@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import type { AppConfig, CloudProviderId } from '../types'
+import { useCallback, useEffect, useState } from 'react'
+import type { AppConfig, CloudProviderId, SystemChecks } from '../types'
 import { api } from '../services/api'
 import './ConfigModal.css'
 
@@ -11,7 +11,7 @@ const PROVIDERS: CloudProviderId[] = [
   'grok',
 ]
 
-type Section = 'cloud' | 'tts'
+type Section = 'setup' | 'cloud' | 'tts'
 type CloudTab = CloudProviderId
 
 type CloudDraft = Record<
@@ -22,6 +22,11 @@ type CloudDraft = Record<
 type Props = {
   open: boolean
   onClose: () => void
+  /** Mở thẳng tab Thiết lập (first-run) */
+  initialSection?: Section
+  /** First-run: thiếu dependency bắt buộc — không đóng bằng overlay */
+  forceSetup?: boolean
+  onSetupReady?: () => void
 }
 
 function emptyCloud(): CloudDraft {
@@ -64,8 +69,14 @@ function emptyCloud(): CloudDraft {
   }
 }
 
-export default function ConfigModal({ open, onClose }: Props) {
-  const [section, setSection] = useState<Section>('cloud')
+export default function ConfigModal({
+  open,
+  onClose,
+  initialSection = 'cloud',
+  forceSetup = false,
+  onSetupReady,
+}: Props) {
+  const [section, setSection] = useState<Section>(initialSection)
   const [draft, setDraft] = useState<CloudDraft>(emptyCloud)
   /** Mỗi ô 1 key; '' = ô trống mới / placeholder đã lưu */
   const [elSlots, setElSlots] = useState<string[]>([''])
@@ -74,6 +85,30 @@ export default function ConfigModal({ open, onClose }: Props) {
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState('')
   const [tab, setTab] = useState<CloudTab>('openai')
+  const [checks, setChecks] = useState<SystemChecks | null>(null)
+  const [checksLoading, setChecksLoading] = useState(false)
+  const [checksErr, setChecksErr] = useState('')
+
+  const loadChecks = useCallback(() => {
+    setChecksLoading(true)
+    setChecksErr('')
+    void api
+      .systemChecks()
+      .then((c) => {
+        setChecks(c)
+        if (c.ok) onSetupReady?.()
+      })
+      .catch((e: Error) => {
+        setChecksErr(e.message || 'Không kiểm tra được hệ thống')
+        setChecks(null)
+      })
+      .finally(() => setChecksLoading(false))
+  }, [onSetupReady])
+
+  useEffect(() => {
+    if (!open) return
+    setSection(initialSection)
+  }, [open, initialSection])
 
   useEffect(() => {
     if (!open) return
@@ -105,9 +140,20 @@ export default function ConfigModal({ open, onClose }: Props) {
       .finally(() => setLoading(false))
   }, [open])
 
+  useEffect(() => {
+    if (!open) return
+    if (section === 'setup' || forceSetup) loadChecks()
+  }, [open, section, forceSetup, loadChecks])
+
   if (!open) return null
 
   const cur = draft[tab]
+  const canClose = !forceSetup || !!checks?.ok
+
+  function tryClose() {
+    if (!canClose) return
+    onClose()
+  }
 
   function setElSlot(i: number, value: string) {
     setElSlots((prev) => {
@@ -184,9 +230,13 @@ export default function ConfigModal({ open, onClose }: Props) {
   }
 
   return (
-    <div className="cfg-overlay" role="presentation" onClick={onClose}>
+    <div
+      className="cfg-overlay"
+      role="presentation"
+      onClick={canClose ? tryClose : undefined}
+    >
       <div
-        className="cfg-modal"
+        className="cfg-modal cfg-modal-wide"
         role="dialog"
         aria-modal
         aria-label="Cấu hình"
@@ -195,14 +245,32 @@ export default function ConfigModal({ open, onClose }: Props) {
         <header className="cfg-head">
           <div>
             <h2>Cấu hình</h2>
-            <p>API dịch cloud · ElevenLabs TTS</p>
+            <p>
+              {forceSetup && !checks?.ok
+                ? 'Cài đủ thành phần bắt buộc để bắt đầu'
+                : 'Thiết lập hệ thống · API dịch · ElevenLabs'}
+            </p>
           </div>
-          <button type="button" className="cfg-close" onClick={onClose} aria-label="Đóng">
-            ×
-          </button>
+          {canClose ? (
+            <button type="button" className="cfg-close" onClick={tryClose} aria-label="Đóng">
+              ×
+            </button>
+          ) : null}
         </header>
 
         <div className="cfg-section-tabs">
+          <button
+            type="button"
+            className={section === 'setup' ? 'active' : undefined}
+            onClick={() => setSection('setup')}
+          >
+            Thiết lập
+            {checks && !checks.ok ? (
+              <span className="cfg-dot cfg-dot-warn" title="Thiếu dependency" />
+            ) : checks?.ok ? (
+              <span className="cfg-dot" title="Sẵn sàng" />
+            ) : null}
+          </button>
           <button
             type="button"
             className={section === 'cloud' ? 'active' : undefined}
@@ -236,8 +304,77 @@ export default function ConfigModal({ open, onClose }: Props) {
           </div>
         )}
 
-        {loading ? (
+        {loading && section !== 'setup' ? (
           <p className="cfg-msg">Đang tải…</p>
+        ) : section === 'setup' ? (
+          <div className="cfg-body cfg-setup">
+            <div className="cfg-setup-bar">
+              <div>
+                <strong>{checks?.summary || (checksLoading ? 'Đang kiểm tra…' : '—')}</strong>
+                {checks ? (
+                  <span className="cfg-setup-meta">
+                    {checks.platform} · Python {checks.python}
+                  </span>
+                ) : null}
+              </div>
+              <button
+                type="button"
+                className="cfg-secondary cfg-setup-refresh"
+                disabled={checksLoading}
+                onClick={loadChecks}
+              >
+                {checksLoading ? 'Đang kiểm tra…' : 'Kiểm tra lại'}
+              </button>
+            </div>
+            {checksErr ? <p className="cfg-msg cfg-msg-err">{checksErr}</p> : null}
+            <ul className="cfg-check-list">
+              {(checks?.items || []).map((it) => (
+                <li
+                  key={it.id}
+                  className={`cfg-check-item ${it.ok ? 'ok' : it.required ? 'bad' : 'warn'}`}
+                >
+                  <div className="cfg-check-top">
+                    <span className="cfg-check-status" aria-hidden>
+                      {it.ok ? '✓' : it.required ? '!' : '·'}
+                    </span>
+                    <div className="cfg-check-main">
+                      <div className="cfg-check-name">
+                        {it.name}
+                        {it.required ? (
+                          <em className="cfg-req">bắt buộc</em>
+                        ) : (
+                          <em className="cfg-opt">tuỳ chọn</em>
+                        )}
+                      </div>
+                      <div className="cfg-check-detail">{it.detail}</div>
+                      {!it.ok ? <div className="cfg-check-hint">{it.hint}</div> : null}
+                    </div>
+                    {!it.ok && it.install ? (
+                      it.install.startsWith('http') ? (
+                        <a
+                          className="cfg-check-link"
+                          href={it.install}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          Tải
+                        </a>
+                      ) : (
+                        <code className="cfg-check-cmd" title="Chạy trong terminal">
+                          {it.install}
+                        </code>
+                      )
+                    ) : null}
+                  </div>
+                </li>
+              ))}
+            </ul>
+            <p className="cfg-hint">
+              Backend đã chạy = Python/Node của API đã có. Cài thiếu (ffmpeg, pip packages) trong
+              terminal, rồi bấm <strong>Kiểm tra lại</strong>. Node chỉ cần khi dev UI (
+              <code>npm run dev</code>).
+            </p>
+          </div>
         ) : section === 'cloud' ? (
           <div className="cfg-body">
             <label>
@@ -333,17 +470,46 @@ export default function ConfigModal({ open, onClose }: Props) {
         {msg ? <p className="cfg-msg">{msg}</p> : null}
 
         <footer className="cfg-foot">
-          <button type="button" className="cfg-secondary" onClick={onClose}>
-            Đóng
-          </button>
-          <button
-            type="button"
-            className="cfg-primary"
-            disabled={saving || loading}
-            onClick={onSave}
-          >
-            {saving ? 'Đang lưu…' : 'Lưu'}
-          </button>
+          {section === 'setup' ? (
+            <>
+              {canClose ? (
+                <button type="button" className="cfg-secondary" onClick={tryClose}>
+                  Đóng
+                </button>
+              ) : (
+                <span className="cfg-foot-note">Cài đủ mục bắt buộc để tiếp tục</span>
+              )}
+              <button
+                type="button"
+                className="cfg-primary"
+                disabled={checksLoading || !checks?.ok}
+                onClick={() => {
+                  if (checks?.ok) {
+                    onSetupReady?.()
+                    onClose()
+                  } else {
+                    loadChecks()
+                  }
+                }}
+              >
+                {checks?.ok ? 'Bắt đầu' : checksLoading ? 'Đang kiểm tra…' : 'Kiểm tra lại'}
+              </button>
+            </>
+          ) : (
+            <>
+              <button type="button" className="cfg-secondary" onClick={tryClose} disabled={!canClose}>
+                Đóng
+              </button>
+              <button
+                type="button"
+                className="cfg-primary"
+                disabled={saving || loading}
+                onClick={onSave}
+              >
+                {saving ? 'Đang lưu…' : 'Lưu'}
+              </button>
+            </>
+          )}
         </footer>
       </div>
     </div>

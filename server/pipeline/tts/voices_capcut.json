@@ -34,22 +34,6 @@
   {
     "lan": "vi",
     "lang": "vi-VN",
-    "voice_type": "vi-VN-HoaiMyNeural",
-    "display_name": "Hoai My",
-    "resource_id": "7371666434650280464",
-    "captured_at": "2026-04-16T17:00:10.719561"
-  },
-  {
-    "lan": "vi",
-    "lang": "vi-VN",
-    "voice_type": "vi-VN-NamMinhNeural",
-    "display_name": "Nam Minh",
-    "resource_id": "7371666524727153168",
-    "captured_at": "2026-04-16T17:00:10.719561"
-  },
-  {
-    "lan": "vi",
-    "lang": "vi-VN",
     "voice_type": "BV075_streaming_vibrato_dsp",
     "display_name": "Việt Méo",
     "resource_id": "7569450639810465040",
@@ -595,7 +579,7 @@
     "lan": "es",
     "lang": "es-ES",
     "voice_type": "ICL_es_male_jiqiren",
-    "display_name": "Male Jiqiren ",
+    "display_name": "Male Jiqiren",
     "resource_id": "7568807473923099920",
     "captured_at": "2026-04-16T19:17:16.008945"
   },
@@ -627,7 +611,7 @@
     "lan": "vi",
     "lang": "vi-VN",
     "voice_type": "multi_male_felipe_uranus_bigtts",
-    "display_name": "Giọng Nam Trầm ",
+    "display_name": "Giọng Nam Trầm",
     "resource_id": "7637456729696996628",
     "captured_at": "2026-04-16T19:18:27.829029"
   },

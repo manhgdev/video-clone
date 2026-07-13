@@ -4,6 +4,7 @@ import type {
   JobStatus,
   ProjectSettings,
   Segment,
+  SystemChecks,
 } from '../types'
 
 const base = '/api'
@@ -39,6 +40,9 @@ async function fetchJson<T>(
 
 export const api = {
   hardware: () => fetchJson<HardwareInfo>(`${base}/hardware`, undefined, 8000),
+
+  systemChecks: () =>
+    fetchJson<SystemChecks>(`${base}/system/checks`, undefined, 20_000),
 
   getConfig: () => fetchJson<AppConfig>(`${base}/config`, undefined, 8000),
 

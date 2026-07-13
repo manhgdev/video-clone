@@ -396,34 +396,35 @@
 }
 
 .audio-volume {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 0 10px 10px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) 36px;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 8px;
   border-top: 1px solid var(--line);
-  margin-top: 2px;
-  padding-top: 8px;
+  margin: 0;
 }
 
 .audio-volume-label {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-size: 0.72rem;
+  font-size: 0.68rem;
   font-weight: 650;
   color: var(--muted);
+  white-space: nowrap;
 }
 
-.audio-volume-label em {
+.audio-volume-pct {
   font-style: normal;
+  font-size: 0.68rem;
   font-weight: 750;
   color: var(--accent);
   font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 
 .audio-volume input[type='range'] {
   width: 100%;
-  height: 6px;
+  height: 4px;
+  margin: 0;
   accent-color: var(--accent);
   cursor: pointer;
 }

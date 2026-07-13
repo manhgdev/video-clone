@@ -1038,64 +1038,89 @@ def _layout_caption(
         place = "over"
     probe = Image.new("RGB", (8, 8))
     draw = ImageDraw.Draw(probe)
-    target_w = int(frame_w * 0.80)
+    # rộng hơn cho câu dài; vẫn trong khung
+    target_w = int(frame_w * 0.90)
     size = fontsize
     font_use = font
     lines = [text]
     font_path = _subtitle_font()
-    # Thu cỡ: ≤2 dòng + (khi over/cover) fit chiều cao dải OCR.
-    max_box_h = (
-        max(28, ocr_box[3] - ocr_box[1])
-        if ocr_box and place == "over"
-        else int(frame_h * 0.14)
-    )
+    # 3 dòng: khung cao hơn (OCR thấp → nới theo text, không kẹp dải 1–2 dòng)
+    max_lines = 3
+    # ước lượng trần: ~3 dòng × fontsize + pad (sẽ clamp theo frame)
+    est_3line = int(fontsize * 3.4) + 16
+    if ocr_box and place == "over":
+        ocr_h = max(1, ocr_box[3] - ocr_box[1])
+        max_box_h = max(int(frame_h * 0.22), ocr_h, est_3line, 72)
+    else:
+        max_box_h = max(int(frame_h * 0.26), est_3line, 72)
+    max_box_h = min(max_box_h, int(frame_h * 0.32))
     lines = [text]
-    for scale in (1.0, 0.92, 0.84, 0.76, 0.68, 0.60, 0.52, 0.44):
-        size = max(14, int(fontsize * scale))
+    for scale in (1.0, 0.94, 0.88, 0.82, 0.76, 0.70, 0.64, 0.58, 0.52, 0.46, 0.40):
+        size = max(13, int(fontsize * scale))
         pad_x = max(6, size // 4)
-        pad_y = max(2, size // 10)
+        pad_y = max(3, size // 8)
         gap_line = max(2, size // 8)
         try:
             font_use = ImageFont.truetype(font_path, size)
         except OSError:
             font_use = font
+        inner_w = max(24, target_w - pad_x * 2)
         one_w = draw.textbbox((0, 0), text, font=font_use)[2]
-        if one_w + pad_x * 2 <= target_w:
+        if one_w <= inner_w:
             cand = [text]
         else:
-            cand = _wrap_balanced(draw, text, font_use, target_w - pad_x * 2)
-            if len(cand) > 2:
-                mid = max(1, len(cand) // 2)
-                cand = [
-                    " ".join(cand[:mid]).strip() or cand[0],
-                    " ".join(cand[mid:]).strip() or cand[-1],
-                ]
+            cand = _wrap_text(draw, text, font_use, inner_w)
+            if len(cand) == 2:
+                cand = _wrap_balanced(draw, text, font_use, inner_w)
+            elif len(cand) > max_lines:
+                cand = _merge_to_n_lines(cand, max_lines)
+        overflow = any(
+            draw.textbbox((0, 0), ln, font=font_use)[2] > inner_w for ln in cand
+        )
         lbs = [draw.textbbox((0, 0), ln, font=font_use) for ln in cand]
+        tw = max((b[2] - b[0]) for b in lbs) if lbs else 0
         th = sum(max(1, b[3] - b[1]) for b in lbs) + gap_line * max(0, len(cand) - 1)
-        if th + pad_y * 2 <= max_box_h and len(cand) <= 2:
+        # 3 dòng: nới max_box_h theo text thật (không kẹp OCR 1 dòng)
+        need_h = th + pad_y * 2
+        allow_h = max(max_box_h, need_h) if len(cand) >= 3 else max_box_h
+        allow_h = min(allow_h, int(frame_h * 0.34))
+        if (
+            not overflow
+            and tw <= inner_w
+            and need_h <= allow_h
+            and len(cand) <= max_lines
+        ):
             lines = cand
+            max_box_h = allow_h
             break
         lines = cand
     else:
-        size = max(14, int(fontsize * 0.44))
+        size = max(13, int(fontsize * 0.40))
         pad_x = max(6, size // 4)
-        pad_y = max(2, size // 10)
+        pad_y = max(3, size // 8)
         gap_line = max(2, size // 8)
         try:
             font_use = ImageFont.truetype(font_path, size)
         except OSError:
             font_use = font
+        inner_w = max(24, target_w - pad_x * 2)
+        lines = _wrap_text(draw, text, font_use, inner_w)
+        if len(lines) > max_lines:
+            lines = _merge_to_n_lines(lines, max_lines)
 
     pad_x = max(6, size // 4)
-    pad_y = max(2, size // 10)
+    pad_y = max(3, size // 8)
     gap_line = max(2, size // 8)
     line_boxes = [draw.textbbox((0, 0), ln, font=font_use) for ln in lines]
     line_hs = [max(1, b[3] - b[1]) for b in line_boxes]
     line_h = (max(line_hs) if line_hs else size) + gap_line
     text_w = max((b[2] - b[0]) for b in line_boxes) if line_boxes else 0
     text_h = sum(line_hs) + gap_line * max(0, len(lines) - 1)
-    box_w = min(frame_w, text_w + pad_x * 2)
+    box_w = min(frame_w, max(text_w + pad_x * 2, 1))
     box_h = text_h + pad_y * 2
+    # 3 dòng: box_h = đủ text (không cắt)
+    box_h = min(max(box_h, text_h + pad_y * 2), frame_h)
+    box_w = min(box_w, frame_w)
     gap = max(6, size // 4)
     if ocr_box:
         cx = (ocr_box[0] + ocr_box[2]) // 2
@@ -1104,15 +1129,21 @@ def _layout_caption(
         elif place == "above":
             y0 = max(0, ocr_box[1] - gap - box_h)
         else:
-            # over: căn giữa dọc trong dải OCR (1 hoặc 2 dòng cùng tâm).
-            cy = (ocr_box[1] + ocr_box[3]) // 2
-            y0 = max(0, min(frame_h - box_h, cy - box_h // 2))
+            # over: 3 dòng → neo đáy dải OCR (lên trên), không kẹp giữa dải thấp
+            if len(lines) >= 3:
+                y0 = max(0, min(frame_h - box_h, ocr_box[3] - box_h))
+                # nếu vẫn tràn đáy khung → kéo lên
+                y0 = max(0, min(y0, frame_h - box_h))
+            else:
+                cy = (ocr_box[1] + ocr_box[3]) // 2
+                y0 = max(0, min(frame_h - box_h, cy - box_h // 2))
     else:
         cx = frame_w // 2
         if place == "above":
-            y0 = max(0, int(frame_h * 0.72) - box_h // 2)
+            y0 = max(0, int(frame_h * 0.70) - box_h // 2)
         else:
-            y0 = max(0, min(frame_h - box_h, int(frame_h * 0.88) - box_h // 2))
+            # below: neo gần đáy, chừa đủ 3 dòng
+            y0 = max(0, min(frame_h - box_h, int(frame_h * 0.90) - box_h))
     x0 = max(0, min(frame_w - box_w, cx - box_w // 2))
     return {
         "box": (x0, y0, x0 + box_w, y0 + box_h),
@@ -1127,6 +1158,33 @@ def _layout_caption(
         "cover_plate": False,
         "vertical": False,
     }
+
+
+def _merge_to_n_lines(parts: list[str], n: int) -> list[str]:
+    """Gộp list dòng thành đúng ≤ n dòng (giữ đủ chữ, không cắt)."""
+    parts = [p for p in parts if (p or "").strip()]
+    if not parts or n <= 1:
+        return [" ".join(parts).strip()] if parts else [""]
+    if len(parts) <= n:
+        return parts
+    # chia đều theo số từ
+    words: list[str] = []
+    for p in parts:
+        words.extend(p.split())
+    if not words:
+        return [""]
+    if len(words) <= n:
+        return words
+    out: list[str] = []
+    per = max(1, (len(words) + n - 1) // n)
+    for i in range(0, len(words), per):
+        out.append(" ".join(words[i : i + per]))
+        if len(out) == n - 1:
+            rest = " ".join(words[i + per :])
+            if rest:
+                out.append(rest)
+            break
+    return out[:n] if out else [""]
 
 
 def _layout_caption_vertical(

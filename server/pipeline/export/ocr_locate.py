@@ -71,15 +71,21 @@ def ocr_mid_labels(
         # cột dọc nguyên liệu: cao hẹp — bắt cả box từng chữ (sẽ gộp sau)
         tall_col = bh > bw * 1.15 and bw < w * 0.25 and bh < h * 0.55
         side = cx < w * 0.42 or cx > w * 0.68
-        small = bw < w * 0.32 and bh < h * 0.25
-        single = cjk >= 1 and len(text.strip()) <= 4 and bw < w * 0.25 and bh < h * 0.20
+        small = bw < w * 0.45 and bh < h * 0.28
+        single = cjk >= 1 and len(text.strip()) <= 6 and bw < w * 0.35 and bh < h * 0.22
+        mid_g = (
+            h * 0.20 < cy < h * 0.72
+            and bw < w * 0.55
+            and bh < h * 0.30
+            and cjk <= 14
+        )
         matched = bool(src) and (
             src in text
             or text in src
             or src == text
             or any(c in text for c in src if "\u4e00" <= c <= "\u9fff")
         )
-        if not (side or small or single or matched or tall_col):
+        if not (side or small or single or matched or tall_col or mid_g):
             continue
         # nới nhẹ bbox OCR (unclip hay cắt stroke)
         pad = max(4, int(min(bw, bh) * 0.12))

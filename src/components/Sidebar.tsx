@@ -406,21 +406,28 @@ export default function Sidebar({
               className="audio-volume"
               title="Âm lượng track gốc / nền sau lọc (0–100%)"
             >
-              <span className="audio-volume-label">
-                Âm lượng nền
-                <em>{Math.max(0, Math.min(100, settings.originalAudioVolume ?? 100))}%</em>
-              </span>
+              <span className="audio-volume-label">Âm lượng nền</span>
               <input
                 type="range"
                 min={0}
                 max={100}
                 step={1}
-                value={Math.max(0, Math.min(100, settings.originalAudioVolume ?? 100))}
+                value={
+                  settings.originalAudioMode === 'mute'
+                    ? 0
+                    : Math.max(0, Math.min(100, settings.originalAudioVolume ?? 100))
+                }
                 disabled={busy || settings.originalAudioMode === 'mute'}
                 onChange={(e) =>
                   set('originalAudioVolume', Math.max(0, Math.min(100, Number(e.target.value) || 0)))
                 }
               />
+              <em className="audio-volume-pct">
+                {settings.originalAudioMode === 'mute'
+                  ? 0
+                  : Math.max(0, Math.min(100, settings.originalAudioVolume ?? 100))}
+                %
+              </em>
             </label>
           </>
         )}

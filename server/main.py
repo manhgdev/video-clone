@@ -532,3 +532,11 @@ def api_tts(project_id: str, name: str):
 @app.get("/api/health")
 def health():
     return {"ok": True, "data": str(DATA)}
+
+
+@app.get("/api/system/checks")
+def api_system_checks():
+    """Dependency checklist cho tab Thiết lập / first-run."""
+    from pipeline.core.system_check import system_checks
+
+    return system_checks()

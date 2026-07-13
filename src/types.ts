@@ -89,6 +89,26 @@ export type HardwareInfo = {
   accel: string
 }
 
+export type SystemCheckItem = {
+  id: string
+  name: string
+  ok: boolean
+  required: boolean
+  detail: string
+  hint: string
+  install: string
+}
+
+export type SystemChecks = {
+  ok: boolean
+  platform: string
+  python: string
+  items: SystemCheckItem[]
+  requiredMissing: string[]
+  optionalMissing: string[]
+  summary: string
+}
+
 export type JobStatus = {
   step: Step
   progress: number

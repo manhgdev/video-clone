@@ -116,6 +116,9 @@ export default function App() {
   ])
   const [settings, setSettings] = useState(loadSettings)
   const [configOpen, setConfigOpen] = useState(false)
+  const [configSection, setConfigSection] = useState<'setup' | 'cloud' | 'tts'>('cloud')
+  const [forceSetup, setForceSetup] = useState(false)
+  const [setupReady, setSetupReady] = useState(true)
   const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth)
   const sidebarWidthRef = useRef(sidebarWidth)
   const sidebarDrag = useRef<{ startX: number; startW: number } | null>(null)
@@ -137,6 +140,32 @@ export default function App() {
 
   useEffect(() => {
     api.hardware().then(setHw).catch(() => setHw({ label: 'Local', accel: 'cpu' }))
+  }, [])
+
+  // First-run: thiếu ffmpeg / package → mở tab Thiết lập
+  useEffect(() => {
+    let cancelled = false
+    void api
+      .systemChecks()
+      .then((c) => {
+        if (cancelled) return
+        if (!c.ok) {
+          setSetupReady(false)
+          setForceSetup(true)
+          setConfigSection('setup')
+          setConfigOpen(true)
+        } else {
+          setSetupReady(true)
+          setForceSetup(false)
+        }
+      })
+      .catch(() => {
+        // API chưa lên — không chặn UI; user mở Cấu hình sau
+        if (!cancelled) setSetupReady(true)
+      })
+    return () => {
+      cancelled = true
+    }
   }, [])
 
   // F5 / Vite HMR: mở lại project đang làm (kể cả đang export)
@@ -550,8 +579,26 @@ export default function App() {
 
   return (
     <div className="app">
-      <Header hardware={hw} onOpenConfig={() => setConfigOpen(true)} />
-      <ConfigModal open={configOpen} onClose={() => setConfigOpen(false)} />
+      <Header
+        hardware={hw}
+        onOpenConfig={() => {
+          setConfigSection(forceSetup && !setupReady ? 'setup' : 'cloud')
+          setConfigOpen(true)
+        }}
+      />
+      <ConfigModal
+        open={configOpen}
+        initialSection={configSection}
+        forceSetup={forceSetup && !setupReady}
+        onSetupReady={() => {
+          setSetupReady(true)
+          setForceSetup(false)
+        }}
+        onClose={() => {
+          if (forceSetup && !setupReady) return
+          setConfigOpen(false)
+        }}
+      />
       <div
         className="workspace"
         style={{ gridTemplateColumns: `${sidebarWidth}px 6px 1fr` }}

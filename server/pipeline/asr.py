@@ -1,6 +1,7 @@
 """Whisper ASR + on-screen OCR (RapidOCR)."""
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -17,10 +18,44 @@ from .core.project import cache_frames, set_status
 _whisper = None
 _whisper_threads: int | None = None
 _whisper_lock = threading.Lock()
+# giới hạn tổng luồng OCR phụ — tránh 100% CPU (để UI/OS ~5–10%)
+_ocr_sem: threading.Semaphore | None = None
+_ocr_sem_n: int = 0
 
 
 def _resolve_asr_workers(workers: int | None) -> int:
     return max(1, min(16, int(workers or 0) or 2))
+
+
+def _cpu_budget(ratio: float = 0.9) -> int:
+    """Số luồng CPU dùng cho OCR (mặc định 90% core — chừa UI)."""
+    n = os.cpu_count() or 4
+    return max(1, min(n, int(n * ratio)))
+
+
+def _ocr_pool_workers(requested: int | None, *, cap: int | None = None) -> int:
+    budget = _cpu_budget(0.9)
+    hard = cap if cap is not None else min(4, budget)
+    return max(1, min(hard, budget, int(requested or 2) or 2))
+
+
+def _ocr_semaphore() -> threading.Semaphore:
+    """Semaphore toàn cục: tổng job OCR phụ ≤ budget (không nhân 3 pass)."""
+    global _ocr_sem, _ocr_sem_n
+    n = _cpu_budget(0.9)
+    if _ocr_sem is None or _ocr_sem_n != n:
+        _ocr_sem = threading.Semaphore(n)
+        _ocr_sem_n = n
+    return _ocr_sem
+
+
+def _limit_onnx_threads() -> None:
+    """ONNX/OpenMP 1 thread / process — fan-out bằng pool, không nhân core."""
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+    os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+    os.environ.setdefault("ORT_NUM_THREADS", "1")
 
 
 def get_whisper(workers: int = 2):
@@ -122,6 +157,7 @@ def _rapidocr_labels() -> Any:
     """OCR lỏng hơn cho nhãn 1 chữ / graphic nhỏ (default min_height=30 bỏ sót 行)."""
     from rapidocr_onnxruntime import RapidOCR  # type: ignore
 
+    _limit_onnx_threads()
     return RapidOCR(
         box_thresh=0.3,
         thresh=0.2,
@@ -241,7 +277,10 @@ def asr_paddleocr(
     total = max(1, len(jpgs))
     n = len(jpgs)
     w_req = max(1, min(16, int(workers or 2)))
-    w = max(1, min(w_req, n if n else 1))
+    # hardsub đáy: ≤90% core, tối đa 6 luồng
+    w = _ocr_pool_workers(w_req, cap=min(6, _cpu_budget(0.9)))
+    w = max(1, min(w, n if n else 1))
+    _limit_onnx_threads()
 
     # Mỗi worker 1 engine RapidOCR (ONNX không share session an toàn giữa thread).
     # Lỏng hơn default: 1 chữ CJK (行) không bị min_height=30 bỏ sót.
@@ -253,6 +292,8 @@ def asr_paddleocr(
             try:
                 eng = _rapidocr_labels()
             except Exception:
+                from rapidocr_onnxruntime import RapidOCR  # type: ignore
+
                 eng = RapidOCR()
             _tls.ocr = eng
         return eng
@@ -261,10 +302,12 @@ def asr_paddleocr(
     timed: list[tuple[float, str]] = [(-1.0, "")] * n
     done = 0
     done_lock = threading.Lock()
+    sem = _ocr_semaphore()
 
     def _ocr_one(i: int, img: Path) -> tuple[int, str]:
         check_cancel(project_id)
-        result, _ = _engine()(str(img))
+        with sem:
+            result, _ = _engine()(str(img))
         lines: list[str] = []
         for row in result or []:
             text = str(row[1] or "").strip()
@@ -312,40 +355,27 @@ def asr_paddleocr(
     vert: list[dict[str, Any]] = []
     labels: list[dict[str, Any]] = []
     vend = video_end or 30.0
-    # mỗi pass tự chia workers — tránh quá tải CPU
-    sub_w = max(1, min(4, w_req // 2 or 1))
-
-    def _job_mid() -> list[dict[str, Any]]:
-        try:
-            return _ocr_mid_hardsubs(
-                video, project_id=project_id, video_end=vend, workers=sub_w
-            )
-        except Exception:
-            return []
-
-    def _job_vert() -> list[dict[str, Any]]:
-        try:
-            return _ocr_vertical_titles(
-                video, project_id=project_id, video_end=vend
-            )
-        except Exception:
-            return []
-
-    def _job_lab() -> list[dict[str, Any]]:
-        try:
-            return _ocr_overlay_labels(
-                video, project_id=project_id, video_end=vend, workers=sub_w
-            )
-        except Exception:
-            return []
-
-    with ThreadPoolExecutor(max_workers=3, thread_name_prefix="ocr-pass") as pool:
-        f_mid = pool.submit(_job_mid)
-        f_vert = pool.submit(_job_vert)
-        f_lab = pool.submit(_job_lab)
-        mid = f_mid.result()
-        vert = f_vert.result()
-        labels = f_lab.result()
+    # tuần tự 3 pass + pool nhỏ (≤90% core) — trước: 3 pool song song → 100% CPU
+    sub_w = _ocr_pool_workers(max(1, w_req // 2), cap=2)
+    _limit_onnx_threads()
+    try:
+        mid = _ocr_mid_hardsubs(
+            video, project_id=project_id, video_end=vend, workers=sub_w
+        )
+    except Exception:
+        mid = []
+    try:
+        vert = _ocr_vertical_titles(
+            video, project_id=project_id, video_end=vend
+        )
+    except Exception:
+        vert = []
+    try:
+        labels = _ocr_overlay_labels(
+            video, project_id=project_id, video_end=vend, workers=sub_w
+        )
+    except Exception:
+        labels = []
     if mid:
         segs = _merge_horizontal_vertical(segs, mid)
     if vert:
@@ -499,9 +529,7 @@ def _ocr_vertical_titles(
     import cv2
 
     try:
-        from rapidocr_onnxruntime import RapidOCR  # type: ignore
-
-        ocr = RapidOCR()
+        ocr = _rapidocr_labels()
     except ImportError:
         return []
 
@@ -526,11 +554,12 @@ def _ocr_vertical_titles(
             t_ms = w0
             while t_ms <= w1:
                 check_cancel(project_id)
-                cap.set(cv2.CAP_PROP_POS_MSEC, float(t_ms))
-                ok, frame = cap.read()
-                if not ok:
-                    break
-                text = _ocr_vertical_from_frame(frame, ocr, vw, vh)
+                with _ocr_semaphore():
+                    cap.set(cv2.CAP_PROP_POS_MSEC, float(t_ms))
+                    ok, frame = cap.read()
+                    if not ok:
+                        break
+                    text = _ocr_vertical_from_frame(frame, ocr, vw, vh)
                 if text:
                     hits.append((t_ms / 1000.0, text))
                 t_ms += step_ms
@@ -649,27 +678,31 @@ def _ocr_scan_stamps(
     """OCR song song theo mốc thời gian — mỗi worker 1 VideoCapture + 1 engine."""
     if not stamps:
         return []
-    w = max(1, min(8, int(workers or 2), len(stamps)))
+    w = _ocr_pool_workers(workers, cap=min(4, _cpu_budget(0.9)))
+    w = min(w, len(stamps))
     out: list[tuple[float, str] | None] = [None] * len(stamps)
     _tls = threading.local()
+    sem = _ocr_semaphore()
 
     def _job(idx: int, t: float) -> tuple[int, float, str]:
         check_cancel(project_id)
         import cv2
 
-        cap = getattr(_tls, "cap", None)
-        if cap is None:
-            cap = cv2.VideoCapture(str(video))
-            _tls.cap = cap
-            _tls.ocr = _rapidocr_labels()
-            _tls.vw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1080)
-            _tls.vh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 1920)
-        cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000.0)
-        ok, frame = cap.read()
-        if not ok:
-            return idx, t, ""
-        text = reader(frame, _tls.ocr, _tls.vw, _tls.vh)
-        return idx, t, text or ""
+        with sem:
+            check_cancel(project_id)
+            cap = getattr(_tls, "cap", None)
+            if cap is None:
+                cap = cv2.VideoCapture(str(video))
+                _tls.cap = cap
+                _tls.ocr = _rapidocr_labels()
+                _tls.vw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1080)
+                _tls.vh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 1920)
+            cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000.0)
+            ok, frame = cap.read()
+            if not ok:
+                return idx, t, ""
+            text = reader(frame, _tls.ocr, _tls.vw, _tls.vh)
+            return idx, t, text or ""
 
     try:
         with ThreadPoolExecutor(max_workers=w, thread_name_prefix="ocr-scan") as pool:
@@ -680,7 +713,6 @@ def _ocr_scan_stamps(
                 if text:
                     out[i] = (t, text)
     finally:
-        # VideoCapture per-thread — GC closes on thread end
         pass
     return [x for x in out if x is not None]
 
@@ -855,19 +887,18 @@ def _ocr_mid_hardsubs(
 def _ocr_mid_hardsub_from_frame(
     frame_bgr: Any, ocr: Any, vw: int, vh: int
 ) -> str:
-    """Chỉ chữ CJK ngắn giữa khung (pop-up hardsub), không đáy / không cột dọc."""
+    """Chữ CJK ngắn / nhãn giữa khung (pop-up), không dải hardsub đáy dài."""
     import cv2
 
-    # dải giữa (bỏ 12% đỉnh + 28% đáy hardsub dài)
-    y0, y1 = int(vh * 0.28), int(vh * 0.72)
-    x0, x1 = int(vw * 0.18), int(vw * 0.82)
+    # dải giữa rộng hơn (bỏ ~20% đỉnh + 22% đáy)
+    y0, y1 = int(vh * 0.20), int(vh * 0.78)
+    x0, x1 = int(vw * 0.10), int(vw * 0.90)
     roi = frame_bgr[y0:y1, x0:x1]
     if roi.size == 0:
         return ""
-    # downscale nhẹ — nhanh hơn full-res, 1 chữ vẫn đọc được
     rh, rw = roi.shape[:2]
-    if max(rh, rw) > 720:
-        sc = 720 / max(rh, rw)
+    if max(rh, rw) > 900:
+        sc = 900 / max(rh, rw)
         roi = cv2.resize(roi, (int(rw * sc), int(rh * sc)))
     result, _ = ocr(roi)
     best = ""
@@ -881,17 +912,18 @@ def _ocr_mid_hardsub_from_frame(
             continue
         compact = re.sub(r"\s+", "", text)
         cjk = sum(1 for c in compact if _is_cjk(c))
-        if cjk < 1 or cjk > 4:
+        # nhãn giữa: tới ~10 CJK (煮开 / 抽藕丝 / 白芷)
+        if cjk < 1 or cjk > 10:
             continue
-        if cjk < len(compact) * 0.7:
+        if cjk < len(compact) * 0.55:
             continue
-        if len(compact) > 6:
+        if len(compact) > 14:
             continue
         bw, bh = _ocr_box_wh(box)
         if bw < 6 or bh < 6:
             continue
-        # bỏ cột dọc dài
-        if bh > bw * 2.2 and bh > rh * 0.35:
+        # bỏ dải ngang dài kiểu hardsub 2 dòng
+        if bw > rw * 0.72 and bh < rh * 0.12 and cjk >= 6:
             continue
         try:
             xs = [float(p[0]) for p in box]
@@ -899,8 +931,9 @@ def _ocr_mid_hardsub_from_frame(
             cx = (min(xs) + max(xs)) * 0.5 / max(1, roi.shape[1])
         except (TypeError, ValueError, IndexError):
             continue
-        center = 1.0 - min(1.0, abs(cx - 0.5) * 1.5)
-        score = cjk * 10 + center * 5 + min(bw, bh) / 20.0
+        center = 1.0 - min(1.0, abs(cx - 0.5) * 1.2)
+        # ưu tiên box to (nhãn graphic)
+        score = cjk * 8 + center * 4 + min(bw, bh) / 15.0 + (bw * bh) / max(1, rw * rh) * 30
         if score > best_score:
             best_score = score
             best = compact
@@ -971,18 +1004,15 @@ def _ocr_overlay_labels(
 def _ocr_labels_from_frame(
     frame_bgr: Any, ocr: Any, vw: int, vh: int
 ) -> str:
-    """Gom nhãn nhỏ / cột bên (không hardsub đáy, không title dọc full giữa)."""
-    import cv2
-
-    # Bỏ 18% đáy (hardsub). Full-res: upscale 1.4× làm det miss glyph 1 chữ.
-    y1 = int(vh * 0.82)
+    """Gom nhãn graphic giữa khung / cột bên (không hardsub đáy full-width)."""
+    # Full frame trừ dải hardsub đáy hẹp
+    y1 = int(vh * 0.86)
     roi = frame_bgr[0:y1, :]
     if roi.size == 0:
         return ""
-    scale = 1.0
-    img = roi
-    result, _ = ocr(img)
-    parts: list[tuple[float, float, str]] = []  # (cy, cx, text)
+    result, _ = ocr(roi)
+    # (cy, cx, bw, bh, text)
+    parts: list[tuple[float, float, float, float, str]] = []
     for row in result or []:
         try:
             box, text = row[0], str(row[1] or "").strip()
@@ -991,61 +1021,106 @@ def _ocr_labels_from_frame(
         if not text:
             continue
         cjk = sum(1 for c in text if _is_cjk(c))
-        # 1 CJK đủ (nhãn flash 1 chữ); Latin nhiễu vẫn bỏ
         if cjk < 1:
             continue
         compact = re.sub(r"\s+", "", text)
-        if cjk < max(1, len(compact) * 0.55):
+        if cjk < max(1, len(compact) * 0.5):
             continue
         bw, bh = _ocr_box_wh(box)
-        # 1 chữ: box phải đủ lớn (không lấy noise chấm)
         if cjk == 1:
             if bw < max(10, vw * 0.012) or bh < max(10, vh * 0.012):
                 continue
         elif bw < 4 or bh < 4:
             continue
         try:
-            xs = [float(p[0]) / scale for p in box]
-            ys = [float(p[1]) / scale for p in box]
+            xs = [float(p[0]) for p in box]
+            ys = [float(p[1]) for p in box]
             cx = (min(xs) + max(xs)) * 0.5
             cy = (min(ys) + max(ys)) * 0.5
         except (TypeError, ValueError, IndexError):
             continue
-        # Bỏ hardsub ngang giữa đáy
-        if cy > vh * 0.72 and bw > vw * 0.28 and bh < vh * 0.08:
+        # hardsub đáy ngang rộng
+        if cy > vh * 0.70 and bw > vw * 0.35 and bh < vh * 0.09:
             continue
-        # Bỏ title dọc full giữa (pass vertical lo)
-        if bh > vh * 0.28 and bh > bw * 1.8 and vw * 0.35 < cx < vw * 0.65:
+        # title dọc full giữa
+        if bh > vh * 0.40 and bh > bw * 1.8 and vw * 0.35 < cx < vw * 0.65:
             continue
-        # Chỉ nhãn graphic: cột bên / nguyên liệu — không lấy 1 chữ giữa (hardsub)
-        side = cx < vw * 0.32 or cx > vw * 0.68
-        tall_col = bh > bw * 1.3 and bw < vw * 0.22 and bh < vh * 0.35
-        multi_side = cjk >= 2 and side and bw < vw * 0.30
-        if not (tall_col or multi_side or (side and cjk >= 2)):
+        if len(compact) > 28:
             continue
-        if len(text) > 24:
+        side = cx < vw * 0.36 or cx > vw * 0.64
+        tall_col = bh > bw * 1.2 and bw < vw * 0.28 and bh < vh * 0.45
+        # nhãn graphic giữa (抽藕丝 / 煮开 / 麻油 / 白芷) — không bắt side
+        mid_graphic = (
+            vh * 0.22 < cy < vh * 0.72
+            and bw < vw * 0.55
+            and bh < vh * 0.28
+            and 1 <= cjk <= 14
+            and not (bw > vw * 0.48 and bh < vh * 0.07)  # dải ngang dài
+        )
+        multi_line_mid = (
+            vh * 0.35 < cy < vh * 0.72
+            and cjk >= 4
+            and bw < vw * 0.60
+            and bh < vh * 0.12
+        )
+        if not (side or tall_col or mid_graphic or multi_line_mid):
             continue
-        # 1 chữ giữa khung = hardsub (pass mid), không phải label
-        if cjk == 1 and 0.32 <= (cx / max(1, vw)) <= 0.68:
-            continue
-        parts.append((cy, cx, text))
+        parts.append((cy, cx, float(bw), float(bh), compact))
     if not parts:
         return ""
-    # Đọc trái→phải, trên→dưới; gộp cột dọc sát nhau
-    parts.sort(key=lambda x: (round(x[1] / max(1, vw * 0.08)), x[0]))
-    texts = [p[2] for p in parts]
-    # dedupe gần giống
-    out: list[str] = []
-    for t in texts:
-        if any(_ocr_same(t, u) for u in out):
+
+    # Gộp dòng chồng dọc (cùng khối nhãn 2 dòng)
+    parts.sort(key=lambda x: (x[0], x[1]))
+    groups: list[list[tuple[float, float, float, float, str]]] = []
+    for p in parts:
+        placed = False
+        for g in groups:
+            # cùng cột / chồng ngang + gần theo Y
+            g_cx = sum(x[1] for x in g) / len(g)
+            g_cy = max(x[0] for x in g)
+            g_bw = max(x[2] for x in g)
+            if abs(p[1] - g_cx) < max(vw * 0.12, g_bw * 0.55) and abs(p[0] - g_cy) < vh * 0.10:
+                g.append(p)
+                placed = True
+                break
+        if not placed:
+            groups.append([p])
+
+    out_blocks: list[str] = []
+    for g in groups:
+        g.sort(key=lambda x: x[0])
+        texts: list[str] = []
+        for _cy, _cx, _bw, _bh, t in g:
+            if any(_ocr_same(t, u) or _ocr_sim(t, u) >= 0.8 for u in texts):
+                continue
+            texts.append(t)
+        if not texts:
             continue
-        out.append(t)
-    if not out:
+        if len(texts) >= 2:
+            # 2 dòng cùng khối: nối space (hoặc · nếu item ngắn)
+            if all(len(t) <= 6 for t in texts):
+                out_blocks.append("·".join(texts))
+            else:
+                out_blocks.append("".join(texts) if all(len(t) <= 8 for t in texts) else " ".join(texts))
+        else:
+            out_blocks.append(texts[0])
+
+    # nhiều khối ngang (cột nguyên liệu)
+    if len(out_blocks) >= 2 and all(len(t) <= 10 for t in out_blocks):
+        # sort left→right by first part cx of group — approximate by text order already cy
+        uniq: list[str] = []
+        for t in out_blocks:
+            if any(_ocr_same(t, u) or _ocr_sim(t, u) >= 0.75 for u in uniq):
+                continue
+            uniq.append(t)
+        if len(uniq) >= 2:
+            return "·".join(uniq)
+        return uniq[0] if uniq else ""
+    if not out_blocks:
         return ""
-    # Nhiều cột nguyên liệu: nối bằng dấu ·
-    if len(out) >= 2 and all(len(t) <= 6 for t in out):
-        return "·".join(out)
-    return _ocr_join_lines(out)
+    # 1 khối tốt nhất (nhiều CJK / dài hơn)
+    out_blocks.sort(key=lambda t: (sum(1 for c in t if _is_cjk(c)), len(t)), reverse=True)
+    return out_blocks[0]
 
 
 def _merge_horizontal_vertical(
