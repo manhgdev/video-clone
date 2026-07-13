@@ -6,6 +6,7 @@ server/.venv-demucs/
 ex_video/
 package-lock.json
 __pycache__/
+.venv/
 *.pyc
 *.bk1
 *.bk2

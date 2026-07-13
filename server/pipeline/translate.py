@@ -641,6 +641,13 @@ def _cloud_batch_prompt(
     )
 
 
+def _estimate_tokens(text: str) -> int:
+    """Token estimate: CJK=1 char/token, mixed≈1.5, ASCII≈4."""
+    cjk = sum(1 for c in text if "一" <= c <= "鿿" or "぀" <= c <= "ヿ")
+    latin = len(text) - cjk
+    return cjk + latin // 3 + 1
+
+
 def _openai_compatible_chat(
     *,
     base_url: str,
@@ -648,7 +655,18 @@ def _openai_compatible_chat(
     model: str,
     prompt: str,
     timeout: float = 120.0,
+    max_output_tokens: int = 512,
+    max_input_tokens: int = 200_000,
 ) -> str:
+    """Cap input+output ≤ max_input_tokens; raise ValueError if prompt too big."""
+    system_msg = "You translate video subtitles. Output numbered lines only."
+    in_est = _estimate_tokens(prompt) + _estimate_tokens(system_msg)
+    total_est = in_est + max_output_tokens
+    if total_est > max_input_tokens:
+        raise ValueError(
+            f"Prompt ~{in_est} tokens + output {max_output_tokens} > "
+            f"limit {max_input_tokens}. Retry with smaller batch."
+        )
     url = base_url.rstrip("/") + "/chat/completions"
     with httpx.Client(timeout=timeout, trust_env=False) as client:
         r = client.post(
@@ -662,10 +680,11 @@ def _openai_compatible_chat(
             json={
                 "model": model,
                 "temperature": 0,
+                "max_tokens": max_output_tokens,
                 "messages": [
                     {
                         "role": "system",
-                        "content": "You translate video subtitles. Output numbered lines only.",
+                        "content": system_msg,
                     },
                     {"role": "user", "content": prompt},
                 ],
@@ -718,7 +737,7 @@ def translate_cloud(
     project_id: str | None = None,
     *,
     source_lang: str = "auto",
-    batch_size: int = 12,
+    batch_size: int = 8,
     workers: int = 2,
 ) -> list[str]:
     """OpenAI / DeepSeek / OpenRouter (chat) hoặc Gemini generateContent."""
@@ -735,9 +754,9 @@ def translate_cloud(
     if not texts:
         return out
     total = max(1, len(texts))
-    bs = max(1, min(20, int(batch_size or 12)))
+    bs = max(1, min(16, int(batch_size or 8)))
     starts = list(range(0, len(texts), bs))
-    w = max(1, min(8, int(workers or 2), len(starts)))
+    w = max(1, min(6, int(workers or 2), len(starts)))
     label = {
         "openai": "OpenAI",
         "gemini": "Gemini",
@@ -760,17 +779,20 @@ def translate_cloud(
         check_cancel(project_id)
         chunk = texts[start : start + bs]
         prompt = _cloud_batch_prompt(chunk, target_lang=target_lang, source_lang=source_lang)
-        if pid == "gemini":
-            raw = _gemini_generate(
-                base_url=base_url, api_key=api_key, model=model, prompt=prompt
-            )
-        else:
-            raw = _openai_compatible_chat(
-                base_url=base_url, api_key=api_key, model=model, prompt=prompt
-            )
-        parsed = _parse_numbered_batch(raw, len(chunk), chunk)
-        if parsed is None:
-            # 1 request / câu
+        try:
+            if pid == "gemini":
+                raw = _gemini_generate(
+                    base_url=base_url, api_key=api_key, model=model, prompt=prompt
+                )
+            else:
+                raw = _openai_compatible_chat(
+                    base_url=base_url, api_key=api_key, model=model, prompt=prompt
+                )
+        except ValueError:
+            # Input too large for context window — send 1-by-1 instead
+            raw = None
+        if raw is None:
+            # 1 request / câu (batch quá lớn hoặc parse fail)
             parsed = []
             for text in chunk:
                 check_cancel(project_id)
@@ -785,10 +807,43 @@ def translate_cloud(
                     )
                 else:
                     line = _openai_compatible_chat(
-                        base_url=base_url, api_key=api_key, model=model, prompt=one
+                        base_url=base_url,
+                        api_key=api_key,
+                        model=model,
+                        prompt=one,
+                        max_output_tokens=256,
                     )
                 line = (line or "").strip().splitlines()[0].strip() if line else text
                 parsed.append(line or text)
+        else:
+            parsed = _parse_numbered_batch(raw, len(chunk), chunk)
+            if parsed is None:
+                # parse fail — retry 1-by-1
+                parsed = []
+                for text in chunk:
+                    check_cancel(project_id)
+                    one = (
+                        f"Translate into {_lang_name(target_lang)}. "
+                        "Return ONLY the translation.\n\n"
+                        f"{text}"
+                    )
+                    if pid == "gemini":
+                        line = _gemini_generate(
+                            base_url=base_url,
+                            api_key=api_key,
+                            model=model,
+                            prompt=one,
+                        )
+                    else:
+                        line = _openai_compatible_chat(
+                            base_url=base_url,
+                            api_key=api_key,
+                            model=model,
+                            prompt=one,
+                            max_output_tokens=256,
+                        )
+                    line = (line or "").strip().splitlines()[0].strip() if line else text
+                    parsed.append(line or text)
         cleaned = []
         for text, line in zip(chunk, parsed):
             line = _clean_burn_text(line, target_lang=target_lang) or line

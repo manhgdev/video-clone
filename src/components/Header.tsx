@@ -19,12 +19,16 @@ const NAV = [
   { label: 'Hướng dẫn', Icon: IconBook, action: null },
 ]
 
+const SHORT: Record<string, string> = { cpu: 'CPU', cuda: 'GPU', metal: 'GPU' }
+
 type Props = {
   hardware: HardwareInfo
   onOpenConfig?: () => void
 }
 
 export default function Header({ hardware, onOpenConfig }: Props) {
+  const display = SHORT[hardware.accel] ?? hardware.accel.toUpperCase()
+
   return (
     <header className="header">
       <div className="brand">
@@ -49,9 +53,9 @@ export default function Header({ hardware, onOpenConfig }: Props) {
           </button>
         ))}
       </nav>
-      <div className="hw" title={hardware.accel}>
+      <div className="hw" title={hardware.label}>
         <span className="dot" />
-        {hardware.label}
+        {display}
       </div>
     </header>
   )
