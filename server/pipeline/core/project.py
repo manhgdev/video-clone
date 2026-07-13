@@ -110,8 +110,8 @@ def asr_cache_key(settings: dict[str, Any], source_fp: str) -> str:
     engine = settings.get("engine", "paddleocr")
     src = settings.get("sourceLang", "auto")
     prev = int(settings.get("previewSec") or 0)
-    # o16: nhãn giữa khung (mid graphic) + multi-line join
-    ver = "o16" if engine in ("paddleocr", "screen") else "a1"
+    # o20: quét cả nhãn ngang ở 10–22% phía trên khung.
+    ver = "o20" if engine in ("paddleocr", "screen") else "a1"
     return f"{engine}|{src}|{source_fp}|p{prev}|{ver}"
 
 

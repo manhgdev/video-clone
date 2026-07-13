@@ -44,7 +44,7 @@ export type ProjectSettings = {
   burnSubs: boolean
   /** Vị trí caption khi không che: below | above (cover thì căn giữa dải OCR) */
   captionPlacement: 'below' | 'above'
-  /** Cỡ chữ bản dịch theo pixel */
+  /** Cỡ chữ bản dịch theo pixel; 0 = tự động theo bbox/độ phân giải */
   subtitleFontSize: number
   /** Bật bộ lọc track âm thanh có sẵn trong video */
   processOriginalAudio: boolean
@@ -54,7 +54,7 @@ export type ProjectSettings = {
   originalAudioVolume: number
   /** Số giây đầu khi bấm Preview (Dịch toàn bộ vẫn = full) */
   previewSec: number
-  /** 1–16 luồng định vị OCR + xuất khung + TTS */
+  /** 1–16 luồng định vị OCR + xuất khung + TTS; 0 = tự động theo tài nguyên rảnh */
   workers: number
 }
 

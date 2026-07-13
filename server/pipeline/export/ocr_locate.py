@@ -3,21 +3,30 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..asr import _ocr_join_lines
+from ..asr import _ocr_join_lines, _rapidocr_labels
 from .labels import pick_label_box
+
+
+def _source_matches(text: str, source: str) -> bool:
+    """Khớp OCR với source; không cho 1 glyph chung kéo cả box nhiễu vào cue dài."""
+    tx = "".join((text or "").split())
+    src = "".join((source or "").split())
+    if not tx or not src:
+        return False
+    if tx == src or src in tx:
+        return True
+    tc = {c for c in tx if "\u4e00" <= c <= "\u9fff"}
+    sc = {c for c in src if "\u4e00" <= c <= "\u9fff"}
+    if tx in src and (len(tc) >= 2 or len(sc) <= 2):
+        return True
+    overlap = len(tc & sc)
+    need = 1 if len(sc) <= 2 else 2
+    return overlap >= need and overlap / max(1, min(len(tc), len(sc))) >= 0.5
 
 
 def rapidocr_labels() -> Any:
     """OCR lỏng cho nhãn / 1 chữ — default RapidOCR bỏ sót glyph nhỏ."""
-    from rapidocr_onnxruntime import RapidOCR  # type: ignore
-
-    return RapidOCR(
-        box_thresh=0.3,
-        thresh=0.2,
-        text_score=0.3,
-        unclip_ratio=2.0,
-        min_height=8,
-    )
+    return _rapidocr_labels()
 
 
 def ocr_mid_labels(
@@ -79,12 +88,7 @@ def ocr_mid_labels(
             and bh < h * 0.30
             and cjk <= 14
         )
-        matched = bool(src) and (
-            src in text
-            or text in src
-            or src == text
-            or any(c in text for c in src if "\u4e00" <= c <= "\u9fff")
-        )
+        matched = bool(src) and _source_matches(text, src)
         if not (side or small or single or matched or tall_col or mid_g):
             continue
         # nới nhẹ bbox OCR (unclip hay cắt stroke)
@@ -104,14 +108,13 @@ def ocr_mid_labels(
         matched_boxes = [
             (b, t)
             for b, t in zip(boxes, texts)
-            if src in t
-            or t in src
-            or src == t
-            or any(c in t for c in src if "\u4e00" <= c <= "\u9fff")
+            if _source_matches(t, src)
         ]
         if matched_boxes:
             boxes = [b for b, _ in matched_boxes]
             texts = [t for _, t in matched_boxes]
+        else:
+            return [], ""
     # gộp chữ cùng cột trước khi trả
     from .labels import expand_label_column
 
@@ -120,13 +123,13 @@ def ocr_mid_labels(
 
 
 def ocr_mid_vertical(
-    frame_bgr: Any, ocr: Any
+    frame_bgr: Any, ocr: Any, source: str = ""
 ) -> tuple[list[tuple[int, int, int, int]], str]:
     """OCR vùng giữa khung cho chữ dọc (tiêu đề)."""
     import cv2
 
     h, w = frame_bgr.shape[:2]
-    x0, x1 = int(w * 0.28), int(w * 0.72)
+    x0, x1 = int(w * 0.05), int(w * 0.75)
     y0, y1 = int(h * 0.12), int(h * 0.88)
     roi = frame_bgr[y0:y1, x0:x1]
     if roi.size == 0:
@@ -134,8 +137,7 @@ def ocr_mid_vertical(
     scale = 1.5
     img = cv2.resize(roi, (int(roi.shape[1] * scale), int(roi.shape[0] * scale)))
     result, _ = ocr(img)
-    boxes: list[tuple[int, int, int, int]] = []
-    texts: list[str] = []
+    found: list[tuple[tuple[int, int, int, int], str]] = []
     for row in result or []:
         try:
             box, text = row[0], str(row[1] or "").strip()
@@ -155,8 +157,40 @@ def ocr_mid_vertical(
             continue
         if bh < bw * 0.9 and len(text) > 6:
             continue
-        boxes.append((bx0, by0, bx1, by1))
-        texts.append(text)
+        found.append(((bx0, by0, bx1, by1), text))
+    if not found:
+        return [], ""
+
+    src = (source or "").strip()
+    anchors = [
+        (box, text)
+        for box, text in found
+        if not src or _source_matches(text, src)
+    ]
+    if src and anchors:
+        # Giữ thêm cột Latin sát title (HUAMUZ), nhưng bỏ hardsub ngang ở giữa
+        # khung. Trước đây union tất cả kết quả làm bbox lệch phải và cao quá mức.
+        selected = list(anchors)
+        for box, text in found:
+            if (box, text) in selected:
+                continue
+            bx0, by0, bx1, by1 = box
+            bw, bh = bx1 - bx0, by1 - by0
+            if bh <= bw * 1.35:
+                continue
+            for ab, _at in anchors:
+                ax0, ay0, ax1, ay1 = ab
+                horizontal_gap = max(0, ax0 - bx1, bx0 - ax1)
+                vertical_gap = max(0, ay0 - by1, by0 - ay1)
+                if horizontal_gap <= w * 0.08 and vertical_gap <= h * 0.08:
+                    selected.append((box, text))
+                    break
+        found = selected
+    elif src:
+        return [], ""
+
+    boxes = [box for box, _text in found]
+    texts = [text for _box, text in found]
     return boxes, _ocr_join_lines(texts)
 
 
@@ -190,12 +224,7 @@ def ocr_mid_hardsub_boxes(
         cjk = sum(1 for c in text if "\u4e00" <= c <= "\u9fff")
         if cjk < 1:
             continue
-        if src and not (
-            src in text
-            or text in src
-            or src == text
-            or any(c in text for c in src if "\u4e00" <= c <= "\u9fff")
-        ):
+        if src and not _source_matches(text, src):
             continue
         try:
             xs = [float(p[0]) for p in box]

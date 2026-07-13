@@ -41,12 +41,12 @@ const defaultSettings: ProjectSettings = {
   coverHardsubs: true,
   burnSubs: true,
   captionPlacement: 'below',
-  subtitleFontSize: 32,
+  subtitleFontSize: 0,
   processOriginalAudio: false,
   originalAudioMode: 'original',
   originalAudioVolume: 100,
   previewSec: 20,
-  workers: 2,
+  workers: 0,
 }
 
 function loadSettings(): ProjectSettings {
@@ -54,7 +54,7 @@ function loadSettings(): ProjectSettings {
     const raw = localStorage.getItem(SETTINGS_LS)
     if (!raw) return defaultSettings
     const s = { ...defaultSettings, ...JSON.parse(raw) } as ProjectSettings
-    if (!s.workers || s.workers <= 0) s.workers = 2
+    if (typeof s.workers !== 'number' || Number.isNaN(s.workers) || s.workers < 0) s.workers = 0
     if (typeof s.originalAudioVolume !== 'number' || Number.isNaN(s.originalAudioVolume)) {
       s.originalAudioVolume = 100
     } else {

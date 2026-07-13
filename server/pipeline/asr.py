@@ -7,12 +7,13 @@ import shutil
 import subprocess
 import threading
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from pathlib import Path
 from typing import Any
 
 from .core.jobs import check_cancel, run_cmd
 from .core.project import cache_frames, set_status
+from .core.resources import adaptive_workers
 
 # 1 model / process; reload khi đổi cpu_threads (Luồng).
 _whisper = None
@@ -24,7 +25,7 @@ _ocr_sem_n: int = 0
 
 
 def _resolve_asr_workers(workers: int | None) -> int:
-    return max(1, min(16, int(workers or 0) or 2))
+    return adaptive_workers(workers, kind="cpu", cap=16)
 
 
 def _cpu_budget(ratio: float = 0.9) -> int:
@@ -33,10 +34,14 @@ def _cpu_budget(ratio: float = 0.9) -> int:
     return max(1, min(n, int(n * ratio)))
 
 
-def _ocr_pool_workers(requested: int | None, *, cap: int | None = None) -> int:
+def _ocr_pool_workers(
+    requested: int | None, *, cap: int | None = None, gpu: bool = False
+) -> int:
     budget = _cpu_budget(0.9)
     hard = cap if cap is not None else min(4, budget)
-    return max(1, min(hard, budget, int(requested or 2) or 2))
+    return adaptive_workers(
+        requested, kind="gpu" if gpu else "cpu", cap=min(hard, budget)
+    )
 
 
 def _ocr_semaphore() -> threading.Semaphore:
@@ -58,6 +63,19 @@ def _limit_onnx_threads() -> None:
     os.environ.setdefault("ORT_NUM_THREADS", "1")
 
 
+def _prepare_cuda_dlls() -> None:
+    if os.name != "nt":
+        return
+    import sysconfig
+
+    root = Path(sysconfig.get_paths()["purelib"]) / "nvidia"
+    path = os.environ.get("PATH", "")
+    bins = [str(p) for p in root.glob("*/bin") if str(p) not in path]
+    if bins:
+        # ponytail: pip's CUDA sub-libraries are loaded by name at runtime.
+        os.environ["PATH"] = os.pathsep.join(bins + [path])
+
+
 def get_whisper(workers: int = 2):
     """CPU: cpu_threads = Luồng (CTranslate2). CUDA: threads ít ảnh hưởng."""
     global _whisper, _whisper_threads
@@ -71,14 +89,12 @@ def get_whisper(workers: int = 2):
         device = "cpu"
         compute = "int8"
         try:
-            import torch
+            _prepare_cuda_dlls()
+            import ctranslate2
 
-            if torch.cuda.is_available():
+            if ctranslate2.get_cuda_device_count() > 0:
                 device, compute = "cuda", "float16"
-            elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
-                # faster-whisper CTranslate2 has no MPS; stay on CPU int8
-                device, compute = "cpu", "int8"
-        except ImportError:
+        except (ImportError, RuntimeError):
             pass
 
         # CPU: nhiều thread = nhanh hơn rõ. CUDA: 1–4 đủ (kernel GPU).
@@ -103,15 +119,20 @@ def asr_whisper(
 ) -> list[dict[str, Any]]:
     """Whisper 1 lần cả file; Luồng → cpu_threads CTranslate2."""
     thr = _resolve_asr_workers(workers)
+    model = get_whisper(thr)
     if project_id:
+        device = getattr(getattr(model, "model", None), "device", "cpu")
         set_status(
             project_id,
             step="asr",
             progress=22,
-            message=f"Whisper ASR ({thr} luồng CPU)…",
+            message=(
+                "Whisper ASR (CUDA)…"
+                if device == "cuda"
+                else f"Whisper ASR ({thr} luồng CPU)…"
+            ),
             running=True,
         )
-    model = get_whisper(thr)
     lang = None if source_lang in ("", "auto") else source_lang
     # beam=1 + VAD + condition_on_previous=False: nhanh hơn default ~2–3× trên CPU.
     segments, _info = model.transcribe(
@@ -153,18 +174,46 @@ def _is_cjk(ch: str) -> bool:
     )
 
 
-def _rapidocr_labels() -> Any:
+def _rapidocr_labels(*, use_cuda: bool | None = None) -> Any:
     """OCR lỏng hơn cho nhãn 1 chữ / graphic nhỏ (default min_height=30 bỏ sót 行)."""
     from rapidocr_onnxruntime import RapidOCR  # type: ignore
 
     _limit_onnx_threads()
+    if use_cuda:
+        _prepare_cuda_dlls()
+    gpu_kwargs = (
+        _rapidocr_gpu_kwargs()
+        if use_cuda is None
+        else {
+            "det_use_cuda": use_cuda,
+            "cls_use_cuda": use_cuda,
+            "rec_use_cuda": use_cuda,
+        }
+    )
     return RapidOCR(
+        **gpu_kwargs,
         box_thresh=0.3,
         thresh=0.2,
         text_score=0.3,
         unclip_ratio=2.0,
         min_height=8,
     )
+
+
+def _rapidocr_gpu_kwargs() -> dict[str, bool]:
+    """Use CUDA for all OCR models when ONNX Runtime exposes its GPU provider."""
+    try:
+        _prepare_cuda_dlls()
+        import onnxruntime as ort
+
+        use_cuda = "CUDAExecutionProvider" in ort.get_available_providers()
+    except (ImportError, OSError):
+        use_cuda = False
+    return {
+        "det_use_cuda": use_cuda,
+        "cls_use_cuda": use_cuda,
+        "rec_use_cuda": use_cuda,
+    }
 
 
 def _ocr_join_lines(lines: list[str]) -> str:
@@ -200,6 +249,14 @@ def _ocr_fix_zh(texts: list[str], project_id: str | None = None) -> list[str]:
         ("马里亚纳海构", "马里亚纳海沟"),
         ("设想机", "摄像机"),
         ("信誓淡淡", "信誓旦旦"),
+        # Watermark dọc 花木紫 thường bị OCR nhầm đúng một glyph.
+        ("花木業", "花木紫"),
+        ("花木葉", "花木紫"),
+        ("花水紫", "花木紫"),
+        ("花水業", "花木紫"),
+        ("花木荣", "花木紫"),
+        ("花水荣", "花木紫"),
+        ("花木菜", "花木紫"),
     )
     out: list[str] = []
     for text in texts:
@@ -217,6 +274,7 @@ def asr_paddleocr(
     reuse_frames: bool = False,
     tag: str = "full",
     workers: int = 2,
+    source_lang: str = "auto",
 ) -> list[dict[str, Any]]:
     """OCR hardsubs on screen (RapidOCR). Nhiều khung song song theo `workers`."""
     try:
@@ -276,9 +334,15 @@ def asr_paddleocr(
     jpgs = sorted(frames.glob("*.jpg"))
     total = max(1, len(jpgs))
     n = len(jpgs)
-    w_req = max(1, min(16, int(workers or 2)))
+    w_req = int(workers or 0)
     # hardsub đáy: ≤90% core, tối đa 6 luồng
-    w = _ocr_pool_workers(w_req, cap=min(6, _cpu_budget(0.9)))
+    # GPU nhỏ thrash khi dựng >4 bộ det/cls/rec; CPU vẫn cho tối đa 6.
+    gpu_ocr = _rapidocr_gpu_kwargs()["det_use_cuda"]
+    w = _ocr_pool_workers(
+        w_req,
+        cap=min(4 if gpu_ocr else 6, _cpu_budget(0.9)),
+        gpu=gpu_ocr,
+    )
     w = max(1, min(w, n if n else 1))
     _limit_onnx_threads()
 
@@ -294,7 +358,7 @@ def asr_paddleocr(
             except Exception:
                 from rapidocr_onnxruntime import RapidOCR  # type: ignore
 
-                eng = RapidOCR()
+                eng = RapidOCR(**_rapidocr_gpu_kwargs())
             _tls.ocr = eng
         return eng
 
@@ -303,18 +367,31 @@ def asr_paddleocr(
     done = 0
     done_lock = threading.Lock()
     sem = _ocr_semaphore()
+    source_is_zh = source_lang.lower().startswith("zh")
 
     def _ocr_one(i: int, img: Path) -> tuple[int, str]:
         check_cancel(project_id)
         with sem:
-            result, _ = _engine()(str(img))
+            try:
+                result, _ = _engine()(str(img))
+            except Exception:
+                _tls.ocr = _rapidocr_labels(use_cuda=False)
+                result, _ = _tls.ocr(str(img))
         lines: list[str] = []
         for row in result or []:
             text = str(row[1] or "").strip()
             if not text:
                 continue
+            confidence = float(row[2]) if len(row) > 2 else 1.0
+            if confidence < 0.5:
+                continue
             # giữ 1 CJK; bỏ Latin/số nhiễu 1 ký tự
             cjk = sum(1 for c in text if _is_cjk(c))
+            if source_is_zh and cjk < 1:
+                continue
+            # ponytail: hardsub đáy là câu; flash 1 glyph do pass giữa xử lý.
+            if source_is_zh and cjk == 1:
+                continue
             if cjk < 1 and len(text) < 2:
                 continue
             lines.append(text)
@@ -356,7 +433,10 @@ def asr_paddleocr(
     labels: list[dict[str, Any]] = []
     vend = video_end or 30.0
     # tuần tự 3 pass + pool nhỏ (≤90% core) — trước: 3 pool song song → 100% CPU
-    sub_w = _ocr_pool_workers(max(1, w_req // 2), cap=2)
+    sub_req = 0 if w_req <= 0 else max(1, w_req // 2)
+    # ROI giữa/full-frame lớn: 2 CUDA session đồng thời gây CUDNN execution
+    # failure trên video dài; một session GPU vẫn nhanh và ổn định hơn fallback.
+    sub_w = _ocr_pool_workers(sub_req, cap=1 if gpu_ocr else 2, gpu=gpu_ocr)
     _limit_onnx_threads()
     try:
         mid = _ocr_mid_hardsubs(
@@ -390,6 +470,15 @@ def asr_paddleocr(
     if looks_zh:
         fixed = _ocr_fix_zh([s["source"] for s in segs], project_id=project_id)
         for seg, src in zip(segs, fixed):
+            # OCR full-frame đôi lúc nối watermark cố định vào title dọc giữa
+            # khung. Tách nó ra để export định vị đúng cột title, trong khi
+            # segment watermark dài vẫn được giữ riêng.
+            if (
+                str(seg.get("layout") or "") == "vertical"
+                and "花木紫" in src
+                and len(_ocr_norm(src)) > 3
+            ):
+                src = src.replace("花木紫", "").strip(" ·・|/")
             seg["source"] = src
     return segs
 
@@ -541,8 +630,8 @@ def _ocr_vertical_titles(
         vh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 1920)
         fps = float(cap.get(cv2.CAP_PROP_FPS) or 25.0) or 25.0
         # coarse 100ms đầu/cuối; refine 40ms chỉ quanh hit
-        step_ms = 100
-        windows: list[tuple[int, int]] = [(0, min(int(video_end * 1000), 3500))]
+        step_ms = 200
+        windows: list[tuple[int, int]] = [(0, min(int(video_end * 1000), 5000))]
         if video_end > 8.0:
             end0 = max(0, int(video_end * 1000) - 2500)
             end1 = int(video_end * 1000)
@@ -625,7 +714,7 @@ def _ocr_vertical_from_frame(
 
     # Bỏ 22% đáy (hardsub) + 8% đỉnh
     y0, y1 = int(vh * 0.10), int(vh * 0.78)
-    x0, x1 = int(vw * 0.30), int(vw * 0.70)
+    x0, x1 = int(vw * 0.05), int(vw * 0.75)
     roi = frame_bgr[y0:y1, x0:x1]
     if roi.size == 0:
         return ""
@@ -650,7 +739,7 @@ def _ocr_vertical_from_frame(
         if bh < 8 or bw < 2:
             continue
         # cột dọc: cao hơn rộng rõ
-        if bh < bw * 1.2 and len(text) > 4:
+        if bh <= bw * 1.3:
             continue
         score = cjk * 10 + bh / max(1.0, bw)
         cands.append((score, text))
@@ -678,42 +767,63 @@ def _ocr_scan_stamps(
     """OCR song song theo mốc thời gian — mỗi worker 1 VideoCapture + 1 engine."""
     if not stamps:
         return []
-    w = _ocr_pool_workers(workers, cap=min(4, _cpu_budget(0.9)))
-    w = min(w, len(stamps))
+    import cv2
+
+    cap = cv2.VideoCapture(str(video))
+    if not cap.isOpened():
+        return []
+    fps = float(cap.get(cv2.CAP_PROP_FPS) or 25.0) or 25.0
+    vw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1080)
+    vh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 1920)
+    targets: dict[int, list[tuple[int, float]]] = {}
+    for i, t in enumerate(stamps):
+        targets.setdefault(max(0, int(round(t * fps))), []).append((i, t))
+
+    w = min(_ocr_pool_workers(workers, cap=min(4, _cpu_budget(0.9))), len(stamps))
     out: list[tuple[float, str] | None] = [None] * len(stamps)
     _tls = threading.local()
     sem = _ocr_semaphore()
 
-    def _job(idx: int, t: float) -> tuple[int, float, str]:
+    def _job(idx: int, t: float, frame: Any) -> tuple[int, float, str]:
         check_cancel(project_id)
-        import cv2
-
         with sem:
             check_cancel(project_id)
-            cap = getattr(_tls, "cap", None)
-            if cap is None:
-                cap = cv2.VideoCapture(str(video))
-                _tls.cap = cap
+            if getattr(_tls, "ocr", None) is None:
                 _tls.ocr = _rapidocr_labels()
-                _tls.vw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1080)
-                _tls.vh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 1920)
-            cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000.0)
-            ok, frame = cap.read()
-            if not ok:
-                return idx, t, ""
-            text = reader(frame, _tls.ocr, _tls.vw, _tls.vh)
+            try:
+                text = reader(frame, _tls.ocr, vw, vh)
+            except Exception:
+                # CUDA/CUDNN có thể lỗi sau nhiều phút với ROI lớn. Chỉ worker
+                # đó chuyển sang CPU và thử lại, không làm mất toàn bộ pass.
+                _tls.ocr = _rapidocr_labels(use_cuda=False)
+                text = reader(frame, _tls.ocr, vw, vh)
             return idx, t, text or ""
 
+    def _collect(done: Any) -> None:
+        for fut in done:
+            i, t, text = fut.result()
+            if text:
+                out[i] = (t, text)
+
+    pending: set[Any] = set()
     try:
         with ThreadPoolExecutor(max_workers=w, thread_name_prefix="ocr-scan") as pool:
-            futs = [pool.submit(_job, i, t) for i, t in enumerate(stamps)]
-            for fut in as_completed(futs):
+            last = max(targets)
+            frame_i = 0
+            while frame_i <= last:
                 check_cancel(project_id)
-                i, t, text = fut.result()
-                if text:
-                    out[i] = (t, text)
+                ok, frame = cap.read()
+                if not ok:
+                    break
+                for i, t in targets.get(frame_i, []):
+                    pending.add(pool.submit(_job, i, t, frame))
+                if len(pending) >= w * 2:
+                    done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                    _collect(done)
+                frame_i += 1
+            _collect(as_completed(pending))
     finally:
-        pass
+        cap.release()
     return [x for x in out if x is not None]
 
 
@@ -820,6 +930,39 @@ def _merge_label_segments(segs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def _ocr_edge_stamps(
+    hits: list[tuple[float, str]],
+    video_end: float,
+    coarse_step: float,
+    refine_step: float,
+    *,
+    layout: str,
+) -> list[float]:
+    """Refine only cluster edges; coarse hits preserve the stable interior."""
+    clusters: list[list[tuple[float, str]]] = []
+    for hit in hits:
+        if clusters:
+            prev = clusters[-1][-1]
+            same = _ocr_same(prev[1], hit[1]) or _ocr_sim(prev[1], hit[1]) >= 0.72
+            if layout == "label" and not same:
+                same = _ocr_label_overlap(prev[1], hit[1]) >= 0.5
+            if hit[0] - prev[0] <= coarse_step * 1.5 and same:
+                clusters[-1].append(hit)
+                continue
+        clusters.append([hit])
+
+    stamps: set[float] = set()
+    pad = coarse_step
+    for cluster in clusters:
+        for edge in {cluster[0][0], cluster[-1][0]}:
+            t = max(0.0, edge - pad)
+            end = min(video_end, edge + pad)
+            while t <= end + 1e-6:
+                stamps.add(round(t, 3))
+                t += refine_step
+    return sorted(stamps)
+
+
 def _ocr_mid_hardsubs(
     video: Path,
     *,
@@ -831,13 +974,8 @@ def _ocr_mid_hardsubs(
 
     Coarse 2.5fps + refine 0.1s quanh hit (không full-video 10fps).
     """
-    try:
-        _rapidocr_labels()
-    except ImportError:
-        return []
-
     # coarse: ~2.5 fps — đủ bắt flash ≥0.4s; 1 chữ ngắn refine sau
-    coarse = 0.4
+    coarse = 0.5
     stamps = [i * coarse for i in range(int(video_end / coarse) + 1)]
     stamps = [t for t in stamps if t <= max(0.0, video_end - 0.02)]
     coarse_hits = _ocr_scan_stamps(
@@ -852,21 +990,9 @@ def _ocr_mid_hardsubs(
 
     # refine ±0.35s quanh mỗi hit (0.1s) — gộp vùng trùng
     refine_step = 0.1
-    windows: list[tuple[float, float]] = []
-    for t, _ in coarse_hits:
-        a, b = max(0.0, t - 0.35), min(video_end, t + 0.45)
-        if windows and a <= windows[-1][1] + 0.05:
-            windows[-1] = (windows[-1][0], max(windows[-1][1], b))
-        else:
-            windows.append((a, b))
-    refine_stamps: list[float] = []
-    for a, b in windows:
-        t = a
-        while t <= b + 1e-6:
-            refine_stamps.append(round(t, 3))
-            t += refine_step
-    # unique sorted
-    refine_stamps = sorted(set(refine_stamps))
+    refine_stamps = _ocr_edge_stamps(
+        coarse_hits, video_end, coarse, refine_step, layout="horizontal"
+    )
     timed = _ocr_scan_stamps(
         video,
         refine_stamps,
@@ -875,11 +1001,11 @@ def _ocr_mid_hardsubs(
         reader=_ocr_mid_hardsub_from_frame,
     )
     return _ocr_cluster_hits(
-        timed,
+        sorted(coarse_hits + timed),
         video_end=video_end,
         step=refine_step,
         layout="horizontal",
-        gap=0.4,
+        gap=coarse * 1.25,
         min_hold=0.2,
     )
 
@@ -901,8 +1027,8 @@ def _ocr_mid_hardsub_from_frame(
         sc = 900 / max(rh, rw)
         roi = cv2.resize(roi, (int(rw * sc), int(rh * sc)))
     result, _ = ocr(roi)
-    best = ""
-    best_score = -1.0
+    # (score, cy, cx, text) — giữ các dòng ngang gần nhau để ghép subtitle 2 dòng.
+    candidates: list[tuple[float, float, float, str]] = []
     for row in result or []:
         try:
             box, text = row[0], str(row[1] or "").strip()
@@ -912,32 +1038,42 @@ def _ocr_mid_hardsub_from_frame(
             continue
         compact = re.sub(r"\s+", "", text)
         cjk = sum(1 for c in compact if _is_cjk(c))
-        # nhãn giữa: tới ~10 CJK (煮开 / 抽藕丝 / 白芷)
-        if cjk < 1 or cjk > 10:
+        confidence = float(row[2]) if len(row) > 2 else 1.0
+        if cjk < 1 or cjk > 32:
+            continue
+        if confidence < (0.9 if cjk == 1 else 0.6):
             continue
         if cjk < len(compact) * 0.55:
             continue
-        if len(compact) > 14:
+        if len(compact) > 40:
             continue
         bw, bh = _ocr_box_wh(box)
         if bw < 6 or bh < 6:
             continue
-        # bỏ dải ngang dài kiểu hardsub 2 dòng
-        if bw > rw * 0.72 and bh < rh * 0.12 and cjk >= 6:
+        # Pass này chỉ lấy chữ ngang; watermark/title dọc do pass riêng xử lý.
+        if bh > bw * 1.25:
             continue
         try:
             xs = [float(p[0]) for p in box]
             ys = [float(p[1]) for p in box]
             cx = (min(xs) + max(xs)) * 0.5 / max(1, roi.shape[1])
+            cy = (min(ys) + max(ys)) * 0.5 / max(1, roi.shape[0])
         except (TypeError, ValueError, IndexError):
             continue
         center = 1.0 - min(1.0, abs(cx - 0.5) * 1.2)
         # ưu tiên box to (nhãn graphic)
         score = cjk * 8 + center * 4 + min(bw, bh) / 15.0 + (bw * bh) / max(1, rw * rh) * 30
-        if score > best_score:
-            best_score = score
-            best = compact
-    return best
+        candidates.append((score, cy, cx, compact))
+    if not candidates:
+        return ""
+    best = max(candidates, key=lambda item: item[0])
+    nearby = [
+        item
+        for item in candidates
+        if abs(item[1] - best[1]) <= 0.10 and abs(item[2] - best[2]) <= 0.32
+    ]
+    nearby.sort(key=lambda item: (item[1], item[2]))
+    return _ocr_join_lines([item[3] for item in nearby])
 
 
 def _ocr_overlay_labels(
@@ -951,12 +1087,7 @@ def _ocr_overlay_labels(
 
     Coarse 0.35s + refine 0.15s quanh hit → timing ổn, không mảnh 0.3s.
     """
-    try:
-        _rapidocr_labels()
-    except ImportError:
-        return []
-
-    coarse = 0.35
+    coarse = 0.6
     stamps = [i * coarse for i in range(int(video_end / coarse) + 1)]
     stamps = [t for t in stamps if t <= max(0.0, video_end - 0.02)]
     coarse_hits = _ocr_scan_stamps(
@@ -971,19 +1102,9 @@ def _ocr_overlay_labels(
 
     # refine ±0.4s quanh hit
     refine_step = 0.15
-    windows: list[tuple[float, float]] = []
-    for t, _ in coarse_hits:
-        a, b = max(0.0, t - 0.4), min(video_end, t + 0.5)
-        if windows and a <= windows[-1][1] + 0.08:
-            windows[-1] = (windows[-1][0], max(windows[-1][1], b))
-        else:
-            windows.append((a, b))
-    refine_stamps: list[float] = []
-    for a, b in windows:
-        t = a
-        while t <= b + 1e-6:
-            refine_stamps.append(round(t, 3))
-            t += refine_step
+    refine_stamps = _ocr_edge_stamps(
+        coarse_hits, video_end, coarse, refine_step, layout="label"
+    )
     timed = _ocr_scan_stamps(
         video,
         sorted(set(refine_stamps)),
@@ -992,11 +1113,11 @@ def _ocr_overlay_labels(
         reader=_ocr_labels_from_frame,
     )
     return _ocr_cluster_hits(
-        timed,
+        sorted(coarse_hits + timed),
         video_end=video_end,
         step=refine_step,
         layout="label",
-        gap=0.55,
+        gap=coarse * 1.25,
         min_hold=0.4,
     )
 
@@ -1024,6 +1145,9 @@ def _ocr_labels_from_frame(
         if cjk < 1:
             continue
         compact = re.sub(r"\s+", "", text)
+        confidence = float(row[2]) if len(row) > 2 else 1.0
+        if confidence < (0.9 if cjk == 1 else 0.6):
+            continue
         if cjk < max(1, len(compact) * 0.5):
             continue
         bw, bh = _ocr_box_wh(box)
@@ -1051,16 +1175,16 @@ def _ocr_labels_from_frame(
         tall_col = bh > bw * 1.2 and bw < vw * 0.28 and bh < vh * 0.45
         # nhãn graphic giữa (抽藕丝 / 煮开 / 麻油 / 白芷) — không bắt side
         mid_graphic = (
-            vh * 0.22 < cy < vh * 0.72
+            vh * 0.10 < cy < vh * 0.72
             and bw < vw * 0.55
             and bh < vh * 0.28
             and 1 <= cjk <= 14
             and not (bw > vw * 0.48 and bh < vh * 0.07)  # dải ngang dài
         )
         multi_line_mid = (
-            vh * 0.35 < cy < vh * 0.72
+            vh * 0.10 < cy < vh * 0.72
             and cjk >= 4
-            and bw < vw * 0.60
+            and bw < vw * 0.85
             and bh < vh * 0.12
         )
         if not (side or tall_col or mid_graphic or multi_line_mid):
@@ -1131,9 +1255,48 @@ def _merge_horizontal_vertical(
     for v in vert:
         vs = v.get("source") or ""
         vlay = str(v.get("layout") or "vertical")
-        if any(_ocr_same(vs, h.get("source") or "") for h in out):
+        matches: list[dict[str, Any]] = []
+        for h in out:
+            hs = h.get("source") or ""
+            hlay = str(h.get("layout") or "horizontal")
+            same = _ocr_same(vs, hs)
+            # OCR dọc hay lệch đúng 1 glyph (紫/業). Nhãn quét toàn clip ổn
+            # định hơn, nên coi chuỗi 3+ glyph cùng độ dài là một title.
+            if not same and {vlay, hlay} <= {"vertical", "label"}:
+                vn, hn = _ocr_norm(vs), _ocr_norm(hs)
+                same = len(vn) == len(hn) >= 3 and _ocr_sim(vs, hs) >= 0.65
+            if same:
+                matches.append(h)
+        if matches:
             # đã có trong hardsub — đánh dấu dọc nếu cùng chữ ở đầu
-            for h in out:
+            for h in matches:
+                hs = h.get("source") or ""
+                hlay = str(h.get("layout") or "horizontal")
+                if (
+                    vlay == "label"
+                    and hlay == "vertical"
+                ):
+                    # Label pass quét suốt video và cho text/timing đáng tin hơn.
+                    h["source"] = vs
+                    h["start"] = min(
+                        float(h.get("start") or 0), float(v.get("start") or 0)
+                    )
+                    h["end"] = max(
+                        float(h.get("end") or 0), float(v.get("end") or 0)
+                    )
+                elif vlay == "vertical" and hlay == "vertical":
+                    h["start"] = min(
+                        float(h.get("start") or 0), float(v.get("start") or 0)
+                    )
+                    h["end"] = max(
+                        float(h.get("end") or 0), float(v.get("end") or 0)
+                    )
+                if (
+                    vlay == "label"
+                    and _ocr_same(vs, hs)
+                    and len(_ocr_norm(vs)) > len(_ocr_norm(hs))
+                ):
+                    h["source"] = vs
                 if (
                     _ocr_same(vs, h.get("source") or "")
                     and float(h.get("start") or 0) < 2.0
@@ -1142,6 +1305,36 @@ def _merge_horizontal_vertical(
                     h["layout"] = "vertical"
             continue
         out.append(v)
+    # Bỏ mảnh title thiếu 1 glyph nằm trọn trong title dọc đầy đủ cùng thời gian.
+    compacted: list[dict[str, Any]] = []
+    for s in out:
+        if str(s.get("layout") or "horizontal") != "vertical":
+            compacted.append(s)
+            continue
+        sn = _ocr_norm(s.get("source") or "")
+        merged_into: dict[str, Any] | None = None
+        for prev in compacted:
+            if str(prev.get("layout") or "horizontal") != "vertical":
+                continue
+            pn = _ocr_norm(prev.get("source") or "")
+            overlap = min(
+                float(s.get("end") or 0), float(prev.get("end") or 0)
+            ) - max(float(s.get("start") or 0), float(prev.get("start") or 0))
+            if overlap >= 0 and min(len(sn), len(pn)) >= 2 and (sn in pn or pn in sn):
+                merged_into = prev
+                break
+        if merged_into is None:
+            compacted.append(s)
+            continue
+        if len(sn) > len(_ocr_norm(merged_into.get("source") or "")):
+            merged_into["source"] = s.get("source") or ""
+        merged_into["start"] = min(
+            float(merged_into.get("start") or 0), float(s.get("start") or 0)
+        )
+        merged_into["end"] = max(
+            float(merged_into.get("end") or 0), float(s.get("end") or 0)
+        )
+    out = compacted
     out.sort(key=lambda s: float(s.get("start") or 0))
     for i, s in enumerate(out, start=1):
         s["index"] = i

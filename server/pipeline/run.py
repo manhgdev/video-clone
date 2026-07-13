@@ -36,6 +36,7 @@ from .core.project import (
     trans_cache_key,
     video_fingerprint,
 )
+from .core.resources import adaptive_workers
 from .translate import translate_segments
 from .tts import tts_cache_key, tts_segment
 
@@ -110,7 +111,8 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                     project_id,
                     reuse_frames=frames_ok,
                     tag=tag,
-                    workers=max(1, min(16, int(settings.get("workers") or 0) or 2)),
+                    workers=int(settings.get("workers") or 0),
+                    source_lang=str(settings.get("sourceLang") or "auto"),
                 )
                 if not segments:
                     raise RuntimeError(
@@ -119,7 +121,9 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                         "Hoặc đổi Nhận dạng → Giọng nói (Whisper)."
                     )
             else:
-                w = max(1, min(16, int(settings.get("workers") or 0) or 2))
+                w = adaptive_workers(
+                    int(settings.get("workers") or 0), kind="cpu", cap=16
+                )
                 set_status(
                     project_id,
                     step="asr",
@@ -196,7 +200,12 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                     # Không dịch → không chèn caption (để trống, không copy source)
                     translations = [""] * len(texts)
                 else:
-                    w = max(1, min(16, int(settings.get("workers") or 0) or 2))
+                    w = adaptive_workers(
+                        int(settings.get("workers") or 0),
+                        kind="network",
+                        cap=16,
+                        tasks=len(texts),
+                    )
                     translations = translate_segments(
                         texts,
                         target,
@@ -370,7 +379,9 @@ def run_dub(project_id: str, *, finalize: bool = True, nested: bool = False) -> 
         pending = list(jobs.values())
         cached = [j for j in pending if j["wav"].exists() and j["wav"].stat().st_size > 128]
         req = int(settings.get("workers") or 0)
-        workers = max(1, min(16, req if req > 0 else 2))
+        workers = adaptive_workers(
+            req, kind="network", cap=16, tasks=len(pending)
+        )
         completed = 0
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="tts") as pool:
             future_jobs = {pool.submit(synthesize, job): job for job in pending}
@@ -486,7 +497,7 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
                 burned,
                 cover=cover,
                 burn=burn,
-                subtitle_font_size=int(settings.get("subtitleFontSize") or 32),
+                subtitle_font_size=int(settings.get("subtitleFontSize", 0)),
                 project_id=project_id,
                 workers=int(settings.get("workers") or 0),
                 caption_placement=place,

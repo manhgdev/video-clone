@@ -1,6 +1,7 @@
 """Kiểm tra dependency runtime cho UI Thiết lập."""
 from __future__ import annotations
 
+import importlib.metadata
 import importlib.util
 import platform
 import shutil
@@ -32,11 +33,87 @@ def _mod_ok(name: str) -> tuple[bool, str]:
         spec = importlib.util.find_spec(name)
         if spec is None:
             return False, "chưa cài"
-        mod = importlib.import_module(name)
-        ver = getattr(mod, "__version__", None) or getattr(mod, "VERSION", None)
-        return True, str(ver) if ver else "ok"
+        dists = importlib.metadata.packages_distributions().get(name) or []
+        return True, importlib.metadata.version(dists[0]) if dists else "ok"
     except Exception as e:
         return False, str(e)[:80]
+
+
+def _ocr_cuda_check() -> tuple[bool, str]:
+    try:
+        # Import helper trong process con để các DLL CUDA cài bằng pip
+        # được thêm vào PATH trước khi ONNX tạo session.
+        out = subprocess.check_output(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "from pipeline.asr import _rapidocr_labels; "
+                    "e=_rapidocr_labels(use_cuda=True); "
+                    "print(','.join(e.text_det.infer.session.get_providers()))"
+                ),
+            ],
+            text=True,
+            stderr=subprocess.STDOUT,
+            timeout=15,
+        ).strip()
+        return "CUDAExecutionProvider" in out, out
+    except (subprocess.SubprocessError, OSError) as e:
+        return False, str(e)[:160]
+
+
+def install_ocr_cuda() -> dict[str, Any]:
+    """Install the OCR GPU runtime into the Python running this API."""
+    ok, detail = _ocr_cuda_check()
+    if ok:
+        return {"ok": True, "message": "GPU tăng tốc đã được cài", "detail": detail}
+    pip = [sys.executable, "-m", "pip"]
+    subprocess.run(
+        pip + ["uninstall", "-y", "onnxruntime", "onnxruntime-gpu"],
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    try:
+        proc = subprocess.run(
+            pip
+            + [
+                "install",
+                "--progress-bar",
+                "off",
+                "onnxruntime-gpu[cuda,cudnn]>=1.23,<1.24",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=900,
+        )
+        if proc.returncode:
+            raise RuntimeError((proc.stderr or proc.stdout)[-2000:])
+    except Exception:
+        # ponytail: keep OCR usable if the optional 2 GB GPU install fails.
+        subprocess.run(
+            pip + ["install", "onnxruntime"],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        raise
+    ok, detail = _ocr_cuda_check()
+    if not ok:
+        subprocess.run(
+            pip + ["uninstall", "-y", "onnxruntime-gpu"],
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        subprocess.run(
+            pip + ["install", "onnxruntime"],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        raise RuntimeError(f"CUDA provider unavailable after install: {detail}")
+    return {"ok": True, "message": "Đã cài GPU tăng tốc", "detail": detail}
 
 
 def _item(
@@ -164,6 +241,19 @@ def system_checks() -> dict[str, Any]:
                 install=install,
             )
         )
+
+    cuda_ok, cuda_detail = _ocr_cuda_check()
+    items.append(
+        _item(
+            id="ocr_cuda",
+            name="GPU tăng tốc AI",
+            ok=cuda_ok,
+            required=False,
+            detail=cuda_detail,
+            hint="Dùng NVIDIA CUDA cho OCR và Whisper; ffmpeg tự bật NVENC nếu hỗ trợ.",
+            install="ocr_cuda" if _which("nvidia-smi") else "",
+        )
+    )
 
     # TTS hệ thống
     if system == "Darwin":

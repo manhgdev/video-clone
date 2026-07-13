@@ -97,7 +97,7 @@ export default function Sidebar({
   }
 
   const fontSizes = [16, 20, 24, 28, 32, 36, 40, 48, 56, 64, 72, 80, 96, 120]
-  const fontSizeOptions = fontSizes.includes(settings.subtitleFontSize)
+  const fontSizeOptions = settings.subtitleFontSize === 0 || fontSizes.includes(settings.subtitleFontSize)
     ? fontSizes
     : [...fontSizes, settings.subtitleFontSize].sort((a, b) => a - b)
 
@@ -337,9 +337,10 @@ export default function Sidebar({
           <select
             value={String(settings.subtitleFontSize)}
             disabled={busy || !settings.burnSubs || settings.targetLang === 'none'}
-            onChange={(e) => set('subtitleFontSize', Number(e.target.value) || 32)}
-            title="Kích thước chữ bản dịch"
+            onChange={(e) => set('subtitleFontSize', Number(e.target.value))}
+            title="Tự động sẽ chọn cỡ lớn nhất vừa từng nhãn, chữ dọc và câu ngang"
           >
+            <option value="0">Tự động (khuyên dùng)</option>
             {fontSizeOptions.map((px) => (
               <option key={px} value={px}>
                 {px} px
@@ -436,16 +437,17 @@ export default function Sidebar({
       <div className="preview-run">
         <label
           className="workers-setting"
-          title="Số luồng song song cho định vị OCR, xuất khung và TTS"
+          title="Tự động tăng/giảm luồng theo CPU, RAM và GPU còn rảnh"
         >
           <span className="preview-run-label">Luồng</span>
           <select
             value={String(
-              [1, 2, 4, 6, 8, 12, 16].includes(settings.workers) ? settings.workers : 2,
+              [0, 1, 2, 4, 6, 8, 12, 16].includes(settings.workers) ? settings.workers : 0,
             )}
             disabled={busy}
-            onChange={(e) => set('workers', Number(e.target.value) || 2)}
+            onChange={(e) => set('workers', Number(e.target.value))}
           >
+            <option value="0">Tự động</option>
             <option value="1">1</option>
             <option value="2">2</option>
             <option value="4">4</option>

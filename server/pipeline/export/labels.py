@@ -98,7 +98,9 @@ def clamp_label_box(
         pad_x = max(8, int(target_w * 0.08))
         pad_y = max(8, int(fh * 0.008))
     else:
-        max_w = max(40, int(fw * max_w_ratio))
+        # OCR box ngang rộng là kích thước thật của nhãn, không được
+        # cắt nó về 30% khung (ví dụ title quảng cáo có cả model Latin).
+        max_w = max(40, int(fw * max_w_ratio), min(int(fw * 0.85), bw))
         max_h = max(36, int(fh * 0.20))
         if bw > max_w:
             half = max_w // 2
@@ -261,7 +263,7 @@ def cover_fit_label(
     else:
         pad_x = max(10, int(fw * 0.012))
         pad_y = max(8, int(fh * 0.008))
-        max_w = int(fw * 0.34)
+        max_w = max(int(fw * 0.34), min(int(fw * 0.85), bw + pad_x * 2))
         max_h = int(fh * 0.24)
     out = (
         max(0, x0 - pad_x),
@@ -369,7 +371,6 @@ def layout_label_caption(
 
     tall = (
         force_vertical
-        or is_vertical_cjk_source(source)
         or is_tall_label(ocr_box)
     )
     units = _split_units(raw)

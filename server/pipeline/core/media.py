@@ -3,10 +3,42 @@ from __future__ import annotations
 
 import platform
 import subprocess
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 from .jobs import run_cmd
+
+
+@lru_cache(maxsize=1)
+def nvenc_available() -> bool:
+    """Probe the encoder, not just ffmpeg's compiled encoder list."""
+    try:
+        return subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", "color=size=256x256:rate=1",
+                "-frames:v", "1", "-c:v", "h264_nvenc", "-f", "null", "-",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        ).returncode == 0
+    except (FileNotFoundError, subprocess.SubprocessError, OSError):
+        return False
+
+
+def h264_encoder_args(*, fast: bool = False) -> list[str]:
+    if nvenc_available():
+        return [
+            "-c:v", "h264_nvenc", "-preset", "p3" if fast else "p5",
+            "-tune", "hq", "-rc", "vbr", "-cq", "18", "-b:v", "0",
+            "-pix_fmt", "yuv420p",
+        ]
+    return [
+        "-c:v", "libx264", "-preset", "veryfast" if fast else "fast",
+        "-crf", "18", "-pix_fmt", "yuv420p",
+    ]
 
 def hardware() -> dict[str, str]:
     machine = platform.machine()
@@ -106,8 +138,7 @@ def ensure_preview_clip(
                 str(sec),
                 "-i",
                 str(source),
-                "-c:v",
-                "libx264",
+                *h264_encoder_args(fast=True),
                 "-c:a",
                 "aac",
                 str(dest),
@@ -176,14 +207,7 @@ def encode_export_1080(
             str(src),
             "-vf",
             vf,
-            "-c:v",
-            "libx264",
-            "-preset",
-            "fast",
-            "-crf",
-            "18",
-            "-pix_fmt",
-            "yuv420p",
+            *h264_encoder_args(),
             "-c:a",
             "aac",
             "-b:a",

@@ -44,6 +44,13 @@ export const api = {
   systemChecks: () =>
     fetchJson<SystemChecks>(`${base}/system/checks`, undefined, 20_000),
 
+  installOcrCuda: () =>
+    fetchJson<{ ok: boolean; message: string; detail: string }>(
+      `${base}/system/install/ocr_cuda`,
+      { method: 'POST' },
+      15 * 60_000,
+    ),
+
   getConfig: () => fetchJson<AppConfig>(`${base}/config`, undefined, 8000),
 
   saveConfig: (body: {

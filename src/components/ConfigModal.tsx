@@ -88,6 +88,7 @@ export default function ConfigModal({
   const [checks, setChecks] = useState<SystemChecks | null>(null)
   const [checksLoading, setChecksLoading] = useState(false)
   const [checksErr, setChecksErr] = useState('')
+  const [installing, setInstalling] = useState(false)
 
   const loadChecks = useCallback(() => {
     setChecksLoading(true)
@@ -149,6 +150,20 @@ export default function ConfigModal({
 
   const cur = draft[tab]
   const canClose = !forceSetup || !!checks?.ok
+
+  async function installOcrCuda() {
+    setInstalling(true)
+    setChecksErr('')
+    try {
+      const result = await api.installOcrCuda()
+      setMsg(result.message)
+      loadChecks()
+    } catch (e) {
+      setChecksErr(e instanceof Error ? e.message : 'Cài GPU tăng tốc thất bại')
+    } finally {
+      setInstalling(false)
+    }
+  }
 
   function tryClose() {
     if (!canClose) return
@@ -320,7 +335,7 @@ export default function ConfigModal({
               <button
                 type="button"
                 className="cfg-secondary cfg-setup-refresh"
-                disabled={checksLoading}
+                disabled={checksLoading || installing}
                 onClick={loadChecks}
               >
                 {checksLoading ? 'Đang kiểm tra…' : 'Kiểm tra lại'}
@@ -349,7 +364,20 @@ export default function ConfigModal({
                       <div className="cfg-check-detail">{it.detail}</div>
                       {!it.ok ? <div className="cfg-check-hint">{it.hint}</div> : null}
                     </div>
-                    {!it.ok && it.install ? (
+                    {it.id === 'ocr_cuda' ? (
+                      it.ok ? (
+                        <span className="cfg-check-installed">Đã cài</span>
+                      ) : (
+                        <button
+                          type="button"
+                          className="cfg-check-install"
+                          disabled={installing}
+                          onClick={() => void installOcrCuda()}
+                        >
+                          {installing ? 'Đang cài…' : 'Cài đặt'}
+                        </button>
+                      )
+                    ) : !it.ok && it.install ? (
                       it.install.startsWith('http') ? (
                         <a
                           className="cfg-check-link"
@@ -370,9 +398,8 @@ export default function ConfigModal({
               ))}
             </ul>
             <p className="cfg-hint">
-              Backend đã chạy = Python/Node của API đã có. Cài thiếu (ffmpeg, pip packages) trong
-              terminal, rồi bấm <strong>Kiểm tra lại</strong>. Node chỉ cần khi dev UI (
-              <code>npm run dev</code>).
+              GPU tăng tốc có thể cài trực tiếp tại đây. Công cụ hệ thống như ffmpeg vẫn mở trang tải
+              chính thức. Node chỉ cần khi dev UI (<code>npm run dev</code>).
             </p>
           </div>
         ) : section === 'cloud' ? (

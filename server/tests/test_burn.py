@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+from PIL import ImageFont
 
 from pipeline.export.burn import (
     _blur_region,
@@ -8,6 +9,8 @@ from pipeline.export.burn import (
     _is_corner_ui_box,
     _merge_ocr_samples,
 )
+from pipeline.export.labels import clamp_label_box, cover_fit_label, layout_label_caption
+from pipeline.export.ocr_locate import _source_matches
 
 
 def test_cover_box_uses_resolution_aware_horizontal_padding() -> None:
@@ -75,3 +78,36 @@ def test_merge_ocr_samples_ignores_left_corner_logo() -> None:
     x0, _y0, x1, _y1 = boxes[0]
     assert x0 >= 200  # không kéo sang logo "12"
     assert x1 >= 780
+
+
+def test_wide_horizontal_label_is_not_cropped() -> None:
+    detected = (122, 264, 884, 403)
+
+    clamped = clamp_label_box(detected, 1080, 1920)
+    covered = cover_fit_label(clamped, None, 1080, 1920)
+
+    assert clamped[0] <= detected[0] and clamped[2] >= detected[2]
+    assert covered is not None
+    assert covered[0] <= detected[0] and covered[2] >= detected[2]
+
+
+def test_pure_cjk_uses_horizontal_ocr_box_shape() -> None:
+    layout = layout_label_caption(
+        "Lâu rồi chưa dọn dẹp",
+        ImageFont.load_default(),
+        48,
+        (122, 264, 884, 403),
+        1080,
+        1920,
+        font_path="",
+        source="\u597d\u4e45\u6ca1\u6253\u626b\u536b\u751f\u4e86",
+    )
+
+    assert layout["vertical"] is False
+
+
+def test_long_source_rejects_single_shared_noise_glyph() -> None:
+    source = "\u597d\u4e45\u6ca1\u6253\u626b\u536b\u751f\u4e86\u8d81\u7740\u9759\u7f6e\u65f6\u95f4\u6253\u626b\u4e00\u4e0b\u536b\u751f"
+
+    assert not _source_matches("II \u5e02", source)
+    assert _source_matches("\u82b1\u6728\u696d", "\u82b1\u6728\u7d2b")

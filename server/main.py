@@ -55,15 +55,15 @@ class Settings(BaseModel):
     coverHardsubs: bool = True
     burnSubs: bool = True
     captionPlacement: str = "below"  # below | above
-    subtitleFontSize: int = 32
+    subtitleFontSize: int = 0  # 0 = tự động theo bbox / độ phân giải
     processOriginalAudio: bool = False
     originalAudioMode: str = "original"
     # 0–100: volume track gốc / nền sau lọc
     originalAudioVolume: int = 100
     # 0 = full; >0 = N giây đầu để thử nhanh
     previewSec: int = 0
-    # 1–16 luồng OCR/xuất/TTS
-    workers: int = 2
+    # 1–16 luồng OCR/xuất/TTS; 0 = tự động theo tài nguyên rảnh
+    workers: int = 0
 
 
 class SegmentIn(BaseModel):
@@ -540,3 +540,14 @@ def api_system_checks():
     from pipeline.core.system_check import system_checks
 
     return system_checks()
+
+
+@app.post("/api/system/install/ocr_cuda")
+def api_install_ocr_cuda():
+    """Install ONNX Runtime GPU into the backend's Python environment."""
+    from pipeline.core.system_check import install_ocr_cuda
+
+    try:
+        return install_ocr_cuda()
+    except Exception as e:
+        raise HTTPException(500, str(e)) from e

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core.jobs import run_cmd
-from ..core.media import _has_audio_stream, ffprobe_duration
+from ..core.media import _has_audio_stream, ffprobe_duration, h264_encoder_args
 from ..core.project import ensure_layout, out_final
 
 
@@ -442,7 +442,7 @@ def mux_dub(
     if video_factor > 1.001:
         filters.append(f"[0:v]setpts={video_factor:.4f}*PTS[vout]")
         map_video = "[vout]"
-        vcodec = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p"]
+        vcodec = h264_encoder_args(fast=True)
     else:
         map_video = "0:v"
         vcodec = ["-c:v", "copy"]

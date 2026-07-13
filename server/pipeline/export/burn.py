@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -11,10 +12,11 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-from ..asr import _ocr_join_lines
+from ..asr import _ocr_join_lines, _rapidocr_gpu_kwargs, _rapidocr_labels
 from ..core.jobs import _job_procs, check_cancel
-from ..core.media import video_size
+from ..core.media import h264_encoder_args, video_size
 from ..core.project import ensure_layout, set_status
+from ..core.resources import adaptive_workers
 from ..translate import _clean_burn_text
 from .labels import (
     clamp_label_box,
@@ -155,6 +157,8 @@ def _pick_font(candidates: tuple[str, ...], *, sample: str = _VI_PROBE, cache_ke
 def _subtitle_font() -> str:
     return _pick_font(
         (
+            "C:/Windows/Fonts/arial.ttf",
+            "C:/Windows/Fonts/segoeui.ttf",
             "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
             "/Library/Fonts/Arial Unicode.ttf",
             "/System/Library/Fonts/Supplemental/Arial.ttf",
@@ -172,6 +176,8 @@ def _subtitle_font_vertical() -> str:
     """Font đậm cho title dọc (VI/Latin); bỏ font thiếu dấu Việt (vd. Arial Rounded)."""
     return _pick_font(
         (
+            "C:/Windows/Fonts/arialbd.ttf",
+            "C:/Windows/Fonts/segoeuib.ttf",
             "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
             "/System/Library/Fonts/Supplemental/Verdana Bold.ttf",
             "/System/Library/Fonts/Supplemental/Tahoma Bold.ttf",
@@ -242,28 +248,31 @@ def _cover_box_fit(
     frame_w: int,
     frame_h: int,
 ) -> tuple[int, int, int, int] | None:
-    """Che theo OCR (Y); caption chỉ nới ngang — tránh pad layout phình mép trên."""
+    """Khung che chứa trọn cả bbox OCR và caption đã co vừa."""
     ocr_u = _union_box(ocr_boxes) if ocr_boxes else None
     if ocr_u is None and text_box is None:
         return None
     if ocr_u is not None:
         x0, y0, x1, y1 = ocr_u
-        if text_box is not None:
-            x0 = min(x0, text_box[0])
-            x1 = max(x1, text_box[2])
-            # Không union Y với caption: box layout có pad_y → bar dư mép trên.
     else:
         assert text_box is not None
         x0, y0, x1, y1 = text_box
+    # Khung che phải chứa cả chữ gốc lẫn toàn bộ caption đã auto-fit. Nếu chỉ
+    # bám OCR, câu Việt dài sẽ tràn ra ngoài nền che.
+    if text_box is not None:
+        x0 = min(x0, text_box[0])
+        y0 = min(y0, text_box[1])
+        x1 = max(x1, text_box[2])
+        y1 = max(y1, text_box[3])
     cy = (y0 + y1) // 2
-    pad_x = max(12, int(round(frame_w * 0.02)))
+    pad_x = max(6, int(round(frame_w * 0.006)))
     # pad trên = dưới, nhỏ (OCR đã pad sẵn).
-    pad_y = max(4, int(round(frame_h * 0.003)))
+    pad_y = max(3, int(round(frame_h * 0.002)))
     x0 -= pad_x
     x1 += pad_x
     y0 -= pad_y
     y1 += pad_y
-    max_h = max(36, int(frame_h * 0.09))
+    max_h = max(36, int(frame_h * (0.34 if text_box is not None else 0.09)))
     if (y1 - y0) > max_h:
         y0, y1 = cy - max_h // 2, cy + max_h // 2
     return (
@@ -536,7 +545,7 @@ def _ocr_cue_boxes(
                 continue
             if layout == "vertical":
                 # Quét giữa khung (tiêu đề dọc) thay vì dải đáy
-                b, _tx = _ocr_mid_vertical(frame, ocr)
+                b, _tx = _ocr_mid_vertical(frame, ocr, source=source)
             elif layout == "label":
                 b, tx = _ocr_mid_labels(frame, ocr, source=source)
                 for box in b:
@@ -558,13 +567,14 @@ def _ocr_cue_boxes(
             else:
                 # hardsub đáy trước; chỉ fallback mid nếu short CJK (行) không thấy ở đáy
                 src = source or ""
-                short_cjk = (
-                    sum(1 for c in src if "\u4e00" <= c <= "\u9fff") <= 2
-                    and len(src.strip()) <= 4
-                )
-                b, _tx = _ocr_band_subs(frame, ocr)
-                if not b and short_cjk:
+                src_cjk = sum(1 for c in src if "\u4e00" <= c <= "\u9fff")
+                short_cjk = 0 < src_cjk <= 2 and len(src.strip()) <= 4
+                if short_cjk:
+                    # Chữ flash ngắn thường nằm giữa khung; OCR dải đáy có thể
+                    # bắt nhầm chi tiết nền rồi đặt cover sai hẳn vị trí.
                     b, _tx = _ocr_mid_hardsub_boxes(frame, ocr, source=src)
+                else:
+                    b, _tx = _ocr_band_subs(frame, ocr)
             u = _union_box(b) if b else None
             if u is None and layout not in ("vertical", "label"):
                 u = _cover_box_from_ink(frame, None, tight=True)
@@ -615,7 +625,7 @@ def _ocr_cue_boxes(
                 uniq = [
                     b
                     for b in uniq
-                    if (b[2] - b[0]) <= fw * 0.38 and (b[3] - b[1]) <= fh * 0.40
+                    if (b[2] - b[0]) <= fw * 0.85 and (b[3] - b[1]) <= fh * 0.40
                 ][:6]
                 if uniq:
                     return uniq
@@ -635,14 +645,8 @@ def _ocr_cue_boxes(
 
 
 def _resolve_workers(requested: int | None, *, cap: int = 16, n: int | None = None) -> int:
-    """1–cap theo setting; ≤0 → 2; kẹp theo n nếu có."""
-    if requested is None or int(requested) <= 0:
-        w = 2
-    else:
-        w = max(1, min(cap, int(requested)))
-    if n is not None:
-        w = min(w, max(1, n))
-    return w
+    """1–cap theo setting; 0 tự điều chỉnh theo tài nguyên đang rảnh."""
+    return adaptive_workers(requested, kind="cpu", cap=cap, tasks=n)
 
 
 def _precompute_cue_boxes(
@@ -667,9 +671,9 @@ def _precompute_cue_boxes(
             )
             for c in cues
         ]
-        # v24: nhãn multi-box — cover từng ô, không union 1 khối
+        # v25: source dài không nhận box nhiễu chỉ trùng một glyph.
         raw_key = json.dumps(
-            ["ocr_boxes_v24", str(video.resolve()), stat.st_size, stat.st_mtime_ns, cue_sig],
+            ["ocr_boxes_v25", str(video.resolve()), stat.st_size, stat.st_mtime_ns, cue_sig],
             ensure_ascii=False,
             separators=(",", ":"),
         )
@@ -1239,10 +1243,7 @@ def _layout_caption_vertical(
     if ocr_box:
         ocr_w = max(28, ocr_box[2] - ocr_box[0])
         ocr_h = max(48, ocr_box[3] - ocr_box[1])
-        if compact:
-            target_h = min(frame_h, max(ocr_h + 24, int(frame_h * 0.12)))
-        else:
-            target_h = min(frame_h, max(ocr_h, int(frame_h * 0.42)))
+        target_h = min(frame_h, max(ocr_h + 24, int(frame_h * 0.12)))
         max_w = max(40, min(int(frame_w * 0.24), ocr_w + 24))
         base = max(22, min(int(fontsize * 1.15), int(ocr_w * (0.78 if pure_cjk else 0.62))))
     else:
@@ -1525,6 +1526,13 @@ def _match_cue_index(
     return -1
 
 
+def _auto_subtitle_font_size(width: int, height: int) -> int:
+    """Cỡ nền dễ đọc; từng layout tiếp tục co độc lập theo bbox thực tế."""
+    short_edge = max(1, min(int(width), int(height)))
+    # 1080p portrait/landscape ≈ 62 px; 720p ≈ 42 px.
+    return max(24, min(72, int(round(short_edge * 0.058))))
+
+
 def cover_and_burn(
     video: Path,
     segments: list[dict[str, Any]],
@@ -1532,7 +1540,7 @@ def cover_and_burn(
     *,
     cover: bool,
     burn: bool = True,
-    subtitle_font_size: int = 32,
+    subtitle_font_size: int = 0,
     project_id: str | None = None,
     workers: int = 0,
     caption_placement: str = "below",
@@ -1546,7 +1554,12 @@ def cover_and_burn(
         return out
 
     w, h = video_size(video)
-    fontsize = max(16, min(120, int(subtitle_font_size or 32)))
+    auto_fontsize = int(subtitle_font_size or 0) <= 0
+    fontsize = (
+        _auto_subtitle_font_size(w, h)
+        if auto_fontsize
+        else max(16, min(120, int(subtitle_font_size)))
+    )
     workers = _resolve_workers(workers)
     place = (caption_placement or "below").lower()
     if place not in ("below", "above"):
@@ -1596,10 +1609,14 @@ def cover_and_burn(
             burn_start = max(0.0, s0 - 0.04)
             burn_end = max(e0 + 0.06, burn_start + 0.15)
         else:
+            # Flash OCR ngắn có sai số coarse tới ~0.5s và chữ thật thường giữ
+            # thêm vài frame. Nới đuôi để không lộ lại chữ Trung ngay sau cue.
+            src_cjk = sum(1 for c in (seg.get("source") or "") if "\u4e00" <= c <= "\u9fff")
+            tail = 0.90 if (e0 - s0) <= 0.75 and src_cjk <= 4 else 0.04
             burn_start = max(0.0, s0 - 0.04)
-            burn_end = max(e0 + 0.04, burn_start + 0.12)
+            burn_end = max(e0 + tail, burn_start + 0.12)
             cover_start = max(0.0, s0 - 0.20)
-            cover_end = max(e0 + 0.22, cover_start + 0.16)
+            cover_end = max(e0 + max(0.22, tail), cover_start + 0.16)
         cues.append(
             (cover_start, cover_end, burn_start, burn_end, burn_text, source, layout)
         )
@@ -1619,9 +1636,7 @@ def cover_and_burn(
     cue_boxes: list[list[tuple[int, int, int, int]]] = [[] for _ in cues]
     if (cover or burn) and cues:
         try:
-            from rapidocr_onnxruntime import RapidOCR  # type: ignore
-
-            ocr = RapidOCR()
+            ocr = _rapidocr_labels()
         except ImportError:
             ocr = None
         if ocr is not None:
@@ -1634,7 +1649,13 @@ def cover_and_burn(
                     running=True,
                 )
             cue_boxes = _precompute_cue_boxes(
-                video, cues, ocr, project_id=project_id, workers=workers
+                video,
+                cues,
+                ocr,
+                project_id=project_id,
+                # Một ONNX CUDA session không an toàn khi gọi đồng thời từ
+                # nhiều thread; CPU vẫn được fan-out theo setting Auto.
+                workers=1 if _rapidocr_gpu_kwargs()["det_use_cuda"] else workers,
             )
             ocr = None
 
@@ -1668,16 +1689,7 @@ def cover_and_burn(
         is_vert = lay_mode == "vertical"
         is_label = lay_mode == "label"
         src_s = (src or "").strip()
-        paint_cy = ((paint[1] + paint[3]) * 0.5 / max(1, h)) if paint else 1.0
-        mid_popup = (
-            not is_vert
-            and not is_label
-            and paint is not None
-            and paint_cy < 0.70
-            and sum(1 for c in src_s if "\u4e00" <= c <= "\u9fff") <= 2
-            and len(src_s) <= 4
-        )
-        use_label_style = is_label or mid_popup
+        use_label_style = is_label
         if paint is None and cover:
             if is_vert:
                 paint = (int(w * 0.46), int(h * 0.28), int(w * 0.54), int(h * 0.78))
@@ -1718,16 +1730,14 @@ def cover_and_burn(
                         bb = expand_box_to_ink(probe, bb, w, h)
                     except Exception:
                         pass
-                tall_b = is_vertical_cjk_source(src_s) or is_tall_label(bb)
+                tall_b = is_tall_label(bb)
                 bb = clamp_label_box(bb, w, h, force_tall=tall_b)
                 refined.append(bb)
             boxes = refined or boxes
             # paint = box chính (lớn nhất) để đặt chữ
             if boxes:
                 paint = max(boxes, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))
-            label_tall = bool(paint) and (
-                is_vertical_cjk_source(src_s) or is_tall_label(paint)
-            )
+            label_tall = bool(paint) and is_tall_label(paint)
             for b in boxes:
                 fit = cover_fit_label(
                     b,
@@ -1735,7 +1745,7 @@ def cover_and_burn(
                     w,
                     h,
                     frame_bgr=probe,
-                    force_tall=is_tall_label(b) or is_vertical_cjk_source(src_s),
+                    force_tall=is_tall_label(b),
                 )
                 if fit:
                     cover_regions.append(fit)
@@ -1840,14 +1850,7 @@ def cover_and_burn(
             "-map",
             "1:a:0?",
             # encode nhanh trung gian; run_export sẽ encode_export_1080 cuối
-            "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            "-crf",
-            "18",
-            "-pix_fmt",
-            "yuv420p",
+            *h264_encoder_args(fast=True),
             "-c:a",
             "aac",
             "-b:a",
@@ -1867,37 +1870,41 @@ def cover_and_burn(
     if project_id:
         _job_procs.setdefault(project_id, []).append(proc)
 
-    # Cue index cho mỗi frame (precompute — worker chỉ blur/blit).
-    n_cues = len(cues)
-    cover_i = 0
-    burn_i = 0
+    # Cue indices cho mỗi frame. Title dọc có thể tồn tại đồng thời với hardsub
+    # ngang; chỉ giữ một index sẽ làm title dài nuốt toàn bộ subtitle phía sau.
     max_frames = frame_total if frame_total > 0 else 10_000_000
-    cover_idx = [-1] * max_frames
-    burn_idx = [-1] * max_frames
-    for fi in range(max_frames):
-        t = fi / fps
-        while cover_i < n_cues and t >= cues[cover_i][1]:
-            cover_i += 1
-        while burn_i < n_cues and t >= cues[burn_i][3]:
-            burn_i += 1
-        if cover and cover_i < n_cues and cues[cover_i][0] <= t < cues[cover_i][1]:
-            cover_idx[fi] = cover_i
-        if burn and burn_i < n_cues and cues[burn_i][2] <= t < cues[burn_i][3]:
-            burn_idx[fi] = burn_i
-        # Hết cả cover+burn window → không cần precompute thêm.
-        if cover_i >= n_cues and burn_i >= n_cues:
-            break
+    cover_idx: list[list[int]] = [[] for _ in range(max_frames)]
+    burn_idx: list[list[int]] = [[] for _ in range(max_frames)]
+    for ci, cue in enumerate(cues):
+        if cover:
+            f0 = max(0, int(float(cue[0]) * fps))
+            f1 = min(max_frames, int(math.ceil(float(cue[1]) * fps)))
+            for fi in range(f0, f1):
+                cover_idx[fi].append(ci)
+        if burn:
+            f0 = max(0, int(float(cue[2]) * fps))
+            f1 = min(max_frames, int(math.ceil(float(cue[3]) * fps)))
+            for fi in range(f0, f1):
+                burn_idx[fi].append(ci)
 
     def _paint_one(item: tuple[int, Any]) -> tuple[int, bytes]:
         fi, fr = item
-        ci = cover_idx[fi] if fi < len(cover_idx) else -1
-        bi = burn_idx[fi] if fi < len(burn_idx) else -1
-        if ci >= 0:
+        cis = cover_idx[fi] if fi < len(cover_idx) else []
+        bis = burn_idx[fi] if fi < len(burn_idx) else []
+        for ci in cis:
             fits = cue_fits[ci] if ci < len(cue_fits) else []
             for fit in fits:
                 if fit is not None:
                     fr = _blur_region(fr, fit)
-        if bi >= 0:
+        has_label = any(
+            (cues[bi][6] if len(cues[bi]) > 6 else "horizontal") == "label"
+            for bi in bis
+        )
+        for bi in bis:
+            # Nhãn chính ưu tiên chữ dịch; watermark dọc vẫn được
+            # cover ở trên, chỉ tạm ẩn caption để không chồng chữ.
+            if has_label and (cues[bi][6] if len(cues[bi]) > 6 else "") == "vertical":
+                continue
             ov = cue_overlays[bi]
             if ov is not None:
                 fr = _blit_overlay(fr, ov)
