@@ -1,0 +1,84 @@
+:root {
+  --bg: #e8ecf1;
+  --surface: #ffffff;
+  --ink: #1a2332;
+  --muted: #6b7a8d;
+  --line: #d5dde8;
+  --accent: #2f6fed;
+  --accent-soft: #e8f0fe;
+  --ok: #1a9b5c;
+  --warn: #c47a12;
+  --radius: 10px;
+  --font: 'Be Vietnam Pro', system-ui, sans-serif;
+  --shadow: 0 1px 2px rgba(26, 35, 50, 0.05);
+}
+
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body {
+  font-family: var(--font);
+  color: var(--ink);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+}
+
+button, select, input, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; }
+button:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.app {
+  display: grid;
+  grid-template-rows: 58px 1fr;
+  height: 100%;
+  min-height: 0;
+}
+
+.workspace {
+  display: grid;
+  grid-template-columns: 360px 6px 1fr;
+  min-height: 0;
+  height: 100%;
+}
+
+.sidebar-resizer {
+  width: 6px;
+  margin-left: -3px;
+  cursor: col-resize;
+  z-index: 5;
+  background: transparent;
+  position: relative;
+  touch-action: none;
+}
+
+.sidebar-resizer::after {
+  content: '';
+  position: absolute;
+  inset: 0 2px;
+  border-radius: 2px;
+  background: transparent;
+  transition: background 0.15s;
+}
+
+.sidebar-resizer:hover::after,
+body.resizing-sidebar .sidebar-resizer::after {
+  background: var(--accent);
+}
+
+body.resizing-sidebar {
+  cursor: col-resize;
+  user-select: none;
+}
+
+body.resizing-sidebar * {
+  cursor: col-resize !important;
+}
+
+@media (max-width: 960px) {
+  .workspace {
+    grid-template-columns: 1fr !important;
+  }
+  .sidebar-resizer {
+    display: none;
+  }
+  .sidebar { max-height: none; }
+}

@@ -1,0 +1,672 @@
+import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
+import Header from './components/Header'
+import Sidebar from './components/Sidebar'
+import Stepper from './components/Stepper'
+import SegmentList from './components/SegmentList'
+import ConfigModal from './components/ConfigModal'
+import { api } from './services/api'
+import type { HardwareInfo, JobStatus, ProjectSettings, Segment, Step } from './types'
+import './App.css'
+
+const SETTINGS_LS = 'videoclone.settings'
+const SESSION_LS = 'videoclone.session'
+const SIDEBAR_W_LS = 'videoclone.sidebarWidth'
+const SIDEBAR_MIN = 240
+const SIDEBAR_MAX = 560
+const SIDEBAR_DEFAULT = 360
+
+function loadSidebarWidth(): number {
+  try {
+    const raw = localStorage.getItem(SIDEBAR_W_LS)
+    // Number(null) === 0 — không dùng khi chưa lưu
+    if (raw != null && raw !== '') {
+      const n = Number(raw)
+      if (Number.isFinite(n) && n > 0) {
+        return Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, n))
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return SIDEBAR_DEFAULT
+}
+
+const defaultSettings: ProjectSettings = {
+  engine: 'whisper',
+  sourceLang: 'auto',
+  targetLang: 'vi',
+  translator: 'google',
+  matchDuration: 'natural',
+  defaultVoice: 'cc:BV075_streaming:7102355803792740865',
+  coverHardsubs: true,
+  burnSubs: true,
+  captionPlacement: 'below',
+  subtitleFontSize: 32,
+  processOriginalAudio: false,
+  originalAudioMode: 'original',
+  originalAudioVolume: 100,
+  previewSec: 20,
+  workers: 2,
+}
+
+function loadSettings(): ProjectSettings {
+  try {
+    const raw = localStorage.getItem(SETTINGS_LS)
+    if (!raw) return defaultSettings
+    const s = { ...defaultSettings, ...JSON.parse(raw) } as ProjectSettings
+    if (!s.workers || s.workers <= 0) s.workers = 2
+    if (typeof s.originalAudioVolume !== 'number' || Number.isNaN(s.originalAudioVolume)) {
+      s.originalAudioVolume = 100
+    } else {
+      s.originalAudioVolume = Math.max(0, Math.min(100, s.originalAudioVolume))
+    }
+    const okTr = [
+      'google',
+      'mymemory',
+      'tiktok',
+      'ollama',
+      'openai',
+      'gemini',
+      'deepseek',
+      'openrouter',
+      'grok',
+    ] as const
+    if (!okTr.includes(s.translator as (typeof okTr)[number])) s.translator = 'google'
+    return s
+  } catch {
+    return defaultSettings
+  }
+}
+
+function persistSettings(s: ProjectSettings) {
+  try {
+    localStorage.setItem(SETTINGS_LS, JSON.stringify(s))
+  } catch {
+    /* quota / private mode */
+  }
+}
+
+function persistSession(projectId: string | null) {
+  try {
+    if (projectId) localStorage.setItem(SESSION_LS, projectId)
+    else localStorage.removeItem(SESSION_LS)
+  } catch {
+    /* ignore */
+  }
+}
+
+const idleStatus: JobStatus = {
+  step: 'video',
+  progress: 0,
+  message: 'Chọn video để bắt đầu',
+  running: false,
+}
+
+function fmtDuration(sec: number) {
+  const m = Math.floor(sec / 60)
+  const s = Math.floor(sec % 60)
+  return `${m}:${String(s).padStart(2, '0')}`
+}
+
+export default function App() {
+  const [hw, setHw] = useState<HardwareInfo>({ label: 'CPU', accel: 'cpu' })
+  const [voices, setVoices] = useState<{ id: string; name: string }[]>([
+    { id: 'el:pNInz6obpgDQGcFmaJgB', name: 'ElevenLabs · Adam' },
+    { id: 'system', name: 'Giọng hệ thống (theo ngôn ngữ đích)' },
+  ])
+  const [settings, setSettings] = useState(loadSettings)
+  const [configOpen, setConfigOpen] = useState(false)
+  const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth)
+  const sidebarWidthRef = useRef(sidebarWidth)
+  const sidebarDrag = useRef<{ startX: number; startW: number } | null>(null)
+  const [projectId, setProjectId] = useState<string | null>(null)
+  const [videoUrl, setVideoUrl] = useState<string | null>(null)
+  const [duration, setDuration] = useState(0)
+  const [segments, setSegments] = useState<Segment[]>([])
+  const [status, setStatus] = useState<JobStatus>(idleStatus)
+  const [exportUrl, setExportUrl] = useState<string | null>(null)
+  const [exportPath, setExportPath] = useState<string | null>(null)
+  const [viewExportSrc, setViewExportSrc] = useState<string | null>(null)
+  const pollRef = useRef<number | null>(null)
+  const pollInFlight = useRef(false)
+  const pollFailStreak = useRef(0)
+  const pendingExportUrl = useRef<string | null>(null)
+  const pendingExportPath = useRef<string | null>(null)
+  /** chặn double-click: Dịch/Xuất rồi dính nút Huỷ vừa hiện */
+  const busyAt = useRef(0)
+
+  useEffect(() => {
+    api.hardware().then(setHw).catch(() => setHw({ label: 'Local', accel: 'cpu' }))
+  }, [])
+
+  // F5 / Vite HMR: mở lại project đang làm (kể cả đang export)
+  useEffect(() => {
+    let id = ''
+    try {
+      id = localStorage.getItem(SESSION_LS) || ''
+    } catch {
+      return
+    }
+    if (!id) return
+    let dead = false
+    ;(async () => {
+      try {
+        const [st, segs] = await Promise.all([api.status(id), api.segments(id)])
+        if (dead) return
+        setProjectId(id)
+        setVideoUrl(`/api/projects/${id}/video`)
+        const dur = Number((st as JobStatus & { duration?: number }).duration || 0)
+        if (dur > 0) setDuration(dur)
+        const extra = st as JobStatus & { settings?: Partial<ProjectSettings> }
+        const mergedVoice =
+          (extra.settings && typeof extra.settings === 'object' && extra.settings.defaultVoice) ||
+          settings.defaultVoice
+        setSegments(applyDefaultVoice(segs, mergedVoice))
+        if (extra.settings && typeof extra.settings === 'object') {
+          setSettings((s) => {
+            const next = { ...s, ...extra.settings }
+            persistSettings(next)
+            return next
+          })
+        }
+        setStatus({
+          step: st.step || 'video',
+          progress: st.progress || 0,
+          message: st.message || 'Đã mở lại project',
+          running: Boolean(st.running),
+          error: st.error,
+          outputRel: st.outputRel,
+        })
+        if (st.running) busyAt.current = Date.now()
+        if (!st.running && st.outputRel && (st.progress || 0) >= 100) {
+          setExportUrl(`/api/projects/${id}/output`)
+          setExportPath(st.outputRel)
+        }
+      } catch {
+        persistSession(null)
+      }
+    })()
+    return () => {
+      dead = true
+    }
+  }, [])
+
+  useEffect(() => {
+    const ac = new AbortController()
+    const t = window.setTimeout(() => ac.abort(), 8000)
+    fetch(`/api/voices?lang=${encodeURIComponent(settings.targetLang === 'none' ? 'vi' : settings.targetLang)}`, {
+      signal: ac.signal,
+    })
+      .then(async (r) => {
+        if (!r.ok) throw new Error(await r.text())
+        return r.json() as Promise<{ id: string; name: string }[]>
+      })
+      .then((vs) => {
+        if (!Array.isArray(vs) || !vs.length) return
+        setVoices(vs)
+        setSettings((s) => {
+          const next = vs.some((v) => v.id === s.defaultVoice) ? s : { ...s, defaultVoice: vs[0].id }
+          if (next !== s) persistSettings(next)
+          return next
+        })
+      })
+      .catch(() => {
+        /* giữ preset đã seed — tránh kẹt "Đang tải giọng" */
+      })
+      .finally(() => window.clearTimeout(t))
+    return () => {
+      ac.abort()
+      window.clearTimeout(t)
+    }
+  }, [settings.targetLang])
+
+  useEffect(() => {
+    if (!projectId || !status.running) {
+      if (pollRef.current) window.clearInterval(pollRef.current)
+      pollRef.current = null
+      pollInFlight.current = false
+      pollFailStreak.current = 0
+      return
+    }
+    pollFailStreak.current = 0
+    pollRef.current = window.setInterval(async () => {
+      // backend reload: bỏ tick nếu request trước còn treo
+      if (pollInFlight.current) return
+      pollInFlight.current = true
+      try {
+        const s = await api.status(projectId)
+        pollFailStreak.current = 0
+        const exportDone =
+          !s.running &&
+          s.step === 'export' &&
+          s.progress >= 100 &&
+          Boolean(s.outputRel || pendingExportUrl.current)
+        setStatus(exportDone && s.error ? { ...s, error: undefined } : s)
+        if (!s.running) {
+          try {
+            const segs = await api.segments(projectId)
+            setSegments(applyDefaultVoice(segs, settings.defaultVoice))
+          } catch {
+            /* status đã xong — segments có thể retry sau */
+          }
+          if (exportDone) {
+            setExportUrl(pendingExportUrl.current || `/api/projects/${projectId}/output`)
+            setExportPath(
+              pendingExportPath.current ||
+                s.outputRel ||
+                `server/data/exports/${projectId}.mp4`,
+            )
+            pendingExportUrl.current = null
+            pendingExportPath.current = null
+          }
+        }
+      } catch {
+        pollFailStreak.current += 1
+        // ~4s (5×800ms) backend down → bỏ trạng thái "Đang xử lý" (tránh UI đơ)
+        if (pollFailStreak.current >= 5) {
+          setStatus((prev) => ({
+            ...prev,
+            running: false,
+            message: prev.running
+              ? 'Mất kết nối backend (đang reload?). Bấm Dịch/Xuất lại nếu cần.'
+              : prev.message,
+            error: 'backend_unreachable',
+          }))
+        }
+      } finally {
+        pollInFlight.current = false
+      }
+    }, 800)
+    return () => {
+      if (pollRef.current) window.clearInterval(pollRef.current)
+      pollRef.current = null
+      pollInFlight.current = false
+    }
+  }, [projectId, status.running])
+
+  // Hiện ô Xem/Tải khi đã từng xuất (kể cả vừa dịch lại — bản có thể cũ)
+  useEffect(() => {
+    if (!projectId || status.running || exportUrl) return
+    if (status.outputRel && (status.progress || 0) >= 100) {
+      setExportUrl(`/api/projects/${projectId}/output`)
+      setExportPath(status.outputRel)
+    }
+  }, [projectId, status.running, status.step, status.progress, status.outputRel, exportUrl])
+
+  // ESC đóng popup xem export
+  useEffect(() => {
+    if (!viewExportSrc) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setViewExportSrc(null)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [viewExportSrc])
+
+  async function onUpload(file: File) {
+    setExportUrl(null)
+    setExportPath(null)
+    setSegments([])
+    setStatus({ step: 'video', progress: 10, message: 'Đang tải video…', running: true })
+    try {
+      const res = await api.upload(file)
+      setProjectId(res.projectId)
+      persistSession(res.projectId)
+      setVideoUrl(res.videoUrl)
+      setDuration(res.duration)
+      if (res.settings && typeof res.settings === 'object') {
+        setSettings((s) => {
+          const next = { ...s, ...res.settings }
+          persistSettings(next)
+          return next
+        })
+      }
+      if (res.segments?.length) {
+        const voice =
+          (res.settings && typeof res.settings === 'object' && res.settings.defaultVoice) ||
+          settings.defaultVoice
+        setSegments(applyDefaultVoice(res.segments, voice))
+        setStatus({
+          step: 'translate',
+          progress: 100,
+          message: res.cached
+            ? `Đã mở lại từ cache — ${res.segments.length} đoạn`
+            : 'Video sẵn sàng',
+          running: false,
+        })
+      } else {
+        setStatus({
+          step: 'video',
+          progress: 100,
+          message: res.cached ? 'Video đã có sẵn (cache)' : 'Video sẵn sàng',
+          running: false,
+        })
+      }
+    } catch (e) {
+      setStatus({
+        step: 'video',
+        progress: 0,
+        message: e instanceof Error ? e.message : 'Tải video thất bại — kiểm tra server :8787',
+        running: false,
+        error: 'upload',
+      })
+    }
+  }
+
+  async function onTranslateAll(previewSec = 0) {
+    if (!projectId) return
+    setExportUrl(null)
+    busyAt.current = Date.now()
+    setStatus({
+      step: 'asr',
+      progress: 0,
+      message: previewSec > 0 ? `Preview ${previewSec}s…` : 'Bắt đầu nhận dạng…',
+      running: true,
+      error: undefined,
+    })
+    await api.run(projectId, { ...settings, previewSec })
+    setStatus((s) => ({ ...s, running: true }))
+  }
+
+  async function onDub() {
+    if (!projectId) return
+    busyAt.current = Date.now()
+    setStatus({ step: 'dub', progress: 0, message: 'Đang lồng tiếng…', running: true, error: undefined })
+    await api.dub(projectId, settings)
+    setStatus((s) => ({ ...s, running: true }))
+  }
+
+  function onSettings(next: ProjectSettings) {
+    const prev = settings
+    // đang chạy job — đừng đổi engine (tránh xóa đoạn + nhảy về Video)
+    if (status.running && next.engine !== prev.engine) return
+    setSettings(next)
+    persistSettings(next)
+    if (projectId) {
+      void api.saveSettings(projectId, next).catch(() => {
+        /* ponytail: ignore transient save */
+      })
+    }
+    // Đổi engine (Whisper ↔ OCR) → bỏ đoạn cũ
+    if (next.engine !== prev.engine) {
+      setSegments([])
+      setExportUrl(null)
+      setExportPath(null)
+      setStatus({
+        step: 'video',
+        progress: 0,
+        message:
+          next.engine === 'paddleocr'
+            ? 'Nhận dạng chữ trên màn — chạy Dịch toàn bộ'
+            : 'Nhận dạng giọng nói — chạy Dịch toàn bộ rồi Lồng tiếng',
+        running: false,
+      })
+      return
+    }
+    if (next.defaultVoice === prev.defaultVoice) return
+    // giọng mặc định sidebar áp dụng cả list (đổi lại = đổi hết đoạn)
+    setSegments((segs) => segs.map((seg) => ({ ...seg, voice: next.defaultVoice })))
+  }
+
+  /** Server hay đóng dấu Adam sau Dịch — đồng bộ về default đang chọn nếu cả loạt cùng 1 giọng */
+  function applyDefaultVoice(segs: Segment[], voice: string): Segment[] {
+    if (!voice || !segs.length) return segs
+    const uniq = new Set(segs.map((s) => (s.voice || '').trim()).filter(Boolean))
+    if (uniq.size <= 1 && (!uniq.size || !uniq.has(voice))) {
+      return segs.map((s) => ({ ...s, voice }))
+    }
+    return segs.map((s) => {
+      const v = (s.voice || '').trim()
+      if (!v || v === 'system') return { ...s, voice }
+      return s
+    })
+  }
+
+  async function onExport() {
+    if (!projectId) return
+    setExportUrl(null)
+    setExportPath(null)
+    busyAt.current = Date.now()
+    // độ dài xuất = lần dịch gần nhất (status đã nói Preview Ns / full), không theo ô số khi đã Dịch cả video
+    setStatus({
+      step: 'export',
+      progress: 0,
+      message:
+        settings.coverHardsubs && settings.burnSubs && settings.targetLang !== 'none'
+          ? 'Đang xuất (che chữ cũ + chèn bản dịch)…'
+          : settings.burnSubs && settings.targetLang !== 'none'
+            ? settings.captionPlacement === 'above'
+              ? 'Đang xuất (chèn bản dịch phía trên)…'
+              : 'Đang xuất (chèn bản dịch phía dưới)…'
+            : settings.coverHardsubs
+              ? 'Đang xuất (che chữ cũ)…'
+              : 'Đang xuất…',
+      running: true,
+      error: undefined,
+    })
+    const res = await api.export(projectId, settings)
+    pendingExportUrl.current = res.url
+    pendingExportPath.current = res.exports || res.path || null
+    setStatus((s) => ({ ...s, running: true }))
+  }
+
+  async function onRevealOutput() {
+    if (!projectId) return
+    try {
+      const res = await api.revealOutput(projectId)
+      setExportPath(res.path)
+    } catch (e) {
+      setStatus((s) => ({
+        ...s,
+        message: e instanceof Error ? e.message : 'Không mở được thư mục',
+      }))
+    }
+  }
+
+  function onViewExport() {
+    if (!projectId) return
+    setViewExportSrc(`/api/projects/${projectId}/output?t=${Date.now()}`)
+  }
+
+  function onCloseViewExport() {
+    setViewExportSrc(null)
+  }
+
+  async function onCancel() {
+    if (!projectId || !status.running) return
+    // chỉ chặn double-click cực sớm (mount Huỷ)
+    if (Date.now() - busyAt.current < 400) return
+    const stepNow = status.step
+    // optimistic — đừng chờ server
+    setStatus({
+      step: stepNow,
+      progress: 0,
+      message:
+        stepNow === 'export'
+          ? 'Đã huỷ xuất bản'
+          : stepNow === 'dub'
+            ? 'Đã huỷ lồng tiếng'
+            : 'Đang huỷ…',
+      running: false,
+      error: 'cancelled',
+    })
+    try {
+      await api.cancel(projectId)
+    } catch {
+      /* flag server có thể fail; UI đã dừng */
+    }
+  }
+
+  async function onSegmentChange(seg: Segment) {
+    setSegments((prev) => prev.map((s) => (s.id === seg.id ? seg : s)))
+    if (!projectId) return
+    try {
+      await api.updateSegment(projectId, seg)
+    } catch {
+      /* keep local edit */
+    }
+  }
+
+  const step: Step = status.step
+
+  useEffect(() => {
+    sidebarWidthRef.current = sidebarWidth
+  }, [sidebarWidth])
+
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      const drag = sidebarDrag.current
+      if (!drag) return
+      const next = Math.max(
+        SIDEBAR_MIN,
+        Math.min(SIDEBAR_MAX, drag.startW + (e.clientX - drag.startX)),
+      )
+      sidebarWidthRef.current = next
+      setSidebarWidth(next)
+    }
+    const onUp = () => {
+      if (!sidebarDrag.current) return
+      sidebarDrag.current = null
+      document.body.classList.remove('resizing-sidebar')
+      try {
+        localStorage.setItem(SIDEBAR_W_LS, String(sidebarWidthRef.current))
+      } catch {
+        /* ignore */
+      }
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+    return () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+  }, [])
+
+  const onSidebarResizeStart = (e: ReactMouseEvent) => {
+    e.preventDefault()
+    sidebarDrag.current = { startX: e.clientX, startW: sidebarWidthRef.current }
+    document.body.classList.add('resizing-sidebar')
+  }
+
+  return (
+    <div className="app">
+      <Header hardware={hw} onOpenConfig={() => setConfigOpen(true)} />
+      <ConfigModal open={configOpen} onClose={() => setConfigOpen(false)} />
+      <div
+        className="workspace"
+        style={{ gridTemplateColumns: `${sidebarWidth}px 6px 1fr` }}
+      >
+        <Sidebar
+          videoUrl={videoUrl}
+          settings={settings}
+          voices={voices}
+          busy={status.running}
+          onSettings={onSettings}
+          onUpload={onUpload}
+          onTranslateAll={() => onTranslateAll(0)}
+          onPreview={() =>
+            onTranslateAll(Math.max(5, Math.min(600, settings.previewSec || 20)))
+          }
+          onCancel={onCancel}
+        />
+        <div
+          className="sidebar-resizer"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Kéo đổi độ rộng menu"
+          onMouseDown={onSidebarResizeStart}
+        />
+        <main className="main">
+          <Stepper
+            step={step}
+            onDub={onDub}
+            onExport={onExport}
+            canDub={segments.length > 0 && !status.running}
+            canExport={
+              segments.length > 0 &&
+              !status.running &&
+              (settings.targetLang === 'none' ||
+                segments.some((s) => s.translation.trim()))
+            }
+          />
+          <div className="main-head">
+            <div>
+              <h2>Kịch bản lồng tiếng</h2>
+              <p className="status-line">
+                {status.running
+                  ? `${status.message} — ${Math.round(status.progress)}%`
+                  : status.message}
+              </p>
+            </div>
+            <div className="meta">
+              <span className="seg-count">{segments.length} đoạn thoại</span>
+              {duration > 0 && <span>{fmtDuration(duration)}</span>}
+            </div>
+          </div>
+          {exportUrl && (
+            <div className="export-banner">
+              <div className="export-banner-text">
+                <strong>
+                  {status.step === 'export'
+                    ? 'Video đã xuất xong'
+                    : 'Có bản xuất trước — Xuất bản lại nếu vừa dịch mới'}
+                </strong>
+                <code>{exportPath || `server/data/exports/${projectId}.mp4`}</code>
+              </div>
+              <div className="export-banner-actions">
+                <button type="button" className="export-dl" onClick={onViewExport}>
+                  Xem
+                </button>
+                <a
+                  className="export-dl"
+                  href={`/api/projects/${projectId}/output?download=1`}
+                  download={`video-clone-${projectId}.mp4`}
+                >
+                  Tải xuống
+                </a>
+                <button type="button" className="export-reveal" onClick={onRevealOutput}>
+                  Mở thư mục
+                </button>
+              </div>
+            </div>
+          )}
+          <SegmentList
+            segments={segments}
+            voices={voices}
+            defaultVoice={settings.defaultVoice}
+            targetLang={settings.targetLang}
+            sourceLang={settings.sourceLang}
+            translator={settings.translator}
+            videoUrl={videoUrl}
+            projectId={projectId}
+            onChange={onSegmentChange}
+          />
+        </main>
+      </div>
+      {viewExportSrc && (
+        <div
+          className="export-modal-backdrop"
+          role="presentation"
+          onClick={onCloseViewExport}
+          onKeyDown={(e) => e.key === 'Escape' && onCloseViewExport()}
+        >
+          <div
+            className="export-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Xem video đã xuất"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="export-modal-head">
+              <strong>Video đã xuất</strong>
+              <button type="button" className="export-modal-close" onClick={onCloseViewExport}>
+                Đóng
+              </button>
+            </div>
+            <video className="export-modal-video" src={viewExportSrc} controls autoPlay playsInline />
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}

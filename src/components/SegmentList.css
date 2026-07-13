@@ -1,0 +1,16 @@
+.segments {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.empty {
+  background: var(--surface);
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+  padding: 48px 24px;
+  text-align: center;
+  color: var(--muted);
+}
+
+.empty p { margin: 0 0 6px; }
