@@ -28,8 +28,8 @@ export type Segment = {
   audioUrl?: string
   audioFile?: string
   audioDuration?: number
-  /** horizontal = hardsub; vertical = title dọc; label = nhãn graphic */
-  layout?: 'horizontal' | 'vertical' | 'label'
+  /** horizontal = hardsub; vertical = title dọc; label = nhãn; mid = flash giữa */
+  layout?: 'horizontal' | 'vertical' | 'label' | 'mid'
   /**
    * Lồng tiếng đoạn này. Title dọc / nhãn: mặc định false (chỉ burn chữ).
    * Hardsub: mặc định true (undefined = bật).

@@ -393,13 +393,16 @@ export default function App() {
     setExportUrl(null)
     setExportPath(null)
     setSegments([])
+    setOverlays([])
     setWorkClipSec(0)
+    setViewExportSrc(null)
     setStatus({ step: 'video', progress: 10, message: 'Đang tải video…', running: true })
     try {
       const res = await api.upload(file)
       setProjectId(res.projectId)
       persistSession(res.projectId)
-      setVideoUrl(res.videoUrl)
+      // bust browser + <video> cache khi đổi / mở lại project
+      setVideoUrl(`${res.videoUrl}?t=${Date.now()}`)
       setDuration(res.duration)
       if (res.settings && typeof res.settings === 'object') {
         setSettings((s) => {

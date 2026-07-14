@@ -122,6 +122,7 @@ export default function Sidebar({
       >
         {videoUrl ? (
           <video
+            key={videoUrl}
             src={videoUrl}
             controls
             playsInline

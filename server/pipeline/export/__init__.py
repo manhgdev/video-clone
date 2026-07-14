@@ -3,9 +3,11 @@
 Caption/translate burn layout lives in burn.py (đóng — đừng trộn OCR vào).
 
 OCR (tách riêng):
-  pipeline.ocr.extract  — RapidOCR đọc chữ trên màn
-  pipeline.ocr.locate   — định vị box lúc xuất
-  pipeline.ocr.labels   — layout nhãn / cột
+  pipeline.ocr.extract       — RapidOCR đọc phụ đề đáy
+  pipeline.ocr.overlay_scan  — mid / dọc / nhãn (quét thưa)
+  pipeline.ocr.overlay_cover — che+chữ dịch classic cho overlay
+  pipeline.ocr.locate        — định vị box lúc xuất
+  pipeline.ocr.labels        — layout nhãn / cột
 
 Shims cũ (tương thích import):
   export/labels.py → ocr.labels

@@ -417,9 +417,9 @@ def _fit_hardsub_box(
     old_w = max(sw, _cover_box_width(src_w, frame_w) if src_w > 0 else 0)
     w = min(frame_w, max(old_w, auto_w))
     cx = (sx0 + sx1) / 2.0
-    top_slack = int(round(sh * 0.28))
+    top_slack = int(round(sh * 0.14))
     y0 = max(0, sy0 + top_slack - pad_top)
-    bot_extra = max(pad_bot, int(round(sh * 0.55)), int(round(font_size * 0.85)))
+    bot_extra = max(pad_bot, int(round(sh * 0.4)), int(round(font_size * 0.7)))
     y1 = min(frame_h, sy1 + bot_extra)
     x0 = max(0, int(round(cx - w / 2)))
     x1 = min(frame_w, x0 + w)
@@ -494,6 +494,7 @@ def _layout_caption_over(
 
     cap_w = int(text_w + cap_pad_x * 2)
     cap_x0 = max(cover_x0, min(cover_x1 - cap_w, int((cover_x0 + cover_x1) / 2 - cap_w / 2)))
+    # khớp preview captionCenterInCover — đúng giữa cover
     cap_y0 = cover_y0 + max(0, (cover_h - text_block_h) // 2)
     cap_box = (cap_x0, cap_y0, cap_x0 + cap_w, cap_y0 + text_block_h)
 
@@ -2082,7 +2083,7 @@ def cover_and_burn(
         if not burn_text:
             continue
         layout = str(seg.get("layout") or "horizontal")
-        if layout not in ("horizontal", "vertical", "label"):
+        if layout not in ("horizontal", "vertical", "label", "mid"):
             layout = "horizontal"
         s0 = float(seg["start"])
         e0 = float(seg["end"])
@@ -2107,6 +2108,11 @@ def cover_and_burn(
             # nhãn: cover sớm hơn burn (CJK hay lộ trước ASR) — lead 120ms
             cover_start = max(0.0, s0 - 0.12)
             cover_end = max(e0 + 0.10, cover_start + 0.20)
+            burn_start = max(0.0, s0)
+            burn_end = max(e0, burn_start + 0.04)
+        elif layout == "mid":
+            cover_start = max(0.0, s0 - 0.10)
+            cover_end = max(e0 + 0.10, cover_start + 0.15)
             burn_start = max(0.0, s0)
             burn_end = max(e0, burn_start + 0.04)
         else:
@@ -2255,13 +2261,18 @@ def cover_and_burn(
         has_manual_bbox = manual_by_idx[i] is not None
         is_vert = lay_mode == "vertical"
         is_label = lay_mode == "label"
+        is_mid = lay_mode == "mid"
         src_s = (src or "").strip()
         use_label_style = is_label
         if paint is None and cover:
+            from ..ocr.overlay_cover import default_overlay_paint, is_mid_flash_source
+
             if is_vert:
-                paint = (int(w * 0.46), int(h * 0.28), int(w * 0.54), int(h * 0.78))
+                paint = default_overlay_paint("vertical", w, h)
             elif is_label:
-                paint = (int(w * 0.06), int(h * 0.12), int(w * 0.28), int(h * 0.42))
+                paint = default_overlay_paint("label", w, h)
+            elif is_mid or is_mid_flash_source(src_s):
+                paint = default_overlay_paint("mid", w, h)
             else:
                 paint = (int(w * 0.08), int(h * 0.84), int(w * 0.92), int(h * 0.94))
             boxes = [paint]
@@ -2271,9 +2282,12 @@ def cover_and_burn(
             pad_y = max(4, int(h * 0.004))
             bw = x1 - x0
             if bw > int(w * 0.18):
-                cx = (x0 + x1) // 2
+                # thu hẹp cột — giữ mép trái/phải (title dọc), không kéo về giữa
                 half = max(14, min(int(w * 0.06), bw // 4 + 6))
-                x0, x1 = cx - half, cx + half
+                if (x0 + x1) / 2 < w * 0.5:
+                    x1 = min(w, x0 + half * 2)
+                else:
+                    x0 = max(0, x1 - half * 2)
             paint = (
                 max(0, x0 - pad_x),
                 max(0, y0 - pad_y),
@@ -2343,7 +2357,13 @@ def cover_and_burn(
                     source=src_s,
                 )
             elif layout_place == "over" and paint is not None:
-                # Preview là bản chính: captionLayout + bbox thắng mọi fit lại
+                # Preview captionLayout/bbox → phụ đề editor (không đụng).
+                # Overlay OCR (mid/dọc/nhãn không có preview layout) → classic c9.
+                from ..ocr.overlay_cover import (
+                    classic_cover_fit,
+                    use_classic_overlay_cover,
+                )
+
                 preview_lay = _preview_caption_layout(seg_meta, cue_fs, _font_for_size)
                 if has_manual_bbox:
                     cover_box = paint
@@ -2353,6 +2373,21 @@ def cover_and_burn(
                         mb = _segment_bbox_override(seg_meta, w, h)
                         if mb is not None:
                             cover_box = mb
+                elif use_classic_overlay_cover(
+                    layout=lay_mode,
+                    source=src_s,
+                    has_preview_layout=False,
+                ):
+                    # đường riêng overlay — layout chữ trong OCR box + cover fit c9
+                    lay = _layout_caption(
+                        text, cue_font, cue_fs, paint, w, h, placement="over"
+                    )
+                    cover_box = classic_cover_fit(
+                        boxes if boxes else ([paint] if paint else []),
+                        lay["box"] if lay else None,
+                        w,
+                        h,
+                    )
                 elif has_manual_bbox:
                     lay = _layout_caption_in_cover(
                         text, cue_fs, paint, w, _font_for_size,

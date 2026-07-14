@@ -196,13 +196,24 @@ def asr_paddleocr(
     frames = cache_frames(pid, tag)
     # crop_v4: hardsub đáy (ổn định ~99%) — tiêu đề dọc = pass riêng
     crop_mark = frames / ".crop_v4"
+    fps_mark = frames / ".fps"
     need_extract = (
         not reuse_frames
         or not any(frames.glob("*.jpg"))
         or not crop_mark.exists()
     )
-    fps = 2.0
+    # Độ dài ước lượng để chọn fps (video vài tiếng không quét 2fps)
+    dur_hint = 0.0
+    try:
+        from ..core.media import ffprobe_duration
+
+        dur_hint = float(ffprobe_duration(video) or 0.0)
+    except Exception:
+        dur_hint = 0.0
+    from .overlay_scan import adaptive_bottom_fps
+
     if need_extract:
+        fps = adaptive_bottom_fps(dur_hint if dur_hint > 0 else 120.0)
         if frames.exists():
             shutil.rmtree(frames)
         frames.mkdir(parents=True)
@@ -238,7 +249,14 @@ def asr_paddleocr(
             ["ffmpeg", "-y", "-i", str(video), "-vf", vf, str(frames / "%06d.jpg")],
         )
         crop_mark.write_text("v4\n", encoding="utf-8")
-
+        fps_mark.write_text(f"{fps:g}\n", encoding="utf-8")
+    else:
+        try:
+            fps = float((fps_mark.read_text(encoding="utf-8") or "2").strip() or 2)
+        except (OSError, ValueError):
+            fps = 2.0
+        if fps <= 0:
+            fps = 2.0
     jpgs = sorted(frames.glob("*.jpg"))
     total = max(1, len(jpgs))
     n = len(jpgs)
@@ -339,56 +357,23 @@ def asr_paddleocr(
     mid: list[dict[str, Any]] = []
     vert: list[dict[str, Any]] = []
     labels: list[dict[str, Any]] = []
-    vend = video_end or 30.0
-    # tuần tự 3 pass + pool nhỏ (≤90% core) — trước: 3 pool song song → 100% CPU
-    # decode: seek theo stamp (không walk full) — mid/nhãn nhanh hơn nhiều trên clip dài
+    vend = video_end or dur_hint or 30.0
+    # Overlay OCR: đường riêng (overlay_scan) — thưa theo độ dài, không 3× full refine
     sub_req = 0 if w_req <= 0 else max(1, w_req // 2)
-    # ROI giữa/full-frame lớn: 2 CUDA session đồng thời gây CUDNN execution
-    # failure trên video dài; một session GPU vẫn nhanh và ổn định hơn fallback.
     sub_w = _ocr_pool_workers(sub_req, cap=1 if gpu_ocr else 2, gpu=gpu_ocr)
     _limit_onnx_threads()
     try:
-        if project_id:
-            set_status(
-                project_id,
-                step="asr",
-                progress=36,
-                message="OCR phụ: giữa khung…",
-                running=True,
-            )
-        mid = _ocr_mid_hardsubs(
-            video, project_id=project_id, video_end=vend, workers=sub_w
+        from .overlay_scan import run_overlay_ocr
+
+        mid, vert, labels = run_overlay_ocr(
+            video,
+            project_id=project_id,
+            video_end=vend,
+            workers=sub_w,
+            set_status=set_status,
         )
     except Exception:
-        mid = []
-    try:
-        if project_id:
-            set_status(
-                project_id,
-                step="asr",
-                progress=44,
-                message="OCR phụ: title dọc…",
-                running=True,
-            )
-        vert = _ocr_vertical_titles(
-            video, project_id=project_id, video_end=vend
-        )
-    except Exception:
-        vert = []
-    try:
-        if project_id:
-            set_status(
-                project_id,
-                step="asr",
-                progress=52,
-                message="OCR phụ: nhãn…",
-                running=True,
-            )
-        labels = _ocr_overlay_labels(
-            video, project_id=project_id, video_end=vend, workers=sub_w
-        )
-    except Exception:
-        labels = []
+        mid, vert, labels = [], [], []
     if mid:
         segs = _merge_horizontal_vertical(segs, mid)
     if vert:
@@ -482,6 +467,31 @@ def _ocr_box_wh(box: Any) -> tuple[float, float]:
     except (TypeError, ValueError, IndexError):
         return 0.0, 0.0
 
+
+def _xyxy_to_bbox(
+    x0: float, y0: float, x1: float, y1: float, fw: int, fh: int, *, pad: int = 2
+) -> dict[str, int]:
+    """xyxy → {x,y,w,h} sát ink (pad mỏng)."""
+    x0i = max(0, int(round(x0)) - pad)
+    y0i = max(0, int(round(y0)) - pad)
+    x1i = min(fw, int(round(x1)) + pad)
+    y1i = min(fh, int(round(y1)) + pad)
+    return {
+        "x": x0i,
+        "y": y0i,
+        "w": max(8, x1i - x0i),
+        "h": max(8, y1i - y0i),
+    }
+
+
+def _union_bbox(boxes: list[dict[str, int]], fw: int, fh: int) -> dict[str, int] | None:
+    if not boxes:
+        return None
+    x0 = min(b["x"] for b in boxes)
+    y0 = min(b["y"] for b in boxes)
+    x1 = max(b["x"] + b["w"] for b in boxes)
+    y1 = max(b["y"] + b["h"] for b in boxes)
+    return _xyxy_to_bbox(x0, y0, x1, y1, fw, fh, pad=0)
 
 def _ocr_segments_from_timeline(
     timed: list[tuple[float, str]], video_end: float
@@ -677,19 +687,25 @@ def _ocr_vertical_titles(
 def _ocr_vertical_from_frame(
     frame_bgr: Any, ocr: Any, vw: int, vh: int
 ) -> str:
-    """Chỉ lấy cột CJK cao/hẹp giữa khung — bỏ hardsub đáy."""
+    text, _bbox = _ocr_vertical_item_from_frame(frame_bgr, ocr, vw, vh)
+    return text
+
+
+def _ocr_vertical_item_from_frame(
+    frame_bgr: Any, ocr: Any, vw: int, vh: int
+) -> tuple[str, dict[str, int] | None]:
+    """Title dọc CJK + bbox cột sát ink."""
     import cv2
 
-    # Bỏ 22% đáy (hardsub) + 8% đỉnh
-    y0, y1 = int(vh * 0.10), int(vh * 0.78)
-    x0, x1 = int(vw * 0.05), int(vw * 0.75)
+    y0, y1 = int(vh * 0.06), int(vh * 0.78)
+    x0, x1 = int(vw * 0.02), int(vw * 0.98)
     roi = frame_bgr[y0:y1, x0:x1]
     if roi.size == 0:
-        return ""
+        return "", None
     scale = 1.8
     img = cv2.resize(roi, (int(roi.shape[1] * scale), int(roi.shape[0] * scale)))
     result, _ = ocr(img)
-    cands: list[tuple[float, str]] = []
+    cands: list[tuple[float, str, float, float, float, float]] = []
     for row in result or []:
         try:
             box, text = row[0], str(row[1] or "").strip()
@@ -700,28 +716,45 @@ def _ocr_vertical_from_frame(
         cjk = sum(1 for c in text if _is_cjk(c))
         if cjk < 2:
             continue
-        # chỉ CJK / punct — bỏ Latin nhiễu
         if cjk < len(text) * 0.7:
             continue
         bw, bh = _ocr_box_wh(box)
         if bh < 8 or bw < 2:
             continue
-        # cột dọc: cao hơn rộng rõ
-        if bh <= bw * 1.3:
+        tall = bh > bw * 1.15
+        short_stack = cjk <= 8 and bh >= bw * 0.85
+        if not (tall or short_stack):
             continue
-        score = cjk * 10 + bh / max(1.0, bw)
-        cands.append((score, text))
+        try:
+            xs = [float(p[0]) for p in box]
+            ys = [float(p[1]) for p in box]
+            bx0 = min(xs) / scale + x0
+            by0 = min(ys) / scale + y0
+            bx1 = max(xs) / scale + x0
+            by1 = max(ys) / scale + y0
+            xc = ((bx0 + bx1) * 0.5 - x0) / max(1.0, (x1 - x0))
+        except (TypeError, ValueError, IndexError):
+            continue
+        edge = min(xc, 1.0 - xc)
+        edge_bonus = 40.0 if edge < 0.22 else (15.0 if edge < 0.35 else -20.0)
+        score = cjk * 10 + bh / max(1.0, bw) + edge_bonus
+        cands.append((score, text, bx0, by0, bx1, by1))
     if not cands:
-        return ""
+        return "", None
     cands.sort(key=lambda x: -x[0])
-    # gộp top CJK (thường 1 tiêu đề)
     parts = [cands[0][1]]
-    for sc, tx in cands[1:3]:
+    boxes = [cands[0][2:]]
+    for sc, tx, *xy in cands[1:3]:
         if sc >= cands[0][0] * 0.45 and not _ocr_same(parts[0], tx):
-            # cùng cột — nối theo thứ tự đọc
             if tx not in parts[0] and parts[0] not in tx:
                 parts.append(tx)
-    return _ocr_join_lines(parts)
+                boxes.append(tuple(xy))  # type: ignore[arg-type]
+    text = _ocr_join_lines(parts)
+    bx0 = min(b[0] for b in boxes)
+    by0 = min(b[1] for b in boxes)
+    bx1 = max(b[2] for b in boxes)
+    by1 = max(b[3] for b in boxes)
+    return text, _xyxy_to_bbox(bx0, by0, bx1, by1, vw, vh, pad=3)
 
 
 def _ocr_scan_stamps(
@@ -849,7 +882,7 @@ def _ocr_label_overlap(a: str, b: str) -> float:
 
 
 def _ocr_cluster_hits(
-    timed: list[tuple[float, str]],
+    timed: list[Any],
     *,
     video_end: float,
     step: float,
@@ -857,15 +890,30 @@ def _ocr_cluster_hits(
     gap: float = 0.45,
     min_hold: float = 0.2,
 ) -> list[dict[str, Any]]:
+    """timed: (t, text) hoặc (t, text, bbox|None)."""
+    normed: list[tuple[float, str, dict[str, int] | None]] = []
+    for row in timed:
+        if not row:
+            continue
+        if len(row) >= 3:
+            t, tx, box = float(row[0]), str(row[1] or ""), row[2]
+            bb = box if isinstance(box, dict) else None
+        else:
+            t, tx = float(row[0]), str(row[1] or "")
+            bb = None
+        if tx:
+            normed.append((t, tx, bb))
+
     segs: list[dict[str, Any]] = []
     i = 0
-    while i < len(timed):
-        t0, tx0 = timed[i]
+    while i < len(normed):
+        t0, tx0, box0 = normed[i]
         window = [tx0]
+        boxes = [box0] if box0 else []
         j = i + 1
-        while j < len(timed):
-            t1, tx1 = timed[j]
-            if t1 - timed[j - 1][0] > gap:
+        while j < len(normed):
+            t1, tx1, box1 = normed[j]
+            if t1 - normed[j - 1][0] > gap:
                 break
             same = (
                 _ocr_same(tx0, tx1)
@@ -880,6 +928,8 @@ def _ocr_cluster_hits(
                 )
             if same:
                 window.append(tx1)
+                if box1:
+                    boxes.append(box1)
                 tx0 = _ocr_pick_best(window)
                 j += 1
                 continue
@@ -888,9 +938,20 @@ def _ocr_cluster_hits(
         if not best or sum(1 for c in best if _is_cjk(c)) < 1:
             i = j
             continue
-        t_end = timed[j - 1][0] + step
+        t_end = normed[j - 1][0] + step
         t_end = min(video_end, max(t_end, t0 + min_hold))
-        segs.append(_ocr_seg(len(segs) + 1, t0, t_end, best, layout=layout))
+        # bbox: ưu tiên khớp text best; không thì union
+        bb: dict[str, int] | None = None
+        for k in range(i, j):
+            if _ocr_same(normed[k][1], best) and normed[k][2]:
+                bb = normed[k][2]
+                break
+        if bb is None and boxes:
+            fw = max((b["x"] + b["w"] for b in boxes), default=1080)
+            fh = max((b["y"] + b["h"] for b in boxes), default=1920)
+            # union trong không gian pixel ước (fw/fh chỉ clamp)
+            bb = _union_bbox(boxes, max(fw, 1080), max(fh, 1920))
+        segs.append(_ocr_seg(len(segs) + 1, t0, t_end, best, layout=layout, bbox=bb))
         i = j
 
     # nhãn: gộp segment chồng thời gian / gần nhau (tránh 0.3s mảnh)
@@ -900,9 +961,21 @@ def _ocr_cluster_hits(
 
 
 def _merge_label_segments(segs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Gộp nhãn chồng/gần (<0.55s) cùng nhóm nguyên liệu."""
+    """Gộp nhãn cùng chỗ + gần thời gian; giữ bbox; không gộp 2 nhãn xa nhau."""
     ordered = sorted(segs, key=lambda s: float(s.get("start") or 0))
     out: list[dict[str, Any]] = []
+
+    def _near(a: dict[str, Any], b: dict[str, Any]) -> bool:
+        ba, bb = a.get("bbox"), b.get("bbox")
+        if not isinstance(ba, dict) or not isinstance(bb, dict):
+            return True
+        acx = float(ba["x"]) + float(ba["w"]) * 0.5
+        acy = float(ba["y"]) + float(ba["h"]) * 0.5
+        bcx = float(bb["x"]) + float(bb["w"]) * 0.5
+        bcy = float(bb["y"]) + float(bb["h"]) * 0.5
+        # cùng chỗ (màn 1080≈) — nhãn khác cột không gộp
+        return abs(acx - bcx) < 80 and abs(acy - bcy) < 90
+
     for s in ordered:
         if not out:
             out.append(s)
@@ -910,19 +983,21 @@ def _merge_label_segments(segs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         prev = out[-1]
         gap = float(s["start"]) - float(prev["end"])
         ov = _ocr_label_overlap(prev.get("source") or "", s.get("source") or "")
-        if gap <= 0.55 and ov >= 0.4:
+        if gap <= 0.55 and ov >= 0.55 and _near(prev, s):
             prev["end"] = max(float(prev["end"]), float(s["end"]))
-            # giữ bản dài/ổn hơn
             prev["source"] = _ocr_pick_best(
                 [prev.get("source") or "", s.get("source") or ""]
             )
+            if not prev.get("bbox") and s.get("bbox"):
+                prev["bbox"] = s["bbox"]
             continue
-        if gap < 0 and ov >= 0.3:
-            # chồng thời gian
+        if gap < 0 and ov >= 0.45 and _near(prev, s):
             prev["end"] = max(float(prev["end"]), float(s["end"]))
             prev["source"] = _ocr_pick_best(
                 [prev.get("source") or "", s.get("source") or ""]
             )
+            if not prev.get("bbox") and s.get("bbox"):
+                prev["bbox"] = s["bbox"]
             continue
         out.append(s)
     for i, s in enumerate(out, start=1):
@@ -1013,22 +1088,29 @@ def _ocr_mid_hardsubs(
 def _ocr_mid_hardsub_from_frame(
     frame_bgr: Any, ocr: Any, vw: int, vh: int
 ) -> str:
-    """Chữ CJK ngắn / nhãn giữa khung (pop-up), không dải hardsub đáy dài."""
+    text, _bbox = _ocr_mid_item_from_frame(frame_bgr, ocr, vw, vh)
+    return text
+
+
+def _ocr_mid_item_from_frame(
+    frame_bgr: Any, ocr: Any, vw: int, vh: int
+) -> tuple[str, dict[str, int] | None]:
+    """Chữ CJK ngắn giữa khung + bbox sát ink (frame coords)."""
     import cv2
 
-    # dải giữa rộng hơn (bỏ ~20% đỉnh + 22% đáy)
     y0, y1 = int(vh * 0.20), int(vh * 0.78)
     x0, x1 = int(vw * 0.10), int(vw * 0.90)
     roi = frame_bgr[y0:y1, x0:x1]
     if roi.size == 0:
-        return ""
+        return "", None
     rh, rw = roi.shape[:2]
+    sc = 1.0
     if max(rh, rw) > 900:
         sc = 900 / max(rh, rw)
         roi = cv2.resize(roi, (int(rw * sc), int(rh * sc)))
     result, _ = ocr(roi)
-    # (score, cy, cx, text) — giữ các dòng ngang gần nhau để ghép subtitle 2 dòng.
-    candidates: list[tuple[float, float, float, str]] = []
+    # (score, cy, cx, text, x0,y0,x1,y1 frame)
+    candidates: list[tuple[float, float, float, str, float, float, float, float]] = []
     for row in result or []:
         try:
             box, text = row[0], str(row[1] or "").strip()
@@ -1041,7 +1123,7 @@ def _ocr_mid_hardsub_from_frame(
         confidence = float(row[2]) if len(row) > 2 else 1.0
         if cjk < 1 or cjk > 32:
             continue
-        if confidence < (0.9 if cjk == 1 else 0.6):
+        if confidence < (0.85 if cjk == 1 else 0.55):
             continue
         if cjk < len(compact) * 0.55:
             continue
@@ -1050,22 +1132,24 @@ def _ocr_mid_hardsub_from_frame(
         bw, bh = _ocr_box_wh(box)
         if bw < 6 or bh < 6:
             continue
-        # Pass này chỉ lấy chữ ngang; watermark/title dọc do pass riêng xử lý.
         if bh > bw * 1.25:
             continue
         try:
             xs = [float(p[0]) for p in box]
             ys = [float(p[1]) for p in box]
-            cx = (min(xs) + max(xs)) * 0.5 / max(1, roi.shape[1])
-            cy = (min(ys) + max(ys)) * 0.5 / max(1, roi.shape[0])
+            bx0 = min(xs) / sc + x0
+            by0 = min(ys) / sc + y0
+            bx1 = max(xs) / sc + x0
+            by1 = max(ys) / sc + y0
+            cx = ((bx0 + bx1) * 0.5 - x0) / max(1.0, (x1 - x0))
+            cy = ((by0 + by1) * 0.5 - y0) / max(1.0, (y1 - y0))
         except (TypeError, ValueError, IndexError):
             continue
         center = 1.0 - min(1.0, abs(cx - 0.5) * 1.2)
-        # ưu tiên box to (nhãn graphic)
         score = cjk * 8 + center * 4 + min(bw, bh) / 15.0 + (bw * bh) / max(1, rw * rh) * 30
-        candidates.append((score, cy, cx, compact))
+        candidates.append((score, cy, cx, compact, bx0, by0, bx1, by1))
     if not candidates:
-        return ""
+        return "", None
     best = max(candidates, key=lambda item: item[0])
     nearby = [
         item
@@ -1073,7 +1157,12 @@ def _ocr_mid_hardsub_from_frame(
         if abs(item[1] - best[1]) <= 0.10 and abs(item[2] - best[2]) <= 0.32
     ]
     nearby.sort(key=lambda item: (item[1], item[2]))
-    return _ocr_join_lines([item[3] for item in nearby])
+    text = _ocr_join_lines([item[3] for item in nearby])
+    bx0 = min(item[4] for item in nearby)
+    by0 = min(item[5] for item in nearby)
+    bx1 = max(item[6] for item in nearby)
+    by1 = max(item[7] for item in nearby)
+    return text, _xyxy_to_bbox(bx0, by0, bx1, by1, vw, vh, pad=3)
 
 
 def _ocr_overlay_labels(
@@ -1125,15 +1214,26 @@ def _ocr_overlay_labels(
 def _ocr_labels_from_frame(
     frame_bgr: Any, ocr: Any, vw: int, vh: int
 ) -> str:
-    """Gom nhãn graphic giữa khung / cột bên (không hardsub đáy full-width)."""
-    # Full frame trừ dải hardsub đáy — giữ độ phân giải (nhãn nhỏ dễ mất khi downscale)
+    items = _ocr_label_items_from_frame(frame_bgr, ocr, vw, vh)
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0][0]
+    # legacy path: nối tạm; dual-scan dùng items riêng
+    return "·".join(t for t, _ in items[:6])
+
+
+def _ocr_label_items_from_frame(
+    frame_bgr: Any, ocr: Any, vw: int, vh: int
+) -> list[tuple[str, dict[str, int]]]:
+    """Mỗi khối nhãn → (text, bbox) riêng — không gộp cả khung thành 1 chuỗi."""
     y1 = int(vh * 0.86)
     roi = frame_bgr[0:y1, :]
     if roi.size == 0:
-        return ""
+        return []
     result, _ = ocr(roi)
-    # (cy, cx, bw, bh, text)
-    parts: list[tuple[float, float, float, float, str]] = []
+    # (cy, cx, bw, bh, text, x0,y0,x1,y1)
+    parts: list[tuple[float, float, float, float, str, float, float, float, float]] = []
     for row in result or []:
         try:
             box, text = row[0], str(row[1] or "").strip()
@@ -1146,105 +1246,90 @@ def _ocr_labels_from_frame(
             continue
         compact = re.sub(r"\s+", "", text)
         confidence = float(row[2]) if len(row) > 2 else 1.0
-        if confidence < (0.9 if cjk == 1 else 0.6):
+        if confidence < (0.75 if cjk == 1 else 0.45):
             continue
         if cjk < max(1, len(compact) * 0.5):
             continue
         bw, bh = _ocr_box_wh(box)
         if cjk == 1:
-            if bw < max(10, vw * 0.012) or bh < max(10, vh * 0.012):
+            if bw < max(8, vw * 0.01) or bh < max(8, vh * 0.01):
                 continue
         elif bw < 4 or bh < 4:
             continue
         try:
             xs = [float(p[0]) for p in box]
             ys = [float(p[1]) for p in box]
-            cx = (min(xs) + max(xs)) * 0.5
-            cy = (min(ys) + max(ys)) * 0.5
+            bx0, by0 = min(xs), min(ys)
+            bx1, by1 = max(xs), max(ys)
+            cx = (bx0 + bx1) * 0.5
+            cy = (by0 + by1) * 0.5
         except (TypeError, ValueError, IndexError):
             continue
-        # hardsub đáy ngang rộng
         if cy > vh * 0.70 and bw > vw * 0.35 and bh < vh * 0.09:
             continue
-        # title dọc full giữa
         if bh > vh * 0.40 and bh > bw * 1.8 and vw * 0.35 < cx < vw * 0.65:
             continue
         if len(compact) > 28:
             continue
         side = cx < vw * 0.36 or cx > vw * 0.64
         tall_col = bh > bw * 1.2 and bw < vw * 0.28 and bh < vh * 0.45
-        # nhãn graphic giữa (抽藕丝 / 煮开 / 麻油 / 白芷) — không bắt side
         mid_graphic = (
-            vh * 0.10 < cy < vh * 0.72
+            vh * 0.08 < cy < vh * 0.75
             and bw < vw * 0.55
-            and bh < vh * 0.28
+            and bh < vh * 0.30
             and 1 <= cjk <= 14
-            and not (bw > vw * 0.48 and bh < vh * 0.07)  # dải ngang dài
+            and not (bw > vw * 0.48 and bh < vh * 0.07)
         )
         multi_line_mid = (
-            vh * 0.10 < cy < vh * 0.72
+            vh * 0.08 < cy < vh * 0.75
             and cjk >= 4
             and bw < vw * 0.85
-            and bh < vh * 0.12
+            and bh < vh * 0.14
         )
         if not (side or tall_col or mid_graphic or multi_line_mid):
             continue
-        parts.append((cy, cx, float(bw), float(bh), compact))
+        parts.append((cy, cx, float(bw), float(bh), compact, bx0, by0, bx1, by1))
     if not parts:
-        return ""
+        return []
 
-    # Gộp dòng chồng dọc (cùng khối nhãn 2 dòng)
     parts.sort(key=lambda x: (x[0], x[1]))
-    groups: list[list[tuple[float, float, float, float, str]]] = []
+    groups: list[list[tuple[float, float, float, float, str, float, float, float, float]]] = []
     for p in parts:
         placed = False
         for g in groups:
-            # cùng cột / chồng ngang + gần theo Y
             g_cx = sum(x[1] for x in g) / len(g)
             g_cy = max(x[0] for x in g)
             g_bw = max(x[2] for x in g)
-            if abs(p[1] - g_cx) < max(vw * 0.12, g_bw * 0.55) and abs(p[0] - g_cy) < vh * 0.10:
+            # chỉ gộp dòng chồng sát (cùng khối), không gộp 2 nhãn cạnh
+            if abs(p[1] - g_cx) < max(vw * 0.08, g_bw * 0.45) and abs(p[0] - g_cy) < vh * 0.06:
                 g.append(p)
                 placed = True
                 break
         if not placed:
             groups.append([p])
 
-    out_blocks: list[str] = []
+    out: list[tuple[str, dict[str, int]]] = []
     for g in groups:
         g.sort(key=lambda x: x[0])
         texts: list[str] = []
-        for _cy, _cx, _bw, _bh, t in g:
+        for _cy, _cx, _bw, _bh, t, *_rest in g:
             if any(_ocr_same(t, u) or _ocr_sim(t, u) >= 0.8 for u in texts):
                 continue
             texts.append(t)
         if not texts:
             continue
-        if len(texts) >= 2:
-            # 2 dòng cùng khối: nối space (hoặc · nếu item ngắn)
-            if all(len(t) <= 6 for t in texts):
-                out_blocks.append("·".join(texts))
-            else:
-                out_blocks.append("".join(texts) if all(len(t) <= 8 for t in texts) else " ".join(texts))
+        if len(texts) >= 2 and all(len(t) <= 6 for t in texts):
+            joined = "·".join(texts)
+        elif len(texts) >= 2:
+            joined = "".join(texts) if all(len(t) <= 8 for t in texts) else " ".join(texts)
         else:
-            out_blocks.append(texts[0])
-
-    # nhiều khối ngang (cột nguyên liệu)
-    if len(out_blocks) >= 2 and all(len(t) <= 10 for t in out_blocks):
-        # sort left→right by first part cx of group — approximate by text order already cy
-        uniq: list[str] = []
-        for t in out_blocks:
-            if any(_ocr_same(t, u) or _ocr_sim(t, u) >= 0.75 for u in uniq):
-                continue
-            uniq.append(t)
-        if len(uniq) >= 2:
-            return "·".join(uniq)
-        return uniq[0] if uniq else ""
-    if not out_blocks:
-        return ""
-    # 1 khối tốt nhất (nhiều CJK / dài hơn)
-    out_blocks.sort(key=lambda t: (sum(1 for c in t if _is_cjk(c)), len(t)), reverse=True)
-    return out_blocks[0]
+            joined = texts[0]
+        bx0 = min(p[5] for p in g)
+        by0 = min(p[6] for p in g)
+        bx1 = max(p[7] for p in g)
+        by1 = max(p[8] for p in g)
+        out.append((joined, _xyxy_to_bbox(bx0, by0, bx1, by1, vw, vh, pad=3)))
+    return out
 
 
 def _merge_horizontal_vertical(
@@ -1348,13 +1433,14 @@ def _ocr_seg(
     text: str,
     *,
     layout: str = "horizontal",
+    bbox: dict[str, int] | None = None,
 ) -> dict[str, Any]:
-    lay = layout if layout in ("horizontal", "vertical", "label") else "horizontal"
-    # vertical/label flash: cho phép < 0.35s (ms-accurate)
-    min_dur = 0.04 if lay in ("vertical", "label") else 0.35
+    lay = layout if layout in ("horizontal", "vertical", "label", "mid") else "horizontal"
+    # vertical/label/mid flash: cho phép ngắn
+    min_dur = 0.04 if lay in ("vertical", "label", "mid") else 0.35
     # title dọc / nhãn: mặc định không lồng tiếng (UI có tích bật lại)
     dub_default = False if lay in ("vertical", "label") else True
-    return {
+    seg: dict[str, Any] = {
         "id": str(uuid.uuid4()),
         "index": index,
         "start": float(start),
@@ -1365,4 +1451,12 @@ def _ocr_seg(
         "layout": lay,
         "dub": dub_default,
     }
+    if bbox and bbox.get("w", 0) >= 8 and bbox.get("h", 0) >= 8:
+        seg["bbox"] = {
+            "x": int(bbox["x"]),
+            "y": int(bbox["y"]),
+            "w": int(bbox["w"]),
+            "h": int(bbox["h"]),
+        }
+    return seg
 

@@ -89,15 +89,11 @@ def preview_tag(preview_sec: int) -> str:
     return f"p{int(preview_sec)}" if preview_sec > 0 else "full"
 
 def video_fingerprint(path: Path) -> str:
-    """ponytail: size + head/tail 2MB; full hash if collisions show up."""
-    st = path.stat()
+    """Full-file sha256 — head/tail 2MB collided when two clips share size + ends."""
     h = hashlib.sha256()
-    h.update(str(st.st_size).encode())
     with path.open("rb") as f:
-        h.update(f.read(2 << 20))
-        if st.st_size > 4 << 20:
-            f.seek(-2 << 20, 2)
-            h.update(f.read())
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
     return h.hexdigest()[:20]
 
 

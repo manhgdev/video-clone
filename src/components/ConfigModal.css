@@ -163,17 +163,17 @@
 
 .cfg-check-item.ok {
   border-color: color-mix(in srgb, var(--ok, #22a06b) 35%, var(--line));
-  background: hsl(141 25% 10%);
+  background: color-mix(in srgb, var(--ok, #22a06b) 12%, var(--surface));
 }
 
 .cfg-check-item.bad {
   border-color: color-mix(in srgb, var(--destructive) 40%, var(--border));
-  background: hsl(0 30% 10%);
+  background: color-mix(in srgb, var(--destructive) 12%, var(--surface));
 }
 
 .cfg-check-item.warn {
-  border-color: #f0e0b8;
-  background: hsl(38 25% 10%);
+  border-color: color-mix(in srgb, var(--warn, #e6a23c) 40%, var(--line));
+  background: color-mix(in srgb, var(--warn, #e6a23c) 12%, var(--surface));
 }
 
 .cfg-check-top {
@@ -197,12 +197,12 @@
 }
 
 .cfg-check-item.ok .cfg-check-status {
-  background: hsl(141 25% 12%);
+  background: color-mix(in srgb, var(--ok, #22a06b) 18%, var(--surface));
   color: var(--ok, #22a06b);
 }
 
 .cfg-check-item.bad .cfg-check-status {
-  background: hsl(0 25% 12%);
+  background: color-mix(in srgb, var(--destructive) 18%, var(--surface));
   color: var(--destructive);
 }
 
@@ -228,8 +228,8 @@
 }
 
 .cfg-req {
-  color: hsl(38 80% 65%);
-  background: hsl(38 30% 12%);
+  color: var(--caution);
+  background: color-mix(in srgb, var(--caution) 16%, var(--surface));
 }
 
 .cfg-opt {
@@ -248,7 +248,7 @@
 .cfg-check-hint {
   margin-top: 4px;
   font-size: 0.74rem;
-  color: hsl(38 70% 55%);
+  color: var(--caution);
   line-height: 1.35;
 }
 
@@ -304,7 +304,7 @@
 .cfg-foot-note {
   margin-right: auto;
   font-size: 0.78rem;
-  color: hsl(38 70% 55%);
+  color: var(--caution);
   font-weight: 600;
   align-self: center;
 }
@@ -372,7 +372,7 @@
 .cfg-el-remove:hover:not(:disabled) {
   color: var(--destructive);
   border-color: color-mix(in srgb, var(--destructive) 40%, var(--border));
-  background: hsl(0 25% 12%);
+  background: color-mix(in srgb, var(--destructive) 12%, var(--surface));
 }
 
 .cfg-el-remove:disabled {
