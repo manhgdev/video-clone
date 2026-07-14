@@ -1,84 +1,202 @@
+@import "tailwindcss";
+
+/* ── Light mode (default) ── */
 :root {
-  --bg: #e8ecf1;
-  --surface: #ffffff;
-  --ink: #1a2332;
-  --muted: #6b7a8d;
-  --line: #d5dde8;
-  --accent: #2f6fed;
-  --accent-soft: #e8f0fe;
-  --ok: #1a9b5c;
-  --warn: #c47a12;
-  --radius: 10px;
-  --font: 'Be Vietnam Pro', system-ui, sans-serif;
-  --shadow: 0 1px 2px rgba(26, 35, 50, 0.05);
+  --background: hsl(0, 0%, 97%);
+  --foreground: hsl(0, 0%, 12%);
+  --card: hsl(0, 0%, 100%);
+  --card-foreground: hsl(0, 0%, 12%);
+  --popover: hsl(0, 0%, 100%);
+  --popover-hover: hsl(0, 0%, 95%);
+  --popover-foreground: hsl(0, 0%, 8%);
+  --primary: hsl(200, 80%, 40%);
+  --primary-foreground: hsl(0, 0%, 100%);
+  --secondary: hsl(204, 60%, 92%);
+  --secondary-border: hsl(204, 60%, 84%);
+  --secondary-foreground: hsl(200, 75%, 32%);
+  --muted: hsl(0, 0%, 93%);
+  --muted-foreground: hsl(0, 0%, 44%);
+  --accent: hsl(0, 0%, 94%);
+  --accent-foreground: hsl(0, 0%, 10%);
+  --destructive: hsl(0, 72%, 51%);
+  --destructive-foreground: hsl(0, 0%, 100%);
+  --constructive: hsl(141, 65%, 36%);
+  --constructive-foreground: hsl(0, 0%, 100%);
+  --caution: hsl(38, 90%, 46%);
+  --caution-foreground: hsl(0, 0%, 10%);
+  --border: hsl(0, 0%, 86%);
+  --input: hsl(0, 0%, 100%);
+  --ring: hsl(0, 0%, 60%);
+  /* backward-compat aliases */
+  --ink:         hsl(0, 0%, 12%);
+  --bg:          hsl(0, 0%, 97%);
+  --surface:     hsl(0, 0%, 100%);
+  --line:        hsl(0, 0%, 86%);
+  --accent-soft: hsl(204, 60%, 92%);
+  --ok:          hsl(141, 65%, 36%);
+  --warn:        hsl(38, 90%, 46%);
+  --radius:      0.65rem;
+  --shadow:      0 1px 3px rgba(0,0,0,.08);
+  --font:        system-ui, sans-serif;
+  /* editor-specific */
+  --preview-workspace-bg: hsl(0, 0%, 14%);
 }
 
-* { box-sizing: border-box; }
-html, body, #root { height: 100%; margin: 0; }
-body {
-  font-family: var(--font);
-  color: var(--ink);
-  background: var(--bg);
-  -webkit-font-smoothing: antialiased;
+/* panel variant — light (also sets background so transparent divs get a color) */
+.panel {
+  --background: hsl(0, 0%, 98%);
+  --card: hsl(0, 0%, 100%);
+  --muted: hsl(0, 0%, 91%);
+  --accent: hsl(0, 0%, 94%);
+  --accent-foreground: hsl(0, 0%, 10%);
+  --border: hsl(0, 0%, 88%);
+  --input: hsl(0, 0%, 100%);
+  background-color: var(--background);
+  color: var(--foreground);
 }
 
-button, select, input, textarea { font: inherit; color: inherit; }
-button { cursor: pointer; }
-button:disabled { opacity: 0.55; cursor: not-allowed; }
-
-.app {
-  display: grid;
-  grid-template-rows: 58px 1fr;
-  height: 100%;
-  min-height: 0;
+/* ── Dark mode (opt-in via html.dark) ── */
+html.dark {
+  --background: hsl(0, 0%, 5%);
+  --foreground: hsl(0, 0%, 87%);
+  --card: hsl(0, 0%, 5%);
+  --card-foreground: hsl(0, 0%, 87%);
+  --popover: hsl(0, 0%, 5%);
+  --popover-hover: hsl(0, 0%, 13%);
+  --popover-foreground: hsl(0, 0%, 95%);
+  --primary: hsl(200, 90%, 52%);
+  --primary-foreground: hsl(0, 0%, 100%);
+  --secondary: hsl(204, 100%, 12%);
+  --secondary-border: hsl(204, 100%, 15%);
+  --secondary-foreground: hsl(200, 98%, 61%);
+  --muted: hsl(0, 0%, 20%);
+  --muted-foreground: hsl(0, 0%, 50%);
+  --accent: hsl(0, 0%, 14%);
+  --accent-foreground: hsl(0, 0%, 95%);
+  --destructive: hsl(0, 83%, 50%);
+  --destructive-foreground: hsl(0, 0%, 100%);
+  --constructive: hsl(141, 71%, 48%);
+  --constructive-foreground: hsl(0, 0%, 100%);
+  --caution: hsl(38, 92%, 60%);
+  --caution-foreground: hsl(0, 0%, 10%);
+  --border: hsl(0, 0%, 16%);
+  --input: hsl(0, 0%, 12%);
+  --ring: hsl(0, 0%, 50%);
+  /* backward-compat aliases */
+  --ink:         hsl(0, 0%, 87%);
+  --bg:          hsl(0, 0%, 5%);
+  --surface:     hsl(0, 0%, 10%);
+  --line:        hsl(0, 0%, 18%);
+  --accent-soft: hsl(204, 100%, 12%);
+  --ok:          hsl(141, 71%, 48%);
+  --warn:        hsl(38, 92%, 60%);
+  --shadow:      0 1px 3px rgba(0,0,0,.5);
+  --preview-workspace-bg: hsl(0, 0%, 6%);
 }
 
-.workspace {
-  display: grid;
-  grid-template-columns: 360px 6px 1fr;
-  min-height: 0;
-  height: 100%;
+/* panel variant — dark */
+html.dark .panel {
+  --background: hsl(0, 0%, 10%);
+  --foreground: hsl(0, 0%, 85%);
+  --card: hsl(0, 0%, 10%);
+  --card-foreground: hsl(0, 0%, 85%);
+  --muted: hsl(0, 0%, 22%);
+  --accent: hsl(0, 0%, 15%);
+  --accent-foreground: hsl(0, 0%, 93%);
+  --border: hsl(0, 0%, 18%);
+  --input: hsl(0, 0%, 22%);
+  background-color: var(--background);
+  color: var(--foreground);
 }
 
-.sidebar-resizer {
-  width: 6px;
-  margin-left: -3px;
-  cursor: col-resize;
-  z-index: 5;
-  background: transparent;
-  position: relative;
-  touch-action: none;
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-sm: 0.35rem;
+  --radius-md: 0.65rem;
+  --radius-lg: 0.82rem;
 }
 
-.sidebar-resizer::after {
-  content: '';
-  position: absolute;
-  inset: 0 2px;
-  border-radius: 2px;
-  background: transparent;
-  transition: background 0.15s;
+@utility scrollbar-hidden {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+  &::-webkit-scrollbar { display: none; }
 }
 
-.sidebar-resizer:hover::after,
-body.resizing-sidebar .sidebar-resizer::after {
-  background: var(--accent);
+@utility scrollbar-thin {
+  &::-webkit-scrollbar { width: 7px; height: 7px; }
+  &::-webkit-scrollbar-track { background: transparent; }
+  &::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+  &::-webkit-scrollbar-thumb:hover { background: var(--muted-foreground); }
 }
 
-body.resizing-sidebar {
-  cursor: col-resize;
-  user-select: none;
+
+@layer base {
+  *, ::after, ::before { border-color: var(--border); }
+  * { box-sizing: border-box; }
+  html, body, #root { height: 100%; margin: 0; overflow: hidden; }
+  body {
+    background: var(--background);
+    color: var(--foreground);
+    font-family: system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    font-size: 13px;
+    overscroll-behavior-x: contain;
+  }
+  button, select, input, textarea { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  button:disabled { opacity: 0.55; cursor: not-allowed; }
+
+  /* Global input theming: uses --input token, adapts to light/dark */
+  input:not([type=checkbox]):not([type=radio]):not([type=color]):not([type=range]),
+  select, textarea {
+    background-color: var(--input);
+    color: var(--foreground);
+    border-color: var(--border);
+  }
+  input:not([type=checkbox]):not([type=radio]):not([type=color]):not([type=range]):focus,
+  select:focus, textarea:focus {
+    border-color: var(--ring);
+    outline: none;
+  }
+  /* select option inherits color scheme */
+  select option {
+    background-color: var(--input);
+    color: var(--foreground);
+  }
+  /* color-scheme follows dark class for native pickers */
+  html.dark { color-scheme: dark; }
+  html:not(.dark) { color-scheme: light; }
 }
 
-body.resizing-sidebar * {
-  cursor: col-resize !important;
-}
-
+/* App grid (used by App.tsx for header + workspace) */
+.app { display: grid; grid-template-rows: 58px 1fr; height: 100%; min-height: 0; overflow: hidden; }
+.app > * { min-height: 0; min-width: 0; }
+.app--editor { grid-template-rows: 1fr; }
+.workspace { display: grid; grid-template-columns: 360px 6px 1fr; min-height: 0; height: 100%; }
+.sidebar-resizer { width: 6px; margin-left: -3px; cursor: col-resize; z-index: 5; background: transparent; position: relative; touch-action: none; }
+.sidebar-resizer::after { content: ''; position: absolute; inset: 0 2px; border-radius: 2px; background: transparent; transition: background 0.15s; }
+.sidebar-resizer:hover::after, body.resizing-sidebar .sidebar-resizer::after { background: var(--primary); }
+body.resizing-sidebar { cursor: col-resize; user-select: none; }
+body.resizing-sidebar * { cursor: col-resize !important; }
 @media (max-width: 960px) {
-  .workspace {
-    grid-template-columns: 1fr !important;
-  }
-  .sidebar-resizer {
-    display: none;
-  }
-  .sidebar { max-height: none; }
+  .workspace { grid-template-columns: 1fr !important; }
+  .sidebar-resizer { display: none; }
 }

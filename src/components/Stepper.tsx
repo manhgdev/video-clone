@@ -14,10 +14,18 @@ type Props = {
   canDub: boolean
   canExport: boolean
   onDub: () => void
+  onPreviewEditor: () => void
   onExport: () => void
 }
 
-export default function Stepper({ step, canDub, canExport, onDub, onExport }: Props) {
+export default function Stepper({
+  step,
+  canDub,
+  canExport,
+  onDub,
+  onPreviewEditor,
+  onExport,
+}: Props) {
   const steps = [
     { id: 'video' as const, label: 'Video', Icon: IconVideo },
     { id: 'asr' as const, label: 'Nhận dạng', Icon: IconMic },
@@ -29,8 +37,6 @@ export default function Stepper({ step, canDub, canExport, onDub, onExport }: Pr
     0,
     steps.findIndex((s) => s.id === step),
   )
-  // sau dịch xong: nhấn mạnh Xuất bản (OCR thường bỏ qua lồng tiếng)
-  const exportNext = canExport && (step === 'translate' || step === 'dub')
 
   return (
     <div className="stepper-wrap">
@@ -56,14 +62,27 @@ export default function Stepper({ step, canDub, canExport, onDub, onExport }: Pr
         </button>
         <button
           type="button"
-          className={exportNext ? 'solid pulse' : 'solid'}
+          className={canExport && (step === 'translate' || step === 'dub') ? 'solid pulse' : undefined}
           disabled={!canExport}
-          onClick={onExport}
-          title="Xuất video (che chữ / chèn dịch theo tùy chọn sidebar)"
+          onClick={onPreviewEditor}
+          title="Xem video nguồn với bản dịch theo timeline và sửa trực tiếp — xuất bản từ đây"
         >
-          <IconPublish size={14} />
-          Xuất bản
+          <IconVideo size={14} />
+          Xem trước & sửa
         </button>
+        {/* ponytail: tạm ẩn Xuất bản ngoài — xuất từ editor mới đúng WYSIWYG; hiện lại khi ổn định */}
+        {false && (
+          <button
+            type="button"
+            className="solid"
+            disabled={!canExport}
+            onClick={() => onExport()}
+            title="Xuất video (che chữ / chèn dịch theo tùy chọn sidebar)"
+          >
+            <IconPublish size={14} />
+            Xuất bản
+          </button>
+        )}
       </div>
     </div>
   )

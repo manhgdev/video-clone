@@ -2,8 +2,6 @@
 from __future__ import annotations
 
 import platform
-import hashlib
-import json
 import subprocess
 from functools import lru_cache
 from pathlib import Path
@@ -102,96 +100,6 @@ def _has_audio_stream(path: Path) -> bool:
         return bool(out.strip())
     except (FileNotFoundError, subprocess.SubprocessError):
         return False
-
-
-def retime_video_segments(
-    video: Path,
-    segments: list[dict[str, Any]],
-    cache_dir: Path,
-    project_id: str | None = None,
-) -> tuple[Path, list[dict[str, Any]]]:
-    """Retime speech spans and return segments mapped onto output timeline."""
-    duration = ffprobe_duration(video)
-    ordered = sorted((dict(s) for s in segments), key=lambda s: float(s.get("start") or 0))
-    if duration <= 0 or not any(abs(float(s.get("videoSpeed") or 1) - 1.0) > 0.001 for s in ordered):
-        return video, ordered
-
-    stat = video.stat()
-    signature = [
-        (s.get("id"), round(float(s.get("start") or 0), 4), round(float(s.get("end") or 0), 4),
-         round(float(s.get("videoSpeed") or 1), 3))
-        for s in ordered
-    ]
-    key = hashlib.sha1(
-        json.dumps([str(video.resolve()), stat.st_size, stat.st_mtime_ns, signature]).encode()
-    ).hexdigest()[:16]
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    out = cache_dir / f"retimed_{key}.mp4"
-
-    spans: list[tuple[float, float, float, float, float]] = []
-    cursor = 0.0
-    out_cursor = 0.0
-    for segment in ordered:
-        start = max(cursor, min(duration, float(segment.get("start") or 0)))
-        end = max(start, min(duration, float(segment.get("end") or start)))
-        if start > cursor + 0.001:
-            gap = start - cursor
-            spans.append((cursor, start, 1.0, out_cursor, out_cursor + gap))
-            out_cursor += gap
-        speed = max(0.5, min(2.0, float(segment.get("videoSpeed") or 1)))
-        if end > start + 0.001:
-            out_end = out_cursor + (end - start) / speed
-            spans.append((start, end, speed, out_cursor, out_end))
-            out_cursor = out_end
-        cursor = max(cursor, end)
-    if cursor < duration - 0.001:
-        spans.append((cursor, duration, 1.0, out_cursor, out_cursor + duration - cursor))
-
-    def map_time(value: float) -> float:
-        for source_start, source_end, speed, output_start, output_end in spans:
-            if value <= source_end + 1e-6:
-                return output_start + max(0.0, min(source_end - source_start, value - source_start)) / speed
-        return spans[-1][4] if spans else value
-
-    remapped = []
-    for segment in ordered:
-        mapped = dict(segment)
-        mapped["start"] = map_time(float(segment.get("start") or 0))
-        mapped["end"] = map_time(float(segment.get("end") or 0))
-        remapped.append(mapped)
-
-    if not out.exists():
-        has_audio = _has_audio_stream(video)
-        filters: list[str] = []
-        labels: list[str] = []
-        for i, (start, end, speed, _out_start, _out_end) in enumerate(spans):
-            filters.append(
-                f"[0:v]trim=start={start:.6f}:end={end:.6f},"
-                f"setpts=(PTS-STARTPTS)/{speed:.6f}[v{i}]"
-            )
-            if has_audio:
-                filters.append(
-                    f"[0:a]atrim=start={start:.6f}:end={end:.6f},asetpts=PTS-STARTPTS,"
-                    f"atempo={speed:.6f}[a{i}]"
-                )
-                labels.append(f"[v{i}][a{i}]")
-            else:
-                labels.append(f"[v{i}]")
-        if has_audio:
-            filters.append("".join(labels) + f"concat=n={len(spans)}:v=1:a=1[vout][aout]")
-        else:
-            filters.append("".join(labels) + f"concat=n={len(spans)}:v=1:a=0[vout]")
-        cmd = [
-            "ffmpeg", "-y", "-i", str(video), "-filter_complex", ";".join(filters),
-            "-map", "[vout]",
-        ]
-        if has_audio:
-            cmd += ["-map", "[aout]", *h264_encoder_args(fast=True), "-c:a", "aac", "-b:a", "192k"]
-        else:
-            cmd += [*h264_encoder_args(fast=True), "-an"]
-        cmd += ["-map_metadata", "-1", "-map_chapters", "-1", str(out)]
-        run_cmd(project_id, cmd)
-    return out, remapped
 
 def ensure_preview_clip(
     source: Path, dest: Path, sec: float, project_id: str | None = None

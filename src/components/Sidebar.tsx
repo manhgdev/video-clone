@@ -383,8 +383,8 @@ export default function Sidebar({
                 [
                   ['no_vocals', 'Xóa lời'],
                   ['vocals', 'Chỉ giữ lời'],
-                  ['original', 'Giữ âm gốc'],
-                  ['mute', 'Tắt âm gốc'],
+                  // ['original', 'Giữ âm gốc'],
+                  // ['mute', 'Tắt âm gốc'],
                 ] as const
               ).map(([value, label]) => (
                 <label

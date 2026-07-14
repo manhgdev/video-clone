@@ -5,6 +5,7 @@ import type {
   ProjectSettings,
   Segment,
   SystemChecks,
+  TextOverlay,
 } from '../types'
 
 const base = '/api'
@@ -108,6 +109,28 @@ export const api = {
       body: JSON.stringify(seg),
     }),
 
+  overlays: (projectId: string) =>
+    fetchJson<TextOverlay[]>(`${base}/projects/${projectId}/overlays`, undefined, 10_000),
+
+  createOverlay: (projectId: string, overlay: TextOverlay) =>
+    fetchJson<TextOverlay>(`${base}/projects/${projectId}/overlays`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(overlay),
+    }),
+
+  updateOverlay: (projectId: string, overlay: TextOverlay) =>
+    fetchJson<TextOverlay>(`${base}/projects/${projectId}/overlays/${overlay.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(overlay),
+    }),
+
+  deleteOverlay: (projectId: string, overlayId: string) =>
+    fetchJson<{ ok: boolean }>(`${base}/projects/${projectId}/overlays/${overlayId}`, {
+      method: 'DELETE',
+    }),
+
   run: (projectId: string, settings: ProjectSettings) =>
     fetchJson<{ ok: boolean }>(`${base}/projects/${projectId}/run`, {
       method: 'POST',
@@ -129,13 +152,13 @@ export const api = {
       5000,
     ),
 
-  export: (projectId: string, settings: ProjectSettings) =>
+  export: (projectId: string, settings: ProjectSettings, segments?: Segment[]) =>
     fetchJson<{ ok: boolean; url: string; path?: string; exports?: string }>(
       `${base}/projects/${projectId}/export`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(settings),
+        body: JSON.stringify(segments ? { ...settings, segments } : settings),
       },
     ),
 

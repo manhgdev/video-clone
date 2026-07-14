@@ -17,7 +17,7 @@
 }
 
 .brand .icon-logo {
-  color: var(--accent);
+  color: var(--primary);
   flex-shrink: 0;
 }
 
@@ -36,7 +36,7 @@
 
 .brand-text span {
   font-size: 0.56rem;
-  color: var(--muted);
+  color: var(--muted-foreground);
   text-transform: uppercase;
   letter-spacing: 0.05em;
   white-space: nowrap;
@@ -61,7 +61,7 @@
   border-bottom: 2px solid transparent;
   background: transparent;
   padding: 0 12px;
-  color: var(--muted);
+  color: var(--muted-foreground);
   font-size: 0.84rem;
   font-weight: 500;
   white-space: nowrap;
@@ -73,13 +73,13 @@
 
 .nav button:hover {
   color: var(--ink);
-  background: #f7f9fc;
+  background: var(--primary);
 }
 
 .nav button.active {
-  color: var(--accent);
+  color: var(--primary);
   font-weight: 650;
-  border-bottom-color: var(--accent);
+  border-bottom-color: var(--primary);
 }
 
 .hw {
@@ -88,7 +88,7 @@
   gap: 8px;
   font-size: 0.78rem;
   font-weight: 650;
-  color: var(--muted);
+  color: var(--muted-foreground);
   white-space: nowrap;
   padding: 0 4px;
 }
@@ -99,6 +99,26 @@
   border-radius: 50%;
   background: var(--ok);
   box-shadow: 0 0 0 3px rgba(26, 155, 92, 0.18);
+}
+
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-foreground);
+  margin-left: 6px;
+  flex-shrink: 0;
+}
+
+.theme-toggle:hover {
+  background: var(--accent);
+  color: var(--accent-foreground);
+  border-color: var(--border);
 }
 
 @media (max-width: 900px) {

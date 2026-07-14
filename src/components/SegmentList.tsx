@@ -25,7 +25,9 @@ export default function SegmentList({
   projectId,
   onChange,
 }: Props) {
-  if (segments.length === 0) {
+  const list = Array.isArray(segments) ? segments : []
+
+  if (list.length === 0) {
     return (
       <div className="empty">
         <p>Chưa có đoạn thoại.</p>
@@ -36,7 +38,7 @@ export default function SegmentList({
 
   return (
     <div className="segments">
-      {segments.map((seg) => (
+      {list.map((seg) => (
         <SegmentCard
           key={seg.id}
           segment={seg}

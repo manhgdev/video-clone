@@ -1,16 +1,22 @@
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import Header from './components/Header'
+import LivePreviewEditor from './components/LivePreviewEditor'
 import Sidebar from './components/Sidebar'
 import Stepper from './components/Stepper'
 import SegmentList from './components/SegmentList'
 import ConfigModal from './components/ConfigModal'
 import { api } from './services/api'
-import type { HardwareInfo, JobStatus, ProjectSettings, Segment, Step } from './types'
+import type { HardwareInfo, JobStatus, ProjectSettings, Segment, Step, TextOverlay } from './types'
 import './App.css'
 
 const SETTINGS_LS = 'videoclone.settings'
 const SESSION_LS = 'videoclone.session'
 const SIDEBAR_W_LS = 'videoclone.sidebarWidth'
+const THEME_LS = 'videoclone.theme'
+
+function loadTheme(): boolean {
+  try { return localStorage.getItem(THEME_LS) === 'dark' } catch { return false }
+}
 const SIDEBAR_MIN = 240
 const SIDEBAR_MAX = 560
 const SIDEBAR_DEFAULT = 360
@@ -39,6 +45,9 @@ const defaultSettings: ProjectSettings = {
   matchDuration: 'natural',
   defaultVoice: 'cc:BV075_streaming:7102355803792740865',
   coverHardsubs: true,
+  coverMaskStyle: 'blur',
+  coverMaskColor: '#4c1d95',
+  coverMaskOpacity: 40,
   burnSubs: true,
   captionPlacement: 'below',
   subtitleFontSize: 0,
@@ -47,6 +56,7 @@ const defaultSettings: ProjectSettings = {
   originalAudioVolume: 100,
   previewSec: 20,
   workers: 0,
+  previewAspectRatio: 'original',
 }
 
 function loadSettings(): ProjectSettings {
@@ -72,6 +82,23 @@ function loadSettings(): ProjectSettings {
       'grok',
     ] as const
     if (!okTr.includes(s.translator as (typeof okTr)[number])) s.translator = 'google'
+    const okMask = ['blur', 'solid', 'mosaic'] as const
+    if (!okMask.includes(s.coverMaskStyle as (typeof okMask)[number])) s.coverMaskStyle = 'blur'
+    if (typeof s.coverMaskOpacity !== 'number' || Number.isNaN(s.coverMaskOpacity)) {
+      s.coverMaskOpacity = 40
+    } else {
+      s.coverMaskOpacity = Math.max(0, Math.min(100, s.coverMaskOpacity))
+    }
+    if (typeof s.coverMaskColor !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(s.coverMaskColor)) {
+      s.coverMaskColor = '#4c1d95'
+    }
+    const okAspect = [
+      'original', 'custom', '16:9', '4:3', '2.35:1', '2:1', '1.85:1',
+      '9:16', '3:4', '58inch', '1:1',
+    ] as const
+    if (!okAspect.includes(s.previewAspectRatio as (typeof okAspect)[number])) {
+      s.previewAspectRatio = 'original'
+    }
     return s
   } catch {
     return defaultSettings
@@ -109,6 +136,7 @@ function fmtDuration(sec: number) {
 }
 
 export default function App() {
+  const [dark, setDark] = useState(loadTheme)
   const [hw, setHw] = useState<HardwareInfo>({ label: 'CPU', accel: 'cpu' })
   const [voices, setVoices] = useState<{ id: string; name: string }[]>([
     { id: 'el:pNInz6obpgDQGcFmaJgB', name: 'ElevenLabs · Adam' },
@@ -126,10 +154,12 @@ export default function App() {
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
   const [duration, setDuration] = useState(0)
   const [segments, setSegments] = useState<Segment[]>([])
+  const [overlays, setOverlays] = useState<TextOverlay[]>([])
   const [status, setStatus] = useState<JobStatus>(idleStatus)
   const [exportUrl, setExportUrl] = useState<string | null>(null)
   const [exportPath, setExportPath] = useState<string | null>(null)
   const [viewExportSrc, setViewExportSrc] = useState<string | null>(null)
+  const [previewEditorOpen, setPreviewEditorOpen] = useState(false)
   const pollRef = useRef<number | null>(null)
   const pollInFlight = useRef(false)
   const pollFailStreak = useRef(0)
@@ -137,6 +167,11 @@ export default function App() {
   const pendingExportPath = useRef<string | null>(null)
   /** chặn double-click: Dịch/Xuất rồi dính nút Huỷ vừa hiện */
   const busyAt = useRef(0)
+
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', dark)
+    try { localStorage.setItem(THEME_LS, dark ? 'dark' : 'light') } catch { /* ignore */ }
+  }, [dark])
 
   useEffect(() => {
     api.hardware().then(setHw).catch(() => setHw({ label: 'Local', accel: 'cpu' }))
@@ -190,7 +225,7 @@ export default function App() {
         const mergedVoice =
           (extra.settings && typeof extra.settings === 'object' && extra.settings.defaultVoice) ||
           settings.defaultVoice
-        setSegments(applyDefaultVoice(segs, mergedVoice))
+        setSegments(applyDefaultVoice(asSegmentList(segs), mergedVoice))
         if (extra.settings && typeof extra.settings === 'object') {
           setSettings((s) => {
             const next = { ...s, ...extra.settings }
@@ -274,7 +309,7 @@ export default function App() {
         if (!s.running) {
           try {
             const segs = await api.segments(projectId)
-            setSegments(applyDefaultVoice(segs, settings.defaultVoice))
+            setSegments(applyDefaultVoice(asSegmentList(segs), settings.defaultVoice))
           } catch {
             /* status đã xong — segments có thể retry sau */
           }
@@ -312,6 +347,14 @@ export default function App() {
       pollInFlight.current = false
     }
   }, [projectId, status.running])
+
+  // phục hồi nếu state segments bị ghi nhầm (vd. onClick truyền event DOM)
+  useEffect(() => {
+    if (!projectId || Array.isArray(segments)) return
+    void api.segments(projectId)
+      .then((segs) => setSegments(applyDefaultVoice(asSegmentList(segs), settings.defaultVoice)))
+      .catch(() => setSegments([]))
+  }, [projectId, segments, settings.defaultVoice])
 
   // Hiện ô Xem/Tải khi đã từng xuất (kể cả vừa dịch lại — bản có thể cũ)
   useEffect(() => {
@@ -354,7 +397,7 @@ export default function App() {
         const voice =
           (res.settings && typeof res.settings === 'object' && res.settings.defaultVoice) ||
           settings.defaultVoice
-        setSegments(applyDefaultVoice(res.segments, voice))
+        setSegments(applyDefaultVoice(asSegmentList(res.segments), voice))
         setStatus({
           step: 'translate',
           progress: 100,
@@ -434,10 +477,14 @@ export default function App() {
     }
     if (next.defaultVoice === prev.defaultVoice) return
     // giọng mặc định sidebar áp dụng cả list (đổi lại = đổi hết đoạn)
-    setSegments((segs) => segs.map((seg) => ({ ...seg, voice: next.defaultVoice })))
+    setSegments((segs) => (Array.isArray(segs) ? segs : []).map((seg) => ({ ...seg, voice: next.defaultVoice })))
   }
 
   /** Server hay đóng dấu Adam sau Dịch — đồng bộ về default đang chọn nếu cả loạt cùng 1 giọng */
+  function asSegmentList(raw: unknown): Segment[] {
+    return Array.isArray(raw) ? raw : []
+  }
+
   function applyDefaultVoice(segs: Segment[], voice: string): Segment[] {
     if (!voice || !segs.length) return segs
     const uniq = new Set(segs.map((s) => (s.voice || '').trim()).filter(Boolean))
@@ -451,8 +498,9 @@ export default function App() {
     })
   }
 
-  async function onExport() {
+  async function onExport(exportSegments?: Segment[]) {
     if (!projectId) return
+    setPreviewEditorOpen(false)
     setExportUrl(null)
     setExportPath(null)
     busyAt.current = Date.now()
@@ -473,7 +521,11 @@ export default function App() {
       running: true,
       error: undefined,
     })
-    const res = await api.export(projectId, settings)
+    const segs = Array.isArray(exportSegments) ? exportSegments : segments
+    if (Array.isArray(exportSegments)) {
+      setSegments(exportSegments)
+    }
+    const res = await api.export(projectId, settings, segs)
     pendingExportUrl.current = res.url
     pendingExportPath.current = res.exports || res.path || null
     setStatus((s) => ({ ...s, running: true }))
@@ -527,12 +579,45 @@ export default function App() {
   }
 
   async function onSegmentChange(seg: Segment) {
-    setSegments((prev) => prev.map((s) => (s.id === seg.id ? seg : s)))
+    setSegments((prev) => (Array.isArray(prev) ? prev : []).map((s) => (s.id === seg.id ? seg : s)))
     if (!projectId) return
     try {
       await api.updateSegment(projectId, seg)
     } catch {
       /* keep local edit */
+    }
+  }
+
+  useEffect(() => {
+    if (!projectId) {
+      setOverlays([])
+      return
+    }
+    void api.overlays(projectId).then(setOverlays).catch(() => setOverlays([]))
+  }, [projectId])
+
+  async function onOverlayChange(overlay: TextOverlay, isNew = false) {
+    if (!projectId) return
+    setOverlays((current) =>
+      isNew ? [...current, overlay] : current.map((item) => (item.id === overlay.id ? overlay : item)),
+    )
+    try {
+      const saved = isNew
+        ? await api.createOverlay(projectId, overlay)
+        : await api.updateOverlay(projectId, overlay)
+      setOverlays((current) => current.map((item) => (item.id === saved.id ? saved : item)))
+    } catch {
+      void api.overlays(projectId).then(setOverlays)
+    }
+  }
+
+  async function onOverlayDelete(overlayId: string) {
+    if (!projectId) return
+    setOverlays((current) => current.filter((item) => item.id !== overlayId))
+    try {
+      await api.deleteOverlay(projectId, overlayId)
+    } catch {
+      void api.overlays(projectId).then(setOverlays)
     }
   }
 
@@ -577,15 +662,21 @@ export default function App() {
     document.body.classList.add('resizing-sidebar')
   }
 
+  const editorOpen = previewEditorOpen && !!videoUrl && !!projectId
+
   return (
-    <div className="app">
+    <div className={editorOpen ? 'app app--editor' : 'app'}>
+      {!editorOpen && (
       <Header
         hardware={hw}
+        dark={dark}
+        onToggleTheme={() => setDark(d => !d)}
         onOpenConfig={() => {
           setConfigSection(forceSetup && !setupReady ? 'setup' : 'cloud')
           setConfigOpen(true)
         }}
       />
+      )}
       <ConfigModal
         open={configOpen}
         initialSection={configSection}
@@ -599,6 +690,23 @@ export default function App() {
           setConfigOpen(false)
         }}
       />
+      {editorOpen ? (
+        <LivePreviewEditor
+          videoUrl={videoUrl}
+          projectId={projectId}
+          segments={segments}
+          settings={settings}
+          voices={voices}
+          busy={status.running}
+          onBack={() => setPreviewEditorOpen(false)}
+          onChange={onSegmentChange}
+          onExport={onExport}
+          onSettings={onSettings}
+          overlays={overlays}
+          onOverlayChange={onOverlayChange}
+          onOverlayDelete={onOverlayDelete}
+        />
+      ) : (
       <div
         className="workspace"
         style={{ gridTemplateColumns: `${sidebarWidth}px 6px 1fr` }}
@@ -627,6 +735,7 @@ export default function App() {
           <Stepper
             step={step}
             onDub={onDub}
+            onPreviewEditor={() => setPreviewEditorOpen(true)}
             onExport={onExport}
             canDub={segments.length > 0 && !status.running}
             canExport={
@@ -690,6 +799,7 @@ export default function App() {
           />
         </main>
       </div>
+      )}
       {viewExportSrc && (
         <div
           className="export-modal-backdrop"

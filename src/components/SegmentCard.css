@@ -45,12 +45,12 @@
   font-weight: 800;
   font-size: 1.05rem;
   font-variant-numeric: tabular-nums;
-  color: var(--accent);
+  color: var(--primary);
   line-height: 1;
 }
 
 .time {
-  color: var(--muted);
+  color: var(--muted-foreground);
   font-size: 0.78rem;
   font-weight: 500;
   line-height: 1.2;
@@ -65,9 +65,9 @@
   letter-spacing: 0.03em;
   text-transform: uppercase;
   line-height: 1.35;
-  color: #5b4b1e;
-  background: #f6e9b8;
-  border: 1px solid #e6d48a;
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 14%, var(--card));
+  border: 1px solid color-mix(in srgb, var(--warn) 35%, var(--border));
 }
 
 .voice-head {
@@ -79,7 +79,7 @@
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: var(--muted);
+  color: var(--muted-foreground);
 }
 
 .dub-check {
@@ -90,7 +90,7 @@
   font-weight: 650;
   letter-spacing: 0;
   text-transform: none;
-  color: var(--text, #1a1f2c);
+  color: var(--foreground);
   cursor: pointer;
   user-select: none;
   white-space: nowrap;
@@ -100,7 +100,7 @@
   width: 13px;
   height: 13px;
   margin: 0;
-  accent-color: var(--accent);
+  accent-color: var(--primary);
 }
 
 .voice-off {
@@ -110,8 +110,8 @@
   padding: 0 10px;
   border: 1px dashed var(--line);
   border-radius: 8px;
-  background: #fafbfd;
-  color: var(--muted);
+  background: var(--surface);
+  color: var(--muted-foreground);
   font-size: 0.82rem;
   font-weight: 600;
 }
@@ -145,15 +145,15 @@
 }
 
 .play {
-  background: var(--accent);
+  background: var(--primary);
   color: #fff;
   box-shadow: 0 4px 10px rgba(47, 111, 237, 0.28);
 }
 
 .retranslate {
-  background: #eef3fb;
-  color: var(--accent);
-  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--primary) 12%, var(--card));
+  color: var(--primary);
+  border: 1px solid color-mix(in srgb, var(--primary) 25%, var(--line));
 }
 
 .play:hover:not(:disabled),
@@ -167,7 +167,7 @@
 }
 
 .play-err {
-  color: #c0392b;
+  color: var(--destructive);
   font-size: 0.68rem;
   font-weight: 500;
   line-height: 1.2;
@@ -190,7 +190,7 @@
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: var(--muted);
+  color: var(--muted-foreground);
 }
 
 .cell textarea,
@@ -199,7 +199,7 @@
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 10px;
-  background: #fafbfd;
+  background: var(--surface);
   resize: vertical;
   min-height: 68px;
   font-size: 0.9rem;
@@ -208,7 +208,7 @@
 
 .cell select {
   min-height: 42px;
-  background: #fff;
+  background: var(--surface);
 }
 
 .voice-cell select { min-height: 42px; }
@@ -222,7 +222,7 @@
 
 .voice-meta em {
   font-style: normal;
-  color: var(--muted);
+  color: var(--muted-foreground);
   font-size: 0.78rem;
   font-weight: 600;
 }
@@ -231,7 +231,7 @@
   margin-top: 10px;
   height: 5px;
   border-radius: 999px;
-  background: #e9eef5;
+  background: var(--muted);
   position: relative;
   overflow: hidden;
 }
@@ -241,6 +241,6 @@
   position: absolute;
   inset: 0 auto 0 0;
   width: var(--p, 40%);
-  background: linear-gradient(90deg, var(--accent), #6aa0ff);
+  background: linear-gradient(90deg, var(--primary), color-mix(in srgb, var(--primary) 60%, var(--primary-foreground)));
   border-radius: inherit;
 }

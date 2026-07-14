@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import math
 import shutil
 import threading
 import uuid
 from pathlib import Path
-from typing import Any
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,7 +20,6 @@ from pipeline import (
     hardware,
     list_voices,
     load_meta,
-    mutate_meta,
     out_final,
     project_dir,
     request_cancel,
@@ -36,7 +33,6 @@ from pipeline import (
     video_fingerprint,
 )
 from pipeline.core.jobs import arm_job
-from pipeline.core.media import video_size
 
 app = FastAPI(title="Video-Clone Local")
 app.add_middleware(
@@ -57,9 +53,6 @@ class Settings(BaseModel):
     matchDuration: str = "natural"
     defaultVoice: str = "cc:BV075_streaming:7102355803792740865"
     coverHardsubs: bool = True
-    coverMaskStyle: str = "blur"  # blur | solid | mosaic
-    coverMaskColor: str = "#4c1d95"
-    coverMaskOpacity: int = 40  # 0–100
     burnSubs: bool = True
     captionPlacement: str = "below"  # below | above
     subtitleFontSize: int = 0  # 0 = tự động theo bbox / độ phân giải
@@ -88,57 +81,6 @@ class SegmentIn(BaseModel):
     layout: str | None = None
     # False = không TTS (title dọc/nhãn mặc định). True = lồng tiếng.
     dub: bool | None = None
-    # Override vùng che chữ (cover box pixel), mode over = đúng khung preview.
-    bbox: dict[str, float] | None = None
-    # Tốc độ riêng đoạn video khi xuất.
-    videoSpeed: float | None = None
-    ttsVolume: float | None = None
-    ttsSpeed: float | None = None
-    # 0 = theo dự án / tự động; 12–240 px
-    fontSize: int | None = None
-    # Layout caption từ preview editor — export burn y nguyên.
-    captionLayout: dict[str, Any] | None = None
-
-
-class ExportPayload(Settings):
-    segments: list[SegmentIn] | None = None
-
-
-class TextOverlayIn(BaseModel):
-    id: str
-    start: float
-    end: float
-    text: str
-    x: float
-    y: float
-    w: float
-    h: float
-    fontSize: int = 42
-    color: str = "#ffffff"
-
-
-def _validate_segment_editor_fields(body: SegmentIn, meta: dict) -> None:
-    if body.videoSpeed is not None:
-        if not math.isfinite(body.videoSpeed) or not 0.5 <= body.videoSpeed <= 2.0:
-            raise HTTPException(422, "videoSpeed phải nằm trong khoảng 0.5–2.0")
-    if body.ttsVolume is not None and (not math.isfinite(body.ttsVolume) or not 0 <= body.ttsVolume <= 200):
-        raise HTTPException(422, "ttsVolume phải nằm trong khoảng 0–200")
-    if body.ttsSpeed is not None and (not math.isfinite(body.ttsSpeed) or not 0.75 <= body.ttsSpeed <= 1.5):
-        raise HTTPException(422, "ttsSpeed phải nằm trong khoảng 0.75–1.5")
-    if body.fontSize is not None and body.fontSize != 0 and not 12 <= body.fontSize <= 240:
-        raise HTTPException(422, "fontSize phải là 0 (tự động) hoặc 12–240 px")
-    if body.bbox is None:
-        return
-    keys = {"x", "y", "w", "h"}
-    if set(body.bbox) != keys:
-        raise HTTPException(422, "bbox cần đủ x, y, w, h")
-    x, y, bw, bh = (float(body.bbox[key]) for key in ("x", "y", "w", "h"))
-    if not all(math.isfinite(value) for value in (x, y, bw, bh)) or bw <= 0 or bh <= 0:
-        raise HTTPException(422, "bbox không hợp lệ")
-    width, height = video_size(Path(meta["videoPath"]))
-    if x < 0 or y < 0 or x + bw > width or y + bh > height:
-        raise HTTPException(422, "bbox nằm ngoài khung video")
-    body.bbox = {"x": x, "y": y, "w": bw, "h": bh}
 
 
 @app.get("/api/hardware")
@@ -302,93 +244,26 @@ def api_segments(project_id: str):
     return meta.get("segments") or []
 
 
-def _validate_overlay(body: TextOverlayIn, meta: dict) -> None:
-    width, height = video_size(Path(meta["videoPath"]))
-    values = (body.start, body.end, body.x, body.y, body.w, body.h)
-    if not all(math.isfinite(value) for value in values) or body.end <= body.start:
-        raise HTTPException(422, "Thời gian text không hợp lệ")
-    if body.x < 0 or body.y < 0 or body.w <= 0 or body.h <= 0 or body.x + body.w > width or body.y + body.h > height:
-        raise HTTPException(422, "Text nằm ngoài khung video")
-    if not 12 <= body.fontSize <= 240:
-        raise HTTPException(422, "Cỡ chữ phải nằm trong khoảng 12–240")
-
-
-@app.get("/api/projects/{project_id}/overlays")
-def api_overlays(project_id: str):
-    meta = load_meta(project_id)
-    if not meta:
-        raise HTTPException(404)
-    return meta.get("overlays") or []
-
-
-@app.post("/api/projects/{project_id}/overlays")
-def api_create_overlay(project_id: str, body: TextOverlayIn):
-    meta = load_meta(project_id)
-    if not meta:
-        raise HTTPException(404)
-    _validate_overlay(body, meta)
-    overlays = meta.get("overlays") or []
-    if any(item.get("id") == body.id for item in overlays):
-        raise HTTPException(409, "Text overlay đã tồn tại")
-    item = body.model_dump()
-    overlays.append(item)
-    meta["overlays"] = overlays
-    save_meta(project_id, meta)
-    return item
-
-
-@app.put("/api/projects/{project_id}/overlays/{overlay_id}")
-def api_update_overlay(project_id: str, overlay_id: str, body: TextOverlayIn):
-    meta = load_meta(project_id)
-    if not meta:
-        raise HTTPException(404)
-    _validate_overlay(body, meta)
-    overlays = meta.get("overlays") or []
-    for i, item in enumerate(overlays):
-        if item.get("id") == overlay_id:
-            overlays[i] = body.model_dump()
-            meta["overlays"] = overlays
-            save_meta(project_id, meta)
-            return overlays[i]
-    raise HTTPException(404, "Text overlay không tồn tại")
-
-
-@app.delete("/api/projects/{project_id}/overlays/{overlay_id}")
-def api_delete_overlay(project_id: str, overlay_id: str):
-    meta = load_meta(project_id)
-    if not meta:
-        raise HTTPException(404)
-    overlays = [item for item in (meta.get("overlays") or []) if item.get("id") != overlay_id]
-    meta["overlays"] = overlays
-    save_meta(project_id, meta)
-    return {"ok": True}
-
-
 @app.put("/api/projects/{project_id}/segments/{seg_id}")
 def api_update_segment(project_id: str, seg_id: str, body: SegmentIn):
-    def apply(meta: dict) -> dict:
-        if not meta:
-            raise HTTPException(404)
-        _validate_segment_editor_fields(body, meta)
-        segs = meta.get("segments") or []
-        for i, s in enumerate(segs):
-            if s["id"] == seg_id:
-                incoming = body.model_dump()
-                merged = {**s, **{k: v for k, v in incoming.items() if v is not None}}
-                if "bbox" in body.model_fields_set and body.bbox is None:
-                    merged.pop("bbox", None)
-                if "captionLayout" in body.model_fields_set and body.captionLayout is None:
-                    merged.pop("captionLayout", None)
-                if incoming.get("layout") is None and s.get("layout"):
-                    merged["layout"] = s["layout"]
-                if incoming.get("dub") is None and "dub" in s:
-                    merged["dub"] = s["dub"]
-                segs[i] = merged
-                meta["segments"] = segs
-                return merged
-        raise HTTPException(404, "Segment not found")
-
-    return mutate_meta(project_id, apply)
+    meta = load_meta(project_id)
+    if not meta:
+        raise HTTPException(404)
+    segs = meta.get("segments") or []
+    for i, s in enumerate(segs):
+        if s["id"] == seg_id:
+            # merge: giữ layout/dub/các field cũ nếu client không gửi
+            incoming = body.model_dump()
+            merged = {**s, **{k: v for k, v in incoming.items() if v is not None}}
+            if incoming.get("layout") is None and s.get("layout"):
+                merged["layout"] = s["layout"]
+            if incoming.get("dub") is None and "dub" in s:
+                merged["dub"] = s["dub"]
+            segs[i] = merged
+            meta["segments"] = segs
+            save_meta(project_id, meta)
+            return segs[i]
+    raise HTTPException(404, "Segment not found")
 
 
 def _spawn(fn, *args):
@@ -491,22 +366,12 @@ def api_save_settings(project_id: str, settings: Settings):
 
 
 @app.post("/api/projects/{project_id}/export")
-def api_export(project_id: str, payload: ExportPayload):
+def api_export(project_id: str, settings: Settings):
     meta = load_meta(project_id)
     if not meta:
         raise HTTPException(404)
     # UI checkbox phải thắng meta cũ; previewSec ô Preview ≠ độ dài lần dịch
-    dumped = payload.model_dump(exclude={"segments"}, exclude_none=False)
-    if payload.segments is not None:
-        by_id = {s.id: s.model_dump(exclude_none=True) for s in payload.segments}
-        merged: list[dict] = []
-        for old in meta.get("segments") or []:
-            oid = str(old.get("id") or "")
-            if oid in by_id:
-                merged.append({**old, **by_id[oid]})
-            else:
-                merged.append(dict(old))
-        meta["segments"] = merged
+    dumped = settings.model_dump()
     run_preview = max(0, int(meta.get("previewSec") or 0))
     ui_prev = max(0, int(dumped.get("previewSec") or 0))
     if ui_prev <= 0:

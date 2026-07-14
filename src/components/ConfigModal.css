@@ -13,7 +13,7 @@
   max-height: min(90vh, 720px);
   overflow: auto;
   border-radius: 14px;
-  background: #fff;
+  background: var(--card);
   border: 1px solid var(--line);
   box-shadow: 0 20px 50px rgba(15, 23, 42, 0.2);
   display: flex;
@@ -43,7 +43,7 @@
 .cfg-head p {
   margin: 4px 0 0;
   font-size: 0.78rem;
-  color: var(--muted);
+  color: var(--muted-foreground);
 }
 
 .cfg-close {
@@ -51,7 +51,7 @@
   background: transparent;
   font-size: 1.4rem;
   line-height: 1;
-  color: var(--muted);
+  color: var(--muted-foreground);
   padding: 0 4px;
 }
 
@@ -66,7 +66,7 @@
   border: 0;
   border-bottom: 2px solid transparent;
   background: transparent;
-  color: var(--muted);
+  color: var(--muted-foreground);
   font-size: 0.82rem;
   font-weight: 650;
   padding: 10px 14px;
@@ -74,8 +74,8 @@
 }
 
 .cfg-section-tabs button.active {
-  color: var(--accent);
-  border-bottom-color: var(--accent);
+  color: var(--primary);
+  border-bottom-color: var(--primary);
 }
 
 .cfg-tabs {
@@ -89,17 +89,17 @@
   position: relative;
   border: 1px solid var(--line);
   border-radius: 999px;
-  background: #f8fafc;
-  color: var(--muted);
+  background: var(--surface);
+  color: var(--muted-foreground);
   font-size: 0.78rem;
   font-weight: 650;
   padding: 6px 12px;
 }
 
 .cfg-tabs button.active {
-  border-color: var(--accent);
-  background: var(--accent-soft);
-  color: var(--accent);
+  border-color: var(--primary);
+  background: var(--secondary);
+  color: var(--primary);
 }
 
 .cfg-dot {
@@ -126,7 +126,7 @@
 .cfg-setup-bar strong {
   display: block;
   font-size: 0.92rem;
-  color: var(--ink, #1a1f2c);
+  color: var(--foreground);
 }
 
 .cfg-setup-meta {
@@ -134,7 +134,7 @@
   margin-top: 3px;
   font-size: 0.72rem;
   font-weight: 500;
-  color: var(--muted);
+  color: var(--muted-foreground);
 }
 
 .cfg-setup-refresh {
@@ -157,23 +157,23 @@
 .cfg-check-item {
   border: 1px solid var(--line);
   border-radius: 10px;
-  background: #fafbfd;
+  background: var(--surface);
   padding: 10px 12px;
 }
 
 .cfg-check-item.ok {
   border-color: color-mix(in srgb, var(--ok, #22a06b) 35%, var(--line));
-  background: color-mix(in srgb, var(--ok, #22a06b) 6%, #fff);
+  background: hsl(141 25% 10%);
 }
 
 .cfg-check-item.bad {
-  border-color: #f0c2c2;
-  background: #fff8f8;
+  border-color: color-mix(in srgb, var(--destructive) 40%, var(--border));
+  background: hsl(0 30% 10%);
 }
 
 .cfg-check-item.warn {
   border-color: #f0e0b8;
-  background: #fffdf6;
+  background: hsl(38 25% 10%);
 }
 
 .cfg-check-top {
@@ -192,24 +192,24 @@
   font-size: 0.72rem;
   font-weight: 800;
   margin-top: 1px;
-  background: #e8edf3;
-  color: var(--muted);
+  background: var(--muted);
+  color: var(--muted-foreground);
 }
 
 .cfg-check-item.ok .cfg-check-status {
-  background: color-mix(in srgb, var(--ok, #22a06b) 20%, #fff);
+  background: hsl(141 25% 12%);
   color: var(--ok, #22a06b);
 }
 
 .cfg-check-item.bad .cfg-check-status {
-  background: #fde8e8;
-  color: #c0392b;
+  background: hsl(0 25% 12%);
+  color: var(--destructive);
 }
 
 .cfg-check-name {
   font-size: 0.86rem;
   font-weight: 750;
-  color: var(--ink, #1a1f2c);
+  color: var(--foreground);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -228,19 +228,19 @@
 }
 
 .cfg-req {
-  color: #9a3412;
-  background: #ffedd5;
+  color: hsl(38 80% 65%);
+  background: hsl(38 30% 12%);
 }
 
 .cfg-opt {
-  color: #64748b;
-  background: #f1f5f9;
+  color: var(--muted-foreground);
+  background: var(--surface);
 }
 
 .cfg-check-detail {
   margin-top: 2px;
   font-size: 0.74rem;
-  color: var(--muted);
+  color: var(--muted-foreground);
   word-break: break-all;
   line-height: 1.35;
 }
@@ -248,14 +248,14 @@
 .cfg-check-hint {
   margin-top: 4px;
   font-size: 0.74rem;
-  color: #8a5a00;
+  color: hsl(38 70% 55%);
   line-height: 1.35;
 }
 
 .cfg-check-link {
   font-size: 0.78rem;
   font-weight: 700;
-  color: var(--accent);
+  color: var(--primary);
   white-space: nowrap;
   padding-top: 2px;
 }
@@ -263,7 +263,7 @@
 .cfg-check-install {
   border: 0;
   border-radius: 7px;
-  background: var(--accent);
+  background: var(--primary);
   color: #fff;
   cursor: pointer;
   font-size: 0.75rem;
@@ -289,22 +289,22 @@
   display: block;
   max-width: 180px;
   font-size: 0.68rem;
-  background: #f1f5f9;
+  background: var(--surface);
   border-radius: 6px;
   padding: 6px 8px;
-  color: #334155;
+  color: var(--foreground);
   word-break: break-all;
   line-height: 1.3;
 }
 
 .cfg-msg-err {
-  color: #c0392b !important;
+  color: var(--destructive) !important;
 }
 
 .cfg-foot-note {
   margin-right: auto;
   font-size: 0.78rem;
-  color: #9a3412;
+  color: hsl(38 70% 55%);
   font-weight: 600;
   align-self: center;
 }
@@ -322,22 +322,22 @@
   gap: 5px;
   font-size: 0.76rem;
   font-weight: 650;
-  color: var(--muted);
+  color: var(--muted-foreground);
 }
 
 .cfg-body input {
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 9px 10px;
-  background: #fff;
+  background: var(--input);
   color: var(--ink);
   font-weight: 500;
   font-size: 0.86rem;
 }
 
 .cfg-body input:focus {
-  outline: 2px solid var(--accent-soft);
-  border-color: var(--accent);
+  outline: 2px solid var(--secondary);
+  border-color: var(--primary);
 }
 
 .cfg-el-list {
@@ -362,17 +362,17 @@
   height: 38px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: #f8fafc;
-  color: var(--muted);
+  background: var(--surface);
+  color: var(--muted-foreground);
   font-size: 1.2rem;
   line-height: 1;
   padding: 0;
 }
 
 .cfg-el-remove:hover:not(:disabled) {
-  color: #c0392b;
-  border-color: #f0c2c2;
-  background: #fff5f5;
+  color: var(--destructive);
+  border-color: color-mix(in srgb, var(--destructive) 40%, var(--border));
+  background: hsl(0 25% 12%);
 }
 
 .cfg-el-remove:disabled {
@@ -383,28 +383,28 @@
   align-self: flex-start;
   border: 1px dashed var(--line);
   border-radius: 8px;
-  background: #f8fafc;
-  color: var(--accent);
+  background: var(--surface);
+  color: var(--primary);
   font-size: 0.8rem;
   font-weight: 650;
   padding: 8px 12px;
 }
 
 .cfg-el-add:hover {
-  border-color: var(--accent);
-  background: var(--accent-soft);
+  border-color: var(--primary);
+  background: var(--secondary);
 }
 
 .cfg-hint {
   margin: 0;
   font-size: 0.72rem;
-  color: #8a97a8;
+  color: var(--muted-foreground);
   line-height: 1.4;
 }
 
 .cfg-hint code {
   font-size: 0.7rem;
-  background: #f1f5f9;
+  background: var(--surface);
   padding: 1px 4px;
   border-radius: 4px;
 }
@@ -412,7 +412,7 @@
 .cfg-msg {
   margin: 0 18px 8px;
   font-size: 0.8rem;
-  color: var(--accent);
+  color: var(--primary);
 }
 
 .cfg-foot {
@@ -433,12 +433,12 @@
 
 .cfg-primary {
   border: 0;
-  background: var(--accent);
+  background: var(--primary);
   color: #fff;
 }
 
 .cfg-secondary {
   border: 1px solid var(--line);
-  background: #fff;
+  background: var(--surface);
   color: var(--ink);
 }

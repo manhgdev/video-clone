@@ -28,7 +28,7 @@
   align-items: center;
   gap: 6px;
   min-width: 88px;
-  color: var(--muted);
+  color: var(--muted-foreground);
   font-size: 0.8rem;
   font-weight: 550;
 }
@@ -44,7 +44,7 @@
 
 .stepper li.done .line,
 .stepper li.current .line {
-  background: #b7d0ff;
+  background: var(--primary);
 }
 
 .stepper li .bubble {
@@ -55,8 +55,8 @@
   place-items: center;
   font-size: 0.78rem;
   font-weight: 700;
-  background: #eef2f7;
-  color: var(--muted);
+  background: var(--muted);
+  color: var(--muted-foreground);
   z-index: 1;
   border: 2px solid transparent;
 }
@@ -65,15 +65,15 @@
 
 .stepper li.done { color: var(--ok); }
 .stepper li.done .bubble {
-  background: #e6f7ee;
+  background: color-mix(in srgb, var(--ok) 15%, var(--muted));
   color: var(--ok);
 }
 
-.stepper li.current { color: var(--accent); font-weight: 700; }
+.stepper li.current { color: var(--primary); font-weight: 700; }
 .stepper li.current .bubble {
-  background: var(--accent);
+  background: var(--primary);
   color: #fff;
-  box-shadow: 0 0 0 4px var(--accent-soft);
+  box-shadow: 0 0 0 4px var(--secondary);
 }
 
 .step-actions {
@@ -86,7 +86,7 @@
   align-items: center;
   gap: 6px;
   border: 1px solid var(--line);
-  background: #fff;
+  background: var(--surface);
   border-radius: 8px;
   padding: 8px 14px;
   font-weight: 650;
@@ -94,8 +94,8 @@
 }
 
 .step-actions button.solid {
-  border-color: var(--accent);
-  background: var(--accent);
+  border-color: var(--primary);
+  background: var(--primary);
   color: #fff;
 }
 

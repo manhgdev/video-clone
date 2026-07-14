@@ -17,6 +17,7 @@ from .core.media import (
     ensure_preview_clip,
     extract_audio,
     ffprobe_duration,
+    retime_video_segments,
     video_size,
 )
 from .export.mux import mux_dub, mux_original_audio, separate_no_vocals
@@ -142,15 +143,22 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
             if not segments:
                 raise RuntimeError("Không nhận được đoạn thoại nào từ video.")
 
-            # giữ bản dịch cũ chỉ khi cùng đúng dòng chữ nguồn
-            prev_tr = {
-                s["source"]: s["translation"]
-                for s in (meta.get("segments") or [])
-                if s.get("source") and s.get("translation")
-            }
+            # giữ bản dịch + chỉnh preview (bbox, font…) khi cùng dòng chữ nguồn
+            prev_by_source: dict[str, dict[str, Any]] = {}
+            for s in meta.get("segments") or []:
+                src = (s.get("source") or "").strip()
+                if src:
+                    prev_by_source[src] = s
             for seg in segments:
-                if not seg.get("translation") and seg["source"] in prev_tr:
-                    seg["translation"] = prev_tr[seg["source"]]
+                old = prev_by_source.get((seg.get("source") or "").strip())
+                if not seg.get("translation") and old and old.get("translation"):
+                    seg["translation"] = old["translation"]
+                if old:
+                    if old.get("bbox"):
+                        seg["bbox"] = old["bbox"]
+                    for k in ("fontSize", "videoSpeed", "ttsVolume", "ttsSpeed"):
+                        if old.get(k) is not None:
+                            seg[k] = old[k]
 
             cache_asr_path(project_id).write_text(
                 json.dumps({"key": a_key, "segments": segments}, ensure_ascii=False),
@@ -454,8 +462,32 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
     for s in segments:
         if float(s.get("end") or 0) > vid_dur:
             s["end"] = vid_dur
+    # Free text uses the same pixel coordinate system as caption cover/burn.
+    # ponytail: treat each overlay as a caption cue to reuse the proven burn renderer.
+    text_overlays = [
+        {
+            "id": f"overlay-{item.get('id', '')}",
+            "start": float(item.get("start") or 0),
+            "end": float(item.get("end") or 0),
+            "translation": str(item.get("text") or ""),
+            "source": "",
+            "layout": "horizontal",
+            "bbox": {
+                "x": float(item.get("x") or 0),
+                "y": float(item.get("y") or 0),
+                "w": float(item.get("w") or 0),
+                "h": float(item.get("h") or 0),
+            },
+        }
+        for item in (meta.get("overlays") or [])
+        if float(item.get("start") or 0) < vid_dur and str(item.get("text") or "").strip()
+    ]
     settings = meta.get("settings") or {}
     root = ensure_layout(project_id)
+    manual_video_speed = any(
+        abs(float(segment.get("videoSpeed") or 1) - 1.0) > 0.001
+        for segment in segments
+    )
     out = out_final(project_id)
     job_gen: int | None = None
     if not nested:
@@ -468,6 +500,17 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
 
     try:
         hint = f"preview {preview_sec}s — " if preview_sec > 0 else ""
+        if manual_video_speed:
+            set_status(
+                project_id,
+                step="export",
+                progress=10,
+                message=f"{hint}Điều tốc từng đoạn…",
+                running=True,
+            )
+            video, segments = retime_video_segments(
+                video, segments, root / "cache", project_id
+            )
         place = str(settings.get("captionPlacement") or "below").lower()
         if cover and burn:
             msg = f"{hint}Che chữ cũ + chèn bản dịch…"
@@ -487,20 +530,23 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
             running=True,
         )
         burned = out_burned(project_id)
-        if cover or burn:
+        if cover or burn or text_overlays:
             place = str(settings.get("captionPlacement") or "below").lower()
             if place not in ("below", "above"):
                 place = "below"
             cover_and_burn(
                 video,
-                segments,
+                segments + text_overlays,
                 burned,
                 cover=cover,
-                burn=burn,
+                burn=burn or bool(text_overlays),
                 subtitle_font_size=int(settings.get("subtitleFontSize", 0)),
                 project_id=project_id,
                 workers=int(settings.get("workers") or 0),
                 caption_placement=place,
+                cover_mask_style=str(settings.get("coverMaskStyle") or "blur"),
+                cover_mask_color=str(settings.get("coverMaskColor") or "#4c1d95"),
+                cover_mask_opacity=int(settings.get("coverMaskOpacity", 40)),
             )
         else:
             # Không burn/cover — remux bỏ metadata (không copy2 nguyên file nguồn)
@@ -564,6 +610,7 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
                 original_audio_mode="original" if source_audio else audio_mode,
                 source_audio=source_audio,
                 original_audio_volume=bg_vol,
+                allow_video_slowdown=not manual_video_speed,
             )
         elif audio_mode != "auto":
             audio_labels = {

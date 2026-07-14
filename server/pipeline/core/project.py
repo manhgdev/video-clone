@@ -3,10 +3,28 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import threading
+import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from .config import DATA
+
+T = TypeVar("T")
+
+_meta_locks: dict[str, threading.RLock] = {}
+_meta_locks_guard = threading.Lock()
+
+
+def _meta_lock(project_id: str) -> threading.RLock:
+    with _meta_locks_guard:
+        lock = _meta_locks.get(project_id)
+        if lock is None:
+            lock = threading.RLock()
+            _meta_locks[project_id] = lock
+        return lock
 
 def project_dir(project_id: str) -> Path:
     p = DATA / project_id
@@ -121,30 +139,86 @@ def trans_cache_key(settings: dict[str, Any]) -> str:
     return f"{eng}|{settings.get('targetLang', 'vi')}|g4"
 
 
+def _read_meta_file(path: Path) -> dict[str, Any]:
+    raw = path.read_text(encoding="utf-8")
+    try:
+        obj = json.loads(raw)
+    except json.JSONDecodeError:
+        # ponytail: file bị append/ghi đè một phần → lấy JSON object đầu
+        obj, _end = json.JSONDecoder().raw_decode(raw.lstrip())
+    if not isinstance(obj, dict):
+        raise json.JSONDecodeError("meta root must be object", raw, 0)
+    return obj
+
+
+def _write_meta_file(path: Path, meta: dict[str, Any]) -> None:
+    payload = json.dumps(meta, ensure_ascii=False, indent=2)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        tmp.write_text(payload, encoding="utf-8")
+        for attempt in range(10):
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError:
+                if attempt >= 9:
+                    raise
+                time.sleep(0.025 * (attempt + 1))
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
 def load_meta(project_id: str) -> dict[str, Any]:
     path = project_dir(project_id) / "meta.json"
-    if not path.exists():
-        return {}
-    return json.loads(path.read_text(encoding="utf-8"))
+    with _meta_lock(project_id):
+        if not path.exists():
+            return {}
+        try:
+            return _read_meta_file(path)
+        except json.JSONDecodeError:
+            # recovery: ghi lại bản sạch dưới cùng lock
+            try:
+                obj, _end = json.JSONDecoder().raw_decode(path.read_text(encoding="utf-8").lstrip())
+            except json.JSONDecodeError:
+                raise
+            if isinstance(obj, dict):
+                _write_meta_file(path, obj)
+                return obj
+            raise
 
 
 def save_meta(project_id: str, meta: dict[str, Any]) -> None:
-    (project_dir(project_id) / "meta.json").write_text(
-        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    path = project_dir(project_id) / "meta.json"
+    with _meta_lock(project_id):
+        _write_meta_file(path, meta)
+
+
+def mutate_meta(project_id: str, fn: Callable[[dict[str, Any]], T]) -> T:
+    """Read-modify-write atomic — tránh race khi nhiều PUT segment."""
+    path = project_dir(project_id) / "meta.json"
+    with _meta_lock(project_id):
+        meta: dict[str, Any] = _read_meta_file(path) if path.exists() else {}
+        out = fn(meta)
+        _write_meta_file(path, meta)
+        return out
 
 
 def set_status(project_id: str, **kwargs: Any) -> None:
-    meta = load_meta(project_id)
-    status = meta.get("status") or {
-        "step": "video",
-        "progress": 0,
-        "message": "",
-        "running": False,
-    }
-    status.update(kwargs)
-    if "error" in kwargs and kwargs["error"] is None:
-        status.pop("error", None)
-    meta["status"] = status
-    save_meta(project_id, meta)
+    def apply(meta: dict[str, Any]) -> None:
+        status = meta.get("status") or {
+            "step": "video",
+            "progress": 0,
+            "message": "",
+            "running": False,
+        }
+        status.update(kwargs)
+        if "error" in kwargs and kwargs["error"] is None:
+            status.pop("error", None)
+        meta["status"] = status
+
+    mutate_meta(project_id, apply)
 
