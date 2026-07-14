@@ -10,7 +10,7 @@ from typing import Any
 
 from ..core.jobs import run_cmd
 from ..core.media import _has_audio_stream, ffprobe_duration, h264_encoder_args
-from ..core.project import ensure_layout, out_final
+from ..core.project import ensure_layout, out_final, set_status
 
 
 def _wav_rms(path: Path) -> float:
@@ -43,23 +43,104 @@ def _wav_rms(path: Path) -> float:
     return (acc / count) ** 0.5 / 32768.0
 
 
-def separate_no_vocals(project_id: str, video: Path) -> Path:
-    """Demucs: bỏ stem vocals, giữ nhạc/SFX. Stem quá im → fallback stereotools."""
+def _demucs_python(project_id: str | None = None, *, report: bool = True) -> str:
+    """Python có demucs: ưu tiên server/.venv-demucs, cài lần đầu nếu thiếu."""
+    server_root = Path(__file__).resolve().parents[2]
+    venv = server_root / ".venv-demucs"
+    py = venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+
+    def _has_demucs(exe: Path) -> bool:
+        if not exe.is_file():
+            return False
+        try:
+            r = subprocess.run(
+                [str(exe), "-c", "import demucs, soundfile"],
+                capture_output=True,
+                timeout=60,
+            )
+            return r.returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            return False
+
+    if _has_demucs(py):
+        return str(py)
+
+    # Fallback: API venv nếu đã có demucs (hiếm)
+    cur = Path(sys.executable)
+    if _has_demucs(cur):
+        return str(cur)
+
+    if report and project_id:
+        set_status(
+            project_id,
+            step="export",
+            progress=62,
+            message="Đang cài Demucs (xóa lời AI) — lần đầu có thể mất vài phút…",
+            running=True,
+        )
+    if not py.is_file():
+        subprocess.run(
+            [sys.executable, "-m", "venv", str(venv)],
+            check=True,
+            capture_output=True,
+            timeout=180,
+        )
+    pip = [str(py), "-m", "pip"]
+    subprocess.run(pip + ["install", "-U", "pip", "wheel"], capture_output=True, timeout=300)
+    # torch CPU — nhẹ hơn CUDA, đủ cho demucs
+    r_torch = subprocess.run(
+        pip
+        + [
+            "install",
+            "torch",
+            "torchaudio",
+            "--index-url",
+            "https://download.pytorch.org/whl/cpu",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=1800,
+    )
+    if r_torch.returncode != 0:
+        raise RuntimeError(
+            "Không cài được PyTorch cho Demucs.\n"
+            + ((r_torch.stderr or r_torch.stdout or "")[-800:])
+        )
+    r_dem = subprocess.run(
+        pip + ["install", "demucs", "soundfile"],
+        capture_output=True,
+        text=True,
+        timeout=900,
+    )
+    if r_dem.returncode != 0:
+        raise RuntimeError(
+            "Không cài được Demucs.\n" + ((r_dem.stderr or r_dem.stdout or "")[-800:])
+        )
+    if not _has_demucs(py):
+        raise RuntimeError("Đã pip demucs nhưng import vẫn lỗi — kiểm tra server/.venv-demucs")
+    return str(py)
+
+
+def separate_no_vocals(
+    project_id: str, video: Path, *, report: bool = True
+) -> Path:
+    """Demucs: bỏ stem vocals, giữ nhạc/SFX.
+
+    Không dùng stereotools làm «xóa lời» — filter đó vẫn để lại lời, cache sai.
+    Demucs lỗi → nền im (đúng hơn còn lời).
+    report=False: gọi từ preview, không ghi đè status job xuất.
+    """
     root = ensure_layout(project_id)
     stat = video.stat()
-    # v4: Demucs thật (Windows python + soundfile); không trộn lại gốc khi stem im
+    # v5: bắt buộc Demucs thật; invalidate cache stereotools (v4 trở xuống)
     key = hashlib.sha1(
-        f"{video.resolve()}|{stat.st_size}|{stat.st_mtime_ns}|v4".encode()
+        f"{video.resolve()}|{stat.st_size}|{stat.st_mtime_ns}|v5".encode()
     ).hexdigest()[:12]
     cache = root / "cache" / f"no_vocals_{key}.wav"
     if cache.exists() and cache.stat().st_size > 1024:
         return cache
 
-    server_root = Path(__file__).resolve().parents[2]
-    venv_py = server_root / ".venv-demucs" / (
-        "Scripts/python.exe" if sys.platform == "win32" else "bin/python"
-    )
-    python = str(venv_py if venv_py.is_file() else Path(sys.executable))
+    python = _demucs_python(project_id, report=report)
     work = root / "cache" / f"demucs_{key}"
     work.mkdir(parents=True, exist_ok=True)
     source_wav = work / "source.wav"
@@ -74,45 +155,48 @@ def separate_no_vocals(project_id: str, video: Path) -> Path:
     demucs_ok = False
     result: Path | None = None
     separated = work / "separated"
+    demucs_err = ""
     try:
-        try:
-            subprocess.run(
-                [python, "-c", "import soundfile"],
-                check=True,
-                capture_output=True,
-                timeout=30,
+        if report:
+            set_status(
+                project_id,
+                step="export",
+                progress=66,
+                message="Demucs đang xóa lời (giữ nhạc/SFX)…",
+                running=True,
             )
-        except subprocess.SubprocessError:
-            # ponytail: torchaudio trên Windows cần soundfile; pip một lần nếu thiếu
-            subprocess.run(
-                [python, "-m", "pip", "install", "-q", "soundfile"],
-                capture_output=True,
-                timeout=180,
-            )
-        run_cmd(
-            project_id,
+        proc = subprocess.run(
             [
                 python, "-m", "demucs", "--two-stems", "vocals",
                 "--shifts", "1", "--overlap", "0.25", "-j", "1",
                 "-o", str(separated), str(source_wav),
             ],
+            capture_output=True,
+            text=True,
+            timeout=3600,
         )
+        if proc.returncode != 0:
+            demucs_err = (proc.stderr or proc.stdout or f"exit {proc.returncode}")[-600:]
         result = separated / "htdemucs" / source_wav.stem / "no_vocals.wav"
         demucs_ok = result.exists() and result.stat().st_size > 1024
-    except Exception:
+        if not demucs_ok and not demucs_err:
+            demucs_err = "không thấy file no_vocals.wav sau Demucs"
+    except Exception as e:
         demucs_ok = False
+        demucs_err = str(e)[:600]
 
-    # Video thoại mono: Demucs nhét hết vào vocals → no_vocals gần im.
-    # Chỉ boost stem im — không trộn lại track gốc (tránh lời quay về).
-    use_fallback = True
     if demucs_ok and result is not None:
+        # Video thoại mono: stem gần im — boost nhẹ, KHÔNG trộn lại gốc.
         src_rms = max(_wav_rms(source_wav), 1e-6)
         stem_rms = _wav_rms(result)
         ratio = stem_rms / src_rms
         if ratio >= 0.12:
             gain = min(2.6, max(1.25, 0.72 / max(ratio, 0.12)))
-        else:
+        elif ratio >= 0.02:
             gain = min(3.5, max(1.5, 0.15 / max(ratio, 0.001)))
+        else:
+            # Gần như không còn nhạc/SFX — giữ gần im (đúng với clip chỉ lời)
+            gain = 1.0
         run_cmd(
             project_id,
             [
@@ -122,23 +206,38 @@ def separate_no_vocals(project_id: str, video: Path) -> Path:
                 "-c:a", "pcm_s16le", str(cache),
             ],
         )
-        use_fallback = False
-
-    if use_fallback:
+    else:
+        # Demucs thất bại: nền im — stereotools cũ để lại lời → lệch setting «Xóa lời».
+        if report and project_id:
+            set_status(
+                project_id,
+                step="export",
+                progress=68,
+                message=(
+                    "Demucs lỗi — tạm tắt âm gốc (tránh còn lời). "
+                    f"Chi tiết: {demucs_err[:180]}"
+                    if demucs_err
+                    else "Demucs lỗi — tạm tắt âm gốc (tránh còn lời)."
+                ),
+                running=True,
+            )
+        dur = max(0.1, ffprobe_duration(source_wav) or ffprobe_duration(video) or 1.0)
         run_cmd(
             project_id,
             [
-                "ffmpeg", "-y", "-i", str(source_wav),
-                "-af",
-                _source_audio_filter("music")
-                + ",volume=1.25,alimiter=limit=0.95:level=disabled",
+                "ffmpeg", "-y",
+                "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+                "-t", f"{dur:.3f}",
                 "-c:a", "pcm_s16le", str(cache),
             ],
         )
 
     shutil.rmtree(work, ignore_errors=True)
     if not cache.exists():
-        raise RuntimeError("Không tạo được track xóa lời (Demucs/fallback).")
+        raise RuntimeError(
+            "Không tạo được track xóa lời (Demucs)."
+            + (f" {demucs_err}" if demucs_err else "")
+        )
     return cache
 
 def _bg_duck_expr(
@@ -196,12 +295,33 @@ def _atempo_chain(ratio: float) -> str:
     return ",".join(parts)
 
 
+def plan_video_slowdown_factor(
+    segments: list[dict[str, Any]],
+    root: Path,
+    *,
+    match: str = "preferVideo",
+) -> float:
+    """Chỉ tính video_factor (>1 = chậm toàn video). Dùng lúc dub + xuất."""
+    _clips, vf = _tts_clip_plan(segments, root, allow_video_slowdown=True, match=match)
+    return float(vf)
+
+
+# preferVideo: chậm cố định 0.80× (setpts 1/0.8) — đủ chỗ TTS dịch dài, không ép đọc
+PREFER_VIDEO_SPEED = 0.80
+PREFER_VIDEO_FACTOR = 1.0 / PREFER_VIDEO_SPEED  # 1.25
+
+
 def _tts_clip_plan(
-    segments: list[dict[str, Any]], root: Path, *, allow_video_slowdown: bool = True
+    segments: list[dict[str, Any]],
+    root: Path,
+    *,
+    allow_video_slowdown: bool = True,
+    match: str = "preferVideo",
 ) -> tuple[list[tuple[Path, float, float, float, float]], float]:
     """Trả (clips, video_factor).
 
-    video_factor > 1 = chậm video để TTS gần tốc độ tự nhiên.
+    video_factor > 1 = chậm **toàn bộ** video để TTS gần tốc độ tự nhiên (áp dụng tất cả).
+    preferVideo: cố định 0.80× (factor 1.25), gần như không ép TTS.
     clips: (wav, start_sec_scaled, slot_sec, tts_speed, volume)
     """
     ordered = sorted(
@@ -209,10 +329,21 @@ def _tts_clip_plan(
         key=lambda s: float(s.get("start") or 0),
     )
     gap = 0.04
-    # Ưu tiên chậm video; TTS chỉ tăng tốc nhẹ
-    max_video_factor = 1.35  # chậm tối đa ~35%
-    soft_tts_speed = 1.12  # mục tiêu đọc gần tự nhiên
-    hard_tts_speed = 1.25  # trần sau khi đã chậm video
+    if match == "preferVideo":
+        max_video_factor = PREFER_VIDEO_FACTOR
+        soft_tts_speed = 1.02
+        hard_tts_cap = 1.12
+        fixed_factor = PREFER_VIDEO_FACTOR if allow_video_slowdown else 1.0
+    elif match == "none":
+        max_video_factor = 1.45
+        soft_tts_speed = 1.08
+        hard_tts_cap = 1.30
+        fixed_factor = None
+    else:
+        max_video_factor = 1.35
+        soft_tts_speed = 1.12
+        hard_tts_cap = 1.60
+        fixed_factor = None
     raw: list[tuple[Path, float, float, float, float, float]] = []  # wav, start, slot0, ad, volume, manual speed
     for i, seg in enumerate(ordered):
         name = seg.get("audioFile") or f"{seg['id']}.wav"
@@ -239,35 +370,43 @@ def _tts_clip_plan(
         raw.append((wav, start, slot0, ad, max(0.0, min(2.0, float(seg.get("ttsVolume", 100)) / 100)), max(0.75, min(1.5, float(seg.get("ttsSpeed", 1))))))
 
     if not raw:
-        return [], 1.0
+        return [], (fixed_factor if fixed_factor is not None else 1.0)
 
-    # video_factor theo p90 nhu cầu (1 outlier không kéo cả video quá chậm)
-    needs: list[float] = []
-    for _wav, _start, slot0, ad, _volume, manual_speed in raw:
-        ad /= manual_speed
-        if ad > 0.08 and slot0 > 0.05 and ad > slot0 * soft_tts_speed:
-            needs.append(ad / (slot0 * soft_tts_speed))
     video_factor = 1.0
-    if needs and allow_video_slowdown:
-        needs.sort()
-        # p90
-        idx = min(len(needs) - 1, max(0, int(len(needs) * 0.90) - 1))
-        video_factor = needs[idx]
-        # không thấp hơn median nếu đa số cần chậm
-        mid = needs[len(needs) // 2]
-        video_factor = max(video_factor, min(mid, max_video_factor))
-    video_factor = min(max_video_factor, max(1.0, video_factor))
+    if fixed_factor is not None:
+        video_factor = float(fixed_factor)
+    elif allow_video_slowdown:
+        needs: list[float] = []
+        for _wav, _start, slot0, ad, _volume, manual_speed in raw:
+            ad /= manual_speed
+            if ad > 0.08 and slot0 > 0.05 and ad > slot0 * soft_tts_speed:
+                needs.append(ad / (slot0 * soft_tts_speed))
+        if needs:
+            needs.sort()
+            idx = min(len(needs) - 1, max(0, int(len(needs) * 0.90) - 1))
+            video_factor = needs[idx]
+            mid = needs[len(needs) // 2]
+            video_factor = max(video_factor, min(mid, max_video_factor))
+        video_factor = min(max_video_factor, max(1.0, video_factor))
 
     clips: list[tuple[Path, float, float, float, float]] = []
     for wav, start, slot0, ad, volume, manual_speed in raw:
         slot = slot0 * video_factor
         speed = 1.0
         if ad > 0.08 and ad > slot * 1.005:
-            # fit đầy đủ vào slot (thường ≤1.25 nhờ chậm video; outlier tới 1.6)
-            speed = min(1.60, ad / max(slot, 0.05))
+            speed = min(hard_tts_cap, ad / max(slot, 0.05))
             speed = max(1.0, speed)
-        clips.append((wav, start * video_factor, slot, speed * manual_speed, volume))
-    return clips, video_factor
+        eff = ad / max(speed * manual_speed, 0.05) if ad > 0.05 else slot
+        trim = max(0.08, min(slot, eff + 0.02))
+        clips.append((wav, start * video_factor, trim, speed * manual_speed, volume))
+    clips.sort(key=lambda c: c[1])
+    out: list[tuple[Path, float, float, float, float]] = []
+    for i, (wav, start, trim, sp, volume) in enumerate(clips):
+        next_start = clips[i + 1][1] if i + 1 < len(clips) else None
+        if next_start is not None:
+            trim = min(trim, max(0.08, next_start - start - 0.03))
+        out.append((wav, start, trim, sp, volume))
+    return out, video_factor
 
 
 def _mix_tts_track(
@@ -277,10 +416,11 @@ def _mix_tts_track(
     *,
     video_factor: float = 1.0,
     allow_video_slowdown: bool = True,
+    match: str = "preferVideo",
 ) -> Path:
     """Trộn TTS theo timeline đã scale. TTS speed nhẹ; video chậm bù."""
     ordered_plan, plan_vf = _tts_clip_plan(
-        segments, root, allow_video_slowdown=allow_video_slowdown
+        segments, root, allow_video_slowdown=allow_video_slowdown, match=match
     )
     # Dùng plan (đã tính factor); video_factor chỉ để cache key khớp mux_dub
     if abs(video_factor - plan_vf) > 0.02 and video_factor > 1.0:
@@ -300,7 +440,7 @@ def _mix_tts_track(
         for w, s, slot, sp, volume in ordered_plan
     ]
     key = hashlib.sha1(
-        (f"v6|vf{plan_vf:.3f}|" + "|".join(signature)).encode()
+        (f"v8|vf{plan_vf:.3f}|" + "|".join(signature)).encode()
     ).hexdigest()[:16]
     out = root / "cache" / f"tts_mix_{key}.wav"
     if out.exists():
@@ -374,12 +514,13 @@ def mux_dub(
     source_audio: Path | None = None,
     original_audio_volume: float = 1.0,
     allow_video_slowdown: bool = True,
+    match: str = "preferVideo",
 ) -> Path:
-    """Đặt TTS theo timeline; chậm video nhẹ nếu TTS dài hơn slot."""
+    """Đặt TTS theo timeline; chậm **toàn video** nếu TTS dài hơn slot."""
     root = ensure_layout(project_id)
     duration = ffprobe_duration(video)
     _clips, video_factor = _tts_clip_plan(
-        segments, root, allow_video_slowdown=allow_video_slowdown
+        segments, root, allow_video_slowdown=allow_video_slowdown, match=match
     )
     voice_track = _mix_tts_track(
         project_id,
@@ -387,6 +528,7 @@ def mux_dub(
         root,
         video_factor=video_factor,
         allow_video_slowdown=allow_video_slowdown,
+        match=match,
     )
     out_dur = duration * video_factor
     vol_mul = max(0.0, min(1.0, float(original_audio_volume)))
@@ -543,12 +685,10 @@ if __name__ == "__main__":
     venv_py = sr / ".venv-demucs" / (
         "Scripts/python.exe" if sys.platform == "win32" else "bin/python"
     )
-    py = venv_py if venv_py.is_file() else Path(sys.executable)
-    assert py.is_file(), "no python for demucs"
+    # Chưa cài vẫn ok — _demucs_python sẽ tạo; chỗ này chỉ check path shape
     if sys.platform == "win32":
         assert "Scripts" in str(venv_py)
-    # quiet stem: boost only, never mix original back (ratio 0.05 → gain > 1.5)
     ratio = 0.05
     gain = min(3.5, max(1.5, 0.15 / max(ratio, 0.001)))
     assert gain > 1.5
-    print("mux self-check ok:", py)
+    print("mux self-check ok:", venv_py)

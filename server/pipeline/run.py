@@ -205,8 +205,8 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                 source = settings.get("sourceLang", "auto")
                 check_cancel(project_id)
                 if target in ("none", "off", "source", ""):
-                    # Không dịch → không chèn caption (để trống, không copy source)
-                    translations = [""] * len(texts)
+                    # Giữ nguyên chữ nguồn — không gọi máy dịch
+                    translations = list(texts)
                 else:
                     w = adaptive_workers(
                         int(settings.get("workers") or 0),
@@ -284,7 +284,7 @@ def run_dub(project_id: str, *, finalize: bool = True, nested: bool = False) -> 
     meta = load_meta(project_id)
     segments = meta.get("segments") or []
     settings = meta.get("settings") or {}
-    match = settings.get("matchDuration", "natural")
+    match = settings.get("matchDuration", "preferVideo")
     lang = settings.get("targetLang", "vi")
     root = ensure_layout(project_id)
     job_gen: int | None = None
@@ -296,6 +296,8 @@ def run_dub(project_id: str, *, finalize: bool = True, nested: bool = False) -> 
         # Một cache key có thể được nhiều segment dùng chung; chỉ synthesize 1 lần.
         jobs: dict[str, dict[str, Any]] = {}
         # Slot TTS = min(end-start, đến start câu sau) — fit đọc hết, ít đè
+        # preferVideo/none: không ép atempo theo slot
+        soft_match = match in ("none", "preferVideo")
         ordered = sorted(segments, key=lambda s: float(s.get("start") or 0))
         for i, seg in enumerate(ordered):
             # Title dọc / nhãn: mặc định không TTS; bật lại qua seg.dub=True
@@ -345,8 +347,8 @@ def run_dub(project_id: str, *, finalize: bool = True, nested: bool = False) -> 
 
         def synthesize(job: dict[str, Any]) -> float:
             wav: Path = job["wav"]
-            target = float(job["target"]) if match != "none" else None
-            # Cache cũ dài hơn slot → fit lại (đọc hết + không đè)
+            target = None if soft_match else float(job["target"])
+            # Cache cũ dài hơn slot → fit lại (chỉ natural/stretch)
             if wav.exists() and wav.stat().st_size > 128:
                 dur = ffprobe_duration(wav)
                 if target is None or dur <= target * 1.06:
@@ -357,7 +359,7 @@ def run_dub(project_id: str, *, finalize: bool = True, nested: bool = False) -> 
                         job["voice"],
                         wav,
                         target,
-                        match if match != "none" else "natural",
+                        match,
                         lang=lang,
                         force_refit=True,
                     )
@@ -413,6 +415,21 @@ def run_dub(project_id: str, *, finalize: bool = True, nested: bool = False) -> 
                     running=True,
                 )
         meta["segments"] = segments
+        # preferVideo: xuất/preview chậm cố định 0.80×
+        if match == "preferVideo":
+            from .export.mux import PREFER_VIDEO_FACTOR, PREFER_VIDEO_SPEED
+
+            meta["videoSlowFactor"] = round(PREFER_VIDEO_FACTOR, 4)
+            for seg in segments:
+                lay = str(seg.get("layout") or "")
+                if "dub" in seg:
+                    want = bool(seg.get("dub"))
+                else:
+                    want = lay not in ("vertical", "label")
+                if want:
+                    seg["videoSpeed"] = PREFER_VIDEO_SPEED
+        elif "videoSlowFactor" in meta:
+            meta.pop("videoSlowFactor", None)
         save_meta(project_id, meta)
         if finalize:
             set_status(project_id, step="dub", progress=100, message="Lồng tiếng xong", running=False)
@@ -484,6 +501,10 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
     ]
     settings = meta.get("settings") or {}
     root = ensure_layout(project_id)
+    match_mode = str(settings.get("matchDuration") or "preferVideo")
+    # preferVideo/none/natural: luôn chậm video toàn cục lúc xuất (không tắt khi có videoSpeed tay)
+    # stretch: khớp TTS theo slot — không chậm video
+    prefer_global_slow = match_mode in ("preferVideo", "none", "natural")
     manual_video_speed = any(
         abs(float(segment.get("videoSpeed") or 1) - 1.0) > 0.001
         for segment in segments
@@ -500,7 +521,8 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
 
     try:
         hint = f"preview {preview_sec}s — " if preview_sec > 0 else ""
-        if manual_video_speed:
+        # preferVideo: chỉ chậm video toàn cục lúc mux — không retime từng đoạn (tránh chậm 2 lần)
+        if manual_video_speed and match_mode not in ("preferVideo", "none"):
             set_status(
                 project_id,
                 step="export",
@@ -590,9 +612,8 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
                 running=True,
             )
             check_cancel(project_id)
-            # Audio không đổi khi burn phụ đề; dùng source video để cache stem
-            # ổn định giữa các lần chỉnh chữ và xuất lại.
-            source_audio = separate_no_vocals(project_id, video)
+            # Stem từ videoPath gốc (không phải clip preview) — cùng cache với xem trước.
+            source_audio = separate_no_vocals(project_id, Path(meta["videoPath"]))
         if has_tts:
             set_status(
                 project_id,
@@ -610,7 +631,8 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
                 original_audio_mode="original" if source_audio else audio_mode,
                 source_audio=source_audio,
                 original_audio_volume=bg_vol,
-                allow_video_slowdown=not manual_video_speed,
+                allow_video_slowdown=prefer_global_slow or not manual_video_speed,
+                match=match_mode,
             )
         elif audio_mode != "auto":
             audio_labels = {

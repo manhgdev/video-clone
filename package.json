@@ -7,8 +7,9 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "server": "cd server && python3 -m uvicorn main:app --reload --port 8787",
-    "start": "npm run server"
+    "server": "cd server && python -m uvicorn main:app --reload --port 8787",
+    "dev:all": "node scripts/dev.mjs",
+    "start": "node scripts/dev.mjs"
   },
   "dependencies": {
     "clsx": "^2.1.1",

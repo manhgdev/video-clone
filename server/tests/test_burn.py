@@ -14,8 +14,8 @@ from pipeline.export.burn import (
     _resolve_segment_font_size,
     _segment_bbox_override,
 )
-from pipeline.export.labels import clamp_label_box, cover_fit_label, layout_label_caption
-from pipeline.export.ocr_locate import _source_matches
+from pipeline.ocr.labels import clamp_label_box, cover_fit_label, layout_label_caption
+from pipeline.ocr.locate import _source_matches
 
 
 def test_cover_box_uses_resolution_aware_horizontal_padding() -> None:

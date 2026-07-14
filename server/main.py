@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 import shutil
 import threading
 import uuid
@@ -37,6 +38,7 @@ from pipeline import (
 )
 from pipeline.core.jobs import arm_job
 from pipeline.core.media import video_size
+from pipeline.export.mux import separate_no_vocals
 
 app = FastAPI(title="Video-Clone Local")
 app.add_middleware(
@@ -54,7 +56,7 @@ class Settings(BaseModel):
     targetLang: str = "vi"
     # google | mymemory | tiktok | ollama | openai | gemini | deepseek | openrouter | grok
     translator: str = "google"
-    matchDuration: str = "natural"
+    matchDuration: str = "preferVideo"
     defaultVoice: str = "cc:BV075_streaming:7102355803792740865"
     coverHardsubs: bool = True
     coverMaskStyle: str = "blur"  # blur | solid | mosaic
@@ -287,6 +289,8 @@ def api_status(project_id: str):
     st = dict(meta.get("status") or {"step": "video", "progress": 0, "message": "", "running": False})
     # UI restore session sau F5 / HMR
     st["duration"] = float(meta.get("duration") or 0)
+    # Độ dài clip lần dịch gần nhất (0 = full) — editor/xuất làm việc trong cửa sổ này
+    st["workClipSec"] = max(0, int(meta.get("previewSec") or 0))
     if meta.get("settings"):
         st["settings"] = meta["settings"]
     if meta.get("outputRel"):
@@ -335,6 +339,22 @@ def api_create_overlay(project_id: str, body: TextOverlayIn):
     meta["overlays"] = overlays
     save_meta(project_id, meta)
     return item
+
+
+@app.put("/api/projects/{project_id}/overlays")
+def api_replace_overlays(project_id: str, body: list[TextOverlayIn]):
+    """Thay cả list overlay (undo/redo)."""
+
+    def apply(meta: dict) -> list[dict]:
+        if not meta:
+            raise HTTPException(404)
+        for item in body:
+            _validate_overlay(item, meta)
+        out = [item.model_dump() for item in body]
+        meta["overlays"] = out
+        return out
+
+    return mutate_meta(project_id, apply)
 
 
 @app.put("/api/projects/{project_id}/overlays/{overlay_id}")
@@ -391,6 +411,29 @@ def api_update_segment(project_id: str, seg_id: str, body: SegmentIn):
     return mutate_meta(project_id, apply)
 
 
+@app.put("/api/projects/{project_id}/segments")
+def api_replace_segments(project_id: str, body: list[SegmentIn]):
+    """Thay cả list segment (split / duplicate / delete từ editor)."""
+
+    def apply(meta: dict) -> list[dict]:
+        if not meta:
+            raise HTTPException(404)
+        for item in body:
+            _validate_segment_editor_fields(item, meta)
+            if not math.isfinite(item.start) or not math.isfinite(item.end) or item.end <= item.start:
+                raise HTTPException(422, "Thời gian segment không hợp lệ")
+        ordered = sorted(body, key=lambda s: (s.start, s.end, s.id))
+        out: list[dict] = []
+        for i, item in enumerate(ordered):
+            dumped = item.model_dump()
+            dumped["index"] = i
+            out.append(dumped)
+        meta["segments"] = out
+        return out
+
+    return mutate_meta(project_id, apply)
+
+
 def _spawn(fn, *args):
     def wrap():
         try:
@@ -406,6 +449,9 @@ def api_run(project_id: str, settings: Settings):
     meta = load_meta(project_id)
     if not meta:
         raise HTTPException(404)
+    # Lưu ngay (giống dub) — tránh mở editor / restore session mất processOriginalAudio
+    meta["settings"] = settings.model_dump()
+    save_meta(project_id, meta)
     arm_job(project_id)
     set_status(project_id, step="asr", progress=1, message="Queued…", running=True, error=None)
     _spawn(run_pipeline, project_id, settings.model_dump())
@@ -631,7 +677,15 @@ def api_retranslate(project_id: str, seg_id: str, body: RetranslateIn):
         raise HTTPException(400, "Thiếu chữ nguồn")
     target = body.targetLang or settings.get("targetLang") or "vi"
     if target in ("none", "off", "source", ""):
-        raise HTTPException(400, "Đang chọn Không dịch")
+        # Giữ nguyên chữ nguồn — không gọi máy dịch
+        tr = source
+        seg["translation"] = tr
+        seg.pop("audioFile", None)
+        seg.pop("audioUrl", None)
+        seg.pop("audioDuration", None)
+        meta["segments"] = segs
+        save_meta(project_id, meta)
+        return {"translation": tr, "segment": seg}
     src_lang = body.sourceLang or settings.get("sourceLang") or "auto"
     eng = body.translator or settings.get("translator") or "google"
     try:
@@ -660,6 +714,33 @@ def api_retranslate(project_id: str, seg_id: str, body: RetranslateIn):
 def api_tts(project_id: str, name: str):
     path = ensure_layout(project_id) / "tts" / name
     if not path.exists():
+        raise HTTPException(404)
+    return FileResponse(path, media_type="audio/wav")
+
+
+@app.post("/api/projects/{project_id}/audio/no-vocals")
+def api_prepare_no_vocals(project_id: str):
+    """Tách stem xóa lời (Demucs) — cache dùng chung preview + export."""
+    meta = load_meta(project_id)
+    if not meta:
+        raise HTTPException(404)
+    video = Path(meta["videoPath"])
+    if not video.is_file():
+        raise HTTPException(404, "Thiếu video nguồn")
+    try:
+        path = separate_no_vocals(project_id, video, report=False)
+    except Exception as e:
+        raise HTTPException(500, str(e)) from e
+    name = path.name
+    return {"audioUrl": f"/api/projects/{project_id}/cache/{name}", "file": name}
+
+
+@app.get("/api/projects/{project_id}/cache/{name}")
+def api_cache_file(project_id: str, name: str):
+    if not re.fullmatch(r"no_vocals_[a-f0-9]+\.wav", name):
+        raise HTTPException(400, "Tên file không hợp lệ")
+    path = ensure_layout(project_id) / "cache" / name
+    if not path.is_file():
         raise HTTPException(404)
     return FileResponse(path, media_type="audio/wav")
 

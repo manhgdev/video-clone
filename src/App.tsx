@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import Header from './components/Header'
 import LivePreviewEditor from './components/LivePreviewEditor'
+import ProgressPopup from './components/ProgressPopup'
 import Sidebar from './components/Sidebar'
 import Stepper from './components/Stepper'
 import SegmentList from './components/SegmentList'
@@ -42,7 +43,7 @@ const defaultSettings: ProjectSettings = {
   sourceLang: 'auto',
   targetLang: 'vi',
   translator: 'google',
-  matchDuration: 'natural',
+  matchDuration: 'preferVideo',
   defaultVoice: 'cc:BV075_streaming:7102355803792740865',
   coverHardsubs: true,
   coverMaskStyle: 'blur',
@@ -99,6 +100,10 @@ function loadSettings(): ProjectSettings {
     if (!okAspect.includes(s.previewAspectRatio as (typeof okAspect)[number])) {
       s.previewAspectRatio = 'original'
     }
+    const okMatch = ['preferVideo', 'none', 'natural', 'stretch'] as const
+    if (!okMatch.includes(s.matchDuration as (typeof okMatch)[number])) {
+      s.matchDuration = 'preferVideo'
+    }
     return s
   } catch {
     return defaultSettings
@@ -153,6 +158,8 @@ export default function App() {
   const [projectId, setProjectId] = useState<string | null>(null)
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
   const [duration, setDuration] = useState(0)
+  /** Độ dài clip làm việc = lần dịch gần nhất (0 = full). Khác settings.previewSec (ô Preview). */
+  const [workClipSec, setWorkClipSec] = useState(0)
   const [segments, setSegments] = useState<Segment[]>([])
   const [overlays, setOverlays] = useState<TextOverlay[]>([])
   const [status, setStatus] = useState<JobStatus>(idleStatus)
@@ -160,6 +167,7 @@ export default function App() {
   const [exportPath, setExportPath] = useState<string | null>(null)
   const [viewExportSrc, setViewExportSrc] = useState<string | null>(null)
   const [previewEditorOpen, setPreviewEditorOpen] = useState(false)
+  const [progressMinimized, setProgressMinimized] = useState(false)
   const pollRef = useRef<number | null>(null)
   const pollInFlight = useRef(false)
   const pollFailStreak = useRef(0)
@@ -167,6 +175,10 @@ export default function App() {
   const pendingExportPath = useRef<string | null>(null)
   /** chặn double-click: Dịch/Xuất rồi dính nút Huỷ vừa hiện */
   const busyAt = useRef(0)
+
+  useEffect(() => {
+    if (status.running) setProgressMinimized(false)
+  }, [status.running])
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', dark)
@@ -219,8 +231,9 @@ export default function App() {
         if (dead) return
         setProjectId(id)
         setVideoUrl(`/api/projects/${id}/video`)
-        const dur = Number((st as JobStatus & { duration?: number }).duration || 0)
+        const dur = Number(st.duration || 0)
         if (dur > 0) setDuration(dur)
+        if (typeof st.workClipSec === 'number') setWorkClipSec(Math.max(0, st.workClipSec))
         const extra = st as JobStatus & { settings?: Partial<ProjectSettings> }
         const mergedVoice =
           (extra.settings && typeof extra.settings === 'object' && extra.settings.defaultVoice) ||
@@ -306,6 +319,7 @@ export default function App() {
           s.progress >= 100 &&
           Boolean(s.outputRel || pendingExportUrl.current)
         setStatus(exportDone && s.error ? { ...s, error: undefined } : s)
+        if (typeof s.workClipSec === 'number') setWorkClipSec(Math.max(0, s.workClipSec))
         if (!s.running) {
           try {
             const segs = await api.segments(projectId)
@@ -379,6 +393,7 @@ export default function App() {
     setExportUrl(null)
     setExportPath(null)
     setSegments([])
+    setWorkClipSec(0)
     setStatus({ step: 'video', progress: 10, message: 'Đang tải video…', running: true })
     try {
       const res = await api.upload(file)
@@ -428,6 +443,7 @@ export default function App() {
   async function onTranslateAll(previewSec = 0) {
     if (!projectId) return
     setExportUrl(null)
+    setWorkClipSec(Math.max(0, previewSec))
     busyAt.current = Date.now()
     setStatus({
       step: 'asr',
@@ -505,19 +521,27 @@ export default function App() {
     setExportPath(null)
     busyAt.current = Date.now()
     // độ dài xuất = lần dịch gần nhất (status đã nói Preview Ns / full), không theo ô số khi đã Dịch cả video
+    const audioHint =
+      settings.processOriginalAudio && settings.originalAudioMode === 'no_vocals'
+        ? ' · xóa lời'
+        : settings.processOriginalAudio && settings.originalAudioMode === 'vocals'
+          ? ' · giữ lời'
+          : settings.processOriginalAudio && settings.originalAudioMode === 'mute'
+            ? ' · tắt âm gốc'
+            : ''
     setStatus({
       step: 'export',
       progress: 0,
       message:
-        settings.coverHardsubs && settings.burnSubs && settings.targetLang !== 'none'
-          ? 'Đang xuất (che chữ cũ + chèn bản dịch)…'
+        (settings.coverHardsubs && settings.burnSubs && settings.targetLang !== 'none'
+          ? 'Đang xuất (che chữ cũ + chèn bản dịch)'
           : settings.burnSubs && settings.targetLang !== 'none'
             ? settings.captionPlacement === 'above'
-              ? 'Đang xuất (chèn bản dịch phía trên)…'
-              : 'Đang xuất (chèn bản dịch phía dưới)…'
+              ? 'Đang xuất (chèn bản dịch phía trên)'
+              : 'Đang xuất (chèn bản dịch phía dưới)'
             : settings.coverHardsubs
-              ? 'Đang xuất (che chữ cũ)…'
-              : 'Đang xuất…',
+              ? 'Đang xuất (che chữ cũ)'
+              : 'Đang xuất') + `${audioHint}…`,
       running: true,
       error: undefined,
     })
@@ -588,6 +612,20 @@ export default function App() {
     }
   }
 
+  async function onSegmentsReplace(next: Segment[]) {
+    const ordered = [...next]
+      .sort((a, b) => a.start - b.start || a.end - b.end)
+      .map((s, i) => ({ ...s, index: i }))
+    setSegments(ordered)
+    if (!projectId) return
+    try {
+      const saved = await api.replaceSegments(projectId, ordered)
+      if (Array.isArray(saved)) setSegments(applyDefaultVoice(asSegmentList(saved), settings.defaultVoice))
+    } catch {
+      /* keep local */
+    }
+  }
+
   useEffect(() => {
     if (!projectId) {
       setOverlays([])
@@ -616,6 +654,17 @@ export default function App() {
     setOverlays((current) => current.filter((item) => item.id !== overlayId))
     try {
       await api.deleteOverlay(projectId, overlayId)
+    } catch {
+      void api.overlays(projectId).then(setOverlays)
+    }
+  }
+
+  async function onOverlaysReplace(next: TextOverlay[]) {
+    setOverlays(next)
+    if (!projectId) return
+    try {
+      const saved = await api.replaceOverlays(projectId, next)
+      if (Array.isArray(saved)) setOverlays(saved)
     } catch {
       void api.overlays(projectId).then(setOverlays)
     }
@@ -693,18 +742,23 @@ export default function App() {
       {editorOpen ? (
         <LivePreviewEditor
           videoUrl={videoUrl}
+          mediaDuration={duration}
+          workClipSec={workClipSec}
           projectId={projectId}
           segments={segments}
           settings={settings}
           voices={voices}
           busy={status.running}
+          onDub={onDub}
           onBack={() => setPreviewEditorOpen(false)}
           onChange={onSegmentChange}
+          onSegmentsReplace={onSegmentsReplace}
           onExport={onExport}
           onSettings={onSettings}
           overlays={overlays}
           onOverlayChange={onOverlayChange}
           onOverlayDelete={onOverlayDelete}
+          onOverlaysReplace={onOverlaysReplace}
         />
       ) : (
       <div
@@ -735,7 +789,13 @@ export default function App() {
           <Stepper
             step={step}
             onDub={onDub}
-            onPreviewEditor={() => setPreviewEditorOpen(true)}
+            onPreviewEditor={() => {
+              // Cài Sidebar = quy tắc đầu vào: ghi server rồi mới mở xem/sửa
+              if (projectId) {
+                void api.saveSettings(projectId, settings).catch(() => { /* ignore */ })
+              }
+              setPreviewEditorOpen(true)
+            }}
             onExport={onExport}
             canDub={segments.length > 0 && !status.running}
             canExport={
@@ -824,6 +884,25 @@ export default function App() {
           </div>
         </div>
       )}
+      <ProgressPopup
+        active={status.running}
+        minimized={progressMinimized}
+        title={
+          status.step === 'dub'
+            ? 'Lồng tiếng'
+            : status.step === 'export'
+              ? 'Xuất video'
+              : status.step === 'translate' || status.step === 'asr'
+                ? 'Dịch / nhận dạng'
+                : 'Đang xử lý'
+        }
+        message={status.message}
+        progress={status.progress}
+        error={status.error}
+        onMinimize={() => setProgressMinimized(true)}
+        onRestore={() => setProgressMinimized(false)}
+        onCancel={status.running ? onCancel : undefined}
+      />
     </div>
   )
 }

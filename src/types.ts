@@ -66,7 +66,7 @@ export type ProjectSettings = {
     | 'deepseek'
     | 'openrouter'
     | 'grok'
-  matchDuration: 'natural' | 'stretch' | 'none'
+  matchDuration: 'natural' | 'stretch' | 'none' | 'preferVideo'
   defaultVoice: string
   /** Che hardsub cũ (blur). Tắt = giữ chữ OCR trên khung */
   coverHardsubs: boolean
@@ -155,4 +155,7 @@ export type JobStatus = {
   error?: string
   outputRel?: string
   outputPath?: string
+  /** Clip lần dịch gần nhất (giây); 0 = full video */
+  workClipSec?: number
+  duration?: number
 }

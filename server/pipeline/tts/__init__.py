@@ -198,8 +198,10 @@ def tts_segment(
             )
 
     dur = ffprobe_duration(out_wav)
-    # Fit slot bằng atempo (đọc hết, nhanh hơn) — không cắt chữ.
-    # natural/stretch: luôn cố fit vào target; max 2× (chuỗi atempo).
+    # preferVideo / none: không ép atempo — để xuất chậm video toàn cục.
+    # natural: chỉ tăng tốc nhẹ (≤1.25×). stretch: khớp đúng slot.
+    if match in ("none", "preferVideo"):
+        return dur
     if match != "none" and target_sec and target_sec > 0.08 and dur > 0.05:
         if match == "stretch":
             fit_sec = target_sec
@@ -207,8 +209,8 @@ def tts_segment(
             if dur <= target_sec * 1.04 and not force_refit:
                 return dur
             fit_sec = target_sec
-        # Cho phép tăng tốc tới 2.0× để nhét hết câu vào slot
-        max_speed = 2.0
+        # natural: trần nhẹ — tránh dịch dài (VI/EN…) đọc gần 2×
+        max_speed = 1.25 if match == "natural" else 2.0
         fit_sec = max(fit_sec, dur / max_speed)
         ratio = dur / fit_sec
         if ratio > 1.02 or (match == "stretch" and abs(ratio - 1.0) > 0.03):

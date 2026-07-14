@@ -109,6 +109,13 @@ export const api = {
       body: JSON.stringify(seg),
     }),
 
+  replaceSegments: (projectId: string, segments: Segment[]) =>
+    fetchJson<Segment[]>(`${base}/projects/${projectId}/segments`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(segments),
+    }),
+
   overlays: (projectId: string) =>
     fetchJson<TextOverlay[]>(`${base}/projects/${projectId}/overlays`, undefined, 10_000),
 
@@ -117,6 +124,13 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(overlay),
+    }),
+
+  replaceOverlays: (projectId: string, overlays: TextOverlay[]) =>
+    fetchJson<TextOverlay[]>(`${base}/projects/${projectId}/overlays`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(overlays),
     }),
 
   updateOverlay: (projectId: string, overlay: TextOverlay) =>
@@ -166,6 +180,14 @@ export const api = {
     fetchJson<{ ok: boolean; path: string }>(
       `${base}/projects/${projectId}/reveal-output`,
       { method: 'POST' },
+    ),
+
+  /** Demucs xóa lời — lần đầu (cài torch) có thể rất lâu; tái dùng cache. */
+  prepareNoVocals: (projectId: string) =>
+    fetchJson<{ audioUrl: string; file: string }>(
+      `${base}/projects/${projectId}/audio/no-vocals`,
+      { method: 'POST' },
+      900_000,
     ),
 
   previewTts: (

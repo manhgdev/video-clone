@@ -199,18 +199,13 @@ export default function Sidebar({
         <Field
           label="Ngôn ngữ dịch"
           icon={<IconGlobe size={14} />}
-          hint={
-            settings.targetLang === 'none'
-              ? 'Giữ nguyên chữ nguồn — không gọi máy dịch.'
-              : undefined
-          }
         >
           <select
             value={settings.targetLang}
             disabled={busy}
             onChange={(e) => set('targetLang', e.target.value)}
           >
-            <option value="none">Không dịch</option>
+            <option value="none">Không dịch (giữ chữ nguồn)</option>
             <option value="vi">Tiếng Việt</option>
             <option value="en">Tiếng Anh</option>
             <option value="zh">Tiếng Trung</option>
@@ -259,13 +254,23 @@ export default function Sidebar({
           <select
             value={settings.matchDuration}
             disabled={busy}
+            title={
+              settings.matchDuration === 'preferVideo'
+                ? 'Chậm video cố định 0.80× toàn bộ — TTS ít bị ép, giảm đè câu'
+                : settings.matchDuration === 'none'
+                  ? 'Giữ TTS nguyên; xuất vẫn có thể chậm video'
+                  : settings.matchDuration === 'stretch'
+                    ? 'Ép TTS đúng khung gốc (nhanh/chậm)'
+                    : 'TTS dài hơn khung → tăng tốc nhẹ (≤1.25×)'
+            }
             onChange={(e) =>
               set('matchDuration', e.target.value as ProjectSettings['matchDuration'])
             }
           >
-            <option value="natural">Tự nhiên, rút gọn</option>
+            <option value="preferVideo">Ưu tiên chậm video 0.80× (dịch dài)</option>
+            <option value="none">Giữ nguyên TTS</option>
+            <option value="natural">Tự nhiên, rút gọn nhẹ</option>
             <option value="stretch">Kéo giãn khớp đoạn</option>
-            <option value="none">Giữ nguyên</option>
           </select>
         </Field>
         <Field label="Giọng mặc định" icon={<IconSpeaker size={14} />}>
