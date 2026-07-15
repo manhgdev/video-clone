@@ -143,6 +143,68 @@
   font-size: 0.78rem !important;
 }
 
+.cfg-device-card {
+  margin: 10px 0 4px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--primary, #5b8def) 10%, var(--surface));
+}
+
+.cfg-device-title {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+  margin-bottom: 8px;
+}
+
+.cfg-device-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 14px;
+}
+
+.cfg-device-grid > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.cfg-device-k {
+  font-size: 0.68rem;
+  color: var(--muted-foreground);
+}
+
+.cfg-device-grid strong {
+  font-size: 0.84rem;
+  font-weight: 650;
+  color: var(--foreground);
+  overflow-wrap: anywhere;
+}
+
+.cfg-device-plan {
+  margin: 10px 0 0;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--foreground);
+}
+
+.cfg-device-hint {
+  margin: 4px 0 0;
+  font-size: 0.72rem;
+  color: var(--muted-foreground);
+}
+
+.cfg-device-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
 .cfg-check-list {
   list-style: none;
   margin: 0;

@@ -2,15 +2,69 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
+import platform
+import re
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
 from ..core.jobs import run_cmd
 from ..core.media import _has_audio_stream, ffprobe_duration, h264_encoder_args
 from ..core.project import ensure_layout, out_final, set_status
+
+
+def _num(v: Any, default: float) -> float:
+    """JSON null / missing → default (seg.get('x', d) vẫn trả None khi key=null)."""
+    if v is None:
+        return float(default)
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def set_stem_progress(
+    project_id: str | None,
+    progress: int,
+    message: str = "",
+    *,
+    running: bool = True,
+) -> None:
+    """Tiến độ tách no_vocals (preview) — file riêng, không đè status xuất."""
+    if not project_id:
+        return
+    root = ensure_layout(project_id)
+    path = root / "cache" / "stem_progress.json"
+    data = {
+        "progress": max(0, min(100, int(progress))),
+        "message": str(message or ""),
+        "running": bool(running),
+        "ts": time.time(),
+    }
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+def read_stem_progress(project_id: str) -> dict[str, Any]:
+    path = ensure_layout(project_id) / "cache" / "stem_progress.json"
+    if not path.is_file():
+        return {"progress": 0, "message": "", "running": False}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return {"progress": 0, "message": "", "running": False}
+        return {
+            "progress": max(0, min(100, int(data.get("progress") or 0))),
+            "message": str(data.get("message") or ""),
+            "running": bool(data.get("running")),
+        }
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return {"progress": 0, "message": "", "running": False}
 
 
 def _wav_rms(path: Path) -> float:
@@ -43,31 +97,235 @@ def _wav_rms(path: Path) -> float:
     return (acc / count) ** 0.5 / 32768.0
 
 
+def _nvidia_smi_ok() -> bool:
+    try:
+        r = subprocess.run(["nvidia-smi"], capture_output=True, timeout=12)
+        return r.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _apple_silicon() -> bool:
+    return sys.platform == "darwin" and platform.machine().lower() in ("arm64", "aarch64")
+
+
+def _demucs_backend_wanted() -> str:
+    """cuda | mlx | cpu — backend tách lời tối ưu theo máy."""
+    if _nvidia_smi_ok():
+        return "cuda"
+    if _apple_silicon():
+        return "mlx"  # demucs-mlx (Metal) — torch MPS thiếu op complex
+    return "cpu"
+
+
+def _torch_device(exe: Path) -> str:
+    """cuda | mps | cpu — probe torch trong venv (không gồm mlx)."""
+    if not exe.is_file():
+        return "cpu"
+    try:
+        r = subprocess.run(
+            [
+                str(exe),
+                "-c",
+                (
+                    "import torch\n"
+                    "if torch.cuda.is_available():\n"
+                    " print('cuda')\n"
+                    "elif getattr(torch.backends, 'mps', None) and torch.backends.mps.is_available():\n"
+                    " print('mps')\n"
+                    "else:\n"
+                    " print('cpu')\n"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+        out = (r.stdout or "").strip().lower()
+        if r.returncode == 0 and out in ("cuda", "mps", "cpu"):
+            return out
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return "cpu"
+
+
+def _has_pkg(exe: Path, import_stmt: str, *, timeout: float = 90) -> bool:
+    if not exe.is_file():
+        return False
+    try:
+        r = subprocess.run(
+            [str(exe), "-c", import_stmt],
+            capture_output=True,
+            timeout=timeout,
+        )
+        return r.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _demucs_accel(exe: Path) -> str:
+    """Backend sẵn có trong venv: mlx | cuda | mps | cpu."""
+    if _apple_silicon() and _has_pkg(exe, "import demucs_mlx"):
+        return "mlx"
+    if _has_pkg(exe, "import demucs, soundfile"):
+        return _torch_device(exe)
+    return "cpu"
+
+
+def _demucs_jobs() -> int:
+    # Demucs -j: song song preprocess; Apple Silicon nhiều lõi → tới 6
+    n = os.cpu_count() or 2
+    cap = 6 if _apple_silicon() else 4
+    return max(1, min(cap, max(2, n // 2)))
+
+
+# cu124: NVIDIA. Mac arm64: pip mặc định (MPS trong torch; tách thì dùng demucs-mlx).
+_TORCH_CUDA_INDEX = "https://download.pytorch.org/whl/cu124"
+_TORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
+
+
+def _pip_install_torch(py: Path, *, accel: str, project_id: str | None) -> None:
+    """accel: cuda | cpu | mac (PyPI macOS arm64 có Metal trong torch)."""
+    pip = [str(py), "-m", "pip"]
+    if accel == "cuda":
+        label = "CUDA"
+        set_stem_progress(project_id, 10, f"Cài PyTorch {label} (có thể vài phút)…")
+        subprocess.run(
+            pip + ["uninstall", "-y", "torch", "torchaudio", "torchvision"],
+            capture_output=True,
+            timeout=300,
+        )
+        cmd = pip + [
+            "install",
+            "--upgrade",
+            "torch",
+            "torchaudio",
+            "--index-url",
+            _TORCH_CUDA_INDEX,
+        ]
+    elif accel == "mac":
+        label = "macOS (Metal)"
+        set_stem_progress(project_id, 10, f"Cài PyTorch {label}…")
+        cmd = pip + ["install", "--upgrade", "torch", "torchaudio"]
+    else:
+        label = "CPU"
+        set_stem_progress(project_id, 10, f"Cài PyTorch {label}…")
+        if sys.platform == "darwin":
+            cmd = pip + ["install", "--upgrade", "torch", "torchaudio"]
+        else:
+            cmd = pip + [
+                "install",
+                "--upgrade",
+                "torch",
+                "torchaudio",
+                "--index-url",
+                _TORCH_CPU_INDEX,
+            ]
+    r_torch = subprocess.run(cmd, capture_output=True, text=True, timeout=2400)
+    if r_torch.returncode != 0:
+        raise RuntimeError(
+            f"Không cài được PyTorch {label} cho Demucs.\n"
+            + ((r_torch.stderr or r_torch.stdout or "")[-800:])
+        )
+
+
+def _pip_install_demucs_mlx(py: Path, project_id: str | None) -> None:
+    pip = [str(py), "-m", "pip"]
+    set_stem_progress(project_id, 12, "Cài demucs-mlx (Apple GPU / Metal)…")
+    r = subprocess.run(
+        pip + ["install", "--upgrade", "demucs-mlx", "soundfile"],
+        capture_output=True,
+        text=True,
+        timeout=1200,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(
+            "Không cài được demucs-mlx.\n" + ((r.stderr or r.stdout or "")[-800:])
+        )
+
+
+def _pip_install_demucs_torch(py: Path, project_id: str | None) -> None:
+    pip = [str(py), "-m", "pip"]
+    set_stem_progress(project_id, 14, "Cài Demucs…")
+    r = subprocess.run(
+        pip + ["install", "--upgrade", "demucs", "soundfile"],
+        capture_output=True,
+        text=True,
+        timeout=900,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(
+            "Không cài được Demucs.\n" + ((r.stderr or r.stdout or "")[-800:])
+        )
+
+
 def _demucs_python(project_id: str | None = None, *, report: bool = True) -> str:
-    """Python có demucs: ưu tiên server/.venv-demucs, cài lần đầu nếu thiếu."""
+    """Python có demucs: Apple Silicon → demucs-mlx; NVIDIA → torch CUDA; khác → CPU."""
     server_root = Path(__file__).resolve().parents[2]
     venv = server_root / ".venv-demucs"
     py = venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+    wanted = _demucs_backend_wanted()
 
-    def _has_demucs(exe: Path) -> bool:
-        if not exe.is_file():
-            return False
-        try:
-            r = subprocess.run(
-                [str(exe), "-c", "import demucs, soundfile"],
-                capture_output=True,
-                timeout=60,
-            )
-            return r.returncode == 0
-        except (OSError, subprocess.SubprocessError):
-            return False
+    def _ready(exe: Path) -> bool:
+        if wanted == "mlx":
+            return _has_pkg(exe, "import demucs_mlx, soundfile")
+        return _has_pkg(exe, "import demucs, soundfile")
 
-    if _has_demucs(py):
+    def _ensure(exe: Path) -> None:
+        if wanted == "mlx":
+            if _ready(exe):
+                return
+            if report and project_id:
+                set_status(
+                    project_id,
+                    step="export",
+                    progress=62,
+                    message="Đang cài demucs-mlx (Apple Silicon GPU)…",
+                    running=True,
+                )
+            set_stem_progress(project_id, 8, "Nâng cấp Demucs → Apple Metal (MLX)…")
+            _pip_install_demucs_mlx(exe, project_id)
+            return
+        if wanted == "cuda":
+            if _ready(exe) and _torch_device(exe) == "cuda":
+                return
+            if report and project_id:
+                set_status(
+                    project_id,
+                    step="export",
+                    progress=62,
+                    message="Đang cài PyTorch CUDA cho tách lời…",
+                    running=True,
+                )
+            set_stem_progress(project_id, 8, "Nâng cấp PyTorch → CUDA…")
+            try:
+                _pip_install_torch(exe, accel="cuda", project_id=project_id)
+            except RuntimeError:
+                set_stem_progress(project_id, 10, "CUDA fail — fallback CPU…")
+                _pip_install_torch(exe, accel="cpu", project_id=project_id)
+            if _torch_device(exe) != "cuda":
+                set_stem_progress(project_id, 10, "Torch CUDA không nhận GPU — fallback CPU…")
+                _pip_install_torch(exe, accel="cpu", project_id=project_id)
+            if not _has_pkg(exe, "import demucs, soundfile"):
+                _pip_install_demucs_torch(exe, project_id)
+            return
+        # CPU (hoặc Intel Mac)
+        if _ready(exe):
+            return
+        _pip_install_torch(
+            exe,
+            accel="mac" if sys.platform == "darwin" else "cpu",
+            project_id=project_id,
+        )
+        _pip_install_demucs_torch(exe, project_id)
+
+    if _ready(py):
+        if wanted == "cuda" and _torch_device(py) != "cuda":
+            _ensure(py)
         return str(py)
 
-    # Fallback: API venv nếu đã có demucs (hiếm)
     cur = Path(sys.executable)
-    if _has_demucs(cur):
+    if _ready(cur) and wanted != "cuda":
         return str(cur)
 
     if report and project_id:
@@ -78,6 +336,7 @@ def _demucs_python(project_id: str | None = None, *, report: bool = True) -> str
             message="Đang cài Demucs (xóa lời AI) — lần đầu có thể mất vài phút…",
             running=True,
         )
+    set_stem_progress(project_id, 4, "Đang cài Demucs / backend GPU (lần đầu)…")
     if not py.is_file():
         subprocess.run(
             [sys.executable, "-m", "venv", str(venv)],
@@ -86,39 +345,241 @@ def _demucs_python(project_id: str | None = None, *, report: bool = True) -> str
             timeout=180,
         )
     pip = [str(py), "-m", "pip"]
+    set_stem_progress(project_id, 6, "Cài pip / wheel…")
     subprocess.run(pip + ["install", "-U", "pip", "wheel"], capture_output=True, timeout=300)
-    # torch CPU — nhẹ hơn CUDA, đủ cho demucs
-    r_torch = subprocess.run(
-        pip
-        + [
-            "install",
-            "torch",
-            "torchaudio",
-            "--index-url",
-            "https://download.pytorch.org/whl/cpu",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=1800,
-    )
-    if r_torch.returncode != 0:
+    _ensure(py)
+    if not _ready(py):
         raise RuntimeError(
-            "Không cài được PyTorch cho Demucs.\n"
-            + ((r_torch.stderr or r_torch.stdout or "")[-800:])
+            "Đã cài Demucs nhưng import vẫn lỗi — kiểm tra server/.venv-demucs"
         )
-    r_dem = subprocess.run(
-        pip + ["install", "demucs", "soundfile"],
-        capture_output=True,
-        text=True,
-        timeout=900,
-    )
-    if r_dem.returncode != 0:
-        raise RuntimeError(
-            "Không cài được Demucs.\n" + ((r_dem.stderr or r_dem.stdout or "")[-800:])
-        )
-    if not _has_demucs(py):
-        raise RuntimeError("Đã pip demucs nhưng import vẫn lỗi — kiểm tra server/.venv-demucs")
+    accel = _demucs_accel(py)
+    set_stem_progress(project_id, 16, f"Đã sẵn sàng Demucs ({accel})")
     return str(py)
+
+
+_PCT_RE = re.compile(r"(\d{1,3})\s*%")
+
+# demucs-mlx API → no_vocals.wav (drums+bass+other). Torch MPS thiếu complex → không dùng.
+_MLX_SEPARATE_PY = r"""
+import sys
+from pathlib import Path
+import numpy as np
+import soundfile as sf
+
+src = Path(sys.argv[1])
+out_root = Path(sys.argv[2])
+from demucs_mlx import Separator
+
+sep = Separator(model="htdemucs", shifts=1, overlap=0.25)
+_origin, stems = sep.separate_audio_file(str(src))
+sr = int(getattr(sep, "sample_rate", None) or getattr(sep, "samplerate", None) or 44100)
+track = out_root / "htdemucs" / src.stem
+track.mkdir(parents=True, exist_ok=True)
+
+def to_sf(audio):
+    a = np.asarray(audio, dtype=np.float32)
+    if a.ndim == 2 and a.shape[0] <= 8 and a.shape[0] < a.shape[-1]:
+        a = a.T
+    return a
+
+for name, audio in stems.items():
+    sf.write(str(track / f"{name}.wav"), to_sf(audio), sr)
+
+parts = [to_sf(stems[k]).astype(np.float64) for k in stems if str(k) != "vocals"]
+if not parts:
+    raise SystemExit("no non-vocal stems")
+mix = parts[0]
+for p in parts[1:]:
+    n = min(mix.shape[0], p.shape[0])
+    mix = mix[:n] + p[:n]
+peak = float(np.max(np.abs(mix))) if mix.size else 1.0
+if peak > 1.0:
+    mix = mix / peak
+sf.write(str(track / "no_vocals.wav"), mix.astype(np.float32), sr)
+print("OK", track)
+"""
+
+
+def _run_demucs_mlx_progress(
+    project_id: str,
+    python: str,
+    source_wav: Path,
+    separated: Path,
+) -> tuple[int, str]:
+    """Apple Silicon: demucs-mlx trên Metal (nhanh hơn torch MPS / CPU)."""
+    set_stem_progress(project_id, 18, "Demucs-MLX (Apple GPU) đang tách…")
+    separated.mkdir(parents=True, exist_ok=True)
+    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    proc = subprocess.Popen(
+        [python, "-c", _MLX_SEPARATE_PY, str(source_wav), str(separated)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        env=env,
+    )
+    assert proc.stdout is not None
+    last_pct = 18
+    lock = threading.Lock()
+    stop_hb = threading.Event()
+    err_chunks: list[str] = []
+
+    def _heartbeat() -> None:
+        nonlocal last_pct
+        while not stop_hb.wait(2.0):
+            with lock:
+                if last_pct < 88:
+                    last_pct = min(88, last_pct + 2)
+                    set_stem_progress(
+                        project_id, last_pct, f"Demucs-MLX (Apple GPU)… {last_pct}%"
+                    )
+
+    hb = threading.Thread(target=_heartbeat, name="stem-mlx-hb", daemon=True)
+    hb.start()
+    try:
+        for line in proc.stdout:
+            err_chunks.append(line)
+            if len(err_chunks) > 60:
+                err_chunks = err_chunks[-30:]
+            if line.strip().startswith("OK"):
+                with lock:
+                    last_pct = 88
+                    set_stem_progress(project_id, 88, "Demucs-MLX xong — ghi stem…")
+        code = proc.wait(timeout=3600)
+    except Exception:
+        proc.kill()
+        raise
+    finally:
+        stop_hb.set()
+        hb.join(timeout=1.0)
+    return code, "".join(err_chunks)[-800:]
+
+
+def _run_demucs_progress(
+    project_id: str,
+    python: str,
+    source_wav: Path,
+    separated: Path,
+) -> tuple[int, str]:
+    """Chạy demucs: mlx (Apple) / cuda / mps / cpu."""
+    accel = _demucs_accel(Path(python))
+    if accel == "mlx":
+        return _run_demucs_mlx_progress(project_id, python, source_wav, separated)
+
+    device = accel if accel in ("cuda", "mps", "cpu") else "cpu"
+    jobs = _demucs_jobs()
+    # CUDA 6GB: segment 6; MPS thử không segment trước
+    segment = "6" if device == "cuda" else None
+    set_stem_progress(
+        project_id,
+        18,
+        f"Demucs đang tách ({device}, -j {jobs})…",
+    )
+
+    def _launch(seg: str | None) -> subprocess.Popen[str]:
+        cmd = [
+            python,
+            "-m",
+            "demucs",
+            "--two-stems",
+            "vocals",
+            "--shifts",
+            "1",
+            "--overlap",
+            "0.25",
+            "-j",
+            str(jobs),
+            "--device",
+            device,
+            "-o",
+            str(separated),
+        ]
+        if seg:
+            cmd.extend(["--segment", seg])
+        cmd.append(str(source_wav))
+        env = {**os.environ, "PYTHONUNBUFFERED": "1", "TQDM_MINITERS": "1"}
+        return subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env=env,
+        )
+
+    def _consume(proc: subprocess.Popen[str]) -> tuple[int, str]:
+        assert proc.stdout is not None
+        last_pct = 18
+        lock = threading.Lock()
+        stop_hb = threading.Event()
+        err_chunks: list[str] = []
+
+        def _heartbeat() -> None:
+            nonlocal last_pct
+            while not stop_hb.wait(2.5):
+                with lock:
+                    if last_pct < 88:
+                        last_pct = min(88, last_pct + 1)
+                        set_stem_progress(
+                            project_id, last_pct, f"Demucs ({device})… {last_pct}%"
+                        )
+
+        hb = threading.Thread(target=_heartbeat, name="stem-hb", daemon=True)
+        hb.start()
+        try:
+            for line in proc.stdout:
+                err_chunks.append(line)
+                if len(err_chunks) > 80:
+                    err_chunks = err_chunks[-40:]
+                m = _PCT_RE.search(line.replace("\r", " "))
+                if not m:
+                    continue
+                raw = max(0, min(100, int(m.group(1))))
+                mapped = 18 + int(raw * 0.70)
+                with lock:
+                    if mapped > last_pct:
+                        last_pct = mapped
+                        set_stem_progress(
+                            project_id, last_pct, f"Demucs ({device})… {last_pct}%"
+                        )
+            code = proc.wait(timeout=3600)
+        except Exception:
+            proc.kill()
+            raise
+        finally:
+            stop_hb.set()
+            hb.join(timeout=1.0)
+        return code, "".join(err_chunks)[-600:]
+
+    proc = _launch(segment)
+    code, err_tail = _consume(proc)
+    # MPS không hỗ trợ → fallback CPU một lần
+    mps_fail = (
+        code != 0
+        and device == "mps"
+        and any(
+            s in err_tail.lower()
+            for s in ("not implemented", "mps", "complex", "backend")
+        )
+    )
+    if mps_fail:
+        set_stem_progress(project_id, 18, "MPS không hỗ trợ model — fallback CPU…")
+        shutil.rmtree(separated, ignore_errors=True)
+        separated.mkdir(parents=True, exist_ok=True)
+        device = "cpu"
+        proc2 = _launch(None)
+        return _consume(proc2)
+    oom = code != 0 and any(
+        s in err_tail.lower()
+        for s in ("out of memory", "cuda out of memory", "cudnn_status")
+    )
+    if oom and device == "cuda" and segment != "4":
+        set_stem_progress(project_id, 18, "GPU thiếu VRAM — thử segment nhỏ hơn…")
+        shutil.rmtree(separated, ignore_errors=True)
+        separated.mkdir(parents=True, exist_ok=True)
+        proc2 = _launch("4")
+        code, err_tail = _consume(proc2)
+    return code, err_tail
 
 
 def separate_no_vocals(
@@ -138,12 +599,15 @@ def separate_no_vocals(
     ).hexdigest()[:12]
     cache = root / "cache" / f"no_vocals_{key}.wav"
     if cache.exists() and cache.stat().st_size > 1024:
+        set_stem_progress(project_id, 100, "Đã có stem xóa lời", running=False)
         return cache
 
+    set_stem_progress(project_id, 2, "Chuẩn bị tách xóa lời…")
     python = _demucs_python(project_id, report=report)
     work = root / "cache" / f"demucs_{key}"
     work.mkdir(parents=True, exist_ok=True)
     source_wav = work / "source.wav"
+    set_stem_progress(project_id, 12, "Trích âm thanh từ video…")
     run_cmd(
         project_id,
         [
@@ -165,18 +629,11 @@ def separate_no_vocals(
                 message="Demucs đang xóa lời (giữ nhạc/SFX)…",
                 running=True,
             )
-        proc = subprocess.run(
-            [
-                python, "-m", "demucs", "--two-stems", "vocals",
-                "--shifts", "1", "--overlap", "0.25", "-j", "1",
-                "-o", str(separated), str(source_wav),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=3600,
+        code, demucs_err = _run_demucs_progress(
+            project_id, python, source_wav, separated
         )
-        if proc.returncode != 0:
-            demucs_err = (proc.stderr or proc.stdout or f"exit {proc.returncode}")[-600:]
+        if code != 0 and not demucs_err:
+            demucs_err = f"exit {code}"
         result = separated / "htdemucs" / source_wav.stem / "no_vocals.wav"
         demucs_ok = result.exists() and result.stat().st_size > 1024
         if not demucs_ok and not demucs_err:
@@ -186,6 +643,7 @@ def separate_no_vocals(
         demucs_err = str(e)[:600]
 
     if demucs_ok and result is not None:
+        set_stem_progress(project_id, 92, "Chỉnh mức âm stem…")
         # Video thoại mono: stem gần im — boost nhẹ, KHÔNG trộn lại gốc.
         src_rms = max(_wav_rms(source_wav), 1e-6)
         stem_rms = _wav_rms(result)
@@ -206,6 +664,7 @@ def separate_no_vocals(
                 "-c:a", "pcm_s16le", str(cache),
             ],
         )
+        set_stem_progress(project_id, 100, "Xong xóa lời", running=False)
     else:
         # Demucs thất bại: nền im — stereotools cũ để lại lời → lệch setting «Xóa lời».
         if report and project_id:
@@ -221,6 +680,12 @@ def separate_no_vocals(
                 ),
                 running=True,
             )
+        set_stem_progress(
+            project_id,
+            0,
+            f"Lỗi tách: {(demucs_err or 'không rõ')[:120]}",
+            running=False,
+        )
         dur = max(0.1, ffprobe_duration(source_wav) or ffprobe_duration(video) or 1.0)
         run_cmd(
             project_id,
@@ -367,7 +832,16 @@ def _tts_clip_plan(
             slot0 = max(0.15, next_start - start - gap)
         else:
             slot0 = max(0.15, (ad if ad > 0.05 else end - start) + 0.12)
-        raw.append((wav, start, slot0, ad, max(0.0, min(2.0, float(seg.get("ttsVolume", 100)) / 100)), max(0.75, min(1.5, float(seg.get("ttsSpeed", 1))))))
+        raw.append(
+            (
+                wav,
+                start,
+                slot0,
+                ad,
+                max(0.0, min(2.0, _num(seg.get("ttsVolume"), 100) / 100)),
+                max(0.75, min(1.5, _num(seg.get("ttsSpeed"), 1))),
+            )
+        )
 
     if not raw:
         return [], (fixed_factor if fixed_factor is not None else 1.0)

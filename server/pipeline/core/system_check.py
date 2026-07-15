@@ -116,6 +116,102 @@ def install_ocr_cuda() -> dict[str, Any]:
     return {"ok": True, "message": "Đã cài GPU tăng tốc", "detail": detail}
 
 
+def _demucs_venv_python() -> Path | None:
+    server_root = Path(__file__).resolve().parents[2]
+    py = server_root / ".venv-demucs" / (
+        "Scripts/python.exe" if sys.platform == "win32" else "bin/python"
+    )
+    return py if py.is_file() else None
+
+
+def _apple_silicon() -> bool:
+    return sys.platform == "darwin" and platform.machine().lower() in ("arm64", "aarch64")
+
+
+def _demucs_check() -> tuple[bool, str]:
+    """Demucs sẵn sàng.
+
+    - Apple Silicon → demucs-mlx (Metal)
+    - NVIDIA → torch CUDA
+    - Không GPU → torch CPU cũng ok
+    """
+    want_cuda = bool(_which("nvidia-smi"))
+    want_mlx = _apple_silicon()
+    py = _demucs_venv_python()
+    if not py:
+        return False, "chưa có server/.venv-demucs (bấm Cài đặt)"
+
+    if want_mlx:
+        try:
+            r = subprocess.run(
+                [
+                    str(py),
+                    "-c",
+                    (
+                        "import demucs_mlx, soundfile; "
+                        "import importlib.metadata as m; "
+                        "print(m.version('demucs-mlx'))"
+                    ),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=90,
+            )
+        except (OSError, subprocess.SubprocessError) as e:
+            return False, str(e)[:160]
+        if r.returncode != 0:
+            err = (r.stderr or r.stdout or "import fail").strip()[-160:]
+            return False, err or "chưa có demucs-mlx (Apple GPU)"
+        ver = (r.stdout or "").strip() or "?"
+        return True, f"mlx · Apple Silicon · demucs-mlx {ver}"
+
+    try:
+        r = subprocess.run(
+            [
+                str(py),
+                "-c",
+                (
+                    "import demucs, soundfile, torch; "
+                    "d=('cuda' if torch.cuda.is_available() else "
+                    "('mps' if getattr(torch.backends,'mps',None) and torch.backends.mps.is_available() else 'cpu')); "
+                    "n=(torch.cuda.get_device_name(0) if d=='cuda' else ('Apple GPU' if d=='mps' else 'CPU')); "
+                    "print(f'{d}|{n}|{torch.__version__}')"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        return False, str(e)[:160]
+    if r.returncode != 0:
+        err = (r.stderr or r.stdout or "import fail").strip()[-160:]
+        return False, err or "import demucs/torch thất bại"
+    parts = (r.stdout or "").strip().split("|")
+    device = parts[0] if parts else "?"
+    name = parts[1] if len(parts) > 1 else "?"
+    ver = parts[2] if len(parts) > 2 else "?"
+    detail = f"{device} · {name} · torch {ver}"
+    if want_cuda and device != "cuda":
+        return False, f"đang CPU (chậm) — {detail}"
+    return True, detail
+
+
+def install_demucs_cuda() -> dict[str, Any]:
+    """Cài Demucs tối ưu: NVIDIA CUDA / Apple demucs-mlx / CPU."""
+    ok, detail = _demucs_check()
+    if ok:
+        return {"ok": True, "message": "Demucs đã sẵn sàng", "detail": detail}
+    from pipeline.export.mux import _demucs_python
+
+    py = Path(_demucs_python(None, report=False))
+    ok, detail = _demucs_check()
+    if not ok:
+        raise RuntimeError(f"Demucs chưa sẵn sàng sau khi cài: {detail} · python={py}")
+    label = "Apple GPU" if _apple_silicon() else ("NVIDIA GPU" if _which("nvidia-smi") else "CPU")
+    return {"ok": True, "message": f"Đã cài Demucs ({label})", "detail": detail}
+
+
 def _item(
     *,
     id: str,
@@ -125,6 +221,7 @@ def _item(
     detail: str,
     hint: str,
     install: str = "",
+    installLabel: str = "",
 ) -> dict[str, Any]:
     return {
         "id": id,
@@ -134,17 +231,63 @@ def _item(
         "detail": detail,
         "hint": hint,
         "install": install,
+        "installLabel": installLabel,
     }
+
+
+def _plan_item(plan: dict[str, Any], item_id: str) -> dict[str, Any]:
+    items = plan.get("items") if isinstance(plan.get("items"), dict) else {}
+    raw = items.get(item_id) if isinstance(items, dict) else None
+    return raw if isinstance(raw, dict) else {}
+
+
+def _install_from_plan(plan: dict[str, Any], item_id: str) -> tuple[str, str, str]:
+    """Trả (install_value, install_label, hint) theo thiết bị."""
+    p = _plan_item(plan, item_id)
+    kind = str(p.get("kind") or "")
+    value = str(p.get("value") or "")
+    label = str(p.get("label") or "")
+    hint = str(p.get("hint") or "")
+    if kind == "none" or not value:
+        return "", label, hint
+    if kind == "action" and not p.get("relevant", True):
+        return "", label, hint
+    return value, label, hint
 
 
 def system_checks() -> dict[str, Any]:
     """Danh sách dependency + ready/missing cho first-run UI."""
+    from .media import detect_device
+
     items: list[dict[str, Any]] = []
     system = platform.system()
     machine = platform.machine()
+    device = detect_device()
+    plan = device.get("install") or {}
 
-    # Python (process đang chạy API)
+    # ── Thiết bị (luôn hiện đầu) — quyết định path cài ──
+    gpu_line = device.get("gpuName") or "không có GPU tăng tốc"
+    if device.get("vramMb"):
+        gpu_line = f"{gpu_line} · {device['vramMb']} MB"
+    if device.get("driver"):
+        gpu_line = f"{gpu_line} · driver {device['driver']}"
+    items.append(
+        _item(
+            id="device",
+            name=f"Thiết bị · {device.get('osLabel')}",
+            ok=True,
+            required=True,
+            detail=(
+                f"{device.get('osLabel')} · {device.get('arch')} · "
+                f"GPU: {gpu_line} · accel={device.get('accel')}"
+            ),
+            hint=str(plan.get("hint") or ""),
+        )
+    )
+
+    # Python
     py_ok = sys.version_info >= (3, 10)
+    py_inst, py_lab, py_hint = _install_from_plan(plan, "python")
     items.append(
         _item(
             id="python",
@@ -152,13 +295,15 @@ def system_checks() -> dict[str, Any]:
             ok=py_ok,
             required=True,
             detail=f"{sys.executable} · {platform.python_version()}",
-            hint="Cần Python ≥ 3.10 cho backend FastAPI.",
-            install="https://www.python.org/downloads/",
+            hint=py_hint or "Cần Python ≥ 3.10 cho backend FastAPI.",
+            install=py_inst,
+            installLabel=py_lab,
         )
     )
 
     # ffmpeg / ffprobe
     ff = _which("ffmpeg")
+    ff_inst, ff_lab, ff_hint = _install_from_plan(plan, "ffmpeg")
     items.append(
         _item(
             id="ffmpeg",
@@ -166,15 +311,13 @@ def system_checks() -> dict[str, Any]:
             ok=bool(ff),
             required=True,
             detail=_run_ver(["ffmpeg", "-version"]) if ff else "không có trên PATH",
-            hint="Bắt buộc để cắt audio, cover/burn, mux xuất video.",
-            install=(
-                "https://ffmpeg.org/download.html"
-                if system != "Darwin"
-                else "brew install ffmpeg"
-            ),
+            hint=ff_hint or "Bắt buộc để cắt audio, cover/burn, mux xuất video.",
+            install=ff_inst,
+            installLabel=ff_lab,
         )
     )
     fp = _which("ffprobe")
+    fp_inst, fp_lab, fp_hint = _install_from_plan(plan, "ffprobe")
     items.append(
         _item(
             id="ffprobe",
@@ -182,54 +325,22 @@ def system_checks() -> dict[str, Any]:
             ok=bool(fp),
             required=True,
             detail=_run_ver(["ffprobe", "-version"]) if fp else "không có trên PATH",
-            hint="Thường đi kèm ffmpeg (cùng package).",
-            install=(
-                "https://ffmpeg.org/download.html"
-                if system != "Darwin"
-                else "brew install ffmpeg"
-            ),
+            hint=fp_hint or "Thường đi kèm ffmpeg (cùng package).",
+            install=fp_inst,
+            installLabel=fp_lab,
         )
     )
 
-    # Python packages (server)
-    for mid, title, req, hint, install in (
-        (
-            "faster_whisper",
-            "faster-whisper",
-            True,
-            "ASR giọng nói (engine Whisper).",
-            "pip install faster-whisper",
-        ),
-        (
-            "rapidocr_onnxruntime",
-            "RapidOCR",
-            True,
-            "OCR hardsub / nhãn trên khung.",
-            "pip install rapidocr-onnxruntime",
-        ),
-        (
-            "httpx",
-            "httpx",
-            True,
-            "Gọi API dịch / TTS cloud.",
-            "pip install httpx",
-        ),
-        (
-            "PIL",
-            "Pillow",
-            True,
-            "Vẽ caption khi burn (thường đi kèm RapidOCR).",
-            "pip install pillow",
-        ),
-        (
-            "cv2",
-            "OpenCV",
-            False,
-            "Xử lý khung OCR (thường đi kèm RapidOCR).",
-            "pip install opencv-python-headless",
-        ),
+    # Python packages
+    for mid, title, req in (
+        ("faster_whisper", "faster-whisper", True),
+        ("rapidocr_onnxruntime", "RapidOCR", True),
+        ("httpx", "httpx", True),
+        ("PIL", "Pillow", True),
+        ("cv2", "OpenCV", False),
     ):
         ok, detail = _mod_ok(mid)
+        inst, lab, hint = _install_from_plan(plan, mid)
         items.append(
             _item(
                 id=mid,
@@ -238,52 +349,85 @@ def system_checks() -> dict[str, Any]:
                 required=req,
                 detail=detail,
                 hint=hint,
-                install=install,
+                install=inst,
+                installLabel=lab,
             )
         )
 
+    # OCR CUDA — chỉ relevant trên NVIDIA
     cuda_ok, cuda_detail = _ocr_cuda_check()
+    ocr_inst, ocr_lab, ocr_hint = _install_from_plan(plan, "ocr_cuda")
+    nvidia = device.get("gpuKind") == "nvidia"
     items.append(
         _item(
             id="ocr_cuda",
-            name="GPU tăng tốc AI",
-            ok=cuda_ok,
+            name="GPU tăng tốc OCR / Whisper",
+            ok=cuda_ok if nvidia else True,
             required=False,
-            detail=cuda_detail,
-            hint="Dùng NVIDIA CUDA cho OCR và Whisper; ffmpeg tự bật NVENC nếu hỗ trợ.",
-            install="ocr_cuda" if _which("nvidia-smi") else "",
+            detail=(
+                cuda_detail
+                if nvidia
+                else (
+                    "Apple Silicon — không dùng CUDA"
+                    if device.get("gpuKind") == "apple"
+                    else "Không có NVIDIA — OCR chạy CPU"
+                )
+            ),
+            hint=ocr_hint,
+            install=ocr_inst,
+            installLabel=ocr_lab,
         )
     )
 
-    # TTS hệ thống
+    # Demucs
+    demucs_ok, demucs_detail = _demucs_check()
+    dem_inst, dem_lab, dem_hint = _install_from_plan(plan, "demucs")
+    items.append(
+        _item(
+            id="demucs",
+            name="Demucs (xóa lời)",
+            ok=demucs_ok,
+            required=False,
+            detail=demucs_detail,
+            hint=dem_hint,
+            install=dem_inst,
+            installLabel=dem_lab,
+        )
+    )
+
+    # TTS hệ thống — theo OS trong plan
     if system == "Darwin":
         say = _which("say")
+        t_inst, t_lab, t_hint = _install_from_plan(plan, "say")
         items.append(
             _item(
                 id="say",
-                name="macOS say",
+                name=str(_plan_item(plan, "say").get("name") or "macOS say"),
                 ok=bool(say),
                 required=False,
                 detail=say or "không có",
-                hint="TTS hệ thống khi không dùng CapCut/ElevenLabs.",
-                install="",
+                hint=t_hint,
+                install=t_inst,
+                installLabel=t_lab,
             )
         )
     else:
         esp = _which("espeak-ng") or _which("espeak")
+        t_inst, t_lab, t_hint = _install_from_plan(plan, "espeak")
         items.append(
             _item(
                 id="espeak",
-                name="espeak-ng",
+                name=str(_plan_item(plan, "espeak").get("name") or "espeak-ng"),
                 ok=bool(esp),
                 required=False,
                 detail=esp or "không có",
-                hint="TTS hệ thống Linux (tuỳ chọn).",
-                install="sudo apt install espeak-ng",
+                hint=t_hint,
+                install=t_inst,
+                installLabel=t_lab,
             )
         )
 
-    # Ollama (tuỳ chọn)
+    # Ollama
     ol = _which("ollama")
     ol_ok = False
     ol_detail = "chưa cài"
@@ -300,8 +444,9 @@ def system_checks() -> dict[str, Any]:
             else:
                 ol_detail = f"{ol_detail} · server HTTP {r.status_code}"
         except Exception:
-            ol_ok = True  # binary có; server có thể chưa bật
+            ol_ok = True
             ol_detail = f"{ol_detail} · binary OK (chưa ping được server)"
+    ol_inst, ol_lab, ol_hint = _install_from_plan(plan, "ollama")
     items.append(
         _item(
             id="ollama",
@@ -309,13 +454,15 @@ def system_checks() -> dict[str, Any]:
             ok=ol_ok,
             required=False,
             detail=ol_detail,
-            hint="Dịch local (translator = ollama). Không bắt buộc nếu dùng Google/TikTok.",
-            install="https://ollama.com/download",
+            hint=ol_hint or "Dịch local (translator = ollama).",
+            install=ol_inst,
+            installLabel=ol_lab,
         )
     )
 
-    # Node (chỉ dev frontend — API không cần khi đã build static)
+    # Node
     node = _which("node")
+    nd_inst, nd_lab, nd_hint = _install_from_plan(plan, "node")
     items.append(
         _item(
             id="node",
@@ -323,8 +470,9 @@ def system_checks() -> dict[str, Any]:
             ok=bool(node),
             required=False,
             detail=_run_ver(["node", "-v"]) if node else "không có (chỉ cần khi dev UI)",
-            hint="Chỉ cần khi chạy `npm run dev`. Bản packaged dùng UI build sẵn.",
-            install="https://nodejs.org/",
+            hint=nd_hint,
+            install=nd_inst,
+            installLabel=nd_lab,
         )
     )
 
@@ -339,6 +487,7 @@ def system_checks() -> dict[str, Any]:
     except Exception as e:
         data_ok = False
         data_detail = str(e)
+    _, _, data_hint = _install_from_plan(plan, "data")
     items.append(
         _item(
             id="data",
@@ -346,8 +495,7 @@ def system_checks() -> dict[str, Any]:
             ok=data_ok,
             required=True,
             detail=data_detail,
-            hint="Lưu project, cache OCR, TTS, file xuất.",
-            install="",
+            hint=data_hint or "Lưu project, cache OCR, TTS, file xuất.",
         )
     )
 
@@ -357,6 +505,7 @@ def system_checks() -> dict[str, Any]:
         "ok": len(required_missing) == 0,
         "platform": f"{system} {machine}",
         "python": platform.python_version(),
+        "device": device,
         "items": items,
         "requiredMissing": [i["id"] for i in required_missing],
         "optionalMissing": [i["id"] for i in optional_missing],

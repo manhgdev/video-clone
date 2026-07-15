@@ -5,6 +5,7 @@ import platform
 import hashlib
 import json
 import subprocess
+import sys
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -42,23 +43,275 @@ def h264_encoder_args(*, fast: bool = False) -> list[str]:
         "-crf", "18", "-pix_fmt", "yuv420p",
     ]
 
-def hardware() -> dict[str, str]:
-    machine = platform.machine()
+def detect_device() -> dict[str, Any]:
+    """Probe OS + GPU cho Thiết lập / cài đặt đúng backend.
+
+    Trả về đủ để UI quyết định: Windows/macOS/Linux, có GPU không, GPU gì,
+    và gói nên cài (OCR CUDA / Demucs CUDA / demucs-mlx).
+    """
     system = platform.system()
+    machine = platform.machine()
     if system == "Darwin":
-        return {"label": f"Metal ({machine})", "accel": "metal"}
-    try:
-        out = subprocess.check_output(
-            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-            text=True,
-            stderr=subprocess.DEVNULL,
-            timeout=2,
-        ).strip()
-        if out:
-            return {"label": f"CUDA ({out.splitlines()[0]})", "accel": "cuda"}
-    except (FileNotFoundError, subprocess.SubprocessError):
-        pass
-    return {"label": f"CPU ({machine})", "accel": "cpu"}
+        os_id, os_label = "macos", "macOS"
+    elif system == "Windows":
+        os_id, os_label = "windows", "Windows"
+    elif system == "Linux":
+        os_id, os_label = "linux", "Linux"
+    else:
+        os_id, os_label = "unknown", system or "Unknown"
+
+    arch = machine or "?"
+    apple_silicon = system == "Darwin" and machine.lower() in ("arm64", "aarch64")
+
+    gpu_kind = "none"
+    gpu_name = ""
+    vram_mb: int | None = None
+    driver = ""
+    accel = "cpu"
+
+    if apple_silicon:
+        gpu_kind = "apple"
+        accel = "metal"
+        chip = ""
+        try:
+            chip = subprocess.check_output(
+                ["sysctl", "-n", "machdep.cpu.brand_string"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+            ).strip()
+        except (FileNotFoundError, subprocess.SubprocessError, OSError):
+            pass
+        gpu_name = chip or f"Apple Silicon ({machine})"
+    else:
+        try:
+            out = subprocess.check_output(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=name,memory.total,driver_version",
+                    "--format=csv,noheader,nounits",
+                ],
+                text=True,
+                stderr=subprocess.DEVNULL,
+                timeout=3,
+            ).strip()
+            if out:
+                line = out.splitlines()[0]
+                parts = [p.strip() for p in line.split(",")]
+                gpu_kind = "nvidia"
+                accel = "cuda"
+                gpu_name = parts[0] if parts else "NVIDIA GPU"
+                if len(parts) > 1:
+                    try:
+                        vram_mb = int(float(parts[1]))
+                    except ValueError:
+                        vram_mb = None
+                if len(parts) > 2:
+                    driver = parts[2]
+        except (FileNotFoundError, subprocess.SubprocessError, OSError):
+            pass
+
+    if gpu_kind == "nvidia":
+        demucs_label = "Cài Demucs CUDA"
+        demucs_backend = "cuda"
+        ocr_action = "ocr_cuda"
+        ocr_label = "Cài OCR CUDA"
+        install_summary = f"{os_label} + {gpu_name} -> OCR CUDA + Demucs CUDA"
+        install_hint = "Máy có NVIDIA — nên cài GPU tăng tốc OCR và Demucs CUDA."
+    elif gpu_kind == "apple":
+        demucs_label = "Cài Demucs (Apple Metal)"
+        demucs_backend = "mlx"
+        ocr_action = ""
+        ocr_label = ""
+        install_summary = f"{os_label} Apple Silicon ({gpu_name}) -> Demucs-MLX (Metal)"
+        install_hint = "Mac Apple Silicon — OCR chạy CPU/ANE; tách lời dùng demucs-mlx (Metal)."
+    else:
+        demucs_label = "Cài Demucs (CPU)"
+        demucs_backend = "cpu"
+        ocr_action = ""
+        ocr_label = ""
+        install_summary = f"{os_label} · CPU ({arch}) — không phát hiện GPU tăng tốc"
+        install_hint = "Không thấy NVIDIA/Apple GPU — Demucs chạy CPU (chậm hơn)."
+
+    # ── Kế hoạch cài TẤT CẢ mục Thiết lập theo OS/GPU ──
+    if os_id == "macos":
+        py_link = "https://www.python.org/downloads/macos/"
+        ff_cmd = "brew install ffmpeg"
+        ff_link = ""
+        ff_label = "Cài ffmpeg (brew)"
+        ollama_link = "https://ollama.com/download/mac"
+        node_link = "https://nodejs.org/en/download"
+        tts_id, tts_name, tts_hint = "say", "macOS say", "TTS hệ thống macOS (có sẵn)."
+        tts_install, tts_label = "", ""
+    elif os_id == "windows":
+        py_link = "https://www.python.org/downloads/windows/"
+        ff_cmd = ""
+        ff_link = "https://www.gyan.dev/ffmpeg/builds/"
+        ff_label = "Tải ffmpeg (Windows)"
+        ollama_link = "https://ollama.com/download/windows"
+        node_link = "https://nodejs.org/en/download"
+        tts_id, tts_name = "espeak", "espeak-ng"
+        tts_hint = "TTS hệ thống Windows/Linux (tuỳ chọn)."
+        tts_install = "https://github.com/espeak-ng/espeak-ng/releases"
+        tts_label = "Tải espeak-ng"
+    else:  # linux / unknown
+        py_link = "https://www.python.org/downloads/"
+        ff_cmd = "sudo apt install ffmpeg"
+        ff_link = ""
+        ff_label = "Cài ffmpeg (apt)"
+        ollama_link = "https://ollama.com/download/linux"
+        node_link = "https://nodejs.org/en/download"
+        tts_id, tts_name = "espeak", "espeak-ng"
+        tts_hint = "TTS hệ thống Linux: sudo apt install espeak-ng"
+        tts_install = "sudo apt install espeak-ng"
+        tts_label = "Cài espeak-ng"
+
+    pip = f'"{sys.executable}" -m pip install' if os_id == "windows" else f"{sys.executable} -m pip install"
+
+    items_plan: dict[str, dict[str, Any]] = {
+        "python": {
+            "kind": "url",
+            "value": py_link,
+            "label": f"Tải Python ({os_label})",
+            "hint": f"Cần Python ≥ 3.10 trên {os_label}.",
+        },
+        "ffmpeg": {
+            "kind": "cmd" if ff_cmd else "url",
+            "value": ff_cmd or ff_link,
+            "label": ff_label,
+            "hint": "Bắt buộc cắt audio / burn / mux.",
+        },
+        "ffprobe": {
+            "kind": "cmd" if ff_cmd else "url",
+            "value": ff_cmd or ff_link,
+            "label": ff_label,
+            "hint": "Thường đi kèm ffmpeg.",
+        },
+        "faster_whisper": {
+            "kind": "cmd",
+            "value": f"{pip} faster-whisper",
+            "label": "Cài faster-whisper",
+            "hint": "ASR giọng nói (Whisper).",
+        },
+        "rapidocr_onnxruntime": {
+            "kind": "cmd",
+            "value": f"{pip} rapidocr-onnxruntime",
+            "label": "Cài RapidOCR",
+            "hint": "OCR hardsub / nhãn trên khung.",
+        },
+        "httpx": {
+            "kind": "cmd",
+            "value": f"{pip} httpx",
+            "label": "Cài httpx",
+            "hint": "Gọi API dịch / TTS cloud.",
+        },
+        "PIL": {
+            "kind": "cmd",
+            "value": f"{pip} pillow",
+            "label": "Cài Pillow",
+            "hint": "Vẽ caption khi burn.",
+        },
+        "cv2": {
+            "kind": "cmd",
+            "value": f"{pip} opencv-python-headless",
+            "label": "Cài OpenCV",
+            "hint": "Xử lý khung OCR.",
+        },
+        "ocr_cuda": {
+            "kind": "action",
+            "value": ocr_action,
+            "label": ocr_label or "OCR CUDA (không cần)",
+            "hint": (
+                "ONNX Runtime CUDA — chỉ NVIDIA."
+                if gpu_kind == "nvidia"
+                else "Máy này không dùng OCR CUDA."
+            ),
+            "relevant": gpu_kind == "nvidia",
+        },
+        "demucs": {
+            "kind": "action",
+            "value": "demucs_cuda",
+            "label": demucs_label,
+            "hint": install_hint,
+            "relevant": True,
+            "backend": demucs_backend,
+        },
+        tts_id: {
+            "kind": "url" if (tts_install or "").startswith("http") else ("cmd" if tts_install else "none"),
+            "value": tts_install,
+            "label": tts_label or tts_name,
+            "hint": tts_hint,
+            "relevant": True,
+            "name": tts_name,
+        },
+        "ollama": {
+            "kind": "url",
+            "value": ollama_link,
+            "label": f"Tải Ollama ({os_label})",
+            "hint": "Dịch local (tuỳ chọn).",
+        },
+        "node": {
+            "kind": "url",
+            "value": node_link,
+            "label": f"Tải Node.js ({os_label})",
+            "hint": "Chỉ cần khi dev UI (npm run dev).",
+        },
+        "data": {
+            "kind": "none",
+            "value": "",
+            "label": "",
+            "hint": "Thư mục lưu project / cache / xuất.",
+        },
+    }
+
+    actions = []
+    if ocr_action:
+        actions.append({"id": ocr_action, "label": ocr_label})
+    actions.append({"id": "demucs_cuda", "label": demucs_label})
+
+    vram_txt = f"{vram_mb} MB" if vram_mb else ""
+    label_bits = [os_label, arch]
+    if gpu_name:
+        label_bits.append(gpu_name)
+    if vram_txt:
+        label_bits.append(vram_txt)
+    label = " · ".join(label_bits)
+
+    return {
+        "os": os_id,
+        "osLabel": os_label,
+        "arch": arch,
+        "appleSilicon": apple_silicon,
+        "gpuKind": gpu_kind,
+        "gpuName": gpu_name,
+        "vramMb": vram_mb,
+        "driver": driver,
+        "accel": accel,
+        "label": label,
+        "hasGpu": gpu_kind in ("nvidia", "apple"),
+        "install": {
+            "ocr": ocr_action,
+            "ocrLabel": ocr_label,
+            "demucs": "demucs_cuda",
+            "demucsLabel": demucs_label,
+            "demucsBackend": demucs_backend,
+            "summary": install_summary,
+            "hint": install_hint,
+            "actions": actions,
+            "items": items_plan,
+        },
+    }
+
+
+def hardware() -> dict[str, str]:
+    d = detect_device()
+    return {
+        "label": d["label"],
+        "accel": str(d["accel"]),
+        "os": str(d["os"]),
+        "gpuKind": str(d["gpuKind"]),
+        "gpuName": str(d.get("gpuName") or ""),
+    }
 
 
 def ffprobe_duration(path: Path) -> float:
@@ -196,10 +449,20 @@ def retime_video_segments(
 def ensure_preview_clip(
     source: Path, dest: Path, sec: float, project_id: str | None = None
 ) -> Path:
-    """Cắt N giây đầu để thử nhanh; cache theo dest path."""
+    """Cắt N giây đầu để thử nhanh; cache theo dest path.
+
+    Ghi *.tmp.mp4 rồi rename — tránh Range vào file đang ghi (416).
+    Không dùng .mp4.tmp: ffmpeg/nvenc không nhận extension → exit -22.
+    """
     if dest.exists() and dest.stat().st_mtime >= source.stat().st_mtime:
         return dest
     dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(f"{dest.stem}.tmp{dest.suffix}")  # preview_10.tmp.mp4
+    try:
+        if tmp.exists():
+            tmp.unlink()
+    except OSError:
+        pass
     # ponytail: -c copy nhanh; lỗi codec thì re-encode
     try:
         run_cmd(
@@ -215,7 +478,7 @@ def ensure_preview_clip(
                 str(source),
                 "-c",
                 "copy",
-                str(dest),
+                str(tmp),
             ],
         )
     except Exception:
@@ -233,10 +496,125 @@ def ensure_preview_clip(
                 *h264_encoder_args(fast=True),
                 "-c:a",
                 "aac",
-                str(dest),
+                str(tmp),
             ],
         )
+    tmp.replace(dest)
     return dest
+
+
+def ensure_playback_speed(
+    source: Path,
+    dest: Path,
+    speed: float = 0.80,
+    project_id: str | None = None,
+    *,
+    force: bool = False,
+) -> Path:
+    """Bake tốc độ phát vào file (preferVideo 0.80×) — chạy TRƯỚC ASR/OCR.
+
+    speed < 1 = chậm hơn (dài hơn): setpts *= 1/speed, atempo = speed.
+    """
+    speed = max(0.5, min(2.0, float(speed)))
+    if abs(speed - 1.0) < 0.001:
+        return source
+    if (
+        not force
+        and dest.exists()
+        and dest.stat().st_mtime >= source.stat().st_mtime
+        and dest.stat().st_size > 1024
+    ):
+        return dest
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(f"{dest.stem}.tmp{dest.suffix}")
+    try:
+        if tmp.exists():
+            tmp.unlink()
+    except OSError:
+        pass
+    pts = 1.0 / speed
+    has_a = _has_audio_stream(source)
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(source),
+        "-filter:v",
+        f"setpts={pts:.6f}*PTS",
+        *h264_encoder_args(fast=True),
+        "-map_metadata",
+        "-1",
+        "-map_chapters",
+        "-1",
+    ]
+    if has_a:
+        # atempo chỉ 0.5–2.0 — speed 0.80 ok 1 bước
+        cmd += ["-filter:a", f"atempo={speed:.6f}", "-c:a", "aac", "-b:a", "192k"]
+    else:
+        cmd += ["-an"]
+    cmd.append(str(tmp))
+    run_cmd(project_id, cmd)
+    tmp.replace(dest)
+    return dest
+
+
+def clamp_playback_speed(speed: float) -> float:
+    return max(0.5, min(2.0, float(speed)))
+
+
+def meta_baked_speed(meta: dict) -> float:
+    """Tốc độ đã bake vào workVideo (1.0 = file gốc 1×)."""
+    if meta.get("bakedSpeed") is not None:
+        return clamp_playback_speed(float(meta["bakedSpeed"]))
+    if meta.get("bakedPreferVideo"):
+        return 0.80
+    return 1.0
+
+
+def speed_cache_tag(speed: float) -> str:
+    return f"s{int(round(clamp_playback_speed(speed) * 100)):03d}"
+
+
+def scale_time_fields(obj: dict, scale: float, keys: tuple[str, ...] = ("start", "end")) -> None:
+    if abs(scale - 1.0) < 1e-9:
+        return
+    for k in keys:
+        if obj.get(k) is None:
+            continue
+        try:
+            obj[k] = float(obj[k]) * scale
+        except (TypeError, ValueError):
+            pass
+
+
+def remap_timeline_for_speed_change(meta: dict, old_speed: float, new_speed: float) -> None:
+    """t_new = t_old * (old/new) khi đổi bake speed (timeline theo tốc độ file)."""
+    old_speed = clamp_playback_speed(old_speed)
+    new_speed = clamp_playback_speed(new_speed)
+    scale = old_speed / new_speed
+    seg_keys = ("start", "end", "coverStart", "coverEnd")
+    for seg in meta.get("segments") or []:
+        if not isinstance(seg, dict):
+            continue
+        scale_time_fields(seg, scale, seg_keys)
+        seg["videoSpeed"] = new_speed
+    for ov in meta.get("overlays") or []:
+        if isinstance(ov, dict):
+            scale_time_fields(ov, scale, ("start", "end"))
+
+
+def preview_1x_path(project_id: str, meta: dict) -> Path:
+    """File preview/source 1× (chưa bake tốc độ)."""
+    from .project import ensure_layout
+
+    preview_sec = max(0, int(meta.get("previewSec") or 0))
+    cache = ensure_layout(project_id) / "cache"
+    if preview_sec > 0:
+        cached = cache / f"preview_{preview_sec}.mp4"
+        if cached.is_file():
+            return cached
+    return Path(str(meta["videoPath"]))
+
 
 def extract_audio(video: Path, wav: Path, project_id: str | None = None) -> None:
     run_cmd(
@@ -304,6 +682,110 @@ def encode_export_1080(
             "aac",
             "-b:a",
             "192k",
+            "-movflags",
+            "+faststart",
+            "-map_metadata",
+            "-1",
+            "-map_chapters",
+            "-1",
+            str(tmp),
+        ],
+    )
+    tmp.replace(dst)
+    return dst
+
+
+# Khớp LivePreviewEditor.ASPECT_PRESETS (w/h ratio)
+_ASPECT_PRESETS: dict[str, tuple[float, float]] = {
+    "16:9": (16, 9),
+    "4:3": (4, 3),
+    "2.35:1": (235, 100),
+    "2:1": (2, 1),
+    "1.85:1": (185, 100),
+    "9:16": (9, 16),
+    "3:4": (3, 4),
+    "58inch": (108, 234),
+    "1:1": (1, 1),
+}
+
+
+def resolve_export_crop(
+    source_w: int,
+    source_h: int,
+    preset_id: str,
+) -> tuple[int, int, int, int] | None:
+    """Center-crop giống resolveCropRect — None = giữ nguyên khung."""
+    if source_w <= 0 or source_h <= 0:
+        return None
+    key = (preset_id or "original").strip()
+    if key in ("", "original", "custom"):
+        return None
+    dims = _ASPECT_PRESETS.get(key)
+    if not dims:
+        return None
+    tw, th = dims
+    target = tw / th
+    source = source_w / source_h
+    if source >= target:
+        h = float(source_h)
+        w = h * target
+        x = (source_w - w) / 2.0
+        y = 0.0
+    else:
+        w = float(source_w)
+        h = w / target
+        x = 0.0
+        y = (source_h - h) / 2.0
+    xi = max(0, int(round(x)))
+    yi = max(0, int(round(y)))
+    wi = int(round(w))
+    hi = int(round(h))
+    # H.264 cần chẵn
+    wi -= wi % 2
+    hi -= hi % 2
+    xi -= xi % 2
+    yi -= yi % 2
+    xi = max(0, min(source_w - wi, xi))
+    yi = max(0, min(source_h - hi, yi))
+    if wi < 2 or hi < 2:
+        return None
+    if wi >= source_w - 1 and hi >= source_h - 1:
+        return None
+    return xi, yi, wi, hi
+
+
+def crop_export_aspect(
+    src: Path,
+    dst: Path,
+    preset_id: str,
+    *,
+    project_id: str | None = None,
+) -> Path:
+    """Cắt khung theo previewAspectRatio (sau burn, trước encode 1080)."""
+    sw, sh = video_size(src)
+    crop = resolve_export_crop(sw, sh, preset_id)
+    if crop is None:
+        if src.resolve() != dst.resolve():
+            import shutil
+
+            shutil.copy2(src, dst)
+        return dst
+    x, y, w, h = crop
+    tmp = dst.with_suffix(".tmpcrop.mp4")
+    tmp.unlink(missing_ok=True)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    run_cmd(
+        project_id,
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(src),
+            "-vf",
+            f"crop={w}:{h}:{x}:{y}",
+            *h264_encoder_args(),
+            "-c:a",
+            "copy",
             "-movflags",
             "+faststart",
             "-map_metadata",

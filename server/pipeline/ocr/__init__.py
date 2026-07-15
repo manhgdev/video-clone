@@ -8,7 +8,13 @@ Modules:
   labels.py        — layout nhãn / cột
 """
 from .extract import asr_paddleocr, _rapidocr_labels, _rapidocr_gpu_kwargs, _ocr_join_lines
-from .locate import ocr_mid_labels, ocr_mid_vertical, ocr_mid_hardsub_boxes, rapidocr_labels
+from .locate import (
+    attach_speech_hardsub_boxes,
+    ocr_mid_labels,
+    ocr_mid_vertical,
+    ocr_mid_hardsub_boxes,
+    rapidocr_labels,
+)
 from .overlay_cover import classic_cover_fit, is_mid_flash_source, use_classic_overlay_cover
 from .overlay_scan import adaptive_bottom_fps, adaptive_overlay_step, run_overlay_ocr
 

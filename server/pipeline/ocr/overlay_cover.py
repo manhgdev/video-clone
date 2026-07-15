@@ -14,12 +14,12 @@ def is_overlay_layout(layout: str | None) -> bool:
 
 
 def is_mid_flash_source(source: str | None) -> bool:
-    """Hardsub giữa khung: CJK ngắn (pass mid) — không phải câu đáy dài."""
+    """Hardsub giữa khung: CJK ngang (pass mid) — không phải câu đáy dài không bbox."""
     compact = re.sub(r"\s+", "", source or "")
     if not compact:
         return False
     cjk = sum(1 for c in compact if "\u4e00" <= c <= "\u9fff")
-    return 1 <= cjk <= 10 and len(compact) <= 14
+    return 1 <= cjk <= 20 and len(compact) <= 28
 
 
 def use_classic_overlay_cover(

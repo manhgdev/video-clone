@@ -52,6 +52,13 @@ export const api = {
       15 * 60_000,
     ),
 
+  installDemucsCuda: () =>
+    fetchJson<{ ok: boolean; message: string; detail: string }>(
+      `${base}/system/install/demucs_cuda`,
+      { method: 'POST' },
+      40 * 60_000,
+    ),
+
   getConfig: () => fetchJson<AppConfig>(`${base}/config`, undefined, 8000),
 
   saveConfig: (body: {
@@ -188,6 +195,35 @@ export const api = {
       `${base}/projects/${projectId}/audio/no-vocals`,
       { method: 'POST' },
       900_000,
+    ),
+
+  /** Tiến độ tách stem (poll khi đang prepareNoVocals). */
+  noVocalsProgress: (projectId: string) =>
+    fetchJson<{ progress: number; message: string; running: boolean }>(
+      `${base}/projects/${projectId}/audio/no-vocals/progress`,
+      undefined,
+      4000,
+    ),
+
+  /** Bake tốc độ preview toàn bộ + remap timeline. */
+  rebakeSpeed: (projectId: string, speed: number) =>
+    fetchJson<{
+      ok: boolean
+      bakedSpeed: number
+      bakedPreferVideo: boolean
+      workClipSec: number
+      duration: number
+      segments: Segment[]
+      overlays: TextOverlay[]
+      videoUrl: string
+    }>(
+      `${base}/projects/${projectId}/rebake-speed`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ speed }),
+      },
+      600_000,
     ),
 
   previewTts: (

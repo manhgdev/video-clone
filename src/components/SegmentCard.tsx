@@ -52,18 +52,30 @@ export default function SegmentCard({
   const voice = !segment.voice || segment.voice === 'system' ? defaultVoice : segment.voice
   const dur = segment.audioDuration ?? Math.max(0.1, segment.end - segment.start)
   const chars = segment.translation.length || segment.source.length
-  const layout = segment.layout || 'horizontal'
+  // bbox giữa khung → CAP-MID (không hiện Caption đáy khi layout trống/horizontal sai)
+  const layout = (() => {
+    const lay = segment.layout
+    if (lay === 'mid' || lay === 'vertical' || lay === 'label') return lay
+    const b = segment.bbox
+    if (b && typeof b.y === 'number' && typeof b.h === 'number') {
+      const cy = b.y + b.h / 2
+      // assume 9:16 ~1920; mid cứng 0.18–0.78
+      if (cy > 1920 * 0.18 && cy < 1920 * 0.78) return 'mid' as const
+      if (cy > 1080 * 0.18 && cy < 1080 * 0.78 && b.y + b.h < 1100) return 'mid' as const
+    }
+    return lay || 'horizontal'
+  })()
   const isOverlay = layout === 'vertical' || layout === 'label'
   const layoutBadge =
-    layout === 'vertical' ? 'Dọc' : layout === 'mid' ? 'Mid' : layout === 'label' ? 'Nhãn' : 'Caption'
+    layout === 'vertical' ? 'Dọc' : layout === 'mid' ? 'CAP-MID' : layout === 'label' ? 'Nhãn' : 'Caption'
   const layoutTitle =
     layout === 'vertical'
       ? 'Tiêu đề dọc'
       : layout === 'mid'
-        ? 'Chữ giữa khung'
+        ? 'Caption giữa khung (CAP-MID) — cao/thấp tùy video, không phải phụ đề đáy cố định'
         : layout === 'label'
           ? 'Nhãn trên khung'
-          : 'Phụ đề đáy (caption)'
+          : 'Phụ đề đáy (Caption)'
   // vertical/label: mặc định tắt lồng tiếng; hardsub/mid: mặc định bật
   const dubOn = isOverlay ? segment.dub === true : segment.dub !== false
   const [busy, setBusy] = useState(false)

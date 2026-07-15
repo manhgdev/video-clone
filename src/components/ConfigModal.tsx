@@ -88,7 +88,7 @@ export default function ConfigModal({
   const [checks, setChecks] = useState<SystemChecks | null>(null)
   const [checksLoading, setChecksLoading] = useState(false)
   const [checksErr, setChecksErr] = useState('')
-  const [installing, setInstalling] = useState(false)
+  const [installing, setInstalling] = useState<string | null>(null)
 
   const loadChecks = useCallback(() => {
     setChecksLoading(true)
@@ -151,17 +151,24 @@ export default function ConfigModal({
   const cur = draft[tab]
   const canClose = !forceSetup || !!checks?.ok
 
-  async function installOcrCuda() {
-    setInstalling(true)
+  async function installAction(kind: 'ocr_cuda' | 'demucs_cuda') {
+    setInstalling(kind)
     setChecksErr('')
     try {
-      const result = await api.installOcrCuda()
-      setMsg(result.message)
+      const result =
+        kind === 'ocr_cuda' ? await api.installOcrCuda() : await api.installDemucsCuda()
+      setMsg(result.message + (result.detail ? ` · ${result.detail}` : ''))
       loadChecks()
     } catch (e) {
-      setChecksErr(e instanceof Error ? e.message : 'Cài GPU tăng tốc thất bại')
+      setChecksErr(
+        e instanceof Error
+          ? e.message
+          : kind === 'ocr_cuda'
+            ? 'Cài GPU OCR thất bại'
+            : 'Cài Demucs thất bại',
+      )
     } finally {
-      setInstalling(false)
+      setInstalling(null)
     }
   }
 
@@ -335,15 +342,79 @@ export default function ConfigModal({
               <button
                 type="button"
                 className="cfg-secondary cfg-setup-refresh"
-                disabled={checksLoading || installing}
+                disabled={checksLoading || !!installing}
                 onClick={loadChecks}
               >
                 {checksLoading ? 'Đang kiểm tra…' : 'Kiểm tra lại'}
               </button>
             </div>
+            {checks?.device ? (
+              <div className="cfg-device-card" role="status">
+                <div className="cfg-device-title">Phát hiện thiết bị</div>
+                <div className="cfg-device-grid">
+                  <div>
+                    <span className="cfg-device-k">Hệ điều hành</span>
+                    <strong>
+                      {checks.device.osLabel}
+                      {checks.device.appleSilicon ? ' · Apple Silicon' : ''}
+                    </strong>
+                  </div>
+                  <div>
+                    <span className="cfg-device-k">Kiến trúc</span>
+                    <strong>{checks.device.arch}</strong>
+                  </div>
+                  <div>
+                    <span className="cfg-device-k">GPU</span>
+                    <strong>
+                      {checks.device.hasGpu
+                        ? checks.device.gpuName || checks.device.gpuKind
+                        : 'Không có (CPU)'}
+                      {checks.device.vramMb ? ` · ${checks.device.vramMb} MB` : ''}
+                    </strong>
+                  </div>
+                  <div>
+                    <span className="cfg-device-k">Tăng tốc</span>
+                    <strong>{String(checks.device.accel).toUpperCase()}</strong>
+                  </div>
+                </div>
+                <p className="cfg-device-plan">{checks.device.install.summary}</p>
+                <p className="cfg-device-hint">{checks.device.install.hint}</p>
+                {(checks.device.install.actions?.length ?? 0) > 0 ? (
+                  <div className="cfg-device-actions">
+                    {checks.device.install.actions!.map((a) => {
+                      const done = (checks.items || []).some(
+                        (it) =>
+                          it.ok &&
+                          (it.install === a.id ||
+                            (a.id === 'demucs_cuda' && it.id === 'demucs') ||
+                            (a.id === 'ocr_cuda' && it.id === 'ocr_cuda')),
+                      )
+                      return done ? (
+                        <span key={a.id} className="cfg-check-installed">
+                          {a.label} ✓
+                        </span>
+                      ) : (
+                        <button
+                          key={a.id}
+                          type="button"
+                          className="cfg-check-install"
+                          disabled={!!installing}
+                          onClick={() =>
+                            void installAction(a.id as 'ocr_cuda' | 'demucs_cuda')
+                          }
+                        >
+                          {installing === a.id ? 'Đang cài…' : a.label}
+                        </button>
+                      )
+                    })}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
             {checksErr ? <p className="cfg-msg cfg-msg-err">{checksErr}</p> : null}
+            {msg && section === 'setup' ? <p className="cfg-msg">{msg}</p> : null}
             <ul className="cfg-check-list">
-              {(checks?.items || []).map((it) => (
+              {(checks?.items || []).filter((it) => it.id !== 'device').map((it) => (
                 <li
                   key={it.id}
                   className={`cfg-check-item ${it.ok ? 'ok' : it.required ? 'bad' : 'warn'}`}
@@ -364,31 +435,39 @@ export default function ConfigModal({
                       <div className="cfg-check-detail">{it.detail}</div>
                       {!it.ok ? <div className="cfg-check-hint">{it.hint}</div> : null}
                     </div>
-                    {it.id === 'ocr_cuda' ? (
-                      it.ok ? (
+                    {it.ok ? (
+                      it.install === 'ocr_cuda' || it.install === 'demucs_cuda' ? (
                         <span className="cfg-check-installed">Đã cài</span>
-                      ) : (
-                        <button
-                          type="button"
-                          className="cfg-check-install"
-                          disabled={installing}
-                          onClick={() => void installOcrCuda()}
-                        >
-                          {installing ? 'Đang cài…' : 'Cài đặt'}
-                        </button>
-                      )
-                    ) : !it.ok && it.install ? (
+                      ) : null
+                    ) : it.install === 'ocr_cuda' || it.install === 'demucs_cuda' ? (
+                      <button
+                        type="button"
+                        className="cfg-check-install"
+                        disabled={!!installing}
+                        onClick={() =>
+                          void installAction(it.install as 'ocr_cuda' | 'demucs_cuda')
+                        }
+                      >
+                        {installing === it.install
+                          ? 'Đang cài…'
+                          : it.installLabel ||
+                            (it.install === 'demucs_cuda'
+                              ? checks?.device?.install.demucsLabel || 'Cài Demucs GPU'
+                              : checks?.device?.install.ocrLabel || 'Cài OCR CUDA')}
+                      </button>
+                    ) : it.install ? (
                       it.install.startsWith('http') ? (
                         <a
                           className="cfg-check-link"
                           href={it.install}
                           target="_blank"
                           rel="noreferrer"
+                          title={it.installLabel || it.install}
                         >
-                          Tải
+                          {it.installLabel || 'Tải'}
                         </a>
                       ) : (
-                        <code className="cfg-check-cmd" title="Chạy trong terminal">
+                        <code className="cfg-check-cmd" title={it.installLabel || 'Chạy trong terminal'}>
                           {it.install}
                         </code>
                       )
@@ -398,8 +477,8 @@ export default function ConfigModal({
               ))}
             </ul>
             <p className="cfg-hint">
-              GPU tăng tốc có thể cài trực tiếp tại đây. Công cụ hệ thống như ffmpeg vẫn mở trang tải
-              chính thức. Node chỉ cần khi dev UI (<code>npm run dev</code>).
+              Mọi mục cài đặt theo thiết bị đã phát hiện (Windows / macOS / Linux + GPU).
+              Link tải và lệnh pip/brew/apt đổi theo OS; NVIDIA → CUDA; Apple Silicon → Metal.
             </p>
           </div>
         ) : section === 'cloud' ? (

@@ -65,10 +65,10 @@ function estimateLineW(text: string, fontPx: number): number {
   let w = 0
   for (const c of text) {
     if (c >= '\u4e00' && c <= '\u9fff') w += fontPx
-    else if (c === ' ') w += fontPx * 0.32
-    else w += fontPx * 0.52 // VI/Latin — thiên hẹp để wrap lấp ngang (bold CSS vẫn vừa)
+    else if (c === ' ') w += fontPx * 0.33
+    else w += fontPx * 0.62 // bold VI/Latin — trước 0.52 hay đo hẹp → mất chữ cuối
   }
-  return Math.max(1, Math.ceil(w))
+  return Math.max(1, Math.ceil(w * 1.04))
 }
 
 /** Tách đơn vị xếp dọc: CJK = từng chữ; VI/Latin = từng từ (đứng, không xoay). */
@@ -155,8 +155,8 @@ export function fitOverlayFontPx(
   if (layout === 'mid') {
     // Ước lượng thô — layoutMidOverlay sẽ max theo ngang thật
     const short = raw.replace(/\s+/g, '').length <= 8
-    const fs = short ? cover.h * 0.52 : cover.h * 0.38
-    const maxFs = Math.max(28, Math.min(68, Math.floor(cover.h * 0.62)))
+    const fs = short ? cover.h * 0.72 : cover.h * 0.55
+    const maxFs = Math.max(28, Math.min(72, Math.floor(cover.h * 0.78)))
     return Math.max(14, Math.min(maxFs, Math.round(fs)))
   }
   // label
@@ -344,7 +344,13 @@ export function layoutMidOverlay(
   let fontPx =
     fontPxIn > 0
       ? Math.max(10, Math.min(120, Math.round(fontPxIn)))
-      : Math.min(56, Math.floor(innerH / LINE))
+      : Math.min(
+          // fill cover — không trần 48 (bbox cao → chữ không còn bé giữa khung trống)
+          Math.max(28, Math.floor(innerH * 0.72)),
+          Math.floor(innerH / LINE),
+          // kẹp theo ngang — tránh font cao làm cắt đuôi VI
+          Math.max(12, Math.floor(innerW / Math.max(4, raw.replace(/\s+/g, '').length * 0.55))),
+        )
   let lines = pack(fontPx)
 
   while (fontPx > 10 && !fits(fontPx, lines)) {
@@ -353,6 +359,11 @@ export function layoutMidOverlay(
   }
   // vẫn không vừa (cover cực thấp): buộc thu tới khi số dòng * line vừa H
   while (fontPx > 8 && lines.length * fontPx * LINE > innerH) {
+    fontPx -= 1
+    lines = pack(fontPx)
+  }
+  // bảo hiểm: mọi dòng phải ≤ innerW (ước lượng trước hay lệch)
+  while (fontPx > 8 && lines.some((ln) => estimateLineW(ln, fontPx) > innerW)) {
     fontPx -= 1
     lines = pack(fontPx)
   }
@@ -375,12 +386,12 @@ export function layoutMidOverlay(
     }
   }
 
-  // caption = vùng chữ trong cover (có pad) — dùng full bề ngang còn lại
+  // caption = vùng chữ full cover (chỉ inset ngang) — flex căn giữa đúng mask
   const caption = {
     x: cover.x + padX,
-    y: cover.y + padY,
+    y: cover.y,
     w: Math.max(8, cover.w - padX * 2),
-    h: Math.max(8, cover.h - padY * 2),
+    h: Math.max(8, cover.h),
   }
 
   return { cover, caption, lines, mode: 'mid', fontPx }
@@ -404,6 +415,9 @@ export function __checkOcrOverlayLayout() {
   const cover = { x: 100, y: 400, w: 160, h: 36 }
   const m = layoutMidOverlay(cover, 'Nấu sôi', 0, 1080, 1920)
   if (m.fontPx > 48 || m.cover.w > 180) throw new Error('mid must stay tight')
+  // bbox cao → font fill (không kẹt trần 48)
+  const tall = layoutMidOverlay({ x: 200, y: 900, w: 420, h: 110 }, 'Tre xanh', 0, 1080, 1920)
+  if (tall.fontPx < 52) throw new Error('tall mid font must fill cover, got ' + tall.fontPx)
   const long = layoutMidOverlay(
     { x: 120, y: 900, w: 527, h: 119 },
     'Đổ đậu xanh giúp vỏ cam khô và co lại mà không bị biến dạng',
@@ -413,15 +427,13 @@ export function __checkOcrOverlayLayout() {
   )
   if (long.lines.length < 2) throw new Error('long mid must wrap 2+ lines')
   if (long.fontPx < 16) throw new Error('long mid font must stay readable')
-  // caption inset — không sát rìa cover
-  if (long.caption.y < long.cover.y + 6) throw new Error('mid caption must leave top inset')
-  if (long.caption.y + long.caption.h > long.cover.y + long.cover.h - 6) {
-    throw new Error('mid caption must leave bottom inset')
-  }
+  // caption inset ngang; dọc full cover để flex căn giữa (tránh lệch lên)
+  if (long.caption.y !== long.cover.y) throw new Error('mid caption must share cover top')
+  if (long.caption.h !== long.cover.h) throw new Error('mid caption must use full cover height')
   if (long.caption.w > long.cover.w - 4) throw new Error('mid caption must leave side inset')
   const short = layoutMidOverlay({ x: 196, y: 912, w: 136, h: 72 }, 'Đào hoa quả', 0, 1080, 1920)
   if (short.lines.length !== 1) throw new Error('short mid should stay 1 line')
-  if (short.caption.y < short.cover.y + 6) throw new Error('short mid must leave top inset')
+  if (short.caption.y !== short.cover.y) throw new Error('short mid caption y must match cover')
   // 1 từ Latin hẹp — không Shaqi|n
   const name = layoutMidOverlay({ x: 400, y: 900, w: 88, h: 64 }, 'Shaqin', 0, 1080, 1920)
   if (name.lines.length !== 1 || name.lines[0] !== 'Shaqin') {
@@ -434,13 +446,13 @@ export function __checkOcrOverlayLayout() {
     1080,
     1920,
   )
-  if (flush.caption.y <= flush.cover.y + 4) throw new Error('3-line mid must not hug top edge')
+  if (flush.caption.y !== flush.cover.y) throw new Error('3-line mid caption top must match cover')
   if (flush.caption.w < flush.cover.w * 0.88) throw new Error('mid caption must span nearly full width')
   const flushJoined = flush.lines.join(' ').replace(/\s+/g, ' ').trim()
   if (flushJoined !== 'Bẻ nhỏ các sợi Pueraria lobata để dễ dàng rửa sạch Pueraria lobata') {
     throw new Error('mid must keep all words — got ' + flushJoined)
   }
-  if (flush.lines.length * flush.fontPx * 1.2 > flush.caption.h + 1) {
+  if (flush.lines.length * flush.fontPx * 1.05 > flush.caption.h + 1) {
     throw new Error('mid text block must fit caption height')
   }
   const L = layoutLabelOverlay({ x: 50, y: 200, w: 90, h: 40 }, 'Đậu xanh', 0, 1080, 1920)

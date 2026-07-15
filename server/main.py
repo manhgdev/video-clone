@@ -10,10 +10,11 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+from starlette.responses import FileResponse as StarletteFileResponse
 
 from pipeline import (
     DATA,
@@ -38,7 +39,54 @@ from pipeline import (
 )
 from pipeline.core.jobs import arm_job
 from pipeline.core.media import video_size
-from pipeline.export.mux import separate_no_vocals
+from pipeline.export.mux import separate_no_vocals, read_stem_progress
+
+
+class _VideoFileResponse(StarletteFileResponse):
+    """Bỏ Range vượt EOF — tránh 416 khi đổi preview↔full / ghi đè clip."""
+
+    def __init__(self, *args: Any, force_full: bool = False, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.force_full = force_full
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if self.force_full:
+            headers = [(k, v) for k, v in scope.get("headers", []) if k.lower() != b"range"]
+            scope = {**scope, "headers": headers}
+        await super().__call__(scope, receive, send)
+
+
+def _range_start(range_header: str | None) -> int | None:
+    if not range_header or not range_header.lower().startswith("bytes="):
+        return None
+    part = range_header.split("=", 1)[1].split(",")[0].strip()
+    start_s, _, _ = part.partition("-")
+    if start_s == "":
+        return 0
+    try:
+        return int(start_s)
+    except ValueError:
+        return None
+
+
+def _serve_video_file(path: Path, request: Request) -> StarletteFileResponse:
+    if not path.is_file():
+        raise HTTPException(404, detail="Không thấy video")
+    st = path.stat()
+    if st.st_size <= 0:
+        raise HTTPException(404, detail="Video chưa sẵn sàng")
+    start = _range_start(request.headers.get("range"))
+    force_full = start is not None and start >= st.st_size
+    return _VideoFileResponse(
+        path,
+        media_type="video/mp4",
+        headers={
+            "Cache-Control": "private, no-cache, must-revalidate",
+            "ETag": f'"{st.st_mtime_ns:x}-{st.st_size:x}"',
+        },
+        force_full=force_full,
+    )
+
 
 app = FastAPI(title="Video-Clone Local")
 app.add_middleware(
@@ -73,6 +121,8 @@ class Settings(BaseModel):
     previewSec: int = 0
     # 1–16 luồng OCR/xuất/TTS; 0 = tự động theo tài nguyên rảnh
     workers: int = 0
+    # Khớp LivePreviewEditor: original | 16:9 | 9:16 | …
+    previewAspectRatio: str = "original"
 
 
 class SegmentIn(BaseModel):
@@ -212,6 +262,10 @@ class PreviewTtsIn(BaseModel):
     lang: str = "vi"
 
 
+class RebakeSpeedIn(BaseModel):
+    speed: float = 1.0
+
+
 @app.post("/api/upload")
 async def api_upload(file: UploadFile = File(...)):
     if not file.filename:
@@ -277,20 +331,102 @@ async def api_upload(file: UploadFile = File(...)):
 
 
 @app.get("/api/projects/{project_id}/video")
-def api_video(project_id: str):
+def api_video(project_id: str, request: Request):
     meta = load_meta(project_id)
     if not meta:
         raise HTTPException(404)
+    from pipeline.core.project import resolve_project_video
+
+    return _serve_video_file(resolve_project_video(meta, project_id), request)
+
+
+@app.post("/api/projects/{project_id}/rebake-speed")
+def api_rebake_speed(project_id: str, body: RebakeSpeedIn):
+    """Bake tốc độ preview từ file 1× + remap timeline theo tốc độ mới."""
+    from pipeline.core.media import (
+        clamp_playback_speed,
+        ensure_playback_speed,
+        meta_baked_speed,
+        preview_1x_path,
+        remap_timeline_for_speed_change,
+        speed_cache_tag,
+    )
+
+    meta = load_meta(project_id)
+    if not meta:
+        raise HTTPException(404)
+    if (meta.get("status") or {}).get("running"):
+        raise HTTPException(409, "Đang có job chạy — đợi xong rồi áp dụng tốc độ")
+
+    speed = clamp_playback_speed(body.speed)
+    old = meta_baked_speed(meta)
+    remap_timeline_for_speed_change(meta, old, speed)
+
+    base = preview_1x_path(project_id, meta)
+    if not base.is_file():
+        raise HTTPException(404, "Chưa có preview 1× — chạy Dịch trước")
+
+    cache = ensure_layout(project_id) / "cache"
     preview_sec = max(0, int(meta.get("previewSec") or 0))
-    if preview_sec > 0:
-        work = meta.get("workVideo") or ""
-        wp = Path(work) if work else None
-        if wp and wp.is_file():
-            return FileResponse(wp)
-        cached = ensure_layout(project_id) / "cache" / f"preview_{preview_sec}.mp4"
-        if cached.is_file():
-            return FileResponse(cached)
-    return FileResponse(meta["videoPath"])
+    try:
+        if abs(speed - 1.0) < 0.001:
+            work = base
+            meta.pop("bakedPreferVideo", None)
+            meta["bakedSpeed"] = 1.0
+            meta.pop("workDuration", None)
+        else:
+            set_status(
+                project_id,
+                step="video",
+                progress=5,
+                message=f"Bake tốc độ {speed:.2f}×…",
+                running=True,
+                error=None,
+            )
+            tag = speed_cache_tag(speed)
+            dest = (
+                cache / f"preview_{preview_sec}_{tag}.mp4"
+                if preview_sec > 0
+                else cache / f"source_{tag}.mp4"
+            )
+            work = ensure_playback_speed(base, dest, speed, project_id=project_id)
+            meta["bakedPreferVideo"] = True
+            meta["bakedSpeed"] = speed
+            meta["workDuration"] = float(ffprobe_duration(work) or 0)
+        meta["workVideo"] = str(work.resolve())
+        save_meta(project_id, meta)
+    except Exception as e:
+        set_status(
+            project_id,
+            step="video",
+            progress=0,
+            message="Bake tốc độ thất bại",
+            running=False,
+            error=str(e)[:500],
+        )
+        raise HTTPException(500, f"Bake tốc độ thất bại: {e}") from e
+
+    speed_baked = abs(speed - 1.0) > 0.001
+    work_clip = float(meta["workDuration"]) if speed_baked else float(preview_sec)
+    duration = float(meta.get("workDuration") or ffprobe_duration(work) or meta.get("duration") or 0)
+    set_status(
+        project_id,
+        step="video",
+        progress=100,
+        message=f"Preview {speed:.2f}× sẵn sàng",
+        running=False,
+        error=None,
+    )
+    return {
+        "ok": True,
+        "bakedSpeed": speed,
+        "bakedPreferVideo": speed_baked,
+        "workClipSec": work_clip,
+        "duration": duration,
+        "segments": meta.get("segments") or [],
+        "overlays": meta.get("overlays") or [],
+        "videoUrl": f"/api/projects/{project_id}/video",
+    }
 
 
 @app.get("/api/projects/{project_id}/status")
@@ -302,7 +438,17 @@ def api_status(project_id: str):
     # UI restore session sau F5 / HMR
     st["duration"] = float(meta.get("duration") or 0)
     # Độ dài clip lần dịch gần nhất (0 = full) — editor/xuất làm việc trong cửa sổ này
-    st["workClipSec"] = max(0, int(meta.get("previewSec") or 0))
+    from pipeline.core.media import meta_baked_speed
+
+    baked_speed = meta_baked_speed(meta)
+    speed_baked = abs(baked_speed - 1.0) > 0.001
+    if speed_baked and float(meta.get("workDuration") or 0) > 0:
+        st["workClipSec"] = float(meta["workDuration"])
+        st["duration"] = float(meta["workDuration"])
+    else:
+        st["workClipSec"] = max(0, int(meta.get("previewSec") or 0))
+    st["bakedPreferVideo"] = speed_baked or bool(meta.get("bakedPreferVideo"))
+    st["bakedSpeed"] = baked_speed
     if meta.get("settings"):
         st["settings"] = meta["settings"]
     if meta.get("outputRel"):
@@ -556,20 +702,24 @@ def api_export(project_id: str, payload: ExportPayload):
     # UI checkbox phải thắng meta cũ; previewSec ô Preview ≠ độ dài lần dịch
     dumped = payload.model_dump(exclude={"segments"}, exclude_none=False)
     if payload.segments is not None:
-        by_id = {s.id: s.model_dump(exclude_none=True) for s in payload.segments}
-        merged: list[dict] = []
-        for old in meta.get("segments") or []:
-            oid = str(old.get("id") or "")
-            if oid in by_id:
-                merged.append({**old, **by_id[oid]})
-            else:
-                merged.append(dict(old))
-        meta["segments"] = merged
+        # List từ editor = source of truth (không merge giữ meta cũ → lệch WYSIWYG)
+        ordered = sorted(payload.segments, key=lambda s: (s.start, s.end, s.id))
+        out: list[dict] = []
+        for i, item in enumerate(ordered):
+            d = item.model_dump(exclude_none=False)
+            if d.get("bbox") is None:
+                d.pop("bbox", None)
+            if d.get("captionLayout") is None:
+                d.pop("captionLayout", None)
+            d["index"] = i
+            out.append(d)
+        meta["segments"] = out
     run_preview = max(0, int(meta.get("previewSec") or 0))
     ui_prev = max(0, int(dumped.get("previewSec") or 0))
     if ui_prev <= 0:
         ui_prev = max(0, int((meta.get("settings") or {}).get("previewSec") or 0)) or 20
     dumped["previewSec"] = ui_prev
+    # Settings editor thắng hoàn toàn (mask/font/cover/burn…)
     meta["settings"] = dumped
     # xuất theo clip lần dịch gần nhất (0 = full), không theo ô Preview
     meta["previewSec"] = run_preview
@@ -747,6 +897,14 @@ def api_prepare_no_vocals(project_id: str):
     return {"audioUrl": f"/api/projects/{project_id}/cache/{name}", "file": name}
 
 
+@app.get("/api/projects/{project_id}/audio/no-vocals/progress")
+def api_no_vocals_progress(project_id: str):
+    """Tiến độ tách stem — poll song song lúc POST /audio/no-vocals đang chạy."""
+    if not load_meta(project_id):
+        raise HTTPException(404)
+    return read_stem_progress(project_id)
+
+
 @app.get("/api/projects/{project_id}/cache/{name}")
 def api_cache_file(project_id: str, name: str):
     if not re.fullmatch(r"no_vocals_[a-f0-9]+\.wav", name):
@@ -777,5 +935,16 @@ def api_install_ocr_cuda():
 
     try:
         return install_ocr_cuda()
+    except Exception as e:
+        raise HTTPException(500, str(e)) from e
+
+
+@app.post("/api/system/install/demucs_cuda")
+def api_install_demucs_cuda():
+    """Cài Demucs + PyTorch CUDA (server/.venv-demucs) — tách lời nhanh."""
+    from pipeline.core.system_check import install_demucs_cuda
+
+    try:
+        return install_demucs_cuda()
     except Exception as e:
         raise HTTPException(500, str(e)) from e

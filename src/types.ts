@@ -128,6 +128,45 @@ export type AppConfig = {
 export type HardwareInfo = {
   label: string
   accel: string
+  os?: string
+  gpuKind?: string
+  gpuName?: string
+}
+
+export type DeviceInfo = {
+  os: 'windows' | 'macos' | 'linux' | 'unknown' | string
+  osLabel: string
+  arch: string
+  appleSilicon: boolean
+  gpuKind: 'nvidia' | 'apple' | 'none' | string
+  gpuName: string
+  vramMb: number | null
+  driver: string
+  accel: 'cuda' | 'metal' | 'cpu' | string
+  label: string
+  hasGpu: boolean
+  install: {
+    ocr: string
+    ocrLabel?: string
+    demucs: string
+    demucsLabel: string
+    demucsBackend: string
+    summary: string
+    hint: string
+    actions?: { id: string; label: string }[]
+    items?: Record<
+      string,
+      {
+        kind: string
+        value: string
+        label: string
+        hint?: string
+        relevant?: boolean
+        backend?: string
+        name?: string
+      }
+    >
+  }
 }
 
 export type SystemCheckItem = {
@@ -138,12 +177,14 @@ export type SystemCheckItem = {
   detail: string
   hint: string
   install: string
+  installLabel?: string
 }
 
 export type SystemChecks = {
   ok: boolean
   platform: string
   python: string
+  device?: DeviceInfo
   items: SystemCheckItem[]
   requiredMissing: string[]
   optionalMissing: string[]
@@ -161,4 +202,8 @@ export type JobStatus = {
   /** Clip lần dịch gần nhất (giây); 0 = full video */
   workClipSec?: number
   duration?: number
+  /** preferVideo đã bake chậm 0.80× vào workVideo — preview rate = 1 */
+  bakedPreferVideo?: boolean
+  /** Tốc độ đã bake vào file preview (1 = chưa bake) */
+  bakedSpeed?: number
 }

@@ -13,7 +13,9 @@ from .export.burn import cover_and_burn
 from .core.config import DATA
 from .core.jobs import Cancelled, begin_job, check_cancel, clear_job
 from .core.media import (
+    crop_export_aspect,
     encode_export_1080,
+    ensure_playback_speed,
     ensure_preview_clip,
     extract_audio,
     ffprobe_duration,
@@ -23,6 +25,7 @@ from .core.media import (
 from .export.mux import mux_dub, mux_original_audio, separate_no_vocals
 from .core.project import (
     asr_cache_key,
+    audio_cache_tag,
     cache_asr_path,
     cache_audio,
     cache_frames,
@@ -38,6 +41,7 @@ from .core.project import (
     video_fingerprint,
 )
 from .core.resources import adaptive_workers
+from .ocr.locate import attach_speech_hardsub_boxes
 from .translate import translate_segments
 from .tts import tts_cache_key, tts_segment
 
@@ -72,6 +76,34 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
         else:
             video = source
 
+        # preferVideo: bake chậm 0.80× TRƯỚC ASR — timeline/chữ/TTS cùng nhịp file thật
+        match_mode = str(settings.get("matchDuration") or "preferVideo")
+        if match_mode == "preferVideo":
+            from .export.mux import PREFER_VIDEO_SPEED
+
+            set_status(
+                project_id,
+                step="asr",
+                progress=5,
+                message="Khớp thời lượng: chậm video 0.80×…",
+                running=True,
+            )
+            cache_dir = ensure_layout(project_id) / "cache"
+            if preview_sec > 0:
+                slow_dest = cache_dir / f"preview_{preview_sec}_s080.mp4"
+            else:
+                slow_dest = cache_dir / "source_s080.mp4"
+            video = ensure_playback_speed(
+                video, slow_dest, PREFER_VIDEO_SPEED, project_id=project_id
+            )
+            meta["bakedPreferVideo"] = True
+            meta["bakedSpeed"] = float(PREFER_VIDEO_SPEED)
+            meta["workDuration"] = float(ffprobe_duration(video) or 0)
+        else:
+            meta.pop("bakedPreferVideo", None)
+            meta["bakedSpeed"] = 1.0
+            meta.pop("workDuration", None)
+
         # —— ASR (reuse segments if same engine+lang+video+preview) ——
         if cache.get("asrKey") == a_key and meta.get("segments"):
             segments = meta["segments"]
@@ -83,7 +115,7 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                 running=True,
             )
         else:
-            wav = cache_audio(project_id, tag)
+            wav = cache_audio(project_id, audio_cache_tag(preview_sec, match_mode))
             engine = settings.get("engine", "whisper")
             use_ocr = engine in ("paddleocr", "screen")
             if not use_ocr:
@@ -154,8 +186,31 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                 if not seg.get("translation") and old and old.get("translation"):
                     seg["translation"] = old["translation"]
                 if old:
-                    if old.get("bbox"):
+                    # Whisper: đừng kế thừa bbox đáy bake; chỉ giữ mid/vertical/label đã OCR
+                    old_lay = str(old.get("layout") or "")
+                    if old.get("bbox") and (
+                        use_ocr or old_lay in ("mid", "vertical", "label")
+                    ):
                         seg["bbox"] = old["bbox"]
+                        if old_lay in ("vertical", "label"):
+                            seg["layout"] = old_lay
+                        else:
+                            # suy mid/horizontal từ cy bbox — không giữ layout trống
+                            from .ocr.locate import _retag_layout_from_bbox
+
+                            # fh tạm: giữ layout cũ nếu mid, else retag sau khi biết video size
+                            if old_lay == "mid":
+                                seg["layout"] = "mid"
+                            else:
+                                bb = old["bbox"]
+                                try:
+                                    cy = float(bb["y"]) + float(bb["h"]) * 0.5
+                                    # giả định khung dọc phổ biến; attach sẽ retag chính xác
+                                    seg["layout"] = (
+                                        "mid" if 1920 * 0.18 < cy < 1920 * 0.78 else "horizontal"
+                                    )
+                                except (KeyError, TypeError, ValueError):
+                                    seg["layout"] = old_lay or "horizontal"
                     for k in ("fontSize", "videoSpeed", "ttsVolume", "ttsSpeed"):
                         if old.get(k) is not None:
                             seg[k] = old[k]
@@ -228,6 +283,33 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                 seg["voice"] = inherit_voice(seg.get("voice"), voice)
             cache["transKey"] = t_key
 
+        # Whisper: speech timing ≠ vị trí chữ — OCR gắn bbox/layout (mid/đáy)
+        # Cần khi burnSubs (kéo mid/dọc đúng chỗ) — không chỉ khi coverHardsubs.
+        engine = settings.get("engine", "whisper")
+        if (
+            engine not in ("paddleocr", "screen")
+            and bool(settings.get("burnSubs", True))
+            and segments
+        ):
+            set_status(
+                project_id,
+                step="translate",
+                progress=95,
+                message="Định vị caption trên khung (OCR)…",
+                running=True,
+            )
+            n_box = attach_speech_hardsub_boxes(
+                video, segments, only_missing=True, project_id=project_id
+            )
+            if n_box:
+                set_status(
+                    project_id,
+                    step="translate",
+                    progress=97,
+                    message=f"Đã gắn vị trí {n_box}/{len(segments)} câu…",
+                    running=True,
+                )
+
         meta["segments"] = segments
         # ô Preview trên UI giữ số >0; lần chạy full (0) không được ghi đè thành 0
         ui_prev = max(0, int(settings.get("previewSec") or 0))
@@ -242,7 +324,6 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
         meta["workVideo"] = str(video.resolve())
         save_meta(project_id, meta)
         hint = f"Preview {preview_sec}s — " if preview_sec > 0 else ""
-        engine = settings.get("engine", "whisper")
         no_tr = str(settings.get("targetLang") or "") in ("none", "off", "source", "")
         if no_tr:
             next_msg = f"{hint}Xong {len(segments)} đoạn — không dịch, không chèn caption"
@@ -256,6 +337,7 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
             progress=100,
             message=next_msg,
             running=False,
+            error=None,
         )
     except Cancelled:
         set_status(
@@ -415,19 +497,17 @@ def run_dub(project_id: str, *, finalize: bool = True, nested: bool = False) -> 
                     running=True,
                 )
         meta["segments"] = segments
-        # preferVideo: xuất/preview chậm cố định 0.80×
+        # preferVideo đã bake 0.80× vào workVideo — không stamp videoSpeed tay (tránh chậm 2 lần)
         if match == "preferVideo":
-            from .export.mux import PREFER_VIDEO_FACTOR, PREFER_VIDEO_SPEED
+            from .export.mux import PREFER_VIDEO_FACTOR
 
-            meta["videoSlowFactor"] = round(PREFER_VIDEO_FACTOR, 4)
-            for seg in segments:
-                lay = str(seg.get("layout") or "")
-                if "dub" in seg:
-                    want = bool(seg.get("dub"))
-                else:
-                    want = lay not in ("vertical", "label")
-                if want:
-                    seg["videoSpeed"] = PREFER_VIDEO_SPEED
+            if meta.get("bakedPreferVideo"):
+                meta.pop("videoSlowFactor", None)
+                for seg in segments:
+                    seg.pop("videoSpeed", None)
+            else:
+                # project cũ chưa bake — vẫn báo factor cho mux
+                meta["videoSlowFactor"] = round(PREFER_VIDEO_FACTOR, 4)
         elif "videoSlowFactor" in meta:
             meta.pop("videoSlowFactor", None)
         save_meta(project_id, meta)
@@ -455,6 +535,19 @@ def export_source_video(project_id: str, meta: dict[str, Any]) -> tuple[Path, in
     """Clip xuất = đúng độ dài lần dịch (meta.previewSec), không lấy nhầm source full."""
     source = Path(meta["videoPath"]).resolve()
     preview_sec = max(0, int(meta.get("previewSec") or 0))
+    # preferVideo đã bake → dùng đúng workVideo (ASR/che chữ cùng timeline)
+    if meta.get("bakedPreferVideo"):
+        work = Path(str(meta.get("workVideo") or ""))
+        if work.is_file():
+            return work, preview_sec
+        cache = ensure_layout(project_id) / "cache"
+        if preview_sec > 0:
+            slow = cache / f"preview_{preview_sec}_s080.mp4"
+            if slow.is_file():
+                return slow, preview_sec
+        slow_full = cache / "source_s080.mp4"
+        if slow_full.is_file():
+            return slow_full, preview_sec
     if preview_sec > 0:
         clip = ensure_preview_clip(
             source,
@@ -479,32 +572,52 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
     for s in segments:
         if float(s.get("end") or 0) > vid_dur:
             s["end"] = vid_dur
-    # Free text uses the same pixel coordinate system as caption cover/burn.
-    # ponytail: treat each overlay as a caption cue to reuse the proven burn renderer.
-    text_overlays = [
-        {
-            "id": f"overlay-{item.get('id', '')}",
-            "start": float(item.get("start") or 0),
-            "end": float(item.get("end") or 0),
-            "translation": str(item.get("text") or ""),
-            "source": "",
-            "layout": "horizontal",
-            "bbox": {
-                "x": float(item.get("x") or 0),
-                "y": float(item.get("y") or 0),
-                "w": float(item.get("w") or 0),
-                "h": float(item.get("h") or 0),
-            },
-        }
-        for item in (meta.get("overlays") or [])
-        if float(item.get("start") or 0) < vid_dur and str(item.get("text") or "").strip()
-    ]
+    # Free text: cùng hệ tọa độ pixel; bake captionLayout + màu/cỡ = preview.
+    text_overlays: list[dict[str, Any]] = []
+    for item in meta.get("overlays") or []:
+        if float(item.get("start") or 0) >= vid_dur:
+            continue
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        x = float(item.get("x") or 0)
+        y = float(item.get("y") or 0)
+        w = float(item.get("w") or 0)
+        h = float(item.get("h") or 0)
+        fs = int(item.get("fontSize") or 42)
+        lines = [ln if ln.strip() else " " for ln in text.splitlines()] or [text]
+        text_overlays.append(
+            {
+                "id": f"overlay-{item.get('id', '')}",
+                "start": float(item.get("start") or 0),
+                "end": float(item.get("end") or 0),
+                "translation": text,
+                "source": "",
+                "layout": "horizontal",
+                "fontSize": fs,
+                "textColor": str(item.get("color") or "#ffffff"),
+                "bbox": {"x": x, "y": y, "w": w, "h": h},
+                "captionLayout": {
+                    "x": x,
+                    "y": y,
+                    "w": w,
+                    "h": h,
+                    "lines": lines,
+                    "fontSize": fs,
+                },
+                # Preview không blur dưới free-text — không mask khi burn
+                "skipCoverMask": True,
+            }
+        )
     settings = meta.get("settings") or {}
     root = ensure_layout(project_id)
     match_mode = str(settings.get("matchDuration") or "preferVideo")
-    # preferVideo/none/natural: luôn chậm video toàn cục lúc xuất (không tắt khi có videoSpeed tay)
+    baked_prefer = bool(meta.get("bakedPreferVideo"))
+    # preferVideo đã bake vào file → không setpts thêm lúc mux
     # stretch: khớp TTS theo slot — không chậm video
-    prefer_global_slow = match_mode in ("preferVideo", "none", "natural")
+    prefer_global_slow = (
+        match_mode in ("preferVideo", "none", "natural") and not baked_prefer
+    )
     manual_video_speed = any(
         abs(float(segment.get("videoSpeed") or 1) - 1.0) > 0.001
         for segment in segments
@@ -516,13 +629,13 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
 
     # cover / burn độc lập; "Không dịch" → không chèn caption
     no_translate = str(settings.get("targetLang") or "") in ("none", "off", "source", "")
-    cover = bool(settings.get("coverHardsubs", False))
+    cover = bool(settings.get("coverHardsubs", True))
     burn = bool(settings.get("burnSubs", True)) and not no_translate
 
     try:
         hint = f"preview {preview_sec}s — " if preview_sec > 0 else ""
-        # preferVideo: chỉ chậm video toàn cục lúc mux — không retime từng đoạn (tránh chậm 2 lần)
-        if manual_video_speed and match_mode not in ("preferVideo", "none"):
+        # preferVideo bake sẵn: không retime từng đoạn. Manual speed chỉ khi stretch/natural tùy.
+        if manual_video_speed and match_mode not in ("preferVideo", "none") and not baked_prefer:
             set_status(
                 project_id,
                 step="export",
@@ -613,7 +726,11 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
             )
             check_cancel(project_id)
             # Stem từ videoPath gốc (không phải clip preview) — cùng cache với xem trước.
-            source_audio = separate_no_vocals(project_id, Path(meta["videoPath"]))
+            source_audio = separate_no_vocals(
+                project_id,
+                # bake 0.80×: tách trên workVideo đã chậm — cùng timeline TTS
+                Path(video) if baked_prefer else Path(meta["videoPath"]),
+            )
         if has_tts:
             set_status(
                 project_id,
@@ -631,7 +748,9 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
                 original_audio_mode="original" if source_audio else audio_mode,
                 source_audio=source_audio,
                 original_audio_volume=bg_vol,
-                allow_video_slowdown=prefer_global_slow or not manual_video_speed,
+                allow_video_slowdown=(
+                    (prefer_global_slow or not manual_video_speed) and not baked_prefer
+                ),
                 match=match_mode,
             )
         elif audio_mode != "auto":
@@ -659,6 +778,19 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
             )
         else:
             shutil.copy2(burned, out)
+
+        # Cắt khung đúng previewAspectRatio (editor) trước khi scale 1080
+        aspect = str(settings.get("previewAspectRatio") or "original")
+        if aspect not in ("", "original", "custom"):
+            set_status(
+                project_id,
+                step="export",
+                progress=88,
+                message=f"{hint}Cắt khung {aspect}…",
+                running=True,
+            )
+            check_cancel(project_id)
+            crop_export_aspect(out, out, aspect, project_id=project_id)
 
         # Chuẩn hóa 1080p + encode chất lượng (mọi nhánh)
         set_status(
@@ -713,7 +845,14 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
         )
         raise
     except Exception as e:
-        set_status(project_id, step="export", progress=0, message=str(e), running=False, error=str(e))
+        # Giữ progress hiện tại — UI thấy dừng ở đâu, không nhảy 0 rồi biến mất
+        set_status(
+            project_id,
+            step="export",
+            message=f"Xuất lỗi: {e}",
+            running=False,
+            error=str(e),
+        )
         raise
     finally:
         if not nested and job_gen is not None:

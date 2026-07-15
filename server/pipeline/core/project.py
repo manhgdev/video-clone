@@ -88,6 +88,27 @@ def out_final(project_id: str) -> Path:
 def preview_tag(preview_sec: int) -> str:
     return f"p{int(preview_sec)}" if preview_sec > 0 else "full"
 
+
+def audio_cache_tag(preview_sec: int, match_duration: str) -> str:
+    """Tag wav theo preview + speed bake — tránh reuse audio_full khi đổi preferVideo."""
+    slow = "s080" if str(match_duration or "") == "preferVideo" else "s1"
+    return f"{preview_tag(preview_sec)}_{slow}"
+
+
+def resolve_project_video(meta: dict[str, Any], project_id: str) -> Path:
+    """Clip đang làm việc: workVideo (ASR/OCR timeline) trước, rồi preview cache, rồi source."""
+    work = str(meta.get("workVideo") or "")
+    if work:
+        wp = Path(work)
+        if wp.is_file():
+            return wp
+    preview_sec = max(0, int(meta.get("previewSec") or 0))
+    if preview_sec > 0:
+        cached = ensure_layout(project_id) / "cache" / f"preview_{preview_sec}.mp4"
+        if cached.is_file():
+            return cached
+    return Path(meta["videoPath"])
+
 def video_fingerprint(path: Path) -> str:
     """Full-file sha256 — head/tail 2MB collided when two clips share size + ends."""
     h = hashlib.sha256()
@@ -126,7 +147,10 @@ def asr_cache_key(settings: dict[str, Any], source_fp: str) -> str:
     prev = int(settings.get("previewSec") or 0)
     # o20: quét cả nhãn ngang ở 10–22% phía trên khung.
     ver = "o20" if engine in ("paddleocr", "screen") else "a1"
-    return f"{engine}|{src}|{source_fp}|p{prev}|{ver}"
+    # preferVideo bake 0.80× trước ASR → timeline khác bản 1×
+    match = str(settings.get("matchDuration") or "")
+    slow = "s080" if match == "preferVideo" else "s1"
+    return f"{engine}|{src}|{source_fp}|p{prev}|{ver}|{slow}"
 
 
 def trans_cache_key(settings: dict[str, Any]) -> str:

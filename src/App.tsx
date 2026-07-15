@@ -160,6 +160,10 @@ export default function App() {
   const [duration, setDuration] = useState(0)
   /** Độ dài clip làm việc = lần dịch gần nhất (0 = full). Khác settings.previewSec (ô Preview). */
   const [workClipSec, setWorkClipSec] = useState(0)
+  const workClipSecRef = useRef(0)
+  const [bakedPreferVideo, setBakedPreferVideo] = useState(false)
+  const bakedPreferVideoRef = useRef(false)
+  const [bakedSpeed, setBakedSpeed] = useState(1)
   const [segments, setSegments] = useState<Segment[]>([])
   const [overlays, setOverlays] = useState<TextOverlay[]>([])
   const [status, setStatus] = useState<JobStatus>(idleStatus)
@@ -230,10 +234,20 @@ export default function App() {
         const [st, segs] = await Promise.all([api.status(id), api.segments(id)])
         if (dead) return
         setProjectId(id)
-        setVideoUrl(`/api/projects/${id}/video`)
+        // ?t= bust cache — tránh <video> Range cũ → 416 sau đổi preview/full
+        setVideoUrl(`/api/projects/${id}/video?t=${Date.now()}`)
         const dur = Number(st.duration || 0)
         if (dur > 0) setDuration(dur)
-        if (typeof st.workClipSec === 'number') setWorkClipSec(Math.max(0, st.workClipSec))
+        if (typeof st.workClipSec === 'number') {
+          const wc = Math.max(0, st.workClipSec)
+          workClipSecRef.current = wc
+          setWorkClipSec(wc)
+        }
+        const baked = Boolean(st.bakedPreferVideo)
+        bakedPreferVideoRef.current = baked
+        setBakedPreferVideo(baked)
+        if (typeof st.bakedSpeed === 'number' && st.bakedSpeed > 0) setBakedSpeed(st.bakedSpeed)
+        else setBakedSpeed(baked ? 0.8 : 1)
         const extra = st as JobStatus & { settings?: Partial<ProjectSettings> }
         const mergedVoice =
           (extra.settings && typeof extra.settings === 'object' && extra.settings.defaultVoice) ||
@@ -319,7 +333,22 @@ export default function App() {
           s.progress >= 100 &&
           Boolean(s.outputRel || pendingExportUrl.current)
         setStatus(exportDone && s.error ? { ...s, error: undefined } : s)
-        if (typeof s.workClipSec === 'number') setWorkClipSec(Math.max(0, s.workClipSec))
+        if (typeof s.workClipSec === 'number') {
+          const wc = Math.max(0, s.workClipSec)
+          if (wc !== workClipSecRef.current) {
+            workClipSecRef.current = wc
+            setWorkClipSec(wc)
+            // Clip preview/full đổi kích thước — phải đổi URL kẻo Range cũ 416
+            setVideoUrl(`/api/projects/${projectId}/video?t=${Date.now()}`)
+          }
+        }
+        const baked = Boolean(s.bakedPreferVideo)
+        if (baked !== bakedPreferVideoRef.current) {
+          bakedPreferVideoRef.current = baked
+          setBakedPreferVideo(baked)
+          setVideoUrl(`/api/projects/${projectId}/video?t=${Date.now()}`)
+        }
+        if (typeof s.bakedSpeed === 'number' && s.bakedSpeed > 0) setBakedSpeed(s.bakedSpeed)
         if (!s.running) {
           try {
             const segs = await api.segments(projectId)
@@ -328,7 +357,8 @@ export default function App() {
             /* status đã xong — segments có thể retry sau */
           }
           if (exportDone) {
-            setExportUrl(pendingExportUrl.current || `/api/projects/${projectId}/output`)
+            const url = pendingExportUrl.current || `/api/projects/${projectId}/output`
+            setExportUrl(url)
             setExportPath(
               pendingExportPath.current ||
                 s.outputRel ||
@@ -336,6 +366,9 @@ export default function App() {
             )
             pendingExportUrl.current = null
             pendingExportPath.current = null
+            // Xuất xong → về trang chủ + hiện bản xuất
+            setPreviewEditorOpen(false)
+            setViewExportSrc(`${url}?t=${Date.now()}`)
           }
         }
       } catch {
@@ -446,7 +479,10 @@ export default function App() {
   async function onTranslateAll(previewSec = 0) {
     if (!projectId) return
     setExportUrl(null)
-    setWorkClipSec(Math.max(0, previewSec))
+    const wc = Math.max(0, previewSec)
+    workClipSecRef.current = wc
+    setWorkClipSec(wc)
+    setVideoUrl(`/api/projects/${projectId}/video?t=${Date.now()}`)
     busyAt.current = Date.now()
     setStatus({
       step: 'asr',
@@ -519,9 +555,10 @@ export default function App() {
 
   async function onExport(exportSegments?: Segment[]) {
     if (!projectId) return
-    setPreviewEditorOpen(false)
     setExportUrl(null)
     setExportPath(null)
+    setViewExportSrc(null)
+    setProgressMinimized(false)
     busyAt.current = Date.now()
     // độ dài xuất = lần dịch gần nhất (status đã nói Preview Ns / full), không theo ô số khi đã Dịch cả video
     const audioHint =
@@ -627,6 +664,27 @@ export default function App() {
     } catch {
       /* keep local */
     }
+  }
+
+  function onPreviewRebaked(res: {
+    segments: Segment[]
+    overlays?: TextOverlay[]
+    workClipSec: number
+    duration: number
+    bakedPreferVideo: boolean
+    bakedSpeed: number
+    videoUrl: string
+  }) {
+    setSegments(applyDefaultVoice(asSegmentList(res.segments), settings.defaultVoice))
+    if (Array.isArray(res.overlays)) setOverlays(res.overlays)
+    const wc = Math.max(0, res.workClipSec)
+    workClipSecRef.current = wc
+    setWorkClipSec(wc)
+    if (res.duration > 0) setDuration(res.duration)
+    bakedPreferVideoRef.current = res.bakedPreferVideo
+    setBakedPreferVideo(res.bakedPreferVideo)
+    setBakedSpeed(res.bakedSpeed > 0 ? res.bakedSpeed : res.bakedPreferVideo ? 0.8 : 1)
+    setVideoUrl(`${res.videoUrl}?t=${Date.now()}`)
   }
 
   useEffect(() => {
@@ -747,6 +805,8 @@ export default function App() {
           videoUrl={videoUrl}
           mediaDuration={duration}
           workClipSec={workClipSec}
+          bakedPreferVideo={bakedPreferVideo}
+          bakedSpeed={bakedSpeed}
           projectId={projectId}
           segments={segments}
           settings={settings}
@@ -756,6 +816,7 @@ export default function App() {
           onBack={() => setPreviewEditorOpen(false)}
           onChange={onSegmentChange}
           onSegmentsReplace={onSegmentsReplace}
+          onPreviewRebaked={onPreviewRebaked}
           onExport={onExport}
           onSettings={onSettings}
           overlays={overlays}
@@ -888,13 +949,13 @@ export default function App() {
         </div>
       )}
       <ProgressPopup
-        active={status.running}
+        active={status.running || Boolean(status.error && status.error !== 'cancelled')}
         minimized={progressMinimized}
         title={
           status.step === 'dub'
             ? 'Lồng tiếng'
             : status.step === 'export'
-              ? 'Xuất video'
+              ? (status.error ? 'Xuất video thất bại' : 'Xuất video')
               : status.step === 'translate' || status.step === 'asr'
                 ? 'Dịch / nhận dạng'
                 : 'Đang xử lý'
@@ -902,7 +963,13 @@ export default function App() {
         message={status.message}
         progress={status.progress}
         error={status.error}
-        onMinimize={() => setProgressMinimized(true)}
+        onMinimize={() => {
+          setProgressMinimized(true)
+          // Đóng popup lỗi — tránh hiện mãi sau lần xuất fail
+          if (!status.running && status.error) {
+            setStatus((s) => ({ ...s, error: undefined, message: s.message || 'Đã đóng báo lỗi' }))
+          }
+        }}
         onRestore={() => setProgressMinimized(false)}
         onCancel={status.running ? onCancel : undefined}
       />

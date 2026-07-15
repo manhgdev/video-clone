@@ -155,20 +155,25 @@ def _pick_font(candidates: tuple[str, ...], *, sample: str = _VI_PROBE, cache_ke
 
 
 def _subtitle_font() -> str:
+    """Khớp preview `font-bold` — ưu tiên Arial/Segoe Bold."""
     return _pick_font(
         (
+            "C:/Windows/Fonts/arialbd.ttf",
+            "C:/Windows/Fonts/segoeuib.ttf",
             "C:/Windows/Fonts/arial.ttf",
             "C:/Windows/Fonts/segoeui.ttf",
+            "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
             "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
             "/Library/Fonts/Arial Unicode.ttf",
             "/System/Library/Fonts/Supplemental/Arial.ttf",
-            "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/opentype/noto/NotoSans-Bold.ttf",
             "/usr/share/fonts/opentype/noto/NotoSans-Regular.ttf",
             "/System/Library/Fonts/PingFang.ttc",
             "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
         ),
-        cache_key="sub",
+        cache_key="sub_bold",
     )
 
 
@@ -271,9 +276,51 @@ def _feather_vertical_blend(
 
 
 def _blur_tint_alpha(opacity_pct: int) -> float:
-    """Đồng bộ coverMaskPreviewStyle (LivePreviewEditor) — sân 0.55…0.90."""
+    """Tint mỏng khớp coverMaskPreviewStyle CSS: clamp(opacity%×0.28, 0.06, 0.22)."""
     a_ui = max(0.0, min(1.0, float(opacity_pct) / 100.0))
-    return max(0.55, min(0.90, 0.38 + a_ui * 0.5))
+    return max(0.06, min(0.22, a_ui * 0.28))
+
+
+def _blur_css_radius(opacity_pct: int) -> float:
+    """Khớp coverMaskPreviewStyle: blurPx = round(22 + a×20) → ~22–42 CSS-px."""
+    a = max(0.0, min(1.0, float(opacity_pct) / 100.0))
+    return 22.0 + a * 20.0
+
+
+def _desaturate_bgr(img: Any, sat: float = 0.88) -> Any:
+    """Khớp backdrop-filter saturate(0.88)."""
+    import cv2
+    import numpy as np
+
+    if abs(sat - 1.0) < 1e-3:
+        return img
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV).astype(np.float32)
+    hsv[:, :, 1] = np.clip(hsv[:, :, 1] * sat, 0, 255)
+    return cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+
+
+def _css_glass_blur(expanded: Any, radius_src: float) -> Any:
+    """Gần backdrop-filter: downscale → blur → upscale (kính mờ, không kem Gaussian kép)."""
+    import cv2
+
+    eh, ew = expanded.shape[:2]
+    if eh < 2 or ew < 2 or radius_src < 0.5:
+        return expanded
+    # Browser hay downsample khi blur lớn — cho look frosted glass
+    down = max(1.0, radius_src / 8.0)
+    tw = max(4, int(round(ew / down)))
+    th = max(4, int(round(eh / down)))
+    small = cv2.resize(expanded, (tw, th), interpolation=cv2.INTER_AREA)
+    # Chromium: sigma ≈ blur/2 (ở không gian đã scale)
+    sigma = max(0.5, radius_src / (2.0 * down))
+    k = max(3, int(round(sigma * 3.0)) | 1)
+    if k % 2 == 0:
+        k += 1
+    k = min(k, (min(tw, th) | 1))
+    if k % 2 == 0:
+        k = max(3, k - 1)
+    small = cv2.GaussianBlur(small, (k, k), sigmaX=sigma, sigmaY=sigma)
+    return cv2.resize(small, (ew, eh), interpolation=cv2.INTER_LINEAR)
 
 
 def _blur_tint_region(
@@ -282,10 +329,10 @@ def _blur_tint_region(
     color_hex: str = "#4c1d95",
     opacity_pct: int = 40,
 ) -> Any:
-    """Khớp preview «Làm mờ»: blur nặng ROI (2 pass) + phủ tint — che kín hardsub.
+    """Làm mờ = kính CapCut khớp editor: blur CSS + saturate(0.88) + tint mỏng.
 
-    Preview CSS không blur pixel thật (chỉ backdrop) nên dùng tint + blur đậm;
-    export blur pixel rồi blend cùng _blur_tint_alpha.
+    Preview: backdrop-filter blur(22–42px) saturate(0.88) + rgba tint.
+    Export cũ (2× Gaussian theo chiều box) nhìn khác hẳn — đổi sang downscale-blur.
     """
     import cv2
     import numpy as np
@@ -300,23 +347,48 @@ def _blur_tint_region(
     bw, bh = x1 - x0, y1 - y0
     if bw < 8 or bh < 8:
         return frame_bgr
-    roi = frame_bgr[y0:y1, x0:x1]
-    # 2 pass blur — phá nét chữ hardsub (outline trắng)
-    ksz = max(15, (min(bw, bh) // 3) | 1)
-    if ksz % 2 == 0:
-        ksz += 1
-    ksz = min(ksz, 31)
-    blurred = cv2.GaussianBlur(roi, (ksz, ksz), 0)
-    k2 = max(11, (ksz * 2 // 3) | 1)
-    if k2 % 2 == 0:
-        k2 += 1
-    blurred = cv2.GaussianBlur(blurred, (k2, k2), 0)
+    css_blur = _blur_css_radius(opacity_pct)
+    # Map CSS-px → pixel nguồn: stage editor ~560 CSS-px cạnh ngắn
+    css_to_src = max(1.0, min(w, h) / 560.0)
+    radius = css_blur * css_to_src
+    pad = max(int(round(radius)) + 4, 16)
+    ex0, ey0 = max(0, x0 - pad), max(0, y0 - pad)
+    ex1, ey1 = min(w, x1 + pad), min(h, y1 + pad)
+    expanded = frame_bgr[ey0:ey1, ex0:ex1]
+    blurred_exp = _css_glass_blur(expanded, radius)
+    ly0, lx0 = y0 - ey0, x0 - ex0
+    covered = blurred_exp[ly0 : ly0 + bh, lx0 : lx0 + bw].copy()
+    covered = _desaturate_bgr(covered, 0.88)
     r, g, b = _parse_hex_color(color_hex)
     tint_bgr = np.array([b, g, r], dtype=np.float32)
     alpha = _blur_tint_alpha(opacity_pct)
-    covered = (blurred.astype(np.float32) * (1.0 - alpha) + tint_bgr * alpha).astype(np.uint8)
+    if alpha >= 0.005:
+        covered = (covered.astype(np.float32) * (1.0 - alpha) + tint_bgr * alpha).astype(np.uint8)
+    # Thay ROI 100% (mép mềm nhờ pad lấy pixel ngoài)
     frame_bgr[y0:y1, x0:x1] = covered
     return frame_bgr
+
+
+def _feather_mask(bh: int, bw: int, feather_y: int, feather_x: int = 0) -> Any:
+    """Alpha mask mép mềm — dùng solid/mosaic; blur CapCut không cần."""
+    import numpy as np
+
+    a = np.ones((bh, bw), np.float32)
+    fy = max(0, min(feather_y, bh // 2))
+    fx = max(0, min(feather_x, bw // 2))
+
+    def _smooth(t: float) -> float:
+        return t * t * (3.0 - 2.0 * t)
+
+    for i in range(fy):
+        t = _smooth((i + 1) / (fy + 1))
+        a[i, :] = np.minimum(a[i, :], t)
+        a[-(i + 1), :] = np.minimum(a[-(i + 1), :], t)
+    for i in range(fx):
+        t = _smooth((i + 1) / (fx + 1))
+        a[:, i] = np.minimum(a[:, i], t)
+        a[:, -(i + 1)] = np.minimum(a[:, -(i + 1)], t)
+    return a
 
 
 def _solid_region(
@@ -419,9 +491,13 @@ def _fit_hardsub_box(
 
             probe = Image.new("RGB", (8, 8))
             draw = ImageDraw.Draw(probe)
-            src_fs = max(font_size, int(round(sh * 0.78)))
+            src_fs = max(int(round(font_size * 1.12)), int(round(sh * 0.92)), 28)
             font = ImageFont.truetype(_subtitle_font(), src_fs)
-            src_w = int(math.ceil(draw.textbbox((0, 0), src, font=font)[2] * 1.08))
+            raw = draw.textbbox((0, 0), src, font=font)[2]
+            cjk = sum(1 for c in src if "\u4e00" <= c <= "\u9fff")
+            cjk_floor = int(math.ceil(cjk * src_fs * 1.15)) if cjk else 0
+            outline = int(math.ceil(src_fs * 0.5))
+            src_w = max(int(math.ceil(raw * 1.2)), cjk_floor) + outline
         except OSError:
             pass
     old_w = max(sw, _cover_box_width(src_w, frame_w) if src_w > 0 else 0)
@@ -482,11 +558,15 @@ def _layout_caption_over(
     src_w = 0
     src = (source_text or "").strip()
     if src:
-        src_fs = max(font_size, int(round(ocr_h * 0.72)))
+        src_fs = max(int(round(font_size * 1.12)), int(round(ocr_h * 0.92)), 28)
         try:
             src_font = ImageFont.truetype(font_path, src_fs)
-            # +16% khớp preview — outline CJK dày hơn đo font
-            src_w = int(math.ceil(draw.textbbox((0, 0), src, font=src_font)[2] * 1.12))
+            raw = draw.textbbox((0, 0), src, font=src_font)[2]
+            cjk = sum(1 for c in src if "\u4e00" <= c <= "\u9fff")
+            cjk_floor = int(math.ceil(cjk * src_fs * 1.15)) if cjk else 0
+            outline = int(math.ceil(src_fs * 0.5))
+            # khớp preview measureSourceInkWidth — đủ outline hardsub
+            src_w = max(int(math.ceil(raw * 1.2)), cjk_floor) + outline
         except OSError:
             pass
 
@@ -494,6 +574,7 @@ def _layout_caption_over(
     content_w = max(orig_w, text_w)
     cap_pad_x = 2
     cap_w = int(text_w + cap_pad_x * 2)
+    # Cover = che full chữ cũ (content từ source/OCR), rồi mới fit nếu VI dài hơn
     auto_w = min(frame_w, max(_fit_cover_width(content_w, cap_w, frame_w), cap_w))
     cover_box = _fit_hardsub_box(
         (ox0, oy0, ox1, oy1), auto_w, font_size, frame_w, frame_h, src
@@ -502,7 +583,11 @@ def _layout_caption_over(
     cover_w = cover_x1 - cover_x0
     cover_h = cover_y1 - cover_y0
 
+    # Caption frame trong cover (có thể hẹp hơn cover) — không co mask theo VI
     cap_w = int(text_w + cap_pad_x * 2)
+    if len(lines) == 1:
+        edge = max(4, int(round(cover_w * 0.03)))
+        cap_w = min(cover_w, max(cap_w, cover_w - edge * 2))
     cap_x0 = max(cover_x0, min(cover_x1 - cap_w, int((cover_x0 + cover_x1) / 2 - cap_w / 2)))
     # khớp preview captionCenterInCover — đúng giữa cover
     cap_y0 = cover_y0 + max(0, (cover_h - text_block_h) // 2)
@@ -528,8 +613,10 @@ def _preview_caption_layout(
     segment: dict[str, Any],
     default_fs: int,
     font_getter: Any,
+    *,
+    layout_mode: str = "",
 ) -> dict[str, Any] | None:
-    """Layout caption gửi từ preview — không tính lại trên server."""
+    """Layout caption gửi từ preview — không tính lại trên server (WYSIWYG)."""
     cl = segment.get("captionLayout")
     if not isinstance(cl, dict):
         return None
@@ -541,7 +628,8 @@ def _preview_caption_layout(
         y = int(round(float(cl["y"])))
         bw = int(round(float(cl["w"])))
         bh = int(round(float(cl["h"])))
-        fs = max(16, min(120, int(cl.get("fontSize") or default_fs)))
+        # mid preview có thể <16 — khớp font đã bake, không sàn 16
+        fs = max(8, min(120, int(cl.get("fontSize") or default_fs)))
     except (KeyError, TypeError, ValueError):
         return None
     if bw <= 0 or bh <= 0:
@@ -559,7 +647,8 @@ def _preview_caption_layout(
     gap_line = max(2, fs // 8)
     text_h = sum(line_hs) + gap_line * max(0, len(lines) - 1)
     line_h = (max(line_hs) if line_hs else fs) + gap_line
-    return {
+    mode = (layout_mode or str(segment.get("layout") or "")).lower()
+    out: dict[str, Any] = {
         "box": (x, y, x + bw, y + bh),
         "lines": lines,
         "font": font,
@@ -570,8 +659,13 @@ def _preview_caption_layout(
         "pad_y": max(2, fs // 10),
         "text_h": text_h,
         "cover_plate": False,
-        "vertical": False,
+        "vertical": mode == "vertical",
+        "label": mode == "label",
     }
+    fill = _text_fill_rgba(segment)
+    if fill is not None:
+        out["fill"] = fill
+    return out
 
 
 def _layout_caption_in_cover(
@@ -717,7 +811,7 @@ def _cover_box_fit(
     y1 += pad_y
     if (y1 - y0) > max_h:
         y0, y1 = cy - max_h // 2, cy + max_h // 2
-    max_w = int(round(frame_w * 0.72))
+    max_w = int(round(frame_w * 0.96))  # hardsub đáy hay >72% — đừng cắt lộ chữ
     if (x1 - x0) > max_w:
         cx = (x0 + x1) // 2
         x0, x1 = cx - max_w // 2, cx + max_w // 2
@@ -777,6 +871,17 @@ def _paint_caption(frame_bgr: Any, layout: dict[str, Any]) -> Any:
     return _blit_overlay(frame_bgr, overlay)
 
 
+def _text_fill_rgba(segment: dict[str, Any] | None) -> tuple[int, int, int, int] | None:
+    """Màu chữ free-text overlay (#RRGGBB) — None = trắng mặc định."""
+    if not segment:
+        return None
+    raw = segment.get("textColor") or segment.get("color")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    r, g, b = _parse_hex_color(raw.strip(), (255, 255, 255))
+    return (r, g, b, 255)
+
+
 def _caption_overlay(layout: dict[str, Any]) -> tuple[Any, int, int] | None:
     """Render RGBA một lần / câu — blit nhanh mỗi khung."""
     import numpy as np
@@ -789,6 +894,7 @@ def _caption_overlay(layout: dict[str, Any]) -> tuple[Any, int, int] | None:
     text_h = layout["text_h"]
     line_hs: list[int] = layout.get("line_hs") or []
     gap_line = int(layout.get("gap_line") or max(2, layout.get("line_h", 20) // 8))
+    fill = layout.get("fill") or (255, 255, 255, 255)
     m = 6
     bw, bh = (x1 - x0) + 2 * m, (y1 - y0) + 2 * m
     if bw < 4 or bh < 4:
@@ -799,44 +905,40 @@ def _caption_overlay(layout: dict[str, Any]) -> tuple[Any, int, int] | None:
     box_h = y1 - y0
     ty = m + max(0, (box_h - text_h) // 2)
     thick = bool(layout.get("vertical") or layout.get("label"))
-    outline = (
-        (
-            (-3, 0),
-            (3, 0),
-            (0, -3),
-            (0, 3),
-            (-2, -2),
-            (2, -2),
-            (-2, 2),
-            (2, 2),
-            (-3, -1),
-            (3, -1),
-            (-3, 1),
-            (3, 1),
-            (-1, -3),
-            (1, -3),
-            (-1, 3),
-            (1, 3),
-            (-2, -3),
-            (2, -3),
-            (-2, 3),
-            (2, 3),
-        )
-        if thick
-        else (
-            (-2, 0),
-            (2, 0),
-            (0, -2),
-            (0, 2),
-            (-2, -1),
-            (2, -1),
-            (-2, 1),
-            (2, 1),
-            (-1, -2),
-            (1, -2),
-            (-1, 2),
-            (1, 2),
-        )
+    # Dọc/nhãn: viền dày. Mid/ngang: soft drop-shadow khớp preview (drop-shadow 0 2px 4px).
+    outline_thick = (
+        (-3, 0),
+        (3, 0),
+        (0, -3),
+        (0, 3),
+        (-2, -2),
+        (2, -2),
+        (-2, 2),
+        (2, 2),
+        (-3, -1),
+        (3, -1),
+        (-3, 1),
+        (3, 1),
+        (-1, -3),
+        (1, -3),
+        (-1, 3),
+        (1, 3),
+        (-2, -3),
+        (2, -3),
+        (-2, 3),
+        (2, 3),
+    )
+    soft_shadow = (
+        (0, 1, 120),
+        (0, 2, 200),
+        (0, 3, 140),
+        (0, 4, 80),
+        (1, 2, 110),
+        (-1, 2, 110),
+        (2, 3, 70),
+        (-2, 3, 70),
+        (1, 1, 60),
+        (-1, 1, 60),
     )
     for i, line in enumerate(lines):
         bb = draw.textbbox((0, 0), line, font=font)
@@ -846,9 +948,13 @@ def _caption_overlay(layout: dict[str, Any]) -> tuple[Any, int, int] | None:
         # bù top bearing của font (textbbox top thường > 0) → căn giữa đúng nét.
         top = bb[1]
         gy = ty - top
-        for dx, dy in outline:
-            draw.text((tx + dx, gy + dy), line, font=font, fill=(0, 0, 0, 250))
-        draw.text((tx, gy), line, font=font, fill=(255, 255, 255, 255))
+        if thick:
+            for dx, dy in outline_thick:
+                draw.text((tx + dx, gy + dy), line, font=font, fill=(0, 0, 0, 250))
+        else:
+            for dx, dy, aa in soft_shadow:
+                draw.text((tx + dx, gy + dy), line, font=font, fill=(0, 0, 0, aa))
+        draw.text((tx, gy), line, font=font, fill=fill)
         ty += th + (gap_line if i + 1 < len(lines) else 0)
     rgba = np.asarray(overlay)
     return rgba, x0 - m, y0 - m
@@ -1005,20 +1111,35 @@ def _ocr_cue_boxes(
                         if pick:
                             samples.append(pick)
                 continue
+            elif layout == "mid":
+                # Hardsub ngang giữa khung — bám OCR thật, không band đáy
+                b, _tx = _ocr_mid_hardsub_boxes(frame, ocr, source=source or "")
             else:
-                # hardsub đáy trước; chỉ fallback mid nếu short CJK (行) không thấy ở đáy
+                # horizontal: ưu tiên vị trí động theo source
+                # (chữ giữa khung như「咱们拿回家做一顶」≠ cố định đáy)
                 src = source or ""
                 src_cjk = sum(1 for c in src if "\u4e00" <= c <= "\u9fff")
-                short_cjk = 0 < src_cjk <= 2 and len(src.strip()) <= 4
-                if short_cjk:
-                    # Chữ flash ngắn thường nằm giữa khung; OCR dải đáy có thể
-                    # bắt nhầm chi tiết nền rồi đặt cover sai hẳn vị trí.
-                    b, _tx = _ocr_mid_hardsub_boxes(frame, ocr, source=src)
+                mid_b, mid_tx = ([], "")
+                if src_cjk >= 1:
+                    mid_b, mid_tx = _ocr_mid_hardsub_boxes(frame, ocr, source=src)
+                if mid_b:
+                    u0 = mid_b[0]
+                    cy0 = (u0[1] + u0[3]) * 0.5
+                    # cy giữa khung → dùng mid; nếu thực sự sát đáy thì để band xử lý
+                    if fh * 0.18 < cy0 < fh * 0.70:
+                        b = mid_b
+                    else:
+                        b, _tx = _ocr_band_subs(frame, ocr)
                 else:
                     b, _tx = _ocr_band_subs(frame, ocr)
+                    # Band có thể bắt nhầm chữ đáy khác — nếu source mid flash ngắn, thử mid không lọc
+                    if (not b) and 0 < src_cjk <= 4 and len(src.strip()) <= 6:
+                        b, _tx = _ocr_mid_hardsub_boxes(frame, ocr, source=src)
             u = _union_box(b) if b else None
             if u is None and layout not in ("vertical", "label"):
-                u = _cover_box_from_ink(frame, None, tight=True)
+                # Chỉ fallback mực đáy khi không phải mid (tránh kéo cover xuống)
+                if layout != "mid":
+                    u = _cover_box_from_ink(frame, None, tight=True)
             if u:
                 # chỉ kẹp ô nhỏ khi box thật sự giữa khung (pop-up 行), không đụng hardsub đáy
                 if layout == "horizontal" and source:
@@ -1522,6 +1643,64 @@ def _segment_bbox_override(
     return (x0, y0, x1, y1) if x1 > x0 and y1 > y0 else None
 
 
+def _box_cy(box: tuple[int, int, int, int]) -> float:
+    return (box[1] + box[3]) * 0.5
+
+
+def _bbox_looks_bottom(box: tuple[int, int, int, int], frame_h: int) -> bool:
+    """Cover/caption dính đáy khung (fallback hardsub) — hay sai với chữ giữa."""
+    return _box_cy(box) >= frame_h * 0.68
+
+
+def _editor_layout_locked(segment: dict[str, Any]) -> bool:
+    """Editor đã bake bbox + captionLayout — xuất đúng WYSIWYG, không relocate/OCR/re-layout."""
+    cl = segment.get("captionLayout")
+    bb = segment.get("bbox")
+    if not isinstance(cl, dict) or not isinstance(bb, dict):
+        return False
+    lines = cl.get("lines")
+    return isinstance(lines, list) and len(lines) > 0
+
+
+def _should_paint_cover_mask(cover: bool, layout: str) -> bool:
+    """Khớp preview: mid/dọc/nhãn che khi burnSubs; ngang chỉ khi coverHardsubs."""
+    if cover:
+        return True
+    return (layout or "horizontal") in ("mid", "vertical", "label")
+
+
+def _stored_cover_should_relocate(
+    segment: dict[str, Any],
+    box: tuple[int, int, int, int],
+    frame_h: int,
+) -> bool:
+    """Bỏ bbox đáy bake khi chưa khóa editor (để OCR lại). Editor locked → không relocate."""
+    if _editor_layout_locked(segment):
+        return False
+    layout = str(segment.get("layout") or "horizontal")
+    if layout in ("vertical", "label"):
+        return False
+    src = str(segment.get("source") or "")
+    cjk = sum(1 for c in src if "\u4e00" <= c <= "\u9fff")
+    if cjk < 2:
+        return False
+    if not _bbox_looks_bottom(box, frame_h):
+        return False
+    return True
+
+
+def _caption_layout_looks_bottom(segment: dict[str, Any], frame_h: int) -> bool:
+    cl = segment.get("captionLayout")
+    if not isinstance(cl, dict):
+        return False
+    try:
+        y = float(cl.get("y") or 0)
+        bh = float(cl.get("h") or 0)
+    except (TypeError, ValueError):
+        return False
+    return (y + bh * 0.5) >= frame_h * 0.68
+
+
 def _wrap_balanced(draw: Any, text: str, font: Any, max_w: int) -> list[str]:
     """Wrap rồi cân dòng (tránh dòng cuối chỉ còn 1 từ)."""
     lines = _wrap_text(draw, text, font, max_w)
@@ -1741,9 +1920,17 @@ def _layout_mid_caption(
         return re.sub(r"\s+", " ", " ".join(lines)).strip() == re.sub(r"\s+", " ", raw).strip()
 
     size = (
-        max(10, min(68, int(preferred_fs)))
+        max(10, min(72, int(preferred_fs)))
         if preferred_fs > 0
-        else max(10, min(56, int(inner_h / line_mul)))
+        else max(
+            10,
+            min(
+                # fill ~72% chiều cao cover (không trần cứng 48 → chữ bé trong bbox phình)
+                max(28, int(inner_h * 0.72)),
+                int(inner_h / line_mul),
+                int(inner_w / max(4, len(re.sub(r"\s+", "", raw)) * 0.55)),
+            ),
+        )
     )
     lines = _fit(size)
     while size > 8 and (
@@ -2152,10 +2339,15 @@ def _resolve_segment_font_size(
     default_font_size: int,
     auto_fontsize: bool,
 ) -> int:
-    """Per-segment override → project setting → auto/default."""
+    """Per-segment override → captionLayout bake → project → auto/default."""
     seg_fs = int(seg.get("fontSize") or 0)
     if seg_fs > 0:
-        return max(16, min(120, seg_fs))
+        return max(8, min(120, seg_fs))
+    cl = seg.get("captionLayout")
+    if isinstance(cl, dict):
+        cl_fs = int(cl.get("fontSize") or 0)
+        if cl_fs > 0:
+            return max(8, min(120, cl_fs))
     if not auto_fontsize:
         return default_font_size
     proj = int(project_font_size or 0)
@@ -2242,27 +2434,15 @@ def cover_and_burn(
             ):
                 layout = "vertical"
         if layout == "vertical":
-            dur = max(0.0, e0 - s0)
-            # Watermark dọc (≥2.5s): chữ + che xuyên suốt; lead nhẹ (OCR hay trễ)
-            lead = 0.4 if dur >= 2.5 else 0.15
-            if dur >= 2.5:
-                burn_start = max(0.0, s0 - lead * 0.5)
-                burn_end = max(e0, burn_start + 0.04)
-            else:
-                burn_start = max(0.0, s0)
-                burn_end = max(e0, burn_start + 0.04)
+            # Khớp preview: chữ + mask theo coverWindow
             cover_start, cover_end = resolve_cover_window(seg)
-            # cover dài ít nhất bằng burn
-            cover_start = min(cover_start, burn_start)
-            cover_end = max(cover_end, burn_end)
+            burn_start, burn_end = cover_start, max(cover_end, cover_start + 0.04)
         elif layout == "label":
             cover_start, cover_end = resolve_cover_window(seg)
-            burn_start = max(0.0, s0)
-            burn_end = max(e0, burn_start + 0.04)
+            burn_start, burn_end = cover_start, max(cover_end, cover_start + 0.04)
         elif layout == "mid":
             cover_start, cover_end = resolve_cover_window(seg)
-            burn_start = max(0.0, s0 - 0.08)
-            burn_end = max(e0 + 0.12, burn_start + 0.04)
+            burn_start, burn_end = cover_start, max(cover_end, cover_start + 0.04)
         else:
             # Cover nới để che hardsub; BURN chữ dịch = clip timeline [start,end)
             cover_start, cover_end = resolve_cover_window(seg)
@@ -2293,14 +2473,30 @@ def cover_and_burn(
         # dùng biên burn lõi (gần [start,end) segment) để chia
         core_end = min(be0, ce0)
         core_start = max(bs1, cs1)
-        if core_end > core_start - 1e-6:
-            cut = (core_end + core_start) * 0.5
-        else:
-            cut = (core_end + core_start) * 0.5
+        cut = (core_end + core_start) * 0.5
         if ce0 > cut:
             cues[a] = (cs0, min(ce0, cut), bs0, min(be0, cut), t0, src0, lay0)
         if cs1 < cut:
             cues[b] = (max(cs1, cut), ce1, max(bs1, cut), be1, t1, src1, lay1)
+    # Horizontal-horizontal: cắt COVER chồng (tail câu trước đè bbox sau)
+    for i in range(len(cues) - 1):
+        cs0, ce0, bs0, be0, t0, src0, lay0 = cues[i]
+        cs1, ce1, bs1, be1, t1, src1, lay1 = cues[i + 1]
+        if lay0 != "horizontal" or lay1 != "horizontal":
+            continue
+        # cắt tại giữa [end0, start1] (clip timeline), không theo cover pad
+        # lấy segment gốc từ ids
+        sid0 = cue_segment_ids[i] if i < len(cue_segment_ids) else ""
+        sid1 = cue_segment_ids[i + 1] if i + 1 < len(cue_segment_ids) else ""
+        seg0 = next((s for s in segments if str(s.get("id") or "") == sid0), None)
+        seg1 = next((s for s in segments if str(s.get("id") or "") == sid1), None)
+        e0 = float(seg0["end"]) if seg0 else be0
+        s1 = float(seg1["start"]) if seg1 else bs1
+        cut = (e0 + s1) * 0.5
+        if ce0 > cut:
+            cues[i] = (cs0, min(ce0, cut), bs0, be0, t0, src0, lay0)
+        if cs1 < cut:
+            cues[i + 1] = (max(cs1, cut), ce1, bs1, be1, t1, src1, lay1)
     # Không cho cửa sổ burn chữ dịch chồng nhau — chỉ hardsub đáy (ngang).
     # vertical/label/mid khác vị trí → được phép overlap (watermark dọc xuyên clip).
     for i in range(len(cues) - 1):
@@ -2315,10 +2511,14 @@ def cover_and_burn(
 
     ocr = None
     segments_by_id = {str(seg.get("id") or ""): seg for seg in segments}
-    manual_by_idx: list[tuple[int, int, int, int] | None] = [
-        _segment_bbox_override(segments_by_id.get(sid, {}), w, h)
-        for sid in cue_segment_ids
-    ]
+    manual_by_idx: list[tuple[int, int, int, int] | None] = []
+    for sid in cue_segment_ids:
+        seg = segments_by_id.get(sid, {})
+        mb = _segment_bbox_override(seg, w, h)
+        # Bbox đáy bake sẵn + source CJK → bỏ, OCR lại vị trí thật (giữa/đáy)
+        if mb is not None and _stored_cover_should_relocate(seg, mb, h):
+            mb = None
+        manual_by_idx.append(mb)
     cue_boxes: list[list[tuple[int, int, int, int]]] = [[] for _ in cues]
     for i, mb in enumerate(manual_by_idx):
         if mb is not None:
@@ -2383,7 +2583,7 @@ def cover_and_burn(
     font_cache: dict[int, Any] = {fontsize: font}
 
     def _font_for_size(size: int):
-        fs = max(16, min(120, int(size)))
+        fs = max(8, min(120, int(size)))
         cached = font_cache.get(fs)
         if cached is not None:
             return cached
@@ -2396,8 +2596,10 @@ def cover_and_burn(
 
     # frame mẫu giữa cue label/dọc — expand cover theo mực chữ thật
     label_probe_frames: dict[int, Any] = {}
-    if cover and any(
-        (c[6] if len(c) > 6 else "") in ("label", "vertical") for c in cues
+    if any(
+        _should_paint_cover_mask(cover, (c[6] if len(c) > 6 else ""))
+        and (c[6] if len(c) > 6 else "") in ("label", "vertical")
+        for c in cues
     ):
         import cv2 as _cv2
 
@@ -2418,6 +2620,7 @@ def cover_and_burn(
     cue_overlays: list[tuple[Any, int, int] | None] = []
     # mỗi cue: 1+ vùng cover (nhãn multi-box)
     cue_fits: list[list[tuple[int, int, int, int]]] = []
+    cue_need_mask: list[bool] = []
     for i, (_cs, _ce, _bs, _be, text, src, lay_mode) in enumerate(cues):
         segment_id = cue_segment_ids[i] if i < len(cue_segment_ids) else ""
         boxes = list(cue_boxes[i] if i < len(cue_boxes) else [])
@@ -2428,7 +2631,8 @@ def cover_and_burn(
         is_mid = lay_mode == "mid"
         src_s = (src or "").strip()
         use_label_style = is_label
-        if paint is None and cover:
+        # Fallback paint: coverHardsubs hoặc overlay mid/dọc (preview vẫn mask khi burn)
+        if paint is None and _should_paint_cover_mask(cover, lay_mode):
             from ..ocr.overlay_cover import default_overlay_paint, is_mid_flash_source
 
             if is_vert:
@@ -2440,24 +2644,37 @@ def cover_and_burn(
             else:
                 paint = (int(w * 0.08), int(h * 0.84), int(w * 0.92), int(h * 0.94))
             boxes = [paint]
+        # OCR bbox giữa khung → che/chữ tại đó (không ép đáy dù layout=horizontal)
+        paint_mid = False
+        if paint is not None and not is_vert and not is_label:
+            pcy = (paint[1] + paint[3]) * 0.5
+            paint_mid = h * 0.18 < pcy < h * 0.70
+            if paint_mid:
+                is_mid = True
         if is_vert and paint is not None:
-            x0, y0, x1, y1 = paint
-            bw = x1 - x0
-            if bw > int(w * 0.18):
-                half = max(12, min(int(w * 0.05), bw // 4 + 4))
-                if (x0 + x1) / 2 < w * 0.5:
-                    x1 = min(w, x0 + half * 2)
-                else:
-                    x0 = max(0, x1 - half * 2)
-            cjk_paint = (x0, y0, x1, y1)
-            # Cover = mực (CJK+HUAMUZI); caption cao theo cover, ngang bám CJK.
-            ink = _expand_vertical_watermark_cover(
-                cjk_paint, w, h, frame_bgr=label_probe_frames.get(i)
-            )
-            paint = cjk_paint
-            boxes = [ink]
-            # cho layout: cùng cx CJK, cao đủ tới đáy ink
-            layout_paint = (cjk_paint[0], ink[1], cjk_paint[2], ink[3])
+            if has_manual_bbox:
+                # bbox editor = khung mask/chữ — không expand ink lại
+                boxes = [paint]
+                layout_paint = paint
+                ink = None
+            else:
+                x0, y0, x1, y1 = paint
+                bw = x1 - x0
+                if bw > int(w * 0.18):
+                    half = max(12, min(int(w * 0.05), bw // 4 + 4))
+                    if (x0 + x1) / 2 < w * 0.5:
+                        x1 = min(w, x0 + half * 2)
+                    else:
+                        x0 = max(0, x1 - half * 2)
+                cjk_paint = (x0, y0, x1, y1)
+                # Cover = mực (CJK+HUAMUZI); caption cao theo cover, ngang bám CJK.
+                ink = _expand_vertical_watermark_cover(
+                    cjk_paint, w, h, frame_bgr=label_probe_frames.get(i)
+                )
+                paint = cjk_paint
+                boxes = [ink]
+                # cho layout: cùng cx CJK, cao đủ tới đáy ink
+                layout_paint = (cjk_paint[0], ink[1], cjk_paint[2], ink[3])
         else:
             layout_paint = paint
             ink = None
@@ -2465,39 +2682,45 @@ def cover_and_burn(
         label_tall = False
         cover_regions: list[tuple[int, int, int, int]] = []
         if use_label_style:
-            probe = label_probe_frames.get(i)
-            raw_boxes = boxes if boxes else ([paint] if paint else [])
-            refined: list[tuple[int, int, int, int]] = []
-            for b in raw_boxes:
-                bb = b
-                if probe is not None:
-                    try:
-                        from ..ocr.labels import expand_box_to_ink
+            if has_manual_bbox and paint is not None:
+                cover_regions = [paint]
+                boxes = [paint]
+                label_tall = is_tall_label(paint)
+            else:
+                probe = label_probe_frames.get(i)
+                raw_boxes = boxes if boxes else ([paint] if paint else [])
+                refined: list[tuple[int, int, int, int]] = []
+                for b in raw_boxes:
+                    bb = b
+                    if probe is not None:
+                        try:
+                            from ..ocr.labels import expand_box_to_ink
 
-                        bb = expand_box_to_ink(probe, bb, w, h)
-                    except Exception:
-                        pass
-                tall_b = is_tall_label(bb)
-                bb = clamp_label_box(bb, w, h, force_tall=tall_b)
-                refined.append(bb)
-            boxes = refined or boxes
-            # paint = box chính (lớn nhất) để đặt chữ
-            if boxes:
-                paint = max(boxes, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))
-            label_tall = bool(paint) and is_tall_label(paint)
-            for b in boxes:
-                fit = cover_fit_label(
-                    b,
-                    None,
-                    w,
-                    h,
-                    frame_bgr=probe,
-                    force_tall=is_tall_label(b),
-                )
-                if fit:
-                    cover_regions.append(fit)
+                            bb = expand_box_to_ink(probe, bb, w, h)
+                        except Exception:
+                            pass
+                    tall_b = is_tall_label(bb)
+                    bb = clamp_label_box(bb, w, h, force_tall=tall_b)
+                    refined.append(bb)
+                boxes = refined or boxes
+                # paint = box chính (lớn nhất) để đặt chữ
+                if boxes:
+                    paint = max(boxes, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))
+                label_tall = bool(paint) and is_tall_label(paint)
+                for b in boxes:
+                    fit = cover_fit_label(
+                        b,
+                        None,
+                        w,
+                        h,
+                        frame_bgr=probe,
+                        force_tall=is_tall_label(b),
+                    )
+                    if fit:
+                        cover_regions.append(fit)
         cover_box: tuple[int, int, int, int] | None = None
         cue_fs = fontsize
+        used_preview_layout = False
         if burn and text:
             seg_meta = segments_by_id.get(segment_id, {})
             cue_fs = _resolve_segment_font_size(
@@ -2507,12 +2730,73 @@ def cover_and_burn(
                 auto_fontsize=auto_fontsize,
             )
             cue_font = _font_for_size(cue_fs)
-            if is_vert:
+            # WYSIWYG: captionLayout từ editor (đã bake giống preview lúc Xuất)
+            preview_lay = _preview_caption_layout(
+                seg_meta, cue_fs, _font_for_size, layout_mode=lay_mode,
+            )
+            editor_locked = _editor_layout_locked(seg_meta)
+            lay: dict[str, Any] | None = None
+            # Mid: ưu tiên layout bake từ preview (caption trong bbox); fallback fit OCR
+            if is_mid and paint is not None:
+                if preview_lay is not None and editor_locked:
+                    lay = preview_lay
+                    cover_box = paint
+                    used_preview_layout = True
+                else:
+                    cl = seg_meta.get("captionLayout") if isinstance(seg_meta.get("captionLayout"), dict) else {}
+                    mid_pref = int(
+                        seg_meta.get("fontSize")
+                        or (cl.get("fontSize") if cl else 0)
+                        or 0
+                    )
+                    lay = _layout_mid_caption(
+                        text,
+                        _font_for_size,
+                        paint,
+                        w,
+                        h,
+                        preferred_fs=mid_pref,
+                    )
+                    cover_box = paint if lay else paint
+                    used_preview_layout = cover_box is not None
+            elif preview_lay is not None:
+                use_preview = True
+                if not editor_locked:
+                    if paint is not None and paint_mid:
+                        if _caption_layout_looks_bottom(seg_meta, h) or (
+                            has_manual_bbox and _bbox_looks_bottom(paint, h)
+                        ):
+                            use_preview = False
+                        elif _bbox_looks_bottom(preview_lay["box"], h) and paint_mid:
+                            use_preview = False
+                    if use_preview and not paint_mid:
+                        if (
+                            _caption_layout_looks_bottom(seg_meta, h)
+                            and sum(1 for c in src_s if "\u4e00" <= c <= "\u9fff") >= 2
+                            and lay_mode in ("horizontal", "mid")
+                        ):
+                            use_preview = False
+                if use_preview:
+                    lay = preview_lay
+                    used_preview_layout = True
+                    if editor_locked:
+                        mb = _segment_bbox_override(seg_meta, w, h)
+                        cover_box = mb if mb is not None else (paint if paint is not None else preview_lay["box"])
+                    elif has_manual_bbox and paint is not None and not paint_mid:
+                        cover_box = paint
+                    elif paint_mid and paint is not None:
+                        cover_box = paint
+                    else:
+                        mb = _segment_bbox_override(seg_meta, w, h)
+                        if mb is not None and not _stored_cover_should_relocate(seg_meta, mb, h):
+                            cover_box = mb
+                        else:
+                            cover_box = paint
+            if lay is None and is_vert:
                 lay = _layout_caption_vertical(
                     text, cue_font, cue_fs, layout_paint if layout_paint else paint, w, h
                 )
-            elif is_mid and paint is not None:
-                # Mid: wrap trong OCR box + font theo H (khớp ocrOverlayLayout.layoutMidOverlay)
+            elif lay is None and is_mid and paint is not None:
                 mid_pref = int(seg_meta.get("fontSize") or 0)
                 lay = _layout_mid_caption(
                     text,
@@ -2523,7 +2807,7 @@ def cover_and_burn(
                     preferred_fs=mid_pref,
                 )
                 cover_box = lay["box"] if lay else paint
-            elif use_label_style:
+            elif lay is None and use_label_style:
                 lab_fs = max(18, int(cue_fs * (0.75 if is_label else 0.85)))
                 lay = layout_label_caption(
                     text,
@@ -2536,24 +2820,16 @@ def cover_and_burn(
                     force_vertical=label_tall,
                     source=src_s,
                 )
-            elif layout_place == "over" and paint is not None:
-                # Preview captionLayout/bbox → phụ đề editor (không đụng).
-                # Overlay OCR (mid/dọc/nhãn không có preview layout) → classic c9.
+            elif lay is None and layout_place == "over" and paint is not None:
+                # Overlay OCR không có captionLayout → classic / manual / auto-over
                 from ..ocr.overlay_cover import (
                     classic_cover_fit,
                     use_classic_overlay_cover,
                 )
 
-                preview_lay = _preview_caption_layout(seg_meta, cue_fs, _font_for_size)
                 if has_manual_bbox:
                     cover_box = paint
-                if preview_lay is not None:
-                    lay = preview_lay
-                    if cover_box is None:
-                        mb = _segment_bbox_override(seg_meta, w, h)
-                        if mb is not None:
-                            cover_box = mb
-                elif use_classic_overlay_cover(
+                if use_classic_overlay_cover(
                     layout=lay_mode,
                     source=src_s,
                     has_preview_layout=False,
@@ -2577,17 +2853,29 @@ def cover_and_burn(
                     lay, cover_box = _layout_caption_over(
                         text, cue_fs, paint, w, h, source_text=src_s,
                     )
-            else:
+            elif lay is None:
                 lay = _layout_caption(
                     text, cue_font, cue_fs, paint, w, h, placement=layout_place
                 )
         else:
             lay = None
         cue_overlays.append(_caption_overlay(lay) if lay else None)
-        if cover:
-            if use_label_style:
+        # che mid/dọc dù coverHardsubs=false (preview maskBoxes cũng vậy);
+        # is_mid có thể set sau khi OCR bbox nằm giữa khung
+        need_mask = _should_paint_cover_mask(
+            cover, "mid" if is_mid else lay_mode
+        )
+        if seg_meta.get("skipCoverMask"):
+            need_mask = False
+        cue_need_mask.append(need_mask)
+        if need_mask:
+            if used_preview_layout and cover_box is not None:
+                cue_fits.append([cover_box])
+            elif used_preview_layout and paint is not None:
+                cue_fits.append([paint])
+            elif use_label_style:
                 # chữ nằm trên paint — nới cover chính nếu cần, vẫn từng box
-                if lay and paint is not None:
+                if lay and paint is not None and not has_manual_bbox:
                     main = cover_fit_label(
                         paint,
                         lay["box"],
@@ -2617,6 +2905,21 @@ def cover_and_burn(
                 # Cover đã tính ink ở boxes[0]
                 cov = boxes[0] if boxes else paint
                 cue_fits.append([cov])
+            elif is_mid and paint is not None:
+                cb = cover_box if cover_box is not None else paint
+                # nới nhẹ X cho stroke; Y giữ sát (pad locate đã đủ)
+                px = max(6, int(round(w * 0.008)))
+                py = max(3, int(round(h * 0.002)))
+                cue_fits.append(
+                    [
+                        (
+                            max(0, cb[0] - px),
+                            max(0, cb[1] - py),
+                            min(w, cb[2] + px),
+                            min(h, cb[3] + py),
+                        )
+                    ]
+                )
             else:
                 if layout_place == "over" and cover_box is not None:
                     # Đúng khung preview — không _cover_box_over (fit/phình lại)
@@ -2691,7 +2994,7 @@ def cover_and_burn(
     cover_idx: list[list[int]] = [[] for _ in range(max_frames)]
     burn_idx: list[list[int]] = [[] for _ in range(max_frames)]
     for ci, cue in enumerate(cues):
-        if cover:
+        if ci < len(cue_need_mask) and cue_need_mask[ci]:
             f0 = max(0, int(float(cue[0]) * fps))
             f1 = min(max_frames, int(math.ceil(float(cue[1]) * fps)))
             for fi in range(f0, f1):
@@ -2708,22 +3011,15 @@ def cover_and_burn(
         bis = burn_idx[fi] if fi < len(burn_idx) else []
         for ci in cis:
             fits = cue_fits[ci] if ci < len(cue_fits) else []
-            lay = cues[ci][6] if ci < len(cues) and len(cues[ci]) > 6 else ""
             for fit in fits:
                 if fit is not None:
-                    # Dọc: blur nền + tint nhẹ — cột mỏng đúng watermark, không tấm đặc.
-                    if lay == "vertical":
-                        fr = _blur_tint_region(
-                            fr, fit, mask_color, min(32, max(22, mask_opacity))
-                        )
-                    else:
-                        fr = _apply_cover_mask(
-                            fr,
-                            fit,
-                            style=mask_style,
-                            color_hex=mask_color,
-                            opacity_pct=mask_opacity,
-                        )
+                    fr = _apply_cover_mask(
+                        fr,
+                        fit,
+                        style=mask_style,
+                        color_hex=mask_color,
+                        opacity_pct=mask_opacity,
+                    )
         for bi in bis:
             # Không ẩn watermark dọc khi label trùng nguồn (OCR flicker cùng cột) —
             # chỉ tạm ẩn nếu nhãn thật khác chữ đang đè cùng frame.

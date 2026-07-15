@@ -554,11 +554,44 @@ def test_seg_from_refined_attaches_cover() -> None:
 
 
 def test_blur_tint_alpha_matches_preview() -> None:
-    # Đồng bộ coverMaskPreviewStyle: tintA = clamp(0.38 + a*0.5, 0.55, 0.90)
-    assert abs(_blur_tint_alpha(40) - 0.58) < 1e-9  # default UI
-    assert _blur_tint_alpha(0) == 0.55
-    assert abs(_blur_tint_alpha(100) - 0.88) < 1e-9
-    assert abs(_blur_tint_alpha(80) - 0.78) < 1e-9
+    # CSS coverMaskPreviewStyle: tintA = clamp(a*0.28, 0.06, 0.22)
+    assert abs(_blur_tint_alpha(40) - 0.112) < 1e-9
+    assert _blur_tint_alpha(0) == 0.06
+    assert abs(_blur_tint_alpha(100) - 0.22) < 1e-9
+    assert _blur_tint_alpha(80) == 0.22
+
+
+def test_preview_caption_layout_wysiwyg() -> None:
+    from pipeline.export.burn import _preview_caption_layout
+    from PIL import ImageFont
+
+    def font_getter(fs: int):
+        try:
+            return ImageFont.load_default()
+        except Exception:
+            return ImageFont.load_default()
+
+    lay = _preview_caption_layout(
+        {
+            "layout": "mid",
+            "captionLayout": {
+                "x": 100,
+                "y": 200,
+                "w": 180,
+                "h": 48,
+                "lines": ["Shaqin"],
+                "fontSize": 12,
+            },
+        },
+        36,
+        font_getter,
+        layout_mode="mid",
+    )
+    assert lay is not None
+    assert lay["fontsize"] == 12
+    assert lay["lines"] == ["Shaqin"]
+    assert lay["box"] == (100, 200, 280, 248)
+    assert lay["vertical"] is False
 
 
 if __name__ == "__main__":
@@ -594,4 +627,5 @@ if __name__ == "__main__":
     test_resolve_cover_fallback_without_fields()
     test_seg_from_refined_attaches_cover()
     test_blur_tint_alpha_matches_preview()
+    test_preview_caption_layout_wysiwyg()
     print("ok")
