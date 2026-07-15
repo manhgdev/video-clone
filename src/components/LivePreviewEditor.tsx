@@ -5,7 +5,8 @@ import { IconHeadphones } from './Icons'
 import { cn } from '@/lib/cn'
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from '@/components/ui/resizable'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { fitOverlayFontPx, layoutOcrOverlay, ocrFallbackCover, verticalTextUnits } from '../lib/ocrOverlayLayout'
+import { fitOverlayFontPx, layoutOcrOverlay, midInsideVerticalWatermark, ocrFallbackCover, verticalTextUnits } from '../lib/ocrOverlayLayout'
+import { resolveCoverWindow } from '../lib/coverTiming'
 
 type Props = {
   videoUrl: string
@@ -201,31 +202,36 @@ function parseHexColor(hex: string): [number, number, number] {
   return [Number.isNaN(n(0)) ? 76 : n(0), Number.isNaN(n(2)) ? 29 : n(2), Number.isNaN(n(4)) ? 149 : n(4)]
 }
 
-/** Preview CSS khớp export (_apply_cover_mask). */
+/** Preview CSS khớp export (_apply_cover_mask / _blur_tint_region).
+ * Export blur pixel ROI rồi blend tint — CSS backdrop yếu nên cần blur + tint đậm hơn để che hết chữ gốc.
+ */
 function coverMaskPreviewStyle(
   style: ProjectSettings['coverMaskStyle'],
   color: string,
   opacity: number,
 ): React.CSSProperties {
   const [r, g, b] = parseHexColor(color)
-  const a = Math.max(0.05, Math.min(1, opacity / 100))
+  const pct = Math.max(0, Math.min(100, opacity))
+  const a = Math.max(0.05, Math.min(1, pct / 100))
   if (style === 'solid') {
     return { backgroundColor: `rgba(${r},${g},${b},${a})` }
   }
   if (style === 'mosaic') {
-    // Khớp export _blur_region — che kín chữ gốc
-    const strength = Math.max(0.35, Math.min(0.85, a))
+    // Khớp export _blur_region (median + pixelate) — che kín hardsub
     return {
-      backgroundColor: `rgba(48,48,56,${strength * 0.45})`,
-      backdropFilter: 'blur(14px) saturate(0.45) contrast(0.95)',
-      WebkitBackdropFilter: 'blur(14px) saturate(0.45) contrast(0.95)',
+      backgroundColor: 'rgba(42,42,48,0.72)',
+      backdropFilter: 'blur(22px) saturate(0.4) contrast(0.92) brightness(0.92)',
+      WebkitBackdropFilter: 'blur(22px) saturate(0.4) contrast(0.92) brightness(0.92)',
     }
   }
-  const blurPx = Math.round(10 + a * 16)
+  // blur: khớp _blur_tint_region — blur nặng 2-pass + tint; CSS dùng blur lớn + sàn alpha
+  // để chữ Trung outline trắng không lộ như trước (chỉ blur 10–16px + alpha 0.4)
+  const tintA = Math.min(0.9, Math.max(0.55, 0.38 + a * 0.5))
+  const blurPx = Math.round(22 + a * 20) // ~22–42px
   return {
-    backgroundColor: `rgba(${r},${g},${b},${a})`,
-    backdropFilter: `blur(${blurPx}px) saturate(0.35)`,
-    WebkitBackdropFilter: `blur(${blurPx}px) saturate(0.35)`,
+    backgroundColor: `rgba(${r},${g},${b},${tintA})`,
+    backdropFilter: `blur(${blurPx}px) saturate(0.42) brightness(0.94)`,
+    WebkitBackdropFilter: `blur(${blurPx}px) saturate(0.42) brightness(0.94)`,
   }
 }
 
@@ -312,32 +318,54 @@ function segmentAt(segments: Segment[], time: number) {
 /**
  * Cửa sổ COVER khớp export (burn.py): hardsub hay lộ trước/sau ASR.
  * Caption/TTS vẫn dùng [start,end) chặt; chỉ mask che chữ dùng cửa sổ này.
+ * peers: kẹp mid/label không đè mid kế (vd. «hoàn thiện» vs câu dài sau).
+ * Ưu tiên coverStart/coverEnd đã lưu từ OCR.
  */
-function coverWindow(seg: Segment): { start: number; end: number } {
-  const s0 = seg.start
-  const e0 = seg.end
+function coverWindow(seg: Segment, peers?: Segment[]): { start: number; end: number } {
+  const base = resolveCoverWindow(seg)
   const layout = seg.layout || 'horizontal'
-  if (layout === 'vertical') {
-    return { start: Math.max(0, s0), end: Math.max(e0, s0 + 0.04) }
-  }
   if (layout === 'label') {
-    const start = Math.max(0, s0 - 0.12)
-    return { start, end: Math.max(e0 + 0.1, start + 0.2) }
+    return clampOverlayPad(seg, base.start, base.end, peers, 'label')
   }
   if (layout === 'mid') {
-    const start = Math.max(0, s0 - 0.08)
-    return { start, end: Math.max(e0 + 0.08, start + 0.12) }
+    return clampOverlayPad(seg, base.start, base.end, peers, 'mid')
   }
-  const src = seg.source || ''
-  let srcCjk = 0
-  for (const c of src) {
-    if (c >= '\u4e00' && c <= '\u9fff') srcCjk += 1
+  return base
+}
+
+/** Cắt pad mid/nhãn tại giữa khe với clip cùng loại — không chồng cửa sổ. */
+function clampOverlayPad(
+  seg: Segment,
+  start: number,
+  end: number,
+  peers: Segment[] | undefined,
+  lane: 'mid' | 'label',
+): { start: number; end: number } {
+  let s = start
+  let e = end
+  if (peers?.length) {
+    for (const o of peers) {
+      if (o.id === seg.id) continue
+      if (captionLaneOf(o) !== lane) continue
+      if (o.end <= seg.start + 0.02) {
+        // clip trước — không lấn vào nửa khe
+        const cut = (o.end + seg.start) * 0.5
+        s = Math.max(s, cut)
+      } else if (o.start >= seg.end - 0.02) {
+        const cut = (seg.end + o.start) * 0.5
+        e = Math.min(e, cut)
+      } else if (o.start < seg.end && o.end > seg.start) {
+        // timeline đã chồng — chia đôi vùng chồng
+        if (o.start >= seg.start) e = Math.min(e, (seg.end + o.start) * 0.5)
+        else s = Math.max(s, (o.end + seg.start) * 0.5)
+      }
+    }
   }
-  // Hardsub lộ sớm/muộn hơn ASR — nới cửa sổ che (bbox theo playhead = cửa sổ này)
-  const lead = 0.35
-  const tail = e0 - s0 <= 0.75 && srcCjk <= 4 ? 1.05 : 0.45
-  const start = Math.max(0, s0 - lead)
-  return { start, end: Math.max(e0 + Math.max(0.4, tail), start + 0.2) }
+  if (e < s + 0.04) e = s + 0.04
+  // luôn phủ ít nhất [start,end) gốc
+  s = Math.min(s, seg.start)
+  e = Math.max(e, seg.end)
+  return { start: Math.max(0, s), end: e }
 }
 
 /** Segment để che chữ tại playhead (nới theo coverWindow, khớp xuất). */
@@ -346,12 +374,12 @@ function segmentAtCover(segments: Segment[], time: number): Segment | null {
   if (hit) return hit
   let best: Segment | null = null
   for (const s of segments) {
-    const w = coverWindow(s)
+    const w = coverWindow(s, segments)
     if (time >= w.start && time < w.end) {
       if (!best || s.start > best.start) best = s
     }
   }
-  // Lấp khe < 0.45s giữa 2 cue (cùng logic xuất)
+  // Lấp khe < 0.45s giữa 2 câu hardsub (cùng logic xuất)
   if (!best) {
     const ordered = [...segments].sort((a, b) => a.start - b.start)
     for (let i = 0; i < ordered.length - 1; i++) {
@@ -359,8 +387,8 @@ function segmentAtCover(segments: Segment[], time: number): Segment | null {
       const b = ordered[i + 1]
       if ((a.layout || 'horizontal') !== 'horizontal') continue
       if ((b.layout || 'horizontal') !== 'horizontal') continue
-      const wa = coverWindow(a)
-      const wb = coverWindow(b)
+      const wa = coverWindow(a, segments)
+      const wb = coverWindow(b, segments)
       const gap = wb.start - wa.end
       if (gap > 0 && gap < 0.45 && time >= wa.end && time < wb.start) {
         return time < (wa.end + wb.start) / 2 ? a : b
@@ -400,32 +428,95 @@ function captionLaneOf(seg: Segment): CaptionLaneKey {
   return 'horizontal'
 }
 
-/** Mọi segment đang cháy tại t (có thể chồng mid+dọc). */
+/** Overlay Mid/Nhãn/Dọc đang dưới gạch theo [start,end) = đúng thanh timeline solid. */
+function solidOverlaysAt(segments: Segment[], time: number): Segment[] {
+  return segments.filter(
+    (s) => isOcrOverlayLayout(s.layout) && time >= s.start && time < s.end,
+  )
+}
+
+function solidMidAt(segments: Segment[], time: number, preferId?: string | null): Segment | null {
+  const mids = solidOverlaysAt(segments, time).filter((s) => captionLaneOf(s) === 'mid')
+  if (!mids.length) return null
+  if (preferId) {
+    const sel = mids.find((s) => s.id === preferId)
+    if (sel) return sel
+  }
+  return mids.reduce((a, b) => (Math.abs(time - a.start) <= Math.abs(time - b.start) ? a : b))
+}
+
+/** Mọi segment đang cháy tại t (có thể chồng mid+dọc). Overlay: cửa sổ cover (OCR lệch). */
 function segmentsAt(segments: Segment[], time: number): Segment[] {
-  return segments.filter((s) => time >= s.start && time < s.end)
+  return segments.filter((s) => {
+    const lane = captionLaneOf(s)
+    if (lane === 'mid' || lane === 'label' || lane === 'vertical') {
+      // Solid [start,end) luôn cháy — khớp thanh vàng; cover pad thêm trước/sau
+      if (time >= s.start && time < s.end) return true
+      const w = coverWindow(s, segments)
+      return time >= w.start && time < w.end
+    }
+    return time >= s.start && time < s.end
+  })
 }
 
 function segmentsAtCover(segments: Segment[], time: number): Segment[] {
   const hits: Segment[] = []
+  const seen = new Set<string>()
   for (const s of segments) {
-    const w = coverWindow(s)
-    if (time >= w.start && time < w.end) hits.push(s)
+    const w = coverWindow(s, segments)
+    if (time >= w.start && time < w.end) {
+      hits.push(s)
+      seen.add(s.id)
+    }
+  }
+  // Clip timeline [start,end) luôn che — kể cả coverStart/coverEnd cũ lệch
+  for (const s of solidOverlaysAt(segments, time)) {
+    if (seen.has(s.id)) continue
+    hits.push(s)
+    seen.add(s.id)
   }
   if (hits.length) return hits
-  // lấp khe hardsub đáy (giống segmentAtCover đơn)
   const one = segmentAtCover(segments, time)
   return one ? [one] : []
 }
 
 function pickTimelineSeg(segments: Segment[], time: number, selectedId: string | null): Segment | null {
+  // Quy tắc: thanh vàng Mid solid dưới gạch → chọn đúng Mid đó (không stick vertical/cover pad cũ)
+  const mid = solidMidAt(segments, time, selectedId)
+  if (mid) return mid
+  const labels = solidOverlaysAt(segments, time).filter((s) => captionLaneOf(s) === 'label')
+  if (labels.length) {
+    const sel = selectedId ? labels.find((s) => s.id === selectedId) : null
+    return sel ?? labels[0]
+  }
   const hits = segmentsAt(segments, time)
   if (!hits.length) return segmentAtCover(segments, time)
   if (selectedId) {
     const sel = hits.find((s) => s.id === selectedId)
-    if (sel) return sel
+    if (sel) {
+      // Vertical dài: đừng cướp selection khi đang chỉ pad cover — nhưng solid mid đã return trên
+      return sel
+    }
   }
-  // Ưu tiên đáy cho TTS/focus; mid/dọc vẫn hiện song song trên preview
-  return hits.find((s) => captionLaneOf(s) === 'horizontal') ?? hits[0]
+  return (
+    hits.find((s) => captionLaneOf(s) === 'horizontal')
+    ?? hits.find((s) => captionLaneOf(s) === 'vertical')
+    ?? hits[0]
+  )
+}
+
+/** Self-check: Mid solid dưới gạch luôn được chọn — không stick vertical/cover pad. */
+export function __checkSolidMidBboxPick(): void {
+  const vert = { id: 'v', start: 0, end: 400, layout: 'vertical' as const, source: '花', translation: 'x' }
+  const midA = { id: 'a', start: 100, end: 120, layout: 'mid' as const, source: '旧', translation: 'cũ' }
+  const midB = { id: 'b', start: 190, end: 220, layout: 'mid' as const, source: '打扫', translation: 'quét' }
+  const segs = [vert, midA, midB]
+  const t = 200
+  const picked = pickTimelineSeg(segs as Segment[], t, 'v')
+  if (picked?.id !== 'b') throw new Error(`expected mid b under playhead, got ${picked?.id}`)
+  const stickPad = pickTimelineSeg(segs as Segment[], t, 'a')
+  if (stickPad?.id !== 'b') throw new Error(`must not stick mid-a cover/select over solid mid-b`)
+  if (!solidMidAt(segs as Segment[], t)) throw new Error('solidMidAt missing')
 }
 
 function dubPlaybackSpeed(seg: Segment): number {
@@ -832,8 +923,11 @@ function overlayCoverSeed(seg: Segment, frameW: number, frameH: number): PixelBo
   if (!seg.bbox) return fallback
   const box = clampCoverBox(seg.bbox, frameW, frameH)
   if (layout === 'vertical' && box.w > box.h * 0.85) return fallback
-  // mid/nhãn: bỏ bbox khổng lồ (lưới phụ đề đáy nhầm)
-  if ((layout === 'mid' || layout === 'label') && (box.w > frameW * 0.7 || box.h > frameH * 0.2)) {
+  // mid: chỉ bỏ khung gần full-frame (lưới đáy nhầm). 2 dòng hardsub giữa/đáy vẫn giữ.
+  if (layout === 'mid' && (box.w > frameW * 0.92 || box.h > frameH * 0.28)) {
+    return fallback
+  }
+  if (layout === 'label' && (box.w > frameW * 0.7 || box.h > frameH * 0.35)) {
     return fallback
   }
   return box
@@ -841,8 +935,9 @@ function overlayCoverSeed(seg: Segment, frameW: number, frameH: number): PixelBo
 
 function isBadOverlayStoredCover(seg: Segment, cover: PixelBox, frameW = 1080, frameH = 1920): boolean {
   if (seg.layout === 'vertical' && cover.w > cover.h * 0.85) return true
-  if (seg.layout === 'mid' && (cover.w > frameW * 0.65 || cover.h > frameH * 0.12)) return true
-  if (seg.layout === 'label' && (cover.w > frameW * 0.55 || cover.h > frameH * 0.35)) return true
+  // ponytail: trước đây w>65%/h>12% quăng mid 2 dòng → fallback giữa → chữ đáy lộ + "bbox ẩn"
+  if (seg.layout === 'mid' && (cover.w > frameW * 0.92 || cover.h > frameH * 0.28)) return true
+  if (seg.layout === 'label' && (cover.w > frameW * 0.7 || cover.h > frameH * 0.35)) return true
   return false
 }
 
@@ -927,13 +1022,13 @@ function resolveOverLayout(
           const ink = clampCoverBox(seg.bbox, frameW, frameH)
           if (ink.w * ink.h > 64 && cover.w * cover.h > ink.w * ink.h * 2.2) cover = ink
         }
-        // Cỡ user set → giữ; còn lại auto lại theo khung (tránh font 6–10px cũ)
+        // Cỡ user set → giữ; mid auto luôn fit lại (tránh font 1 dòng bé trong bbox to)
         const storedFs = stored.caption && seg.captionLayout?.fontSize
           ? Number(seg.captionLayout.fontSize)
           : 0
         const want = preferred > 0
           ? preferred
-          : (storedFs >= 16 ? storedFs : 0)
+          : (seg.layout === 'mid' ? 0 : (storedFs >= 16 ? storedFs : 0))
         const laid = layoutOcrOverlay(seg.layout, cover, seg.translation, want, frameW, frameH)
         return { cover: laid.cover, caption: laid.caption, lines: laid.lines, fontPx: laid.fontPx }
       }
@@ -996,6 +1091,27 @@ function unionBox(a: PixelBox, b: PixelBox): PixelBox {
 }
 
 type PreviewOverLayout = OverLayout & { mask: PixelBox }
+
+/** Mask che chữ gốc — không cần bản dịch (mid/label/dọc OCR). */
+function resolveCoverMaskOnly(
+  seg: Segment,
+  frameW: number,
+  frameH: number,
+  crop: CropRect,
+  coverOverride?: PixelBox,
+): PixelBox | null {
+  const cover = clampCoverBox(
+    coverOverride ?? overlayCoverSeed(seg, frameW, frameH),
+    frameW,
+    frameH,
+  )
+  if (cropCoversFull(crop, frameW, frameH)) return cover
+  const ink = intersectBox(cover, crop) ?? intersectBox(
+    seg.bbox ? clampCoverBox(seg.bbox, frameW, frameH) : cover,
+    crop,
+  )
+  return ink ? unionBox(ink, cover) : cover
+}
 
 /** Preview: dùng layout đã giãn ngang; 9:16 chỉ thêm mask che OCR trong crop. */
 function resolvePreviewOverLayout(
@@ -1308,13 +1424,28 @@ function overlayDisplayFontStyle(
   if (layout === 'vertical') {
     return {
       fontSize: `min(calc(100cqw * ${byW}), calc(100cqh * ${byH}))`,
-      lineHeight: 1.05,
+      lineHeight: 1.08,
       maxWidth: '100%',
     }
   }
+  // mid: font ≤ đủ cho n dòng trong caption — không overflow/cắt
+  if (layout === 'mid') {
+    const n = Math.max(1, _lineCount)
+    const lh = 1.2
+    // an toàn 90%: chừa mép dấu thanh/diacritic
+    const frac = Math.min(fontPx / h, 0.9 / (n * lh))
+    return {
+      fontSize: `calc(100cqh * ${frac})`,
+      lineHeight: lh,
+      maxWidth: '100%',
+      width: '100%',
+    }
+  }
+  // label
+  const lh = 1.15
   return {
-    fontSize: `min(calc(100cqh * ${byH}), calc(100cqw * ${byW}))`,
-    lineHeight: layout === 'label' ? 1.15 : 1.1,
+    fontSize: `min(calc(100cqh * ${Math.min(0.88, byH)}), calc(100cqw * ${Math.min(0.96, byW)}))`,
+    lineHeight: lh,
     maxWidth: '100%',
   }
 }
@@ -1540,7 +1671,7 @@ export default function LivePreviewEditor({
   const [snapGuides, setSnapGuides] = useState<SnapGuides>({ h: false, v: false })
   const [selectedOverlayId, setSelectedOverlayId] = useState<string | null>(null)
   /** Track đang focus — click Caption ≠ TTS ≠ Âm gốc ≠ Text */
-  const [trackFocus, setTrackFocus] = useState<'video' | 'caption' | 'dub' | 'bg' | 'text'>('caption')
+  const [trackFocus, setTrackFocus] = useState<'video' | 'caption' | 'dub' | 'bg' | 'text'>('video')
   const [selectedMediaId, setSelectedMediaId] = useState<string | null>(null)
   const [videoClips, setVideoClips] = useState<MediaClip[]>([])
   const [bgClips, setBgClips] = useState<MediaClip[]>([])
@@ -1817,29 +1948,69 @@ export default function LivePreviewEditor({
     ?? (selected?.bbox ? clampCoverBox(selected.bbox, sourceWidth, sourceHeight) : null)
     ?? resolveSegmentCover(selected, settings, sourceWidth, sourceHeight)
     ?? fallbackBox
-  // Mask che chữ Trung: mọi cửa sổ cover tại playhead. Chữ dịch: mọi clip [start,end).
-  const coverSegs = overCoverMode ? segmentsAtCover(segments, time) : []
-  const timelineSegs = segmentsAt(segments, time).filter((s) => s.translation.trim())
+  const verticalWatermarkSegs = useMemo(
+    () => segments.filter((s) => s.layout === 'vertical'),
+    [segments],
+  )
+  const skipSpuriousMid = (s: Segment) =>
+    midInsideVerticalWatermark(s, verticalWatermarkSegs)
+  // Mask: cover pad + mid/nhãn solid dưới gạch (khớp thanh vàng tới hết)
+  const solidAtPlayhead = solidOverlaysAt(segments, time)
+  const coverSegsRaw = overCoverMode
+    ? (() => {
+        const base = segmentsAtCover(segments, time)
+        const seen = new Set(base.map((s) => s.id))
+        for (const s of solidAtPlayhead) {
+          if (!seen.has(s.id)) base.push(s)
+        }
+        return base
+      })()
+    : []
+  const timelineSegsRaw = segmentsAt(segments, time)
+    .filter((s) => s.translation.trim() && !skipSpuriousMid(s))
+  // Một mid tại một thời điểm — ưu tiên clip SOLID dưới gạch
+  const pickOneMid = (list: Segment[]) => {
+    const mids = list.filter((s) => captionLaneOf(s) === 'mid')
+    if (mids.length <= 1) return list
+    const keep = solidMidAt(list, time, selectedId) ?? mids[0]
+    return list.filter((s) => captionLaneOf(s) !== 'mid' || s.id === keep.id)
+  }
+  const coverSegs = pickOneMid(coverSegsRaw)
+  const timelineSegs = pickOneMid(timelineSegsRaw)
   const timelineSeg = pickTimelineSeg(segments, time, selectedId)
   const coverSeg = coverSegs.find((s) => s.id === selectedId) ?? coverSegs[0] ?? null
+  // Khung kéo: Mid solid dưới gạch vàng — không phụ thuộc selected cũ (vertical/cover pad)
+  const bboxSeg =
+    solidMidAt(segments, time, selectedId)
+    ?? solidAtPlayhead.find((s) => captionLaneOf(s) === 'label')
+    ?? (selected && (time >= selected.start && time < selected.end) ? selected : null)
+    ?? (coverSeg && isOcrOverlayLayout(coverSeg.layout) ? coverSeg : null)
+    ?? (timelineSeg && isOcrOverlayLayout(timelineSeg.layout) ? timelineSeg : null)
+    ?? selected
   const activeCoverDraft =
-    selected && bboxDraft && (timelineSegs.some((s) => s.id === selected.id) || coverSeg?.id === selected.id)
+    bboxSeg && bboxDraft && bboxSeg.id === selected?.id
       ? bboxDraft
       : undefined
   const maskBoxes =
     overCoverMode && settings.burnSubs
       ? coverSegs
-          .filter((s) => s.translation.trim())
-          .map((s) =>
-            resolvePreviewOverLayout(
-              s,
-              settings,
-              sourceWidth,
-              sourceHeight,
-              crop,
-              s.id === selected?.id ? activeCoverDraft : undefined,
-            )?.mask ?? null,
+          .filter((s) =>
+            isOcrOverlayLayout(s.layout) || s.translation.trim(),
           )
+          .map((s) => {
+            const override = s.id === selected?.id ? activeCoverDraft : undefined
+            if (s.translation.trim()) {
+              return resolvePreviewOverLayout(
+                s,
+                settings,
+                sourceWidth,
+                sourceHeight,
+                crop,
+                override,
+              )?.mask ?? resolveCoverMaskOnly(s, sourceWidth, sourceHeight, crop, override)
+            }
+            return resolveCoverMaskOnly(s, sourceWidth, sourceHeight, crop, override)
+          })
           .filter((b): b is PixelBox => !!b)
       : []
   const captionLayers =
@@ -1857,16 +2028,43 @@ export default function LivePreviewEditor({
         }).filter((x): x is { seg: Segment; layout: NonNullable<ReturnType<typeof resolvePreviewOverLayout>> } => !!x)
       : []
   const captionOverLayout =
-    captionLayers.find((c) => c.seg.id === timelineSeg?.id)?.layout
+    captionLayers.find((c) => c.seg.id === bboxSeg?.id)?.layout
+    ?? captionLayers.find((c) => c.seg.id === timelineSeg?.id)?.layout
     ?? captionLayers[0]?.layout
     ?? null
-  // Khung tím: theo đoạn đang chọn / timeline (không theo pad cover ngoài clip)
-  const selectedBox = bboxDraft
-    ?? (timelineSeg && captionOverLayout && timelineSeg.id === selected?.id ? captionOverLayout.cover : null)
-    ?? (selected && captionLayers.find((c) => c.seg.id === selected.id)?.layout.cover)
-    ?? selectedBoxSource
-  const showBboxAtPlayhead =
-    !overCoverMode || !timelineSeg || timelineSeg.id === selected?.id || !!bboxDraft || !!selected
+  const bboxLayoutCover =
+    bboxSeg && captionLayers.find((c) => c.seg.id === bboxSeg.id)?.layout.cover
+  const selectedBox = bboxDraft && selected && bboxSeg?.id === selected.id
+    ? bboxDraft
+    : bboxLayoutCover
+      ?? (bboxSeg
+        ? (
+            resolvePreviewOverLayout(bboxSeg, settings, sourceWidth, sourceHeight, crop)?.cover
+            ?? resolveCoverMaskOnly(bboxSeg, sourceWidth, sourceHeight, crop)
+            ?? (bboxSeg.bbox ? clampCoverBox(bboxSeg.bbox, sourceWidth, sourceHeight) : null)
+            ?? overlayCoverSeed(bboxSeg, sourceWidth, sourceHeight)
+          )
+        : null)
+      ?? selectedBoxSource
+  // Khung kéo (handles): chỉ khi đang chỉnh Caption/Cover — xem Video thì chỉ mask, không khung chấm
+  const showBboxAtPlayhead = (() => {
+    if (tool === 'text') return false
+    if (bboxDraft) return true
+    if (!(trackFocus === 'caption' || tool === 'cover')) return false
+    if (!selected && !bboxSeg) return false
+    // Mid/nhãn solid dưới gạch — hiện suốt thanh vàng khi đang focus caption
+    if (bboxSeg && isOcrOverlayLayout(bboxSeg.layout) && time >= bboxSeg.start && time < bboxSeg.end) {
+      return true
+    }
+    if (!selected) return false
+    if (coverSeg?.id === selected.id || timelineSeg?.id === selected.id) return true
+    if (!isOcrOverlayLayout(selected.layout)) return false
+    const lane = captionLaneOf(selected)
+    const otherSameLane = [...coverSegs, ...timelineSegs].some(
+      (s) => s.id !== selected.id && captionLaneOf(s) === lane,
+    )
+    return !otherSameLane
+  })()
   const activeOcrBox = selectedBox
   const captionLanes = useMemo(() => {
     const present = new Set(segments.map(captionLaneOf))
@@ -1933,7 +2131,7 @@ export default function LivePreviewEditor({
     if (!video) return
     syncOriginalBg(video.currentTime, !video.paused, Boolean(dubTokenRef.current))
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional: policy flags only
-  }, [muteOriginal, wantNoVocals, stemStatus, settings.originalAudioVolume, trackMute.video, trackMute.dub])
+  }, [muteOriginal, wantNoVocals, stemStatus, settings.originalAudioVolume, trackMute.dub])
 
   function syncOriginalBg(
     videoTime: number,
@@ -1947,7 +2145,8 @@ export default function LivePreviewEditor({
     const volMul = Math.max(0, Math.min(1, (settings.originalAudioVolume ?? 100) / 100))
     const bg = bgAudioRef.current
     const playStem = wantNoVocals && stemStatus === 'ready' && !!bg
-    const playVideoAudio = !trackMute.video && !muteOriginal
+    // Âm gốc chỉ điều khiển qua track «Âm gốc» (không duplicate mute trên Video)
+    const playVideoAudio = !muteOriginal
     const rate = Math.max(0.5, Math.min(2, playRate))
 
     if (playStem && bg) {
@@ -2111,7 +2310,7 @@ export default function LivePreviewEditor({
 
   function seek(segment: Segment) {
     const video = videoRef.current
-    setSelectedId(segment.id)
+    focusCaption(segment)
     if (!video) return
     video.currentTime = segment.start
     setTime(segment.start)
@@ -2125,9 +2324,15 @@ export default function LivePreviewEditor({
     focusCaption(segment)
     pushHistory()
     const original = { start: segment.start, end: segment.end }
-    const index = segments.findIndex((s) => s.id === segment.id)
-    const before = index > 0 ? segments[index - 1] : undefined
-    const after = index >= 0 ? segments[index + 1] : undefined
+    // Chỉ kẹp theo cùng lane — vertical dài (0→cuối) không đè mid khi kéo
+    const lane = captionLaneOf(segment)
+    const laneSegs = segments
+      .filter((s) => captionLaneOf(s) === lane)
+      .slice()
+      .sort((a, b) => a.start - b.start)
+    const index = laneSegs.findIndex((s) => s.id === segment.id)
+    const before = index > 0 ? laneSegs[index - 1] : undefined
+    const after = index >= 0 && index < laneSegs.length - 1 ? laneSegs[index + 1] : undefined
     const gap = 0.04
     const minDuration = 0.15
 
@@ -2164,8 +2369,13 @@ export default function LivePreviewEditor({
         (Math.abs(current.start - original.start) > 0.001 || Math.abs(current.end - original.end) > 0.001)
       ) {
         onChange({ ...segment, start: current.start, end: current.end })
-        if (videoRef.current) videoRef.current.currentTime = current.start
-        setTime(current.start)
+        // Giữ playhead nếu còn trong clip; đừng tua về đầu / cuối lệch
+        const t = videoRef.current?.currentTime ?? time
+        if (t < current.start || t >= current.end) {
+          const mid = current.start + Math.max(0.05, (current.end - current.start) / 2)
+          if (videoRef.current) videoRef.current.currentTime = mid
+          setTime(mid)
+        }
       }
     }
     window.addEventListener('pointermove', update)
@@ -2199,11 +2409,56 @@ export default function LivePreviewEditor({
     window.addEventListener('pointerup', commit, { once: true })
   }
 
+  /** Thanh tiến độ preview / toàn màn hình — tua theo chiều ngang bar. */
+  function beginPreviewSeek(event: ReactPointerEvent<HTMLElement>) {
+    if (busy || timelineDuration <= 0) return
+    const video = videoRef.current
+    if (!video) return
+    event.preventDefault()
+    const bar = event.currentTarget
+    const seekTo = (clientX: number) => {
+      const rect = bar.getBoundingClientRect()
+      const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / Math.max(1, rect.width)))
+      const nextTime = ratio * timelineDuration
+      video.currentTime = nextTime
+      setTime(nextTime)
+      if (trackFocus === 'caption' || trackFocus === 'dub') {
+        const current = pickTimelineSeg(segments, nextTime, selectedId)
+        const cov = segmentAtCover(segments, nextTime)
+        if (current) {
+          setSelectedId(current.id)
+        } else if (cov) {
+          const prev = selectedId ? segments.find((s) => s.id === selectedId) : null
+          const prevLane = prev ? captionLaneOf(prev) : null
+          if (!(captionLaneOf(cov) === 'vertical' && prevLane && prevLane !== 'vertical')) {
+            setSelectedId(cov.id)
+          }
+        }
+      }
+      dubHardSyncRef.current = true
+      syncDubAudio(nextTime, !video.paused)
+    }
+    seekTo(event.clientX)
+    const move = (pointer: PointerEvent) => seekTo(pointer.clientX)
+    const commit = () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', commit)
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', commit, { once: true })
+  }
+
   function beginBboxDrag(
     event: ReactPointerEvent,
     mode: 'move' | 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w',
+    targetSeg?: Segment | null,
   ) {
-    if (!selected || busy || tool === 'text' || trackLocked.caption) return
+    const seg = targetSeg ?? selected
+    if (!seg || busy || tool === 'text' || trackLocked.caption) return
+    if (seg.id !== selected?.id) {
+      setSelectedId(seg.id)
+      setTrackFocus('caption')
+    }
     const canvas = canvasRef.current
     if (!canvas) return
     event.preventDefault()
@@ -2213,11 +2468,11 @@ export default function LivePreviewEditor({
     const rect = canvas.getBoundingClientRect()
     // Bắt đầu từ khung đang hiện (selectedBox), không nhảy về OCR raw / fitHardsub
     const original = clampCoverBox(
-      bboxDraft ?? selectedBox ?? selected.bbox ?? fallbackBox,
+      bboxDraft ?? selectedBox ?? seg.bbox ?? fallbackBox,
       sourceWidth,
       sourceHeight,
     )
-    const overDrag = overCoverMode && !!selected.translation.trim()
+    const overDrag = overCoverMode && !!seg.translation.trim()
     const minSize = 12
     setDraggingBox(true)
     setSnapGuides({ h: false, v: false })
@@ -2266,11 +2521,23 @@ export default function LivePreviewEditor({
       bboxDraftRef.current = null; setBboxDraft(null)
       if (next) {
         const norm = clampCoverBox(next, sourceWidth, sourceHeight)
-        if (overDrag && selected) {
-          const layout = manualCoverLayout(norm, selected.translation, selectedFontPx, sourceWidth, sourceHeight, true)
-          onChange(segmentWithLayout(selected, layout, selectedFontPx))
+        if (overDrag) {
+          const fontPx = resolveCaptionFontSize(seg, settings, sourceWidth, sourceHeight)
+          if (isOcrOverlayLayout(seg.layout)) {
+            const preferred = resolveOverlayFontPreferred(seg)
+            const laid = layoutOcrOverlay(seg.layout, norm, seg.translation, preferred, sourceWidth, sourceHeight)
+            onChange(segmentWithLayout(seg, {
+              cover: laid.cover,
+              caption: laid.caption,
+              lines: laid.lines,
+              fontPx: laid.fontPx,
+            }, laid.fontPx))
+          } else {
+            const layout = manualCoverLayout(norm, seg.translation, fontPx, sourceWidth, sourceHeight, true)
+            onChange(segmentWithLayout(seg, layout, fontPx))
+          }
         } else {
-          onChange({ ...selected, bbox: norm, captionLayout: selected.captionLayout ?? null })
+          onChange({ ...seg, bbox: norm, captionLayout: seg.captionLayout ?? null })
         }
       }
     }
@@ -2421,6 +2688,7 @@ export default function LivePreviewEditor({
     setSelectedOverlayId(null)
     setTrackFocus('video')
     setPropTab('video')
+    if (tool === 'cover') setTool('select')
     const clip = (clipId ? videoClips.find((c) => c.id === clipId) : null)
       ?? clipAtTime(videoClips, time)
       ?? videoClips[0]
@@ -2434,9 +2702,11 @@ export default function LivePreviewEditor({
     setPropTab('overlay')
   }
 
-  /** Chọn clip: giữ playhead nếu đã nằm trong clip (tránh seek về đầu → Split bị khóa) */
-  function selectClipKeepPlayhead(start: number, end: number) {
-    if (time < start || time >= end) {
+  /** Chọn clip: giữ playhead nếu đã trong [start,end) hoặc cover pad (mid/OCR). */
+  function selectClipKeepPlayhead(start: number, end: number, cover?: { start: number; end: number }) {
+    const lo = cover ? Math.min(start, cover.start) : start
+    const hi = cover ? Math.max(end, cover.end) : end
+    if (time < lo || time >= hi) {
       const mid = start + Math.max(SPLIT_EDGE, Math.min((end - start) / 2, end - start - SPLIT_EDGE))
       seekPlayhead(mid)
     }
@@ -3123,7 +3393,7 @@ export default function LivePreviewEditor({
 
               {/* ── CENTER: Preview panel (OpenCut PreviewPanel) ── */}
               <ResizablePanel id="preview" defaultSize={50} minSize={25} className="min-h-0 min-w-0 px-1">
-                <div ref={previewRef} className="panel bg-background relative flex size-full min-h-0 min-w-0 flex-col rounded-sm border border-border overflow-hidden">
+                <div ref={previewRef} className="panel preview-panel bg-background relative flex size-full min-h-0 min-w-0 flex-col rounded-sm border border-border overflow-hidden">
 
                   {/* Viewport — Fit = vừa panel; % = scale + scroll */}
                   <div
@@ -3209,27 +3479,45 @@ export default function LivePreviewEditor({
                               pauseDubAudio()
                             }
                             setTime(current)
-                            // Clip timeline = nguồn chọn đoạn; cover pad chỉ để mask
-                            const hits = segmentsAt(segments, current)
-                            const now = (selectedId && hits.find((s) => s.id === selectedId))
-                              ?? pickTimelineSeg(segments, current, selectedId)
-                            const cov = segmentAtCover(segments, current)
-                            if (now) setSelectedId(now.id)
-                            else if (cov) setSelectedId(cov.id)
+                            // Focus Video/BG: xem clip — không nhảy chọn Mid/Dọc (tránh hiện khung kéo)
+                            if (trackFocus === 'caption' || trackFocus === 'dub') {
+                              const now = pickTimelineSeg(segments, current, selectedId)
+                              const cov = segmentAtCover(segments, current)
+                              if (now) {
+                                setSelectedId(now.id)
+                              } else if (cov) {
+                                const prev = selectedId ? segments.find((s) => s.id === selectedId) : null
+                                const prevLane = prev ? captionLaneOf(prev) : null
+                                if (captionLaneOf(cov) === 'vertical' && prevLane && prevLane !== 'vertical') {
+                                  /* keep */
+                                } else {
+                                  setSelectedId(cov.id)
+                                }
+                              }
+                            }
                             const preferSlow = settings.matchDuration === 'preferVideo'
                             event.currentTarget.playbackRate = preferSlow
                               ? 0.8
-                              : (now?.videoSpeed ?? 1)
+                              : (pickTimelineSeg(segments, current, selectedId)?.videoSpeed ?? 1)
                             syncDubAudio(current, !event.currentTarget.paused)
                           }}
                           onSeeked={(event) => {
                             const t = event.currentTarget.currentTime
-                            const hits = segmentsAt(segments, t)
-                            const current = (selectedId && hits.find((s) => s.id === selectedId))
-                              ?? pickTimelineSeg(segments, t, selectedId)
-                            const cov = segmentAtCover(segments, t)
-                            if (current) setSelectedId(current.id)
-                            else if (cov) setSelectedId(cov.id)
+                            if (trackFocus === 'caption' || trackFocus === 'dub') {
+                              const current = pickTimelineSeg(segments, t, selectedId)
+                              const cov = segmentAtCover(segments, t)
+                              if (current) {
+                                setSelectedId(current.id)
+                              } else if (cov) {
+                                const prev = selectedId ? segments.find((s) => s.id === selectedId) : null
+                                const prevLane = prev ? captionLaneOf(prev) : null
+                                if (captionLaneOf(cov) === 'vertical' && prevLane && prevLane !== 'vertical') {
+                                  /* keep */
+                                } else {
+                                  setSelectedId(cov.id)
+                                }
+                              }
+                            }
                             // Scrub timeline → ép TTS/stem khớp lại một lần
                             dubHardSyncRef.current = true
                             syncDubAudio(event.currentTarget.currentTime, !event.currentTarget.paused)
@@ -3264,8 +3552,8 @@ export default function LivePreviewEditor({
                         />
                       ))}
 
-                      {/* Bbox kéo — chỉ khi khớp đoạn tại playhead (tránh bbox đoạn khác đè timeline) */}
-                      {selected && showBboxAtPlayhead && tool !== 'text' && (
+                      {/* Bbox kéo — suốt thanh vàng Mid [start,end); không ẩn sớm vì selected cũ */}
+                      {bboxSeg && showBboxAtPlayhead && tool !== 'text' && (
                         <div
                           className={cn(
                             'absolute border-2 border-violet-400 cursor-move z-10 overflow-hidden',
@@ -3280,7 +3568,7 @@ export default function LivePreviewEditor({
                               ? coverMaskPreviewStyle(coverMaskStyle, coverMaskColor, coverMaskOpacity)
                               : {}),
                           }}
-                          onPointerDown={(e) => beginBboxDrag(e, 'move')}
+                          onPointerDown={(e) => beginBboxDrag(e, 'move', bboxSeg)}
                         >
                           {(['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'] as const).map((handle) => (
                             <span
@@ -3296,7 +3584,7 @@ export default function LivePreviewEditor({
                                 handle === 'sw' && 'bottom-[-6px] left-[-6px] cursor-nesw-resize',
                                 handle === 'w'  && 'top-[calc(50%-6px)] left-[-6px] cursor-ew-resize',
                               )}
-                              onPointerDown={(e) => { e.stopPropagation(); beginBboxDrag(e, handle) }}
+                              onPointerDown={(e) => { e.stopPropagation(); beginBboxDrag(e, handle, bboxSeg) }}
                             />
                           ))}
                           {(effectivePropTab === 'mask' || draggingBox) && (
@@ -3326,12 +3614,16 @@ export default function LivePreviewEditor({
                         <div
                           key={layerSeg.id}
                           className={cn(
-                            '@container [container-type:size] absolute z-20 pointer-events-none flex items-center justify-center overflow-hidden',
-                            overlayLay === 'vertical' && 'px-0.5',
+                            '@container [container-type:size] absolute z-20 pointer-events-none flex items-center justify-center',
+                            overlayLay === 'vertical' && 'px-0.5 overflow-hidden',
+                            overlayLay === 'mid' && 'overflow-visible',
+                            overlayLay !== 'vertical' && overlayLay !== 'mid' && 'overflow-hidden',
                           )}
                           style={sourceToDisplayStyle(
-                            // Cover = bbox tím: chữ luôn căn giữa khung (không lệch caption box)
-                            layerLayout.cover,
+                            // Mid/dọc: chữ trong caption (đã pad); mask tím = cover
+                            overlayLay === 'vertical' || overlayLay === 'mid'
+                              ? layerLayout.caption
+                              : layerLayout.cover,
                             crop,
                           )}
                         >
@@ -3348,9 +3640,9 @@ export default function LivePreviewEditor({
                                 height: '100%',
                                 overflow: 'hidden',
                                 margin: 0,
-                                padding: 0,
+                                padding: '0.08em 0.06em',
                                 boxSizing: 'border-box',
-                                ...overlayDisplayFontStyle('vertical', layerLayout.cover, fontPx, lines.length),
+                                ...overlayDisplayFontStyle('vertical', layerLayout.caption, fontPx, lines.length),
                               }}
                             >
                               {lines.map((unit, i) => (
@@ -3371,17 +3663,33 @@ export default function LivePreviewEditor({
                             </div>
                           ) : overlayLay === 'label' || overlayLay === 'mid' ? (
                             <p
-                              className="w-full h-full text-center text-white font-bold drop-shadow-[0_2px_4px_rgba(0,0,0,0.9)] break-words overflow-hidden flex flex-col items-center justify-center"
+                              className={cn(
+                                'w-full h-full text-center text-white font-bold drop-shadow-[0_2px_4px_rgba(0,0,0,0.9)] flex flex-col items-center justify-center',
+                                overlayLay === 'mid' ? 'overflow-visible' : 'overflow-hidden break-words',
+                              )}
                               style={{
-                                ...overlayDisplayFontStyle(overlayLay, layerLayout.cover, fontPx, lines.length),
-                                whiteSpace: 'pre-wrap',
-                                padding: '0.04em 0.08em',
+                                ...overlayDisplayFontStyle(
+                                  overlayLay,
+                                  overlayLay === 'mid' ? layerLayout.caption : layerLayout.cover,
+                                  fontPx,
+                                  lines.length,
+                                ),
+                                whiteSpace: overlayLay === 'mid' ? 'normal' : 'pre-wrap',
+                                padding: overlayLay === 'mid' ? '0' : '0.04em 0.08em',
                                 boxSizing: 'border-box',
                                 margin: 0,
                               }}
                             >
                               {lines.map((line, i) => (
-                                <span key={i}>{i > 0 && <br />}{line}</span>
+                                <span
+                                  key={i}
+                                  className={cn(
+                                    'block w-full text-center',
+                                    overlayLay === 'mid' && 'whitespace-nowrap',
+                                  )}
+                                >
+                                  {line}
+                                </span>
                               ))}
                             </p>
                           ) : (
@@ -3462,8 +3770,32 @@ export default function LivePreviewEditor({
                     </div>
                   </div>
 
+                  {/* Thanh tiến độ — preview + toàn màn hình (kéo tua) */}
+                  {timelineDuration > 0 && (
+                    <div className="preview-seek-wrap shrink-0 px-4 pb-1 pt-2">
+                      <div
+                        role="slider"
+                        aria-label="Tiến độ phát"
+                        aria-valuemin={0}
+                        aria-valuemax={timelineDuration}
+                        aria-valuenow={time}
+                        className="group relative h-2 cursor-pointer rounded-full bg-muted/80 touch-none"
+                        onPointerDown={beginPreviewSeek}
+                      >
+                        <div
+                          className="pointer-events-none absolute inset-y-0 left-0 rounded-full bg-primary/90"
+                          style={{ width: `${Math.min(100, (time / timelineDuration) * 100)}%` }}
+                        />
+                        <div
+                          className="pointer-events-none absolute top-1/2 size-3 -translate-y-1/2 rounded-full border-2 border-background bg-primary opacity-0 shadow transition-opacity group-hover:opacity-100"
+                          style={{ left: `calc(${Math.min(100, (time / timelineDuration) * 100)}% - 6px)` }}
+                        />
+                      </div>
+                    </div>
+                  )}
+
                   {/* Preview toolbar — OpenCut: grid-cols-[1fr_auto_1fr] pb-3 pt-5 px-5 */}
-                  <div className="grid grid-cols-[1fr_auto_1fr] items-center pb-2 pt-2 px-4 shrink-0">
+                  <div className="preview-toolbar grid grid-cols-[1fr_auto_1fr] items-center pb-2 pt-2 px-4 shrink-0">
                     {/* Left: timecode */}
                     <div className="flex items-center">
                       <span className="font-mono text-xs tabular-nums">{formatTimecode(time)}</span>
@@ -4400,7 +4732,7 @@ export default function LivePreviewEditor({
                             <polygon points="5 3 19 12 5 21 5 3" />
                           </svg>
                         ),
-                        mute: true,
+                        mute: false,
                         hide: true,
                         lock: true,
                         focus: 'video' as const,
@@ -4470,7 +4802,10 @@ export default function LivePreviewEditor({
                           else if (row.id === 'bg') focusBg()
                           else if (row.id === 'caption') {
                             const laneKey = 'laneKey' in row ? row.laneKey : 'horizontal'
-                            const hit = segments.find((s) => captionLaneOf(s) === laneKey)
+                            const under = segments.find(
+                              (s) => captionLaneOf(s) === laneKey && time >= s.start && time < s.end,
+                            )
+                            const hit = under ?? segments.find((s) => captionLaneOf(s) === laneKey)
                             if (hit) focusCaption(hit)
                             else setTrackFocus('caption')
                           }
@@ -4665,11 +5000,13 @@ export default function LivePreviewEditor({
                         {segments.filter((seg) => captionLaneOf(seg) === lane.key).map((seg) => {
                           const display = draft?.id === seg.id ? { ...seg, ...draft } : seg
                           const isSelected = trackFocus === 'caption' && seg.id === selected?.id
+                          // Một thanh kéo [start,end) — không ghost cover 2 màu; sai thì user kéo đầu/đuôi
                           return (
                             <button
                               key={seg.id}
                               type="button"
                               data-caption-clip=""
+                              title={`${formatTime(display.start)}–${formatTime(display.end)}`}
                               className={cn(
                                 'absolute top-1.5 h-[calc(100%-12px)] rounded-md text-[11px] text-white whitespace-nowrap overflow-hidden px-2 flex items-center justify-center text-center cursor-pointer border-0 transition-opacity hover:opacity-90',
                                 isSelected && 'ring-[1.5px] ring-primary',
@@ -5124,7 +5461,7 @@ export default function LivePreviewEditor({
                   <CtxItem onClick={() => { setPropTab('overlay'); setCtxMenu(null) }}>Mở Text</CtxItem>
                 )}
                 {(tid === 'caption' || tid === 'dub' || tid === 'text') && <CtxSep />}
-                {(tid === 'video' || tid === 'dub' || tid === 'bg') && (
+                {(tid === 'dub' || tid === 'bg') && (
                   <CtxItem
                     onClick={() => {
                       if (tid === 'bg') {

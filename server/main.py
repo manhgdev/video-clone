@@ -86,6 +86,9 @@ class SegmentIn(BaseModel):
     audioUrl: str | None = None
     audioFile: str | None = None
     audioDuration: float | None = None
+    # Cửa sổ che chữ gốc (có thể rộng hơn start/end dịch)
+    coverStart: float | None = None
+    coverEnd: float | None = None
     # horizontal | vertical | label — UI/export burn
     layout: str | None = None
     # False = không TTS (title dọc/nhãn mặc định). True = lồng tiếng.
@@ -278,6 +281,15 @@ def api_video(project_id: str):
     meta = load_meta(project_id)
     if not meta:
         raise HTTPException(404)
+    preview_sec = max(0, int(meta.get("previewSec") or 0))
+    if preview_sec > 0:
+        work = meta.get("workVideo") or ""
+        wp = Path(work) if work else None
+        if wp and wp.is_file():
+            return FileResponse(wp)
+        cached = ensure_layout(project_id) / "cache" / f"preview_{preview_sec}.mp4"
+        if cached.is_file():
+            return FileResponse(cached)
     return FileResponse(meta["videoPath"])
 
 

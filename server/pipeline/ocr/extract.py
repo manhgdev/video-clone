@@ -82,6 +82,27 @@ def _is_cjk(ch: str) -> bool:
     )
 
 
+def _hardsub_line_keep(text: str, source_lang: str) -> bool:
+    """Hardsub đáy: bỏ Latin/số thuần + mảnh CJK (mid/nhãn hay lọt)."""
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    cjk = sum(1 for c in raw if _is_cjk(c))
+    compact = re.sub(r"\s+", "", raw)
+    lang = (source_lang or "").lower()
+    reject_ascii = lang.startswith("zh") or lang in ("auto", "", "zh-cn", "zh-tw")
+    if reject_ascii and cjk < 1:
+        return False
+    if cjk < 1 and re.fullmatch(r"[A-Za-z0-9._:/-]+", compact or ""):
+        return False
+    # đáy: câu ≥4 CJK — 2–3 chữ hay là mid flash / nhiễu (意力)
+    if cjk < 4:
+        return False
+    if cjk < 1 and len(raw) < 2:
+        return False
+    return True
+
+
 def _rapidocr_labels(*, use_cuda: bool | None = None) -> Any:
     """OCR lỏng hơn cho nhãn 1 chữ / graphic nhỏ (default min_height=30 bỏ sót 行)."""
     from rapidocr_onnxruntime import RapidOCR  # type: ignore
@@ -195,7 +216,7 @@ def asr_paddleocr(
     pid = project_id or video.parent.name
     frames = cache_frames(pid, tag)
     # crop_v4: hardsub đáy (ổn định ~99%) — tiêu đề dọc = pass riêng
-    crop_mark = frames / ".crop_v4"
+    crop_mark = frames / ".crop_v5"
     fps_mark = frames / ".fps"
     need_extract = (
         not reuse_frames
@@ -240,7 +261,8 @@ def asr_paddleocr(
             pass
 
         portrait = h > w > 0
-        band = 0.40 if portrait else 0.30
+        # Đáy hẹp — portrait 40% nuốt mid (灰尘/橘酿…) thành hardsub giả
+        band = 0.18 if portrait else 0.22
         y0 = 1.0 - band
         # upscale 2× — soft subtitle trắng viền đen dễ đọc hơn khi phóng
         vf = f"fps={fps:g},crop=iw:ih*{band}:0:ih*{y0},scale=iw*2:ih*2"
@@ -293,7 +315,6 @@ def asr_paddleocr(
     done = 0
     done_lock = threading.Lock()
     sem = _ocr_semaphore()
-    source_is_zh = source_lang.lower().startswith("zh")
 
     def _ocr_one(i: int, img: Path) -> tuple[int, str]:
         check_cancel(project_id)
@@ -311,14 +332,7 @@ def asr_paddleocr(
             confidence = float(row[2]) if len(row) > 2 else 1.0
             if confidence < 0.5:
                 continue
-            # giữ 1 CJK; bỏ Latin/số nhiễu 1 ký tự
-            cjk = sum(1 for c in text if _is_cjk(c))
-            if source_is_zh and cjk < 1:
-                continue
-            # ponytail: hardsub đáy là câu; flash 1 glyph do pass giữa xử lý.
-            if source_is_zh and cjk == 1:
-                continue
-            if cjk < 1 and len(text) < 2:
+            if not _hardsub_line_keep(text, source_lang):
                 continue
             lines.append(text)
         return i, _ocr_join_lines(lines)
@@ -388,17 +402,186 @@ def asr_paddleocr(
     if looks_zh:
         fixed = _ocr_fix_zh([s["source"] for s in segs], project_id=project_id)
         for seg, src in zip(segs, fixed):
-            # OCR full-frame đôi lúc nối watermark cố định vào title dọc giữa
-            # khung. Tách nó ra để export định vị đúng cột title, trong khi
-            # segment watermark dài vẫn được giữ riêng.
-            if (
-                str(seg.get("layout") or "") == "vertical"
-                and "花木紫" in src
-                and len(_ocr_norm(src)) > 3
-            ):
-                src = src.replace("花木紫", "").strip(" ·・|/")
+            # Vertical = watermark cột: giữ nguyên (đừng strip 花木紫 rồi còn rác 工).
             seg["source"] = src
+        # fix_zh sau merge → label mảnh (花水業→花木紫) trùng watermark dọc;
+        # gộp vào vertical kẻo burn ẩn chữ dọc khi has_label.
+        segs = _fold_duplicate_watermark_labels(segs)
+        segs = _fold_vertical_column_flickers(segs)
+        segs = _drop_mid_in_watermark_column(segs)
     return segs
+
+
+def _fold_duplicate_watermark_labels(segs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Label cùng cột/watermark với vertical → gộp timing, bỏ label mảnh."""
+    verts = [s for s in segs if str(s.get("layout") or "") == "vertical"]
+    if not verts:
+        return segs
+    out: list[dict[str, Any]] = []
+    for s in segs:
+        if str(s.get("layout") or "") != "label":
+            out.append(s)
+            continue
+        src = s.get("source") or ""
+        folded = False
+        for v in verts:
+            vs = v.get("source") or ""
+            if not (_ocr_same(src, vs) or _ocr_sim(src, vs) >= 0.65):
+                continue
+            # cùng cột (bbox) hoặc thiếu bbox vẫn gộp nếu text khớp
+            vb, sb = v.get("bbox"), s.get("bbox")
+            near_col = True
+            if isinstance(vb, dict) and isinstance(sb, dict):
+                vcx = float(vb["x"]) + float(vb["w"]) * 0.5
+                scx = float(sb["x"]) + float(sb["w"]) * 0.5
+                near_col = abs(vcx - scx) < 90
+            if not near_col:
+                continue
+            v["start"] = min(float(v.get("start") or 0), float(s.get("start") or 0))
+            v["end"] = max(float(v.get("end") or 0), float(s.get("end") or 0))
+            # nới bbox xuống nếu label cao hơn (thường kèm Latin dưới CJK)
+            if isinstance(vb, dict) and isinstance(sb, dict):
+                y0 = min(float(vb["y"]), float(sb["y"]))
+                y1 = max(
+                    float(vb["y"]) + float(vb["h"]),
+                    float(sb["y"]) + float(sb["h"]),
+                )
+                x0 = min(float(vb["x"]), float(sb["x"]))
+                x1 = max(
+                    float(vb["x"]) + float(vb["w"]),
+                    float(sb["x"]) + float(sb["w"]),
+                )
+                v["bbox"] = {
+                    "x": int(x0),
+                    "y": int(y0),
+                    "w": max(8, int(x1 - x0)),
+                    "h": max(8, int(y1 - y0)),
+                }
+            folded = True
+            break
+        if not folded:
+            out.append(s)
+    for i, s in enumerate(out, start=1):
+        s["index"] = i
+    return out
+
+
+def _trim_vertical_ocr_tail(src: str) -> str:
+    """Bỏ đuôi 1-glyph dính cụm watermark (≥3 CJK)."""
+    n = _ocr_norm(src)
+    if len(n) <= 3:
+        return src
+    stem, rest = n[:3], n[3:]
+    if rest and all(_is_cjk(c) for c in rest) and len(rest) <= 2:
+        return stem
+    return src
+
+
+def _fold_vertical_column_flickers(segs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """OCR dọc flicker (花木紫/花水業/…) cùng cột + overlap → 1 segment."""
+    verts = [s for s in segs if str(s.get("layout") or "") == "vertical"]
+    others = [s for s in segs if str(s.get("layout") or "") != "vertical"]
+    if not verts:
+        return segs
+
+    verts = sorted(verts, key=lambda s: float(s.get("start") or 0))
+    merged: list[dict[str, Any]] = []
+    for v in verts:
+        src0 = _trim_vertical_ocr_tail(str(v.get("source") or ""))
+        cjk = sum(1 for c in src0 if _is_cjk(c))
+        if cjk < 2:
+            continue
+        v = {**v, "source": src0}
+        vs, ve = float(v.get("start") or 0), float(v.get("end") or 0)
+        vb = v.get("bbox")
+        hit = None
+        for m in merged:
+            ms, me = float(m.get("start") or 0), float(m.get("end") or 0)
+            if ve < ms - 0.3 or vs > me + 0.3:
+                continue
+            mb = m.get("bbox")
+            near = True
+            if isinstance(vb, dict) and isinstance(mb, dict):
+                vcx = float(vb["x"]) + float(vb["w"]) * 0.5
+                mcx = float(mb["x"]) + float(mb["w"]) * 0.5
+                near = abs(vcx - mcx) < 100
+            if near:
+                hit = m
+                break
+        if hit is None:
+            merged.append(dict(v))
+            continue
+        hit["start"] = min(float(hit.get("start") or 0), vs)
+        hit["end"] = max(float(hit.get("end") or 0), ve)
+        hit["source"] = _trim_vertical_ocr_tail(
+            _ocr_pick_best(
+                [str(hit.get("source") or ""), str(v.get("source") or "")]
+            )
+        )
+        hb, vb2 = hit.get("bbox"), v.get("bbox")
+        if isinstance(hb, dict) and isinstance(vb2, dict):
+            x0 = min(float(hb["x"]), float(vb2["x"]))
+            y0 = min(float(hb["y"]), float(vb2["y"]))
+            x1 = max(float(hb["x"]) + float(hb["w"]), float(vb2["x"]) + float(vb2["w"]))
+            y1 = max(float(hb["y"]) + float(hb["h"]), float(vb2["y"]) + float(vb2["h"]))
+            hit["bbox"] = {
+                "x": int(x0),
+                "y": int(y0),
+                "w": max(8, int(x1 - x0)),
+                "h": max(8, int(y1 - y0)),
+            }
+    out = others + merged
+    out.sort(key=lambda s: float(s.get("start") or 0))
+    for i, s in enumerate(out, start=1):
+        s["index"] = i
+    return out
+
+
+def _drop_mid_in_watermark_column(segs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Mid 1 glyph trong cột watermark dọc → nhiễu OCR (vd. 尔 dưới 花木紫), bỏ burn."""
+    verts = [s for s in segs if str(s.get("layout") or "") == "vertical"]
+    if not verts:
+        return segs
+    out: list[dict[str, Any]] = []
+    for s in segs:
+        if str(s.get("layout") or "") != "mid":
+            out.append(s)
+            continue
+        bb = s.get("bbox")
+        if not isinstance(bb, dict):
+            out.append(s)
+            continue
+        src = re.sub(r"\s+", "", s.get("source") or "")
+        cjk = sum(1 for c in src if "\u4e00" <= c <= "\u9fff")
+        if cjk != 1 or cjk != len(src):
+            out.append(s)
+            continue
+        mcx = float(bb["x"]) + float(bb["w"]) * 0.5
+        mcy = float(bb["y"]) + float(bb["h"]) * 0.5
+        ss, se = float(s.get("start") or 0), float(s.get("end") or 0)
+        drop = False
+        for v in verts:
+            vb = v.get("bbox")
+            if not isinstance(vb, dict):
+                continue
+            vs, ve = float(v.get("start") or 0), float(v.get("end") or 0)
+            if se <= vs + 0.05 or ss >= ve - 0.05:
+                continue
+            pad_x = max(12.0, float(vb["w"]) * 0.35)
+            pad_y_bot = max(36.0, float(vb["h"]) * 0.12)
+            vx0 = float(vb["x"]) - pad_x
+            vx1 = float(vb["x"]) + float(vb["w"]) + pad_x
+            vy0 = float(vb["y"]) - 8.0
+            vy1 = float(vb["y"]) + float(vb["h"]) + pad_y_bot
+            if vx0 <= mcx <= vx1 and vy0 <= mcy <= vy1:
+                drop = True
+                break
+        if not drop:
+            out.append(s)
+    if len(out) != len(segs):
+        for i, s in enumerate(out, start=1):
+            s["index"] = i
+    return out
 
 
 def _ocr_norm(s: str) -> str:
@@ -926,6 +1109,16 @@ def _ocr_cluster_hits(
                     _ocr_label_overlap(tx0, tx1) >= 0.5
                     or _ocr_label_overlap(window[-1], tx1) >= 0.5
                 )
+            # watermark dọc: OCR hay lệch 1 glyph (紫/業/荣) — cùng độ dài ≥3 → gộp
+            if not same and layout == "vertical":
+                n0, n1 = _ocr_norm(tx0), _ocr_norm(tx1)
+                same = (
+                    len(n0) == len(n1) >= 3
+                    and (
+                        _ocr_sim(tx0, tx1) >= 0.45
+                        or (n0 and n1 and n0[0] == n1[0])
+                    )
+                )
             if same:
                 window.append(tx1)
                 if box1:
@@ -938,8 +1131,12 @@ def _ocr_cluster_hits(
         if not best or sum(1 for c in best if _is_cjk(c)) < 1:
             i = j
             continue
+        t_start = t0
+        # Vertical watermark: OCR hit muộn hơn lúc mực hiện — kéo sớm nhẹ
+        if layout == "vertical":
+            t_start = max(0.0, t0 - min(0.55, max(0.25, step * 1.5)))
         t_end = normed[j - 1][0] + step
-        t_end = min(video_end, max(t_end, t0 + min_hold))
+        t_end = min(video_end, max(t_end, t_start + min_hold))
         # bbox: ưu tiên khớp text best; không thì union
         bb: dict[str, int] | None = None
         for k in range(i, j):
@@ -951,7 +1148,7 @@ def _ocr_cluster_hits(
             fh = max((b["y"] + b["h"] for b in boxes), default=1920)
             # union trong không gian pixel ước (fw/fh chỉ clamp)
             bb = _union_bbox(boxes, max(fw, 1080), max(fh, 1920))
-        segs.append(_ocr_seg(len(segs) + 1, t0, t_end, best, layout=layout, bbox=bb))
+        segs.append(_ocr_seg(len(segs) + 1, t_start, t_end, best, layout=layout, bbox=bb))
         i = j
 
     # nhãn: gộp segment chồng thời gian / gần nhau (tránh 0.3s mảnh)
@@ -990,6 +1187,18 @@ def _merge_label_segments(segs: list[dict[str, Any]]) -> list[dict[str, Any]]:
             )
             if not prev.get("bbox") and s.get("bbox"):
                 prev["bbox"] = s["bbox"]
+            pcs, pce = prev.get("coverStart"), prev.get("coverEnd")
+            scs, sce = s.get("coverStart"), s.get("coverEnd")
+            if pcs is not None or scs is not None:
+                prev["coverStart"] = min(
+                    float(pcs if pcs is not None else prev["start"]),
+                    float(scs if scs is not None else s["start"]),
+                )
+            if pce is not None or sce is not None:
+                prev["coverEnd"] = max(
+                    float(pce if pce is not None else prev["end"]),
+                    float(sce if sce is not None else s["end"]),
+                )
             continue
         if gap < 0 and ov >= 0.45 and _near(prev, s):
             prev["end"] = max(float(prev["end"]), float(s["end"]))
@@ -998,8 +1207,66 @@ def _merge_label_segments(segs: list[dict[str, Any]]) -> list[dict[str, Any]]:
             )
             if not prev.get("bbox") and s.get("bbox"):
                 prev["bbox"] = s["bbox"]
+            pcs, pce = prev.get("coverStart"), prev.get("coverEnd")
+            scs, sce = s.get("coverStart"), s.get("coverEnd")
+            if pcs is not None or scs is not None:
+                prev["coverStart"] = min(
+                    float(pcs if pcs is not None else prev["start"]),
+                    float(scs if scs is not None else s["start"]),
+                )
+            if pce is not None or sce is not None:
+                prev["coverEnd"] = max(
+                    float(pce if pce is not None else prev["end"]),
+                    float(sce if sce is not None else s["end"]),
+                )
             continue
         out.append(s)
+    for i, s in enumerate(out, start=1):
+        s["index"] = i
+    return out
+
+
+def _merge_mid_segments(
+    segs: list[dict[str, Any]],
+    *,
+    max_gap: float = 2.5,
+) -> list[dict[str, Any]]:
+    """Gộp mid cùng chữ gần nhau — chữ xuyên màn không bị tách mỗi mốc coarse."""
+    ordered = sorted(segs, key=lambda s: float(s.get("start") or 0))
+    out: list[dict[str, Any]] = []
+    for s in ordered:
+        if not out:
+            out.append(s)
+            continue
+        prev = out[-1]
+        gap = float(s.get("start") or 0) - float(prev.get("end") or 0)
+        ps, ss = prev.get("source") or "", s.get("source") or ""
+        same = _ocr_same(ps, ss) or _ocr_sim(ps, ss) >= 0.72
+        if not same or gap > max_gap:
+            out.append(s)
+            continue
+        prev["end"] = max(float(prev.get("end") or 0), float(s.get("end") or 0))
+        prev["source"] = _ocr_pick_best([ps, ss])
+        # gộp cửa sổ che nếu có
+        pcs, pce = prev.get("coverStart"), prev.get("coverEnd")
+        scs, sce = s.get("coverStart"), s.get("coverEnd")
+        if pcs is not None or scs is not None:
+            prev["coverStart"] = min(
+                float(pcs if pcs is not None else prev["start"]),
+                float(scs if scs is not None else s.get("start") or 0),
+            )
+        if pce is not None or sce is not None:
+            prev["coverEnd"] = max(
+                float(pce if pce is not None else prev["end"]),
+                float(sce if sce is not None else s.get("end") or 0),
+            )
+        pb, sb = prev.get("bbox"), s.get("bbox")
+        if isinstance(pb, dict) and isinstance(sb, dict):
+            ub = _union_bbox([pb, sb], 1080, 1920)
+            if ub:
+                prev["bbox"] = ub
+        elif not pb and sb:
+            prev["bbox"] = sb
     for i, s in enumerate(out, start=1):
         s["index"] = i
     return out
@@ -1163,6 +1430,238 @@ def _ocr_mid_item_from_frame(
     bx1 = max(item[6] for item in nearby)
     by1 = max(item[7] for item in nearby)
     return text, _xyxy_to_bbox(bx0, by0, bx1, by1, vw, vh, pad=3)
+
+
+def _classify_overlay_detections(
+    dets: list[tuple[str, float, float, float, float, float]],
+    vw: int,
+    vh: int,
+) -> dict[str, list[tuple[str, dict[str, int]]]]:
+    """Phân vertical / mid / label từ danh sách detect (text, conf, bx0..by1).
+
+    Vertical cột trước — glyph 1 chữ nằm trong cột không thành mid (chặn 尔→Bạn).
+    """
+    if vw < 8 or vh < 8:
+        return {"vertical": [], "mid": [], "label": []}
+
+    # (text, conf, bx0, by0, bx1, by1, cx, cy, bw, bh, cjk)
+    items: list[tuple[str, float, float, float, float, float, float, float, float, float, int]] = []
+    for text, conf, bx0, by0, bx1, by1 in dets:
+        compact = re.sub(r"\s+", "", text or "")
+        if not compact:
+            continue
+        cjk = sum(1 for c in compact if _is_cjk(c))
+        if cjk < 1 or cjk > 32:
+            continue
+        if cjk < max(1, len(compact) * 0.5):
+            continue
+        if conf < (0.75 if cjk == 1 else 0.45):
+            continue
+        bw = max(1.0, bx1 - bx0)
+        bh = max(1.0, by1 - by0)
+        if bw < 4 or bh < 4:
+            continue
+        if by0 > vh * 0.82:
+            continue
+        cx = (bx0 + bx1) * 0.5
+        cy = (by0 + by1) * 0.5
+        items.append((compact, conf, bx0, by0, bx1, by1, cx, cy, bw, bh, cjk))
+
+    def _is_vert_shape(
+        cx: float, cy: float, bw: float, bh: float, cjk: int
+    ) -> bool:
+        if bw > vw * 0.28 or bh > vh * 0.55:
+            return False
+        edge = min(cx / max(1.0, vw), 1.0 - cx / max(1.0, vw))
+        if edge >= 0.28:
+            return False
+        tall = bh > bw * 1.15
+        short_stack = cjk >= 2 and cjk <= 10 and bh >= bw * 0.85
+        # RapidOCR hay tách từng glyph cột — seed 1 chữ hẹp mép
+        glyph_seed = cjk == 1 and bw < vw * 0.14 and bh < vh * 0.14
+        return tall or short_stack or glyph_seed
+
+    vert_raw = [it for it in items if _is_vert_shape(it[6], it[7], it[8], it[9], it[10])]
+    # gom cột theo cx
+    vert_groups: list[list[tuple]] = []
+    for it in sorted(vert_raw, key=lambda x: (x[6], x[7])):
+        placed = False
+        for g in vert_groups:
+            g_cx = sum(x[6] for x in g) / len(g)
+            g_bw = max(x[8] for x in g)
+            if abs(it[6] - g_cx) < max(vw * 0.06, g_bw * 0.7):
+                g.append(it)
+                placed = True
+                break
+        if not placed:
+            vert_groups.append([it])
+
+    verticals: list[tuple[str, dict[str, int]]] = []
+    vert_boxes: list[tuple[float, float, float, float]] = []
+    for g in vert_groups:
+        g.sort(key=lambda x: x[7])
+        # bỏ cột quá yếu (1 glyph nhỏ)
+        if sum(x[10] for x in g) < 2 and max(x[9] for x in g) < vh * 0.08:
+            continue
+        multi = [x for x in g if x[10] >= 2]
+        if multi:
+            # RapidOCR đôi lúc trả cả cụm + glyph rác cạnh — lấy cụm ≥2
+            joined = _ocr_pick_best([x[0] for x in multi])
+        else:
+            joined = _ocr_join_lines([x[0] for x in g])
+        if sum(1 for c in joined if _is_cjk(c)) < 2:
+            continue
+        # bỏ đuôi 1 glyph lạ dính cụm (花木紫工 → 花木紫)
+        if len(_ocr_norm(joined)) > 3:
+            stem = _ocr_norm(joined)[:3]
+            rest = _ocr_norm(joined)[3:]
+            if rest and all(len(p) == 1 for p in rest):
+                joined = stem
+        bx0 = min(x[2] for x in g)
+        by0 = min(x[3] for x in g)
+        bx1 = max(x[4] for x in g)
+        by1 = max(x[5] for x in g)
+        bb = _xyxy_to_bbox(bx0, by0, bx1, by1, vw, vh, pad=3)
+        verticals.append((joined, bb))
+        vert_boxes.append((bx0, by0, bx1, by1))
+
+    def _in_vert_col(cx: float, cy: float) -> bool:
+        for vx0, vy0, vx1, vy1 in vert_boxes:
+            pad_x = max(12.0, (vx1 - vx0) * 0.35)
+            pad_y = max(36.0, (vy1 - vy0) * 0.12)
+            if (
+                vx0 - pad_x <= cx <= vx1 + pad_x
+                and vy0 - 8.0 <= cy <= vy1 + pad_y
+            ):
+                return True
+        return False
+
+    remain = [it for it in items if not _in_vert_col(it[6], it[7])]
+
+    # mid: ngang, giữa khung, không cột
+    mid_cands: list[tuple[float, tuple]] = []
+    for it in remain:
+        text, conf, bx0, by0, bx1, by1, cx, cy, bw, bh, cjk = it
+        if bh > bw * 1.25:
+            continue
+        if not (vh * 0.18 < cy < vh * 0.78):
+            continue
+        if not (vw * 0.12 < cx < vw * 0.88):
+            continue
+        if conf < (0.85 if cjk == 1 else 0.55):
+            continue
+        # 1 glyph: chỉ nhận nếu rõ giữa khung (không mép watermark)
+        if cjk == 1 and abs(cx / vw - 0.5) > 0.22:
+            continue
+        center = 1.0 - min(1.0, abs(cx / vw - 0.5) * 1.2)
+        score = cjk * 8 + center * 4 + min(bw, bh) / 15.0
+        mid_cands.append((score, it))
+
+    mids: list[tuple[str, dict[str, int]]] = []
+    if mid_cands:
+        best = max(mid_cands, key=lambda x: x[0])[1]
+        nearby = [
+            it
+            for _, it in mid_cands
+            if abs(it[7] - best[7]) <= vh * 0.06
+            and abs(it[6] - best[6]) <= vw * 0.28
+        ]
+        nearby.sort(key=lambda x: (x[7], x[6]))
+        tx = _ocr_join_lines([x[0] for x in nearby])
+        bx0 = min(x[2] for x in nearby)
+        by0 = min(x[3] for x in nearby)
+        bx1 = max(x[4] for x in nearby)
+        by1 = max(x[5] for x in nearby)
+        mids.append((tx, _xyxy_to_bbox(bx0, by0, bx1, by1, vw, vh, pad=3)))
+        used = set(id(x) for x in nearby)
+        remain = [it for it in remain if id(it) not in used]
+
+    # label: cạnh / graphic giữa (không đụng mid đã lấy)
+    labels: list[tuple[str, dict[str, int]]] = []
+    lab_parts: list[tuple] = []
+    for it in remain:
+        text, conf, bx0, by0, bx1, by1, cx, cy, bw, bh, cjk = it
+        if len(text) > 28:
+            continue
+        if cy > vh * 0.70 and bw > vw * 0.35 and bh < vh * 0.09:
+            continue
+        side = cx < vw * 0.36 or cx > vw * 0.64
+        tall_col = bh > bw * 1.2 and bw < vw * 0.28 and bh < vh * 0.45
+        mid_graphic = (
+            vh * 0.08 < cy < vh * 0.75
+            and bw < vw * 0.55
+            and bh < vh * 0.30
+            and 1 <= cjk <= 14
+            and not (bw > vw * 0.48 and bh < vh * 0.07)
+        )
+        multi_line_mid = (
+            vh * 0.08 < cy < vh * 0.75
+            and cjk >= 4
+            and bw < vw * 0.85
+            and bh < vh * 0.14
+        )
+        if not (side or tall_col or mid_graphic or multi_line_mid):
+            continue
+        # không label lại cột vertical đã có
+        if _in_vert_col(cx, cy):
+            continue
+        lab_parts.append(it)
+
+    lab_parts.sort(key=lambda x: (x[7], x[6]))
+    groups: list[list[tuple]] = []
+    for p in lab_parts:
+        placed = False
+        for g in groups:
+            g_cx = sum(x[6] for x in g) / len(g)
+            g_cy = max(x[7] for x in g)
+            g_bw = max(x[8] for x in g)
+            if abs(p[6] - g_cx) < max(vw * 0.08, g_bw * 0.45) and abs(p[7] - g_cy) < vh * 0.06:
+                g.append(p)
+                placed = True
+                break
+        if not placed:
+            groups.append([p])
+    for g in groups:
+        g.sort(key=lambda x: x[7])
+        texts = [x[0] for x in g]
+        joined = _ocr_join_lines(texts) if len(texts) > 1 else texts[0]
+        if sum(1 for c in joined if _is_cjk(c)) < 1:
+            continue
+        bx0 = min(x[2] for x in g)
+        by0 = min(x[3] for x in g)
+        bx1 = max(x[4] for x in g)
+        by1 = max(x[5] for x in g)
+        labels.append((joined, _xyxy_to_bbox(bx0, by0, bx1, by1, vw, vh, pad=3)))
+
+    return {"vertical": verticals, "mid": mids, "label": labels}
+
+
+def _ocr_overlay_boxes_from_frame(
+    frame_bgr: Any, ocr: Any, vw: int, vh: int
+) -> dict[str, list[tuple[str, dict[str, int]]]]:
+    """1 OCR ROI (trừ dải đáy hardsub) → mid / vertical / label theo bbox."""
+    y1 = int(vh * 0.82)
+    roi = frame_bgr[0:y1, :]
+    if roi.size == 0:
+        return {"vertical": [], "mid": [], "label": []}
+    result, _ = ocr(roi)
+    dets: list[tuple[str, float, float, float, float, float]] = []
+    for row in result or []:
+        try:
+            box, text = row[0], str(row[1] or "").strip()
+        except (IndexError, TypeError):
+            continue
+        if not text:
+            continue
+        conf = float(row[2]) if len(row) > 2 else 1.0
+        try:
+            xs = [float(p[0]) for p in box]
+            ys = [float(p[1]) for p in box]
+        except (TypeError, ValueError, IndexError):
+            continue
+        # ROI gốc (0,0) → frame coords
+        dets.append((text, conf, min(xs), min(ys), max(xs), max(ys)))
+    return _classify_overlay_detections(dets, vw, vh)
 
 
 def _ocr_overlay_labels(
@@ -1353,7 +1852,8 @@ def _merge_horizontal_vertical(
             if same:
                 matches.append(h)
         if matches:
-            # đã có trong hardsub — đánh dấu dọc nếu cùng chữ ở đầu
+            # đã có segment cùng chữ — chỉ absorb khi nhánh dưới thật sự nới/ghép.
+            absorbed = False
             for h in matches:
                 hs = h.get("source") or ""
                 hlay = str(h.get("layout") or "horizontal")
@@ -1369,6 +1869,7 @@ def _merge_horizontal_vertical(
                     h["end"] = max(
                         float(h.get("end") or 0), float(v.get("end") or 0)
                     )
+                    absorbed = True
                 elif vlay == "vertical" and hlay == "vertical":
                     h["start"] = min(
                         float(h.get("start") or 0), float(v.get("start") or 0)
@@ -1376,19 +1877,60 @@ def _merge_horizontal_vertical(
                     h["end"] = max(
                         float(h.get("end") or 0), float(v.get("end") or 0)
                     )
+                    absorbed = True
+                elif vlay == "label" and hlay == "mid":
+                    # Label mảnh cùng chữ mid (vd. 挖果) — nới cửa sổ nếu kề nhau.
+                    # Không nối flash xa (tránh 尔 5s dính 尔 19s).
+                    hs0 = float(h.get("start") or 0)
+                    he0 = float(h.get("end") or 0)
+                    vs0 = float(v.get("start") or 0)
+                    ve0 = float(v.get("end") or 0)
+                    if vs0 <= he0 + 1.2 and ve0 >= hs0 - 1.2:
+                        h["start"] = min(hs0, vs0)
+                        h["end"] = max(he0, ve0)
+                        if not h.get("bbox") and v.get("bbox"):
+                            h["bbox"] = v["bbox"]
+                        absorbed = True
+                elif vlay == "mid" and hlay == "horizontal":
+                    # Crop đáy quá cao hay nuốt mid → giữ mid, bỏ nhãn Caption trùng
+                    if _ocr_same(vs, hs) or _ocr_sim(vs, hs) >= 0.72:
+                        h["layout"] = "mid"
+                        h["source"] = _ocr_pick_best([hs, vs])
+                        h["start"] = min(
+                            float(h.get("start") or 0), float(v.get("start") or 0)
+                        )
+                        h["end"] = max(
+                            float(h.get("end") or 0), float(v.get("end") or 0)
+                        )
+                        if v.get("bbox"):
+                            h["bbox"] = v["bbox"]
+                        absorbed = True
+                elif vlay == "mid" and hlay == "mid":
+                    hs0 = float(h.get("start") or 0)
+                    he0 = float(h.get("end") or 0)
+                    vs0 = float(v.get("start") or 0)
+                    ve0 = float(v.get("end") or 0)
+                    # chỉ gộp mid kề (≤0.85s) — flash rời không nối xuyên clip
+                    if vs0 <= he0 + 0.85 and ve0 >= hs0 - 0.85:
+                        h["start"] = min(hs0, vs0)
+                        h["end"] = max(he0, ve0)
+                        absorbed = True
                 if (
                     vlay == "label"
                     and _ocr_same(vs, hs)
                     and len(_ocr_norm(vs)) > len(_ocr_norm(hs))
                 ):
                     h["source"] = vs
+                    absorbed = True
                 if (
                     _ocr_same(vs, h.get("source") or "")
                     and float(h.get("start") or 0) < 2.0
                     and vlay == "vertical"
                 ):
                     h["layout"] = "vertical"
-            continue
+                    absorbed = True
+            if absorbed:
+                continue
         out.append(v)
     # Bỏ mảnh title thiếu 1 glyph nằm trọn trong title dọc đầy đủ cùng thời gian.
     compacted: list[dict[str, Any]] = []

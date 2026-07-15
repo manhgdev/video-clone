@@ -1,25 +1,39 @@
-"""OCR phụ (giữa / dọc / nhãn) — thưa vùng trống, refine chậm quanh hit.
+"""OCR overlay — coarse full-ROI thưa; chỗ trống bỏ qua; biên pad từ coarse (0 OCR).
 
-Coarse thưa (nhanh khi không có chữ). Hit → refine dày hơn ± vùng
-để timing + bbox chuẩn. Title dọc: đầu/cuối + refine khi có hit.
+Chữ bất kỳ vị trí trên ROI: classify bbox (mid/vertical/label).
+Dọc sticky (xuyên clip): 1 segment + pad biên — không OCR biên từng mốc.
+Không lưới refine 0.12s. Hardsub đáy crop riêng (extract).
 """
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from ..core.jobs import check_cancel
+from .cover_timing import attach_cover_times
 from .extract import (
+    _merge_label_segments,
+    _merge_mid_segments,
     _ocr_cluster_hits,
-    _ocr_label_items_from_frame,
-    _ocr_mid_item_from_frame,
+    _ocr_label_overlap,
+    _ocr_overlay_boxes_from_frame,
+    _ocr_pick_best,
     _ocr_pool_workers,
     _ocr_same,
+    _ocr_seg,
     _ocr_semaphore,
     _ocr_sim,
-    _ocr_vertical_item_from_frame,
     _rapidocr_labels,
 )
+
+# Biên timing: pad giữa mốc coarse trống↔hit (0 OCR khi đã biết từ quét).
+# Fallback 1 probe giữa khoảng nếu mốc ngoài lưới. Mục tiêu nhanh; lệch ~½ step coarse.
+_EDGE_EPS = 0.20
+_CLUSTER_GAP = 1.5
+# Sticky dọc xuyên clip: ≥3 hit và span ≥5s → 1 segment + tối đa 2 biên
+_STICKY_VERT_HITS = 3
+_STICKY_VERT_SPAN = 5.0
+_VERT_LONG_SEC = _STICKY_VERT_SPAN  # compat test / callers cũ
 
 
 def adaptive_bottom_fps(video_end: float) -> float:
@@ -32,173 +46,548 @@ def adaptive_bottom_fps(video_end: float) -> float:
 
 
 def adaptive_overlay_step(video_end: float) -> float:
-    """Bước coarse thưa — vùng trống đi nhanh."""
+    """Bước coarse — lướt nhanh chỗ trống; flash rất ngắn (<~0.5s) có thể sót."""
     if video_end >= 1800:
-        return 3.5
-    if video_end >= 600:
-        return 2.8
-    if video_end >= 120:
         return 2.2
-    return 1.6
+    if video_end >= 600:
+        return 2.0
+    if video_end >= 120:
+        return 2.0
+    return 1.5
 
 
 def _budget_stamps(video_end: float, *, budget: int = 28) -> list[float]:
-    """≤ budget mốc coarse đều clip — ít hơn; refine bổ sung quanh hit."""
+    """Mốc coarse đều clip — cap 150 (không nổ refine sau)."""
     if video_end <= 0.05:
         return []
-    n = max(1, min(budget, int(video_end / adaptive_overlay_step(video_end)) + 1))
+    step = adaptive_overlay_step(video_end)
+    n = max(1, min(150, max(budget, int(video_end / step) + 1)))
     if n == 1:
         return [min(0.5, video_end * 0.5)]
     return [round(i * (video_end - 0.05) / (n - 1), 3) for i in range(n)]
 
 
-def _refine_stamps(
-    hits: list[tuple[float, Any, ...]],
-    video_end: float,
-    *,
-    pad: float = 0.45,
-    step: float = 0.12,
-) -> list[float]:
-    """Mốc dày quanh hit — chậm lại 1 chút để bbox/timing chuẩn."""
+Hit = tuple[float, str, dict[str, int] | None]
+ProgressCb = Callable[[int, int, str], None] | None
+
+
+def _cluster_hits(hits: list[Hit], *, gap: float = _CLUSTER_GAP) -> list[list[Hit]]:
+    """Gom hit liên tiếp theo thời gian (cùng lane đã lọc sẵn)."""
     if not hits:
         return []
-    out: set[float] = set()
-    for row in hits:
-        t0 = float(row[0])
-        t = max(0.0, t0 - pad)
-        end = min(video_end, t0 + pad)
-        while t <= end + 1e-9:
-            out.add(round(t, 3))
-            t += step
-    return sorted(out)
+    ordered = sorted(hits, key=lambda h: float(h[0]))
+    out: list[list[Hit]] = [[ordered[0]]]
+    for row in ordered[1:]:
+        if float(row[0]) - float(out[-1][-1][0]) <= gap:
+            out[-1].append(row)
+        else:
+            out.append([row])
+    return out
 
 
-def _scan_dual_mid_label(
+def _cluster_hits_overlay(
+    hits: list[Hit],
+    *,
+    gap: float,
+    coarse_step: float,
+    layout: str,
+) -> list[list[Hit]]:
+    """Gom hit — cùng chữ được nới gap tới ~1.8× coarse (chữ giữ màn liên tục)."""
+    if not hits:
+        return []
+    ordered = sorted(hits, key=lambda h: float(h[0]))
+    out: list[list[Hit]] = [[ordered[0]]]
+    same_gap = max(gap, coarse_step * 1.8)
+    for row in ordered[1:]:
+        prev = out[-1][-1]
+        dt = float(row[0]) - float(prev[0])
+        same = _ocr_same(prev[1], row[1]) or _ocr_sim(prev[1], row[1]) >= 0.72
+        if not same and layout == "label":
+            same = _ocr_label_overlap(prev[1], row[1]) >= 0.5
+        if dt <= (same_gap if same else gap):
+            out[-1].append(row)
+        else:
+            out.append([row])
+    return out
+
+
+def _best_hit(cluster: list[Hit]) -> Hit:
+    texts = [h[1] for h in cluster if h[1]]
+    best_tx = _ocr_pick_best(texts) if texts else (cluster[0][1] or "")
+    bb = None
+    t_mid = float(cluster[len(cluster) // 2][0])
+    for t, tx, box in cluster:
+        if box and (_ocr_same(tx, best_tx) or _ocr_sim(tx, best_tx) >= 0.65):
+            bb = box
+            t_mid = float(t)
+            break
+    if bb is None:
+        for t, _tx, box in cluster:
+            if box:
+                bb = box
+                t_mid = float(t)
+                break
+    return (t_mid, best_tx, bb)
+
+
+def _layout_present(
+    boxes: dict[str, list[tuple[str, dict[str, int]]]],
+    layout: str,
+    seed: str,
+) -> bool:
+    rows = boxes.get(layout) or []
+    if not rows:
+        return False
+    if not (seed or "").strip():
+        return True
+    for tx, _bb in rows:
+        if _ocr_same(tx, seed) or _ocr_sim(tx, seed) >= 0.55:
+            return True
+    # cùng layout khác chữ vẫn coi là “có chữ” nếu seed yếu
+    return len(seed.strip()) < 2
+
+
+def _binary_edge_start(
+    has_text: Callable[[float], bool],
+    t_lo: float,
+    t_hi: float,
+    *,
+    eps: float = _EDGE_EPS,
+    max_iters: int = 8,
+) -> float:
+    """t_lo trống, t_hi có chữ → start (giữ cho test / fallback)."""
+    lo, hi = float(t_lo), float(t_hi)
+    if hi <= lo + eps:
+        return hi
+    n = 0
+    while hi - lo > eps and n < max_iters:
+        mid = (lo + hi) * 0.5
+        if has_text(mid):
+            hi = mid
+        else:
+            lo = mid
+        n += 1
+    return round(hi, 3)
+
+
+def _binary_edge_end(
+    has_text: Callable[[float], bool],
+    t_lo: float,
+    t_hi: float,
+    *,
+    eps: float = _EDGE_EPS,
+    max_iters: int = 8,
+) -> float:
+    """t_lo có chữ, t_hi trống → end (giữ cho test / fallback)."""
+    lo, hi = float(t_lo), float(t_hi)
+    if hi <= lo + eps:
+        return lo
+    n = 0
+    while hi - lo > eps and n < max_iters:
+        mid = (lo + hi) * 0.5
+        if has_text(mid):
+            lo = mid
+        else:
+            hi = mid
+        n += 1
+    return round(lo, 3)
+
+
+def _cheap_edge_start(has_text: Callable[[float], bool], t_lo: float, t_hi: float) -> float:
+    """1–2 OCR trong trống→có. Bias sớm: midpoint trống hay để chữ lộ trước bbox."""
+    lo, hi = float(t_lo), float(t_hi)
+    if hi <= lo + _EDGE_EPS:
+        return round(hi, 3)
+    mid = (lo + hi) * 0.5
+    if has_text(mid):
+        q = lo + (hi - lo) * 0.25
+        return round(q if has_text(q) else mid, 3)
+    # chữ nằm nửa sau — lấy ¾ (sớm hơn nhảy thẳng về hi)
+    return round((mid + hi) * 0.5, 3)
+
+
+def _cheap_edge_end(has_text: Callable[[float], bool], t_lo: float, t_hi: float) -> float:
+    lo, hi = float(t_lo), float(t_hi)
+    if hi <= lo + _EDGE_EPS:
+        return round(lo, 3)
+    mid = (lo + hi) * 0.5
+    if has_text(mid):
+        q = lo + (hi - lo) * 0.75
+        return round(q if has_text(q) else mid, 3)
+    return round((lo + mid) * 0.5, 3)
+
+
+def _pad_edge_start(t_lo: float, t_hi: float) -> float:
+    """0 OCR — bias sớm trong khe trống→hit (midpoint hay trễ ~½ step coarse)."""
+    lo, hi = float(t_lo), float(t_hi)
+    if hi <= lo + _EDGE_EPS:
+        return round(hi, 3)
+    gap = hi - lo
+    return round(lo + gap * 0.2, 3)
+
+
+def _pad_edge_end(t_lo: float, t_hi: float) -> float:
+    """0 OCR — bias muộn: chữ thường còn tới gần mốc trống."""
+    lo, hi = float(t_lo), float(t_hi)
+    if hi <= lo + _EDGE_EPS:
+        return round(lo, 3)
+    gap = hi - lo
+    return round(lo + gap * 0.8, 3)
+
+
+def _coarse_layout_absent(
+    stamp_layouts: dict[float, set[str]],
+    t: float,
+    layout: str,
+) -> bool | None:
+    """True=coarse trống layout; False=có; None=không phải mốc coarse."""
+    lays = stamp_layouts.get(t)
+    if lays is None:
+        for k, v in stamp_layouts.items():
+            if abs(float(k) - float(t)) < 1e-3:
+                lays = v
+                break
+    if lays is None:
+        return None
+    return layout not in lays
+
+
+def _neighbor_empty(
+    stamps: list[float],
+    hit_t: float,
+    *,
+    before: bool,
+    video_end: float,
+) -> float:
+    """Mốc coarse trống gần nhất trước/sau hit (fallback ± step)."""
+    if before:
+        prev = [t for t in stamps if t < hit_t - 1e-6]
+        return float(prev[-1]) if prev else 0.0
+    nxt = [t for t in stamps if t > hit_t + 1e-6]
+    return float(nxt[0]) if nxt else float(video_end)
+
+
+class _OverlayProbe:
+    """Seek + OCR full ROI — dùng chung coarse / binary-search biên."""
+
+    def __init__(self, video: Path, *, project_id: str | None, workers: int) -> None:
+        import cv2
+
+        self._cv2 = cv2
+        self.cap = cv2.VideoCapture(str(video))
+        self.ok = self.cap.isOpened()
+        self.vw = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1080) if self.ok else 1080
+        self.vh = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 1920) if self.ok else 1920
+        self.project_id = project_id
+        self._ = min(_ocr_pool_workers(workers, cap=min(2, workers or 1)), 2)
+        self._tls: Any = type("T", (), {})()
+        self._sem = _ocr_semaphore()
+
+    def close(self) -> None:
+        if self.ok:
+            self.cap.release()
+
+    def _engine(self):
+        eng = getattr(self._tls, "ocr", None)
+        if eng is None:
+            self._tls.ocr = _rapidocr_labels()
+            eng = self._tls.ocr
+        return eng
+
+    def ocr_at(self, t: float) -> dict[str, list[tuple[str, dict[str, int]]]]:
+        check_cancel(self.project_id)
+        if not self.ok:
+            return {"mid": [], "vertical": [], "label": []}
+        self.cap.set(self._cv2.CAP_PROP_POS_MSEC, float(t) * 1000.0)
+        ok, frame = self.cap.read()
+        if not ok:
+            return {"mid": [], "vertical": [], "label": []}
+        snap = frame.copy()
+        with self._sem:
+            eng = self._engine()
+            try:
+                return _ocr_overlay_boxes_from_frame(snap, eng, self.vw, self.vh)
+            except Exception:
+                self._tls.ocr = _rapidocr_labels(use_cuda=False)
+                eng = self._tls.ocr
+                return _ocr_overlay_boxes_from_frame(snap, eng, self.vw, self.vh)
+
+
+def _scan_overlay_stamps(
     video: Path,
     stamps: list[float],
     *,
     project_id: str | None,
     workers: int,
-) -> tuple[list[tuple[float, str, dict[str, int] | None]], list[tuple[float, str, dict[str, int] | None]]]:
-    """1 seek/mốc → mid (1) + nhiều nhãn (bbox từng khối)."""
+    on_progress: ProgressCb = None,
+    progress_label: str = "OCR overlay",
+) -> tuple[list[Hit], list[Hit], list[Hit], dict[float, set[str]]]:
+    """1 seek + 1 OCR / mốc → hits + map layout có mặt tại mỗi mốc coarse."""
     if not stamps:
-        return [], []
-    import cv2
-
-    cap = cv2.VideoCapture(str(video))
-    if not cap.isOpened():
-        return [], []
-    vw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1080)
-    vh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 1920)
-    mid_hits: list[tuple[float, str, dict[str, int] | None]] = []
-    lab_hits: list[tuple[float, str, dict[str, int] | None]] = []
-    _ = min(_ocr_pool_workers(workers, cap=min(2, workers or 1)), 2)
-    _tls: Any = type("T", (), {})()
-    sem = _ocr_semaphore()
-
-    def _ocr_engine():
-        eng = getattr(_tls, "ocr", None)
-        if eng is None:
-            _tls.ocr = _rapidocr_labels()
-            eng = _tls.ocr
-        return eng
-
+        return [], [], [], {}
+    probe = _OverlayProbe(video, project_id=project_id, workers=workers)
+    mid_hits: list[Hit] = []
+    vert_hits: list[Hit] = []
+    lab_hits: list[Hit] = []
+    stamp_layouts: dict[float, set[str]] = {}
+    total = len(stamps)
     try:
-        for t in stamps:
-            check_cancel(project_id)
-            cap.set(cv2.CAP_PROP_POS_MSEC, float(t) * 1000.0)
-            ok, frame = cap.read()
-            if not ok:
-                continue
-            snap = frame.copy()
-            with sem:
-                eng = _ocr_engine()
-                try:
-                    mid_tx, mid_bb = _ocr_mid_item_from_frame(snap, eng, vw, vh)
-                    lab_items = _ocr_label_items_from_frame(snap, eng, vw, vh)
-                except Exception:
-                    _tls.ocr = _rapidocr_labels(use_cuda=False)
-                    eng = _tls.ocr
-                    mid_tx, mid_bb = _ocr_mid_item_from_frame(snap, eng, vw, vh)
-                    lab_items = _ocr_label_items_from_frame(snap, eng, vw, vh)
-            if mid_tx:
-                mid_hits.append((t, mid_tx, mid_bb))
-            for tx, bb in lab_items:
+        for i, t in enumerate(stamps):
+            boxes = probe.ocr_at(t)
+            present: set[str] = set()
+            for tx, bb in boxes.get("mid") or []:
+                mid_hits.append((t, tx, bb))
+                present.add("mid")
+            for tx, bb in boxes.get("vertical") or []:
+                vert_hits.append((t, tx, bb))
+                present.add("vertical")
+            for tx, bb in boxes.get("label") or []:
                 lab_hits.append((t, tx, bb))
+                present.add("label")
+            stamp_layouts[float(t)] = present
+            if on_progress and (i % max(1, total // 20 or 1) == 0 or i + 1 == total):
+                on_progress(i + 1, total, progress_label)
     finally:
-        cap.release()
-    return mid_hits, lab_hits
+        probe.close()
+    return mid_hits, vert_hits, lab_hits, stamp_layouts
 
 
-def _vertical_sparse(
-    video: Path,
+CoverHint = dict[str, Any]
+
+
+def _edge_refine_cluster(
+    probe: _OverlayProbe,
+    cluster: list[Hit],
+    layout: str,
     *,
-    project_id: str | None,
+    coarse: list[float],
     video_end: float,
-) -> list[dict[str, Any]]:
-    """Title dọc đầu/cuối — coarse nhanh; có hit → refine dày hơn."""
-    import cv2
+    stamp_layouts: dict[float, set[str]] | None = None,
+) -> tuple[list[Hit], CoverHint]:
+    """Biên nhanh: pad 0-OCR từ coarse; trả cover hint (mốc trống kế)."""
+    empty: CoverHint = {
+        "t_before": 0.0,
+        "t_after": float(video_end),
+        "empty_before": False,
+        "empty_after": False,
+    }
+    if not cluster:
+        return [], empty
+    t0 = float(cluster[0][0])
+    t1 = float(cluster[-1][0])
+    seed = _best_hit(cluster)[1]
+    bb = _best_hit(cluster)[2]
+    layouts = stamp_layouts or {}
 
-    try:
-        ocr = _rapidocr_labels()
-    except ImportError:
-        return []
-    cap = cv2.VideoCapture(str(video))
-    if not cap.isOpened():
-        return []
-    hits: list[tuple[float, str, dict[str, int] | None]] = []
-    try:
-        vw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1080)
-        vh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 1920)
-        windows: list[tuple[float, float]] = [(0.0, min(3.0, video_end))]
-        if video_end > 8.0:
-            windows.append((max(0.0, video_end - 2.0), video_end))
-        # coarse nhanh
-        for w0, w1 in windows:
-            t = w0
-            while t <= w1 + 1e-6:
-                check_cancel(project_id)
-                with _ocr_semaphore():
-                    cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000.0)
-                    ok, frame = cap.read()
-                    if not ok:
-                        break
-                    text, bbox = _ocr_vertical_item_from_frame(frame, ocr, vw, vh)
-                if text:
-                    hits.append((t, text, bbox))
-                t += 0.55
-        # có chữ → refine chậm quanh hit
-        if hits:
-            extra: list[tuple[float, str, dict[str, int] | None]] = []
-            seen = {round(h[0], 2) for h in hits}
-            for t0, tx0, bb0 in list(hits):
-                for d in (-0.35, -0.2, -0.1, 0.1, 0.2, 0.35):
-                    t = round(t0 + d, 3)
-                    if t < 0 or t > video_end or round(t, 2) in seen:
-                        continue
-                    with _ocr_semaphore():
-                        cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000.0)
-                        ok, frame = cap.read()
-                        if not ok:
-                            continue
-                        text, bbox = _ocr_vertical_item_from_frame(frame, ocr, vw, vh)
-                    if text and (_ocr_same(text, tx0) or _ocr_sim(text, tx0) >= 0.72):
-                        extra.append((t, text, bbox or bb0))
-                        seen.add(round(t, 2))
-            hits.extend(extra)
-            hits.sort(key=lambda x: x[0])
-    finally:
-        cap.release()
+    def has_at(t: float) -> bool:
+        return _layout_present(probe.ocr_at(t), layout, seed)
+
+    t_before = _neighbor_empty(coarse, t0, before=True, video_end=video_end)
+    empty_before = False
+    if t_before < t0 - 1e-3:
+        abs_b = _coarse_layout_absent(layouts, t_before, layout)
+        # đầu clip / không có mốc coarse → coi trống, pad 0-OCR
+        if abs_b is None and t_before <= 0.05:
+            abs_b = True
+        if abs_b is False:
+            # mốc trước vẫn có layout (chữ khác?) — kéo sớm hơn 50ms cố định
+            start = max(0.0, t0 - 0.25)
+        elif abs_b is True:
+            start = _pad_edge_start(t_before, t0)
+            empty_before = True
+        else:
+            start = _cheap_edge_start(has_at, t_before, t0)
+    else:
+        start = max(0.0, t0 - 0.2)
+
+    t_after = _neighbor_empty(coarse, t1, before=False, video_end=video_end)
+    empty_after = False
+    if t_after > t1 + 1e-3:
+        abs_a = _coarse_layout_absent(layouts, t_after, layout)
+        if abs_a is None and abs(t_after - float(video_end)) <= 0.05:
+            abs_a = True
+        if abs_a is False:
+            end = min(video_end, t1 + 0.05)
+        elif abs_a is True:
+            end = _pad_edge_end(t1, t_after)
+            empty_after = True
+        else:
+            end = _cheap_edge_end(has_at, t1, t_after)
+    else:
+        end = min(video_end, t1 + 0.05)
+
+    end = max(end, start + 0.08)
+    mid_t = (start + end) * 0.5
+    hits = [
+        (round(start, 3), seed, bb),
+        (round(mid_t, 3), seed, bb),
+        (round(max(start, end - 0.05), 3), seed, bb),
+    ]
+    return hits, {
+        "t_before": float(t_before),
+        "t_after": float(t_after),
+        "empty_before": empty_before,
+        "empty_after": empty_after,
+    }
+
+
+def _is_sticky_vertical(cluster: list[Hit]) -> bool:
+    """Cột dọc xuyên suốt — không edge-search từng mốc như flash."""
+    if len(cluster) < _STICKY_VERT_HITS:
+        return False
+    span = float(cluster[-1][0]) - float(cluster[0][0])
+    return span >= _STICKY_VERT_SPAN
+
+
+def _partition_vert_clusters(
+    clusters: list[list[Hit]],
+) -> tuple[list[list[Hit]], list[list[Hit]]]:
+    sticky: list[list[Hit]] = []
+    flash: list[list[Hit]] = []
+    for c in clusters:
+        if _is_sticky_vertical(c):
+            sticky.append(c)
+        else:
+            flash.append(c)
+    return sticky, flash
+
+
+def _sticky_vertical_edges(
+    probe: _OverlayProbe,
+    cluster: list[Hit],
+    *,
+    coarse: list[float],
+    video_end: float,
+    stamp_layouts: dict[float, set[str]] | None = None,
+) -> tuple[list[Hit], CoverHint]:
+    """Sticky dọc: pad biên từ coarse; trả cover hint."""
+    empty: CoverHint = {
+        "t_before": 0.0,
+        "t_after": float(video_end),
+        "empty_before": False,
+        "empty_after": False,
+    }
+    if not cluster:
+        return [], empty
+    t0 = float(cluster[0][0])
+    t1 = float(cluster[-1][0])
+    seed = _best_hit(cluster)[1]
+    bb = _best_hit(cluster)[2]
+    vend = float(video_end)
+    layouts = stamp_layouts or {}
+
+    def has_at(t: float) -> bool:
+        return _layout_present(probe.ocr_at(t), "vertical", seed)
+
+    t_before = _neighbor_empty(coarse, t0, before=True, video_end=vend)
+    empty_before = False
+    if t_before < t0 - 1e-3:
+        abs_b = _coarse_layout_absent(layouts, t_before, "vertical")
+        if abs_b is False:
+            start = max(0.0, t0 - 0.25)
+        elif abs_b is True:
+            start = _pad_edge_start(t_before, t0)
+            empty_before = True
+        elif t0 <= 2.5:
+            start = 0.0
+            empty_before = True
+        else:
+            start = _cheap_edge_start(has_at, t_before, t0)
+    elif t0 <= 2.5:
+        start = 0.0
+        empty_before = True
+    else:
+        start = max(0.0, t0 - 0.2)
+
+    t_after = _neighbor_empty(coarse, t1, before=False, video_end=vend)
+    empty_after = False
+    if t1 >= vend - 2.5:
+        abs_tail = _coarse_layout_absent(layouts, t1, "vertical")
+        if abs_tail is False or (t1 in layouts and "vertical" in layouts.get(t1, set())):
+            end = vend
+            empty_after = True
+            t_after = vend
+        else:
+            te = min(vend, max(t1, vend - 0.15))
+            end = vend if has_at(te) else _pad_edge_end(t1, max(t_after, te))
+            empty_after = True
+            t_after = vend
+    elif t_after > t1 + 1e-3:
+        abs_a = _coarse_layout_absent(layouts, t_after, "vertical")
+        if abs_a is False:
+            end = min(vend, t1 + 0.05)
+        elif abs_a is True:
+            end = _pad_edge_end(t1, t_after)
+            empty_after = True
+        else:
+            end = _cheap_edge_end(has_at, t1, t_after)
+    else:
+        end = min(vend, t1 + 0.05)
+
+    end = max(end, start + 0.15)
+    mid_t = (start + end) * 0.5
+    hits = [
+        (round(start, 3), seed, bb),
+        (round(mid_t, 3), seed, bb),
+        (round(max(start, end - 0.05), 3), seed, bb),
+    ]
+    return hits, {
+        "t_before": float(t_before),
+        "t_after": float(t_after),
+        "empty_before": empty_before,
+        "empty_after": empty_after,
+    }
+
+
+# alias cũ
+def _vertical_long_edges(*args: Any, **kwargs: Any) -> list[Hit]:
+    hits, _hint = _sticky_vertical_edges(*args, **kwargs)
+    return hits
+
+
+def _seg_from_refined_hits(
+    hits: list[Hit],
+    *,
+    layout: str,
+    video_end: float,
+    min_hold: float = 0.2,
+    index: int = 1,
+    cover_hint: CoverHint | None = None,
+) -> dict[str, Any] | None:
+    """1 cụm đã refine biên → 1 segment [start,end] + coverStart/coverEnd."""
     if not hits:
-        return []
-    return _ocr_cluster_hits(
-        hits,
+        return None
+    _tm, text, bb = _best_hit(hits)
+    if not (text or "").strip():
+        return None
+    t0 = float(hits[0][0])
+    t1 = float(hits[-1][0])
+    t1 = min(float(video_end), max(t1, t0 + min_hold))
+    seg = _ocr_seg(index, t0, t1, text, layout=layout, bbox=bb)
+    hint = cover_hint or {}
+    attach_cover_times(
+        seg,
+        t_before=hint.get("t_before"),
+        t_after=hint.get("t_after"),
         video_end=video_end,
-        step=0.25,
-        layout="vertical",
-        gap=0.45,
-        min_hold=0.15,
+        neighbor_empty_before=bool(hint.get("empty_before")),
+        neighbor_empty_after=bool(hint.get("empty_after")),
     )
+    return seg
+
+
+def _ensure_cover_times(segs: list[dict[str, Any]], *, video_end: float) -> list[dict[str, Any]]:
+    for s in segs:
+        if s.get("coverStart") is None or s.get("coverEnd") is None:
+            attach_cover_times(s, video_end=video_end)
+    return segs
+
+
+def _reindex_segs(segs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out = sorted(segs, key=lambda s: float(s.get("start") or 0))
+    for i, s in enumerate(out, start=1):
+        s["index"] = i
+    return out
 
 
 def run_overlay_ocr(
@@ -209,7 +598,7 @@ def run_overlay_ocr(
     workers: int = 2,
     set_status: Any = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    """Coarse nhanh vùng trống; hit → refine chậm (chuẩn bbox/timing)."""
+    """Coarse full-ROI thưa; hit → binary-search biên → 1 segment / cụm."""
     vend = max(0.0, float(video_end))
     coarse = _budget_stamps(vend, budget=28)
     step = adaptive_overlay_step(vend)
@@ -218,75 +607,159 @@ def run_overlay_ocr(
     vert: list[dict[str, Any]] = []
     labels: list[dict[str, Any]] = []
 
-    try:
-        if set_status and project_id:
-            set_status(
-                project_id,
-                step="asr",
-                progress=38,
-                message=f"OCR phụ mid+nhãn coarse ({len(coarse)} mốc)…",
-                running=True,
-            )
-        mid_hits, lab_hits = _scan_dual_mid_label(
-            video, coarse, project_id=project_id, workers=workers
+    def _status(done: int, total: int, label: str, p0: int, p1: int) -> None:
+        if not (set_status and project_id and total > 0):
+            return
+        pct = p0 + int((p1 - p0) * done / total)
+        set_status(
+            project_id,
+            step="asr",
+            progress=min(p1, max(p0, pct)),
+            message=f"{label} {done}/{total}…",
+            running=True,
         )
-        # phần có chữ → scan dày hơn quanh hit
-        refine: list[float] = []
-        if mid_hits or lab_hits:
-            refine = _refine_stamps(
-                mid_hits + lab_hits, vend, pad=0.5, step=0.12
-            )
-            refine = [t for t in refine if t not in set(coarse)]
-            if refine:
-                if set_status and project_id:
-                    set_status(
-                        project_id,
-                        step="asr",
-                        progress=42,
-                        message=f"OCR phụ refine ({len(refine)} mốc quanh chữ)…",
-                        running=True,
-                    )
-                m2, l2 = _scan_dual_mid_label(
-                    video, refine, project_id=project_id, workers=workers
-                )
-                mid_hits.extend(m2)
-                lab_hits.extend(l2)
-                mid_hits.sort(key=lambda x: x[0])
-                lab_hits.sort(key=lambda x: x[0])
-
-        cluster_step = 0.15 if (mid_hits or lab_hits) else step
-        if mid_hits:
-            mid = _ocr_cluster_hits(
-                mid_hits,
-                video_end=vend,
-                step=cluster_step,
-                layout="mid",
-                gap=max(0.35, cluster_step * 2),
-                min_hold=0.2,
-            )
-        if lab_hits:
-            labels = _ocr_cluster_hits(
-                lab_hits,
-                video_end=vend,
-                step=cluster_step,
-                layout="label",
-                gap=max(0.4, cluster_step * 2),
-                min_hold=0.3,
-            )
-    except Exception:
-        mid, labels = [], []
 
     try:
-        if set_status and project_id:
-            set_status(
-                project_id,
-                step="asr",
-                progress=50,
-                message="OCR phụ: title dọc…",
-                running=True,
+        mid_hits, vert_hits, lab_hits, stamp_layouts = _scan_overlay_stamps(
+            video,
+            coarse,
+            project_id=project_id,
+            workers=workers,
+            on_progress=lambda d, t, lab: _status(d, t, lab, 38, 48),
+            progress_label="OCR overlay quét",
+        )
+
+        mid_segs: list[dict[str, Any]] = []
+        vert_segs: list[dict[str, Any]] = []
+        lab_segs: list[dict[str, Any]] = []
+        refined = False
+
+        # Biên mid/nhãn: pad từ coarse — gần như không OCR thêm.
+        # Chỉ mở probe khi neighbor ngoài lưới (hiếm).
+        probe = _OverlayProbe(video, project_id=project_id, workers=workers)
+        try:
+            mid_clusters = _cluster_hits_overlay(
+                mid_hits, gap=_CLUSTER_GAP, coarse_step=step, layout="mid"
             )
-        vert = _vertical_sparse(video, project_id=project_id, video_end=vend)
+            lab_clusters = _cluster_hits_overlay(
+                lab_hits, gap=_CLUSTER_GAP, coarse_step=step, layout="label"
+            )
+            vert_clusters = _cluster_hits(vert_hits, gap=max(_CLUSTER_GAP, step * 1.2))
+            sticky_vert, flash_vert = _partition_vert_clusters(vert_clusters)
+
+            if sticky_vert:
+                n_sticky = len(sticky_vert)
+                for si, cluster in enumerate(sticky_vert):
+                    hits, hint = _sticky_vertical_edges(
+                        probe,
+                        cluster,
+                        coarse=coarse,
+                        video_end=vend,
+                        stamp_layouts=stamp_layouts,
+                    )
+                    seg = _seg_from_refined_hits(
+                        hits,
+                        layout="vertical",
+                        video_end=vend,
+                        min_hold=0.15,
+                        cover_hint=hint,
+                    )
+                    if seg:
+                        vert_segs.append(seg)
+                    _status(si + 1, n_sticky, "OCR dọc xuyên clip", 48, 50)
+                refined = True
+
+            edge_jobs: list[tuple[str, list[Hit]]] = []
+            for c in mid_clusters:
+                edge_jobs.append(("mid", c))
+            for c in lab_clusters:
+                edge_jobs.append(("label", c))
+            for c in flash_vert:
+                edge_jobs.append(("vertical", c))
+
+            p0_edge, p1_edge = (50, 56) if sticky_vert else (48, 56)
+            n_jobs = len(edge_jobs)
+            for ji, (kind, cluster) in enumerate(edge_jobs):
+                hits, hint = _edge_refine_cluster(
+                    probe,
+                    cluster,
+                    kind,
+                    coarse=coarse,
+                    video_end=vend,
+                    stamp_layouts=stamp_layouts,
+                )
+                hold = 0.3 if kind == "label" else (0.15 if kind == "vertical" else 0.2)
+                seg = _seg_from_refined_hits(
+                    hits,
+                    layout=kind,
+                    video_end=vend,
+                    min_hold=hold,
+                    cover_hint=hint,
+                )
+                if seg:
+                    if kind == "mid":
+                        mid_segs.append(seg)
+                    elif kind == "label":
+                        lab_segs.append(seg)
+                    else:
+                        vert_segs.append(seg)
+                refined = True
+                if n_jobs:
+                    _status(ji + 1, n_jobs, "OCR biên mid/nhãn", p0_edge, p1_edge)
+        finally:
+            probe.close()
+
+        if refined:
+            merge_gap = max(2.2, step * 1.5)
+            mid = _ensure_cover_times(
+                _merge_mid_segments(_reindex_segs(mid_segs), max_gap=merge_gap),
+                video_end=vend,
+            )
+            vert = _ensure_cover_times(_reindex_segs(vert_segs), video_end=vend)
+            labels = _reindex_segs(lab_segs)
+            if len(labels) > 1:
+                labels = _merge_label_segments(labels)
+                labels = _reindex_segs(labels)
+            labels = _ensure_cover_times(labels, video_end=vend)
+        else:
+            # fallback coarse-only: gap ≈ step để không tách hit thưa
+            gap_fb = max(1.5, step * 1.2)
+            if mid_hits:
+                mid = _ocr_cluster_hits(
+                    mid_hits,
+                    video_end=vend,
+                    step=0.2,
+                    layout="mid",
+                    gap=gap_fb,
+                    min_hold=0.2,
+                )
+            if vert_hits:
+                vert = _ocr_cluster_hits(
+                    vert_hits,
+                    video_end=vend,
+                    step=0.25,
+                    layout="vertical",
+                    gap=gap_fb,
+                    min_hold=0.15,
+                )
+            if lab_hits:
+                labels = _ocr_cluster_hits(
+                    lab_hits,
+                    video_end=vend,
+                    step=0.2,
+                    layout="label",
+                    gap=gap_fb,
+                    min_hold=0.3,
+                )
+            mid = _ensure_cover_times(mid, video_end=vend)
+            vert = _ensure_cover_times(vert, video_end=vend)
+            labels = _ensure_cover_times(labels, video_end=vend)
     except Exception:
-        vert = []
+        mid, vert, labels = [], [], []
 
     return mid, vert, labels
+
+
+def _refine_stamps_gone() -> bool:
+    """ponytail: self-check — không còn API lưới refine dày."""
+    return not callable(globals().get("_refine_stamps"))

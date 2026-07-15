@@ -52,8 +52,19 @@ export default function SegmentCard({
   const voice = !segment.voice || segment.voice === 'system' ? defaultVoice : segment.voice
   const dur = segment.audioDuration ?? Math.max(0.1, segment.end - segment.start)
   const chars = segment.translation.length || segment.source.length
-  const isOverlay = segment.layout === 'vertical' || segment.layout === 'label'
-  // vertical/label: mặc định tắt lồng tiếng; hardsub: mặc định bật
+  const layout = segment.layout || 'horizontal'
+  const isOverlay = layout === 'vertical' || layout === 'label'
+  const layoutBadge =
+    layout === 'vertical' ? 'Dọc' : layout === 'mid' ? 'Mid' : layout === 'label' ? 'Nhãn' : 'Caption'
+  const layoutTitle =
+    layout === 'vertical'
+      ? 'Tiêu đề dọc'
+      : layout === 'mid'
+        ? 'Chữ giữa khung'
+        : layout === 'label'
+          ? 'Nhãn trên khung'
+          : 'Phụ đề đáy (caption)'
+  // vertical/label: mặc định tắt lồng tiếng; hardsub/mid: mặc định bật
   const dubOn = isOverlay ? segment.dub === true : segment.dub !== false
   const [busy, setBusy] = useState(false)
   const [reBusy, setReBusy] = useState(false)
@@ -150,19 +161,21 @@ export default function SegmentCard({
         <div className="seg-rail">
           <div className="idx-row">
             <span className="idx">{String(segment.index).padStart(2, '0')}</span>
-            {isOverlay && (
-              <span
-                className="seg-badge"
-                title={segment.layout === 'vertical' ? 'Tiêu đề dọc' : 'Nhãn trên khung'}
-              >
-                {segment.layout === 'vertical' ? 'Dọc' : 'Nhãn'}
-              </span>
-            )}
+            <span
+              className={`seg-badge seg-badge--${layout}`}
+              title={layoutTitle}
+            >
+              {layoutBadge}
+            </span>
           </div>
           <span className="time">
             {(() => {
               const short = segment.end - segment.start < 1.0
-              return `${fmt(segment.start, short)} – ${fmt(segment.end, short)}`
+              return (
+                <span className="time-line" title="Đầu – cuối clip (kéo trên timeline nếu sai)">
+                  {fmt(segment.start, short)} – {fmt(segment.end, short)}
+                </span>
+              )
             })()}
           </span>
           <div className="seg-actions">

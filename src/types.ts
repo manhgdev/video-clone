@@ -5,6 +5,9 @@ export type Segment = {
   index: number
   start: number
   end: number
+  /** Cửa sổ che chữ gốc (có thể rộng hơn start/end dịch). OCR/gán tay. */
+  coverStart?: number
+  coverEnd?: number
   /** Vùng che chữ (pixel video nguồn). Mode over: lưu đúng khung cover trên preview. */
   bbox?: { x: number; y: number; w: number; h: number } | null
   /** Layout caption từ preview — export dùng y nguyên, không tính lại. */
