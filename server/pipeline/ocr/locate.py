@@ -377,14 +377,19 @@ def _apply_caption_box(
     x0, y0, x1, y1 = box
     cy = (y0 + y1) * 0.5
     # pad X đủ stroke/glow; Y sát glyph — tránh hộp cao chữ bé
-    pad_x = max(10, int(round(fw * 0.01)))
-    pad_y = max(6, int(round(fh * 0.004)))
+    # Probe đã có bleed quanh poly OCR; chỉ cộng mép nhỏ cho stroke,
+    # tránh bbox lớn hơn rõ rệt so với chữ cũ.
+    pad_x = max(4, int(round(fw * 0.004)))
+    pad_y = max(3, int(round(fh * 0.002)))
     seg["bbox"] = _xyxy_to_seg_bbox(x0, y0, x1, y1, fw, fh, pad_x=pad_x, pad_y=pad_y)
+    seg["bboxInherited"] = False
     seg["layout"] = _layout_from_cy(cy, fh)
     seg.pop("captionLayout", None)
 
 
-def _inherit_caption_bboxes(segments: list[dict[str, Any]], fh: int) -> int:
+def _inherit_caption_bboxes(
+    segments: list[dict[str, Any]], fh: int, fw: int = 1080
+) -> int:
     """ponytail: OCR fail 1 câu → mượn bbox câu kề (cùng video hay cùng dải). Ceiling: video đổi vị trí giữa shot."""
     n = 0
     caps: list[dict[str, int] | None] = []
@@ -392,17 +397,32 @@ def _inherit_caption_bboxes(segments: list[dict[str, Any]], fh: int) -> int:
         bb = seg.get("bbox")
         lay = str(seg.get("layout") or "")
         cy = _bbox_cy_frac(bb if isinstance(bb, dict) else None, fh)
-        if lay in ("mid", "horizontal") and isinstance(bb, dict) and cy is not None:
+        if (
+            lay in ("mid", "horizontal")
+            and isinstance(bb, dict)
+            and cy is not None
+            and not bool(seg.get("bboxInherited"))
+        ):
             caps.append(
                 {
                     "x": int(bb["x"]),
                     "y": int(bb["y"]),
                     "w": int(bb["w"]),
                     "h": int(bb["h"]),
+                    "cjk": _cjk_len(str(seg.get("source") or "")),
                 }
             )
         else:
             caps.append(None)
+
+    glyph_widths = sorted(
+        cap["w"] / max(1, cap["cjk"])
+        for cap in caps
+        if cap is not None and cap["cjk"] > 0
+    )
+    median_glyph_w = (
+        glyph_widths[len(glyph_widths) // 2] if glyph_widths else 0.0
+    )
 
     def nearest(i: int) -> dict[str, int] | None:
         for d in range(1, len(segments)):
@@ -424,13 +444,57 @@ def _inherit_caption_bboxes(segments: list[dict[str, Any]], fh: int) -> int:
         donor = nearest(i)
         if not donor:
             continue
-        # mượn nguyên bbox mid neighbor — không scale hẹp (che sai nửa hardsub)
+        # Chỉ OCR ba câu: mượn vị trí từ câu mẫu nhưng ước lượng lại chiều
+        # ngang theo số glyph nguồn. Không sao chép nguyên bbox dài sang câu ngắn.
+        target_cjk = max(1, _cjk_len(src))
+        glyph_w = median_glyph_w or donor["w"] / max(1, int(donor.get("cjk") or 1))
+        glyph_w = max(donor["h"] * 0.42, min(donor["h"] * 0.95, glyph_w))
+        bleed = max(12, round(glyph_w * 0.45))
+        width = max(48, min(fw, round(target_cjk * glyph_w + bleed * 2)))
+        cx = donor["x"] + donor["w"] * 0.5
+        x = max(0, min(fw - width, round(cx - width * 0.5)))
         cy = donor["y"] + donor["h"] * 0.5
-        seg["bbox"] = dict(donor)
+        seg["bbox"] = {
+            "x": x,
+            "y": donor["y"],
+            "w": width,
+            "h": donor["h"],
+        }
+        seg["bboxInherited"] = True
         seg["layout"] = _layout_from_cy(cy, fh)
         seg.pop("captionLayout", None)
         n += 1
     return n
+
+
+def _ensure_cover_times(
+    segments: list[dict[str, Any]], video_end: float | None
+) -> None:
+    """Gán coverStart/coverEnd mặc định khi segment chưa có."""
+    from .cover_timing import attach_cover_times
+
+    for seg in segments:
+        if seg.get("coverStart") is not None and seg.get("coverEnd") is not None:
+            continue
+        lay = str(seg.get("layout") or "horizontal")
+        if lay in ("vertical", "label"):
+            continue
+        if _cjk_len(str(seg.get("source") or "")) < 1:
+            continue
+        attach_cover_times(seg, video_end=video_end)
+
+
+def _three_point_segments(
+    segments: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Chọn tối đa ba cue đại diện: đầu, giữa và cuối video.
+
+    Whisper đã cung cấp timecode. OCR ở đây chỉ dùng để tìm vùng hardsub
+    chung, nên không được chạy ba lần cho từng câu.
+    """
+    if len(segments) <= 3:
+        return list(segments)
+    return [segments[i] for i in (0, len(segments) // 2, len(segments) - 1)]
 
 
 def attach_speech_hardsub_boxes(
@@ -440,10 +504,7 @@ def attach_speech_hardsub_boxes(
     only_missing: bool = True,
     project_id: str | None = None,
 ) -> int:
-    """Whisper = gợi ý thời gian; OCR đo trái/phải + tinh chỉnh start/end theo lúc chữ trên khung.
-
-    Không nới bbox theo bản dịch — chỉ poly OCR khớp đủ dòng CJK.
-    """
+    """Whisper giữ timecode; OCR chỉ đo bbox tại đầu / giữa / cuối cửa sổ."""
     import cv2
 
     path = Path(video)
@@ -457,16 +518,27 @@ def attach_speech_hardsub_boxes(
     if fw <= 0 or fh <= 0:
         cap.release()
         return 0
+    fps = float(cap.get(cv2.CAP_PROP_FPS) or 0) or 25.0
+    frame_total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    video_end = (frame_total / fps) if frame_total > 0 else None
 
-    # Sửa layout lệch từ lần trước (bbox mid mà layout trống/horizontal)
+    # Migration cho project cũ: trước đây bbox của ba mốc bị copy cho gần như
+    # toàn bộ câu và chưa có cờ provenance. Xóa một lần để tạo lại đúng anchor
+    # OCR thật + bbox ước lượng; không đụng project chỉ có vài bbox kéo tay.
+    legacy = [
+        seg
+        for seg in segments
+        if isinstance(seg.get("bbox"), dict) and "bboxInherited" not in seg
+    ]
+    if len(legacy) >= max(4, len(segments) // 2):
+        for seg in legacy:
+            seg.pop("bbox", None)
+            seg.pop("captionLayout", None)
+
     for seg in segments:
         _retag_layout_from_bbox(seg, fh)
 
     filtered: list[dict[str, Any]] = []
-    # ponytail: cache frame theo grid 0.5s — giảm seek/đecode từ ~10k → ~4k cho 2h video.
-    # Ceiling: motion nhanh có thể nhầm frame giữa 2 bucket; chỉ dùng cho giai đoạn seeds/walk.
-    _frame_cache: dict[tuple[int, int], Any] = {}
-    _CACHE_GRID = 0.5
     for seg in segments:
         lay = str(seg.get("layout") or "horizontal")
         if lay in ("vertical", "label"):
@@ -477,13 +549,13 @@ def attach_speech_hardsub_boxes(
         bb = seg.get("bbox")
         if only_missing and isinstance(bb, dict) and bb.get("w") and bb.get("h"):
             cy = _bbox_cy_frac(bb, fh)
-            # giữ nếu đã có bbox đủ ngang; bbox hẹp/lệch → OCR lại
             if cy is not None and _bbox_fits_source(bb, src, fw):
                 _retag_layout_from_bbox(seg, fh)
                 continue
         filtered.append(seg)
     if not filtered:
-        n_inh = _inherit_caption_bboxes(segments, fh)
+        n_inh = _inherit_caption_bboxes(segments, fh, fw)
+        _ensure_cover_times(segments, video_end)
         cap.release()
         return n_inh
 
@@ -491,20 +563,17 @@ def attach_speech_hardsub_boxes(
         ocr = rapidocr_labels()
     except ImportError:
         cap.release()
-        return _inherit_caption_bboxes(segments, fh)
+        n = _inherit_caption_bboxes(segments, fh, fw)
+        _ensure_cover_times(segments, video_end)
+        return n
 
     def _read_probe(
         t: float, src: str
     ) -> tuple[float, float, tuple[int, int, int, int], str] | None:
-        # Cache theo bucket 0.5s: hai timestamp cùng bucket trả cùng frame
-        key = int(t // _CACHE_GRID)
-        frame = _frame_cache.get(key)
-        if frame is None:
-            cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, t) * 1000.0)
-            ok, frame = cap.read()
-            if not ok:
-                return None
-            _frame_cache[key] = frame
+        cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, t) * 1000.0)
+        ok, frame = cap.read()
+        if not ok:
+            return None
         hit = _probe_mid_hardsub(frame, ocr, source=src)
         if not hit:
             return None
@@ -514,9 +583,11 @@ def attach_speech_hardsub_boxes(
     def _report(done: int, total: int) -> None:
         if not project_id or total <= 0:
             return
-        # cập nhật theo số câu — không khóa theo progress 95..98 (0/67 và 20/67 cùng pct)
         prev = getattr(_report, "_prev_done", -1)
         if done == prev:
+            return
+        # ponytail: ghi meta mỗi câu = chậm; heartbeat mỗi 4 câu + đầu/cuối
+        if done not in (1, total) and done % 4 != 0:
             return
         _report._prev_done = done
         pct = 95 + min(3, int(3 * done / total))
@@ -526,15 +597,19 @@ def attach_speech_hardsub_boxes(
             project_id,
             step="translate",
             progress=pct,
-            message=f"Định vị OCR {done}/{total} câu…",
+            message=f"Định vị OCR {done}/{total} mốc (đầu • giữa • cuối) — vẫn chạy…",
             running=True,
         )
 
+    from .cover_timing import attach_cover_times
+
     attached = 0
-    total = len(filtered)
+    # Chỉ định vị ba vùng đại diện của video, rồi nội suy bbox cho các cue
+    # Whisper còn lại ở _inherit_caption_bboxes bên dưới.
+    probes = _three_point_segments(filtered)
+    total = len(probes)
     try:
-        for si, seg in enumerate(filtered):
-            # báo trước khi OCR câu này — UI thấy 1/67 ngay, không đứng 0/67
+        for si, seg in enumerate(probes):
             _report(si + 1, total)
             s0 = float(seg.get("start") or 0)
             e0 = float(seg.get("end") or s0)
@@ -542,57 +617,12 @@ def attach_speech_hardsub_boxes(
                 e0 = s0 + 0.4
             src = str(seg.get("source") or "").strip()
             dur = max(0.2, e0 - s0)
-            # 1) ít mốc — dừng sớm khi khớp chắc
-            seeds = [s0 + dur * f for f in (0.45, 0.70, 0.25)]
-            hits: list[tuple[float, float, tuple[int, int, int, int], str]] = []
-            for t in seeds:
-                p = _read_probe(t, src)
-                if not p:
-                    continue
-                hits.append(p)
-                if p[1] >= 35:
-                    break
-            # 2) nới tìm nếu Whisper lệch
-            if not hits:
-                for t in (s0 - 0.45, e0 + 0.35, s0 + dur * 0.55):
-                    if t < 0:
-                        continue
-                    p = _read_probe(t, src)
-                    if p:
-                        hits.append(p)
-                        break
-            # 3) lỏng: cùng độ dài CJK
-            if not hits and src:
-                for t in seeds[:2]:
-                    cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000.0)
-                    ok, frame = cap.read()
-                    if not ok:
-                        continue
-                    loose = _probe_mid_hardsub(frame, ocr, source="")
-                    if not loose:
-                        continue
-                    sc, box, tx = loose
-                    if _similar_hardsub_len(tx or "", src) and _bbox_fits_source(
-                        {"w": box[2] - box[0], "h": box[3] - box[1]}, src, fw
-                    ):
-                        hits.append((t, sc * 0.5, box, tx))
-                        break
+            # Mỗi cue đại diện chỉ đọc một frame. Tổng cộng tối đa ba lần OCR:
+            # cue đầu, cue giữa và cue cuối của video.
+            hit = _read_probe(s0 + dur * 0.5, src)
+            hits = [hit] if hit else []
             if not hits:
                 continue
-
-            # walk biên ngắn — đủ tune; tránh OCR hàng chục khung/câu
-            best = max(hits, key=lambda x: x[1])
-            t_anchor = best[0]
-            # ponytail: 2 bước thay vì 4 (chỉ ±0.4), vẫn đủ tune cho caption đứng yên
-            for step in (-0.4, 0.4):
-                t = t_anchor + step
-                if t < max(0.0, s0 - 0.8) or t > e0 + 0.8:
-                    continue
-                p = _read_probe(t, src)
-                if p:
-                    hits.append(p)
-
-            times = sorted({round(h[0], 3) for h in hits})
             chosen = None
             for h in sorted(hits, key=lambda x: -x[1]):
                 box = h[2]
@@ -602,21 +632,15 @@ def attach_speech_hardsub_boxes(
                     break
             if chosen is None:
                 continue
-            best = chosen
-            new_s = max(0.0, times[0])
-            new_e = max(new_s + 0.25, times[-1] + 0.12)
-            new_s = max(s0 - 1.2, min(s0 + 1.0, new_s))
-            new_e = max(e0 - 1.0, min(e0 + 1.2, new_e))
-            if new_e <= new_s + 0.2:
-                new_s, new_e = s0, e0
-            seg["start"] = round(new_s, 3)
-            seg["end"] = round(new_e, 3)
-            _apply_caption_box(seg, best[2], fw, fh)
+            _apply_caption_box(seg, chosen[2], fw, fh)
+            seg.pop("captionLayout", None)
+            attach_cover_times(seg, video_end=video_end)
             attached += 1
-            # Xóa: _report(total, total) — bug: args ngược, vô dụng
+        _report(total, total)
     finally:
         cap.release()
-    attached += _inherit_caption_bboxes(segments, fh)
+    attached += _inherit_caption_bboxes(segments, fh, fw)
+    _ensure_cover_times(segments, video_end)
     for seg in segments:
         _retag_layout_from_bbox(seg, fh)
     return attached

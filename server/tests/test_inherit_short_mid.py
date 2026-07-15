@@ -1,9 +1,8 @@
-"""Inherit mid bbox for short CJK when OCR miss — keep full donor width for cover."""
+"""Inherit mid bbox from three OCR anchors without copying an oversized width."""
 from pipeline.ocr.locate import _inherit_caption_bboxes
 
 
-def test_inherit_keeps_wide_donor_for_short_cjk() -> None:
-    # Whisper cắt nửa hardsub — inherit phải giữ W donor để che đủ dòng trên khung
+def test_inherit_scales_wide_donor_for_short_cjk() -> None:
     segs = [
         {
             "id": "3",
@@ -36,5 +35,7 @@ def test_inherit_keeps_wide_donor_for_short_cjk() -> None:
     assert s4["layout"] == "mid"
     bb = s4["bbox"]
     assert isinstance(bb, dict)
-    assert bb["w"] == 545, bb  # full donor, không scale hẹp
+    assert 48 <= bb["w"] < 545, bb
+    assert bb["x"] > 269
+    assert s4["bboxInherited"] is True
     assert bb["y"] == 1161

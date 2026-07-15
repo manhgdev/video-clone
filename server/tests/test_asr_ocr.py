@@ -443,6 +443,31 @@ def test_merge_mid_segments_keeps_distant_same_glyph() -> None:
     assert len(out) == 2
 
 
+def test_merge_whisper_hardsub_fragments_joins_split_line() -> None:
+    from pipeline.ocr.extract import _merge_whisper_hardsub_fragments
+
+    shards = [
+        {"source": "最奢侈", "start": 5.76, "end": 6.6},
+        {"source": "最豪華的奔官", "start": 6.8, "end": 7.8},
+    ]
+    out = _merge_whisper_hardsub_fragments(shards)
+    assert len(out) == 1
+    assert "最奢侈" in out[0]["source"]
+    assert "奔官" in out[0]["source"]
+    assert out[0]["end"] >= 7.8
+
+
+def test_merge_whisper_keeps_separate_lines() -> None:
+    from pipeline.ocr.extract import _merge_whisper_hardsub_fragments
+
+    shards = [
+        {"source": "還有一棵竹子", "start": 2.56, "end": 4.04},
+        {"source": "咱們拿回家做一點", "start": 4.73, "end": 5.53},
+    ]
+    out = _merge_whisper_hardsub_fragments(shards)
+    assert len(out) == 2
+
+
 def test_cluster_hits_overlay_same_text_wide_gap() -> None:
     from pipeline.ocr.overlay_scan import _cluster_hits_overlay
 

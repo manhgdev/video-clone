@@ -9,6 +9,34 @@ import httpx
 from .core.jobs import check_cancel
 from .core.project import set_status
 
+
+def _report_mt(
+    project_id: str | None,
+    *,
+    label: str,
+    cur: int,
+    total: int,
+    last_t: list[float],
+    force: bool = False,
+) -> None:
+    """Heartbeat dịch — cập nhật message ≥1.2s / lần đầu / lần cuối (tránh % đứng im)."""
+    import time
+
+    if not project_id or total <= 0:
+        return
+    now = time.monotonic()
+    if not force and cur not in (1, total) and now - last_t[0] < 1.2:
+        return
+    last_t[0] = now
+    set_status(
+        project_id,
+        step="translate",
+        progress=55 + int(35 * cur / max(1, total)),
+        message=f"Dịch {label} {cur}/{total} — vẫn chạy…",
+        running=True,
+    )
+
+
 def _ollama_model(models: list[str], *, prefer_fast: bool = True) -> str:
     """prefer_fast: ưu tiên 3–14B (dịch phụ đề). 32B quá chậm; 1B dễ hỏng."""
     import re
@@ -427,12 +455,13 @@ def translate_google_free(
     w = max(1, min(16, int(workers or 8), n))
     done = 0
     done_lock = threading.Lock()
+    last_t = [0.0]
     if project_id:
         set_status(
             project_id,
             step="translate",
             progress=55,
-            message=f"Dịch Google {n} đoạn ({w} luồng)…",
+            message=f"Dịch Google 0/{n} đoạn ({w} luồng) — vẫn chạy…",
             running=True,
         )
     with ThreadPoolExecutor(max_workers=w, thread_name_prefix="gtx") as pool:
@@ -444,14 +473,9 @@ def translate_google_free(
             with done_lock:
                 done += 1
                 cur = done
-            if project_id and (done % max(1, n // 10) == 0 or done == n):
-                set_status(
-                    project_id,
-                    step="translate",
-                    progress=55 + int(35 * cur / max(1, n)),
-                    message=f"Dịch Google {cur}/{n}",
-                    running=True,
-                )
+            _report_mt(
+                project_id, label="Google", cur=cur, total=n, last_t=last_t, force=(cur == n)
+            )
     return out
 
 
@@ -499,12 +523,13 @@ def translate_mymemory(
     w = max(1, min(12, int(workers or 6), n))
     done = 0
     done_lock = threading.Lock()
+    last_t = [0.0]
     if project_id:
         set_status(
             project_id,
             step="translate",
             progress=55,
-            message=f"Dịch MyMemory {n} đoạn…",
+            message=f"Dịch MyMemory 0/{n} đoạn — vẫn chạy…",
             running=True,
         )
     with ThreadPoolExecutor(max_workers=w, thread_name_prefix="mymem") as pool:
@@ -516,14 +541,9 @@ def translate_mymemory(
             with done_lock:
                 done += 1
                 cur = done
-            if project_id and (done % max(1, n // 10) == 0 or done == n):
-                set_status(
-                    project_id,
-                    step="translate",
-                    progress=55 + int(35 * cur / max(1, n)),
-                    message=f"Dịch MyMemory {cur}/{n}",
-                    running=True,
-                )
+            _report_mt(
+                project_id, label="MyMemory", cur=cur, total=n, last_t=last_t, force=(cur == n)
+            )
     return out
 
 
@@ -588,12 +608,13 @@ def translate_tiktok(
     w = max(1, min(6, int(workers or 4), n))
     done = 0
     done_lock = threading.Lock()
+    last_t = [0.0]
     if project_id:
         set_status(
             project_id,
             step="translate",
             progress=55,
-            message=f"Dịch TikTok {n} đoạn…",
+            message=f"Dịch TikTok 0/{n} đoạn — vẫn chạy…",
             running=True,
         )
     with ThreadPoolExecutor(max_workers=w, thread_name_prefix="tt-mt") as pool:
@@ -605,14 +626,9 @@ def translate_tiktok(
             with done_lock:
                 done += 1
                 cur = done
-            if project_id and (done % max(1, n // 10) == 0 or done == n):
-                set_status(
-                    project_id,
-                    step="translate",
-                    progress=55 + int(35 * cur / max(1, n)),
-                    message=f"Dịch TikTok {cur}/{n}",
-                    running=True,
-                )
+            _report_mt(
+                project_id, label="TikTok", cur=cur, total=n, last_t=last_t, force=(cur == n)
+            )
     return out
 
 

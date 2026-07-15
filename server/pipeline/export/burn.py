@@ -1897,10 +1897,10 @@ def _layout_mid_caption(
     cw = max(8, ox1 - ox0)
     ch = max(8, oy1 - oy0)
     raw = (text or "").strip() or " "
-    line_mul = 1.2
-    # Không cắt/bỏ chữ: thu font đến khi wrap vừa khung
-    pad_x = max(4, int(round(cw * 0.03)))
-    pad_y = max(6, int(round(ch * 0.1)))
+    line_mul = 1.15
+    # pad mỏng — chữ fill bbox; không nới khung OCR
+    pad_x = max(3, int(round(cw * 0.02)))
+    pad_y = max(3, int(round(ch * 0.04)))
     inner_w = max(12, cw - pad_x * 2)
     inner_h = max(12, ch - pad_y * 2)
     probe = Image.new("RGB", (8, 8))
@@ -1925,10 +1925,10 @@ def _layout_mid_caption(
         else max(
             10,
             min(
-                # fill ~72% chiều cao cover (không trần cứng 48 → chữ bé trong bbox phình)
-                max(28, int(inner_h * 0.72)),
+                # fill ~90% chiều cao inner — bbox dư trống → chữ to hơn, không phình H
+                max(28, int(inner_h * 0.90)),
                 int(inner_h / line_mul),
-                int(inner_w / max(4, len(re.sub(r"\s+", "", raw)) * 0.55)),
+                int(inner_w / max(4, len(re.sub(r"\s+", "", raw)) * 0.52)),
             ),
         )
     )

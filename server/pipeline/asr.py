@@ -68,7 +68,17 @@ def asr_whisper(
     project_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Whisper 1 lần cả file; Luồng → cpu_threads CTranslate2."""
+    import time
+
     thr = _resolve_asr_workers(workers)
+    if project_id:
+        set_status(
+            project_id,
+            step="asr",
+            progress=18,
+            message="Tải model Whisper…",
+            running=True,
+        )
     model = get_whisper(thr)
     if project_id:
         device = getattr(getattr(model, "model", None), "device", "cpu")
@@ -77,9 +87,9 @@ def asr_whisper(
             step="asr",
             progress=22,
             message=(
-                "Whisper ASR (CUDA)…"
+                "Whisper đang nhận dạng (CUDA) — % có thể đứng lâu…"
                 if device == "cuda"
-                else f"Whisper ASR ({thr} luồng CPU)…"
+                else f"Whisper đang nhận dạng ({thr} luồng CPU) — % có thể đứng lâu…"
             ),
             running=True,
         )
@@ -97,6 +107,7 @@ def asr_whisper(
         without_timestamps=False,
     )
     out: list[dict[str, Any]] = []
+    last_report = 0.0
     for i, seg in enumerate(segments, start=1):
         text = (seg.text or "").strip()
         if not text:
@@ -111,6 +122,28 @@ def asr_whisper(
                 "translation": "",
                 "voice": "",
             }
+        )
+        # heartbeat — Whisper hay đứng % ở 22; message đổi để UI không tưởng đơ
+        if project_id:
+            now = time.monotonic()
+            if len(out) == 1 or now - last_report >= 1.5:
+                last_report = now
+                t_end = float(seg.end)
+                pct = min(48, 22 + len(out))
+                set_status(
+                    project_id,
+                    step="asr",
+                    progress=pct,
+                    message=f"Whisper đã nhận {len(out)} đoạn · ~{t_end:.0f}s…",
+                    running=True,
+                )
+    if project_id and out:
+        set_status(
+            project_id,
+            step="asr",
+            progress=50,
+            message=f"Whisper xong — {len(out)} đoạn",
+            running=True,
         )
     return out
 

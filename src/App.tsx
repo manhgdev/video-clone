@@ -874,7 +874,7 @@ export default function App() {
               <h2>Kịch bản lồng tiếng</h2>
               <p className="status-line">
                 {status.running
-                  ? `${status.message} — ${Math.round(status.progress)}%`
+                  ? `${status.message || 'Đang xử lý…'} — ${Math.round(status.progress)}% (vẫn chạy, % có thể đứng lâu)`
                   : status.message}
               </p>
             </div>
@@ -951,6 +951,7 @@ export default function App() {
       <ProgressPopup
         active={status.running || Boolean(status.error && status.error !== 'cancelled')}
         minimized={progressMinimized}
+        running={status.running}
         title={
           status.step === 'dub'
             ? 'Lồng tiếng'

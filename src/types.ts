@@ -10,6 +10,8 @@ export type Segment = {
   coverEnd?: number
   /** Vùng che chữ (pixel video nguồn). Mode over: lưu đúng khung cover trên preview. */
   bbox?: { x: number; y: number; w: number; h: number } | null
+  /** true khi bbox được ước lượng từ 3 mốc OCR, không phải poly OCR trực tiếp. */
+  bboxInherited?: boolean
   /** Layout caption từ preview — export dùng y nguyên, không tính lại. */
   captionLayout?: {
     x: number

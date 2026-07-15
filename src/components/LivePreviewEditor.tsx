@@ -692,7 +692,8 @@ function TimelineFilmstrip({
   )
 }
 
-const AUTO_SUBTITLE_FONT = 36
+// Cỡ chuẩn dùng cho toàn video. Câu dài sẽ nới vùng cover, không thu chữ.
+const AUTO_SUBTITLE_FONT = 48
 /** Khớp burn._cover_max_h — đủ 1–3 dòng theo font */
 const COVER_MAX_H_FRAME_RATIO = 0.065
 
@@ -700,10 +701,10 @@ const COVER_SHADOW_BOT = 4
 
 function coverPad(fontSizePx = AUTO_SUBTITLE_FONT, frameW = 1080) {
   return {
-    x: Math.max(8, Math.round(frameW * 0.012)),
-    // Trên sát chữ (OCR hay thừa trống); dưới phải đủ stroke CJK
+    x: Math.max(5, Math.round(frameW * 0.006)),
+    // Chỉ chừa đủ viền/stroke; tránh chữ lọt thỏm giữa bbox.
     top: Math.max(2, Math.round(fontSizePx * 0.04)),
-    bottom: Math.max(18, Math.round(fontSizePx * 0.55)),
+    bottom: Math.max(6, Math.round(fontSizePx * 0.16)),
   }
 }
 
@@ -769,7 +770,7 @@ function fitHardsubCover(
   // Dọc: thu trống trên OCR (ít hơn — tránh kéo phụ đề xuống), nới đáy che stroke
   const topSlack = Math.round(seed.h * 0.14)
   const y = Math.max(0, seed.y + topSlack - pad.top)
-  const botExtra = Math.max(pad.bottom, Math.round(seed.h * 0.4), Math.round(fontPx * 0.7))
+  const botExtra = Math.max(pad.bottom, Math.round(seed.h * 0.15), Math.round(fontPx * 0.22))
   const bottom = seed.y + seed.h + botExtra
   const h = Math.max(12, Math.min(frameH - y, bottom - y))
 
@@ -939,6 +940,25 @@ function layoutOverMode(
   }
 }
 
+/** Thu bbox cũ bị kế thừa quá rộng; giữ nguyên tâm/Y/H của vùng OCR. */
+function tightenStoredBbox(
+  seg: Pick<Segment, 'source' | 'bboxInherited'>,
+  box: PixelBox,
+  frameW: number,
+): PixelBox {
+  // Poly OCR thật đã có đúng hai biên: tuyệt đối không thu lại.
+  if (!seg.bboxInherited) return box
+  const cjk = [...(seg.source ?? '')].filter((c) => c >= '\u4e00' && c <= '\u9fff').length
+  if (cjk < 1) return box
+  const glyphW = Math.max(18, box.h * 0.68)
+  const expectedW = Math.max(box.h * 1.15, cjk * glyphW + 12)
+  if (expectedW >= box.w * 0.82) return box
+  const w = Math.max(48, Math.min(box.w, Math.round(expectedW)))
+  const cx = box.x + box.w / 2
+  const x = Math.max(0, Math.min(frameW - w, Math.round(cx - w / 2)))
+  return { ...box, x, w }
+}
+
 /** Cover hiển thị / xuất — bbox lưu trực tiếp khung này (mode over). */
 function resolveSegmentCover(
   seg: Segment | undefined,
@@ -953,12 +973,14 @@ function resolveSegmentCover(
     return overlayCoverSeed(seg, frameW, frameH)
   }
   if (!over) {
-    const seed = seg.bbox ?? seedCoverBox(seg, frameW, frameH, fontPx)
+    const seed = seg.bbox
+      ? tightenStoredBbox(seg, clampCoverBox(seg.bbox, frameW, frameH), frameW)
+      : seedCoverBox(seg, frameW, frameH, fontPx)
     if (!seed) return null
     return normalizeCoverBox(seed, frameW, frameH, fontPx)
   }
   if (seg.bbox) {
-    return clampCoverBox(seg.bbox, frameW, frameH)
+    return tightenStoredBbox(seg, clampCoverBox(seg.bbox, frameW, frameH), frameW)
   }
   const seed = seedCoverBox(seg, frameW, frameH, fontPx)
   if (!seed) return null
@@ -981,7 +1003,7 @@ function overlayCoverSeed(seg: Segment, frameW: number, frameH: number): PixelBo
     if (layout === 'horizontal' || isCjkHardsubSource(seg.source)) return null
     return clampCoverBox(ocrFallbackCover(frameW, frameH, layout), frameW, frameH)
   }
-  const box = clampCoverBox(seg.bbox, frameW, frameH)
+  const box = tightenStoredBbox(seg, clampCoverBox(seg.bbox, frameW, frameH), frameW)
   if (layout === 'vertical' && box.w > box.h * 0.85) {
     return clampCoverBox(ocrFallbackCover(frameW, frameH, 'vertical'), frameW, frameH)
   }
@@ -1022,7 +1044,7 @@ function storedOverLayout(seg: Segment, frameW: number, frameH: number): OverLay
   const b = seg.bbox
   if (!b || !cl?.lines?.length || cl.w <= 0 || cl.h <= 0) return null
   return {
-    cover: clampCoverBox(b, frameW, frameH),
+    cover: tightenStoredBbox(seg, clampCoverBox(b, frameW, frameH), frameW),
     caption: {
       x: Math.round(cl.x),
       y: Math.round(cl.y),
@@ -1067,11 +1089,11 @@ function resolveOverLayout(
       if (stored && !isBadOverlayStoredCover(seg, stored.cover, frameW, frameH)) {
         // Tin bbox/mask đã lưu; chữ xếp lại trong cover (tránh captionLayout x/y lệch → chữ sai chỗ)
         const cover = stored.cover
+        // captionLayout.fontSize là kết quả auto cũ, không phải lựa chọn khóa
+        // của người dùng. Bỏ nó để bbox dài tự tính lại font lớn nhất có thể.
         const want = preferred > 0
           ? preferred
-          : (Number(seg.captionLayout?.fontSize) > 0
-            ? Number(seg.captionLayout?.fontSize)
-            : 0)
+          : autoFontFromBbox(stored.cover, seg.translation, fontPx)
         const laid = layoutOcrOverlay(overlayLay, cover, seg.translation, want, frameW, frameH)
         return {
           cover,
@@ -1084,7 +1106,10 @@ function resolveOverLayout(
     // mid/dọc/nhãn: cover = bbox OCR (không nới theo VI); chưa OCR → không bịa khung
     const seed = overlayCoverSeed(seg, frameW, frameH)
     if (!seed) return null
-    const laid = layoutOcrOverlay(overlayLay, seed, seg.translation, preferred, frameW, frameH)
+    const autoFontPx = preferred > 0
+      ? preferred
+      : autoFontFromBbox(seed, seg.translation, fontPx)
+    const laid = layoutOcrOverlay(overlayLay, seed, seg.translation, autoFontPx, frameW, frameH)
     return { cover: laid.cover, caption: laid.caption, lines: laid.lines, fontPx: laid.fontPx }
   }
 
@@ -1100,19 +1125,26 @@ function resolveOverLayout(
   if (hasStoredLayout(seg, fontPx)) {
     const stored = storedOverLayout(seg, frameW, frameH)
     if (!stored) return null
-    const cover = stored.cover
-    const laid = layoutCaptionInCover(cover, seg.translation, fontPx, frameW)
-    return { cover, ...laid, fontPx }
+    const autoFontPx = autoFontFromBbox(stored.cover, seg.translation, fontPx)
+    const laid = adaptiveCoverLayout(stored.cover, seg.translation, autoFontPx, frameW, frameH)
+    return { ...laid, fontPx: autoFontPx }
   }
 
   const seedRaw = seg.bbox
-    ? clampCoverBox(seg.bbox, frameW, frameH)
+    ? tightenStoredBbox(seg, clampCoverBox(seg.bbox, frameW, frameH), frameW)
     : seedCoverBox(seg, frameW, frameH, fontPx)
   if (!seedRaw) return null
   const seed = normalizeCoverBox(seedRaw, frameW, frameH, fontPx)
 
-  // Chưa kéo tay: auto (1) che full chữ cũ → (2) xếp chữ dịch trong cover
+  // Bbox OCR là vùng che chữ gốc. Giữ cỡ chữ nhất quán; nếu bản dịch dài,
+  // chỉ nới cover để đủ chữ, không thu nhỏ font theo từng câu.
   const anchor = coverToAnchor(seed, fontPx, frameW)
+  if (seg.bbox) {
+    const autoFontPx = autoFontFromBbox(seed, seg.translation, fontPx)
+    const laid = adaptiveCoverLayout(seed, seg.translation, autoFontPx, frameW, frameH)
+    return { ...laid, fontPx: autoFontPx }
+  }
+
   const sourceTrim = (seg.source ?? '').trim()
   const sourceW = sourceTrim ? measureSourceInkWidth(sourceTrim, fontPx, anchor.h) : 0
   const inkW = resolveInkWidth(anchor, seed, !!sourceTrim, sourceW, frameW)
@@ -1466,7 +1498,9 @@ function seedCoverBox(
   frameH: number,
   fontSizePx = AUTO_SUBTITLE_FONT,
 ): PixelBox | null {
-  if (seg?.bbox) return clampCoverBox(seg.bbox, frameW, frameH)
+  if (seg?.bbox) {
+    return tightenStoredBbox(seg, clampCoverBox(seg.bbox, frameW, frameH), frameW)
+  }
   if (seg && isCjkHardsubSource(seg.source)) return null
   return fallbackCoverBox(frameW, frameH, fontSizePx)
 }
@@ -1586,6 +1620,19 @@ function snapBoxToCenter(box: PixelBox, frameW: number, frameH: number): { box: 
     },
     guides,
   }
+}
+
+/** Auto font theo bbox OCR: chỉ tăng từ cỡ chuẩn, không thu nhỏ từng câu. */
+function autoFontFromBbox(
+  bbox: PixelBox,
+  text: string,
+  baseFontPx: number,
+): number {
+  const compactLen = text.replace(/\s+/g, '').length
+  const heightRatio = compactLen <= 18 ? 0.68 : 0.58
+  const byHeight = Math.round(bbox.h * heightRatio)
+  const floorFontPx = Math.max(AUTO_SUBTITLE_FONT, baseFontPx)
+  return Math.max(floorFontPx, Math.min(84, byHeight))
 }
 
 function resolveCaptionFontSize(
@@ -3316,8 +3363,14 @@ export default function LivePreviewEditor({
           resolveOverlayFontPreferred(timelineSeg),
         )
       : undefined)
-  const activeCaptionPx = overlayLaidFont
+  const activeCaptionBasePx = overlayLaidFont
     ?? resolveCaptionFontSize(focusCaptionSeg ?? undefined, settings, sourceWidth, sourceHeight)
+  // Caption below/above cũng phải auto theo bbox OCR; trước đây nhánh này
+  // luôn dùng cỡ cố định nên chữ nhỏ, nhìn như padding rất xa viền box.
+  const activeCaptionPx =
+    focusCaptionSeg?.translation && activeOcrBox
+      ? autoFontFromBbox(activeOcrBox, focusCaptionSeg.translation, activeCaptionBasePx)
+      : activeCaptionBasePx
   const placement = captionPlacement(settings)
   // below/above: chỉ caption ngang — không đụng mid/dọc (tránh chữ đáy trong khi OCR ở giữa)
   const activeCaptionBox =

@@ -1272,6 +1272,84 @@ def _merge_mid_segments(
     return out
 
 
+def _cjk_len(text: str) -> int:
+    return sum(1 for c in (text or "") if "\u4e00" <= c <= "\u9fff")
+
+
+def _join_whisper_sources(a: str, b: str) -> str:
+    """Nối mảnh Whisper — CJK không chèn space; tránh lặp ký tự biên."""
+    a, b = (a or "").strip(), (b or "").strip()
+    if not a:
+        return b
+    if not b:
+        return a
+    if b.startswith(a):
+        return b
+    if a.endswith(b):
+        return a
+    # 最奢侈 + 最豪華 → không lặp 最 ở giữa nếu trùng
+    if a[-1] == b[0]:
+        return a + b[1:]
+    return a + b
+
+
+def _merge_whisper_hardsub_fragments(
+    segs: list[dict[str, Any]],
+    *,
+    max_gap: float = 0.35,
+    max_shard_cjk: int = 8,
+    max_combined_cjk: int = 18,
+) -> list[dict[str, Any]]:
+    """Chỉ gộp mảnh Whisper rất ngắn + sát — không dính hai câu dịch liền nhau."""
+    ordered = sorted(segs, key=lambda s: float(s.get("start") or 0))
+    out: list[dict[str, Any]] = []
+    for s in ordered:
+        lay = str(s.get("layout") or "")
+        if lay in ("vertical", "label"):
+            out.append(s)
+            continue
+        src = (s.get("source") or "").strip()
+        if _cjk_len(src) < 1:
+            out.append(s)
+            continue
+        if not out:
+            out.append(s)
+            continue
+        prev = out[-1]
+        if str(prev.get("layout") or "") in ("vertical", "label"):
+            out.append(s)
+            continue
+        ps = (prev.get("source") or "").strip()
+        if _cjk_len(ps) < 1:
+            out.append(s)
+            continue
+        gap = float(s.get("start") or 0) - float(prev.get("end") or 0)
+        pc, sc = _cjk_len(ps), _cjk_len(src)
+        # ponytail: chỉ mảnh ngắn + gap/overlap rất sát — tránh ghép 2 dòng hardsub thành 1
+        if (
+            gap <= max_gap
+            and pc <= max_shard_cjk
+            and sc <= max_shard_cjk
+            and pc + sc <= max_combined_cjk
+        ):
+            prev["end"] = max(float(prev.get("end") or 0), float(s.get("end") or 0))
+            prev["source"] = _join_whisper_sources(ps, src)
+            prev.pop("translation", None)
+            prev.pop("captionLayout", None)
+            pb, sb = prev.get("bbox"), s.get("bbox")
+            if isinstance(pb, dict) and isinstance(sb, dict):
+                ub = _union_bbox([pb, sb], 1080, 1920)
+                if ub:
+                    prev["bbox"] = ub
+            elif not pb and sb:
+                prev["bbox"] = sb
+            continue
+        out.append(s)
+    for i, s in enumerate(out, start=1):
+        s["index"] = i
+    return out
+
+
 def _ocr_edge_stamps(
     hits: list[tuple[float, str]],
     video_end: float,
