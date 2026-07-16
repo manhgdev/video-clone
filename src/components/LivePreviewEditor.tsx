@@ -468,6 +468,9 @@ function captionLaneOf(seg: Segment, frameH = 1920): CaptionLaneKey {
 
 /** Chuẩn hoá layout theo bbox OCR — ghi đè horizontal sai khi chữ ở giữa khung. */
 function withInferredLayout(seg: Segment, frameH: number): Segment {
+  if (seg.bboxInherited && seg.bbox && seg.bbox.w >= Math.max(1, seg.bbox.h) * 8) {
+    return { ...seg, layout: 'horizontal' }
+  }
   if (seg.layout === 'vertical' || seg.layout === 'label') return seg
   if (seg.bboxInherited === false) {
     return seg.layout ? seg : { ...seg, layout: 'horizontal' }
@@ -2158,16 +2161,12 @@ export default function LivePreviewEditor({
   const skipSpuriousMid = (s: Segment) =>
     midInsideVerticalWatermark(s, verticalWatermarkSegs)
   const solidAtPlayhead = solidOverlaysAt(layoutSegs, time)
-  // Mask: cover mode → mọi clip; chỉ burn → vẫn che mid/dọc/nhãn (tránh chữ hiện mà không blur)
+  // Preview masks follow caption [start,end) exactly. Extended cover timing made
+  // old/new boxes appear outside their timeline clips and overlap at boundaries.
   const coverSegsRaw = settings.burnSubs
     ? (() => {
         if (overCoverMode) {
-          const base = segmentsAtCover(layoutSegs, time)
-          const seen = new Set(base.map((s) => s.id))
-          for (const s of solidAtPlayhead) {
-            if (!seen.has(s.id)) base.push(s)
-          }
-          return base
+          return segmentsAt(layoutSegs, time)
         }
         return solidAtPlayhead
       })()
@@ -2199,7 +2198,7 @@ export default function LivePreviewEditor({
     ?? solidAtPlayhead.find((s) => captionLaneOf(s, sourceHeight) === 'label')
     ?? (selectedLayout && (time >= selectedLayout.start && time < selectedLayout.end) ? selectedLayout : null)
     ?? (coverSeg && isOcrOverlayLayout(coverSeg.layout) ? coverSeg : null)
-    ?? (timelineSeg && isOcrOverlayLayout(timelineSeg.layout) ? timelineSeg : null)
+    ?? timelineSeg
     ?? selectedLayout
     ?? selected
   const activeCoverDraft =
@@ -2272,28 +2271,10 @@ export default function LivePreviewEditor({
     if (tool === 'text') return false
     if (bboxDraft) return true
     if (!(trackFocus === 'caption' || tool === 'cover' || propTab === 'mask')) return false
-    if (!selected && !bboxSeg) return false
-    // Mid/nhãn: hiện tại playhead kể cả khi chưa chọn đoạn (áp dụng tất cả)
-    if (bboxSeg && isOcrOverlayLayout(bboxSeg.layout) && time >= bboxSeg.start && time < bboxSeg.end) {
-      return true
-    }
-    if (!selected) {
-      // Ngang đã có bbox + cover mode: vẫn hiện mask khung khi tab mask / tool cover
-      return Boolean(
-        bboxSeg
-        && overCoverMode
-        && bboxSeg.bbox
-        && time >= bboxSeg.start
-        && time < bboxSeg.end,
-      )
-    }
-    if (coverSeg?.id === selected.id || timelineSeg?.id === selected.id) return true
-    if (!isOcrOverlayLayout(selected.layout)) return false
-    const lane = captionLaneOf(selected)
-    const otherSameLane = [...coverSegs, ...timelineSegs].some(
-      (s) => s.id !== selected.id && captionLaneOf(s) === lane,
-    )
-    return !otherSameLane
+    const target = bboxSeg ?? selected
+    // Editor handles follow caption timecode exactly. Only the mask may use
+    // coverStart/coverEnd to hide source text before/after speech timing.
+    return Boolean(target && time >= target.start && time < target.end)
   })()
   const activeOcrBox = selectedBox
   const captionLanes = useMemo(() => {
@@ -4112,8 +4093,9 @@ export default function LivePreviewEditor({
                     {/* Center: play/pause */}
                     <button
                       type="button"
-                      className="flex h-8 w-8 items-center justify-center rounded-md text-foreground hover:bg-accent transition-colors"
+                      className="preview-play-button flex h-8 w-8 items-center justify-center rounded-md text-foreground hover:bg-accent transition-colors"
                       onClick={togglePlay}
+                      aria-label={playing ? 'Tạm dừng' : 'Phát'}
                       title="Phát / dừng (Space hoặc K)"
                     >
                       {playing

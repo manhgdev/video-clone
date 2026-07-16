@@ -361,8 +361,14 @@ def _retag_layout_from_bbox(seg: dict[str, Any], fh: int) -> None:
     lay = str(seg.get("layout") or "")
     if lay in ("vertical", "label"):
         return
-    cy = _bbox_cy_frac(seg.get("bbox") if isinstance(seg.get("bbox"), dict) else None, fh)
+    bbox = seg.get("bbox") if isinstance(seg.get("bbox"), dict) else None
+    cy = _bbox_cy_frac(bbox, fh)
     if cy is None:
+        return
+    # A very wide, shallow OCR strip is a normal horizontal subtitle even in
+    # portrait video, where its Y center can still be below the 0.78 cutoff.
+    if bbox and float(bbox.get("w") or 0) >= float(bbox.get("h") or 1) * 8:
+        seg["layout"] = "horizontal"
         return
     seg["layout"] = _layout_from_cy(cy * fh, fh)
 
@@ -383,7 +389,12 @@ def _apply_caption_box(
     pad_y = max(3, int(round(fh * 0.002)))
     seg["bbox"] = _xyxy_to_seg_bbox(x0, y0, x1, y1, fw, fh, pad_x=pad_x, pad_y=pad_y)
     seg["bboxInherited"] = False
-    seg["layout"] = _layout_from_cy(cy, fh)
+    saved = seg["bbox"]
+    seg["layout"] = (
+        "horizontal"
+        if saved["w"] >= max(1, saved["h"]) * 8
+        else _layout_from_cy(cy, fh)
+    )
     seg.pop("captionLayout", None)
 
 
@@ -461,7 +472,7 @@ def _inherit_caption_bboxes(
             "h": donor["h"],
         }
         seg["bboxInherited"] = True
-        seg["layout"] = _layout_from_cy(cy, fh)
+        seg["layout"] = "horizontal" if width >= max(1, donor["h"]) * 8 else _layout_from_cy(cy, fh)
         seg.pop("captionLayout", None)
         n += 1
     return n

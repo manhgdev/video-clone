@@ -220,3 +220,13 @@ body.resizing-sidebar * { cursor: col-resize !important; }
 .preview-panel:fullscreen .preview-toolbar .text-muted-foreground {
   color: hsl(0, 0%, 65%);
 }
+.preview-panel:fullscreen .preview-play-button {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.16);
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  box-shadow: 0 1px 8px rgba(0, 0, 0, 0.45);
+}
+.preview-panel:fullscreen .preview-play-button:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.28);
+}
