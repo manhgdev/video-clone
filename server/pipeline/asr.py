@@ -99,6 +99,8 @@ def asr_whisper(
         str(wav),
         language=lang,
         vad_filter=True,
+        # Keep short conversational pauses as segment boundaries. 800 ms made
+        # adjacent sentences collapse into long captions before translation.
         vad_parameters=dict(min_silence_duration_ms=400),
         beam_size=1,
         best_of=1,

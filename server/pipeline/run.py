@@ -223,19 +223,9 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
             if cache.get("transKey") != t_key:
                 cache.pop("transKey", None)
 
-        # Whisper cắt 1 dòng hardsub thành nhiều mảnh → gộp trước dịch (tránh bản dịch thiếu)
-        engine = settings.get("engine", "whisper")
-        use_ocr = engine in ("paddleocr", "screen")
-        if not use_ocr and segments:
-            from .ocr.extract import _merge_whisper_hardsub_fragments
-
-            n_before = len(segments)
-            segments = _merge_whisper_hardsub_fragments(segments)
-            if len(segments) != n_before:
-                cache.pop("transKey", None)
-                for s in segments:
-                    if not (s.get("translation") or "").strip():
-                        s.pop("translation", None)
+        # Preserve Whisper's sentence boundaries. The old CJK fragment merger
+        # joined any short, adjacent segments, including complete sentences,
+        # so translation received fewer and much longer captions than ASR made.
 
         # —— Translate ——
         voice = settings.get("defaultVoice", "system")

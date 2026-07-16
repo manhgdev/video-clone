@@ -146,7 +146,8 @@ def asr_cache_key(settings: dict[str, Any], source_fp: str) -> str:
     src = settings.get("sourceLang", "auto")
     prev = int(settings.get("previewSec") or 0)
     # o20: quét cả nhãn ngang ở 10–22% phía trên khung.
-    ver = "o20" if engine in ("paddleocr", "screen") else "a1"
+    # a2: Whisper VAD uses 400 ms pauses and preserves model segment boundaries.
+    ver = "o20" if engine in ("paddleocr", "screen") else "a2"
     # preferVideo bake 0.80× trước ASR → timeline khác bản 1×
     match = str(settings.get("matchDuration") or "")
     slow = "s080" if match == "preferVideo" else "s1"
@@ -241,4 +242,3 @@ def set_status(project_id: str, **kwargs: Any) -> None:
         meta["status"] = status
 
     mutate_meta(project_id, apply)
-

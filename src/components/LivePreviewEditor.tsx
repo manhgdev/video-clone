@@ -429,6 +429,7 @@ function effectiveOverlayLayout(
   frameH: number,
 ): 'vertical' | 'label' | 'mid' | null {
   if (isOcrOverlayLayout(seg.layout)) return seg.layout
+  if (seg.bboxInherited === false) return null
   const b = seg.bbox
   if (!b || frameH <= 0) return null
   const cy = b.y + b.h / 2
@@ -455,6 +456,7 @@ const CAPTION_LANE_DEFS: {
 function captionLaneOf(seg: Segment, frameH = 1920): CaptionLaneKey {
   const lay = seg.layout
   if (lay === 'mid' || lay === 'vertical' || lay === 'label') return lay
+  if (seg.bboxInherited === false) return 'horizontal'
   const b = seg.bbox
   if (b && frameH > 0) {
     const cy = b.y + b.h / 2
@@ -467,6 +469,9 @@ function captionLaneOf(seg: Segment, frameH = 1920): CaptionLaneKey {
 /** Chuẩn hoá layout theo bbox OCR — ghi đè horizontal sai khi chữ ở giữa khung. */
 function withInferredLayout(seg: Segment, frameH: number): Segment {
   if (seg.layout === 'vertical' || seg.layout === 'label') return seg
+  if (seg.bboxInherited === false) {
+    return seg.layout ? seg : { ...seg, layout: 'horizontal' }
+  }
   const lane = captionLaneOf({ ...seg, layout: undefined }, frameH)
   if (lane === 'mid') return seg.layout === 'mid' ? seg : { ...seg, layout: 'mid' }
   if (seg.layout === 'horizontal' || seg.layout === 'mid') return seg
@@ -701,16 +706,29 @@ const COVER_SHADOW_BOT = 4
 
 function coverPad(fontSizePx = AUTO_SUBTITLE_FONT, frameW = 1080) {
   return {
-    x: Math.max(5, Math.round(frameW * 0.006)),
+    x: Math.max(3, Math.round(frameW * 0.003)),
     // Chỉ chừa đủ viền/stroke; tránh chữ lọt thỏm giữa bbox.
     top: Math.max(2, Math.round(fontSizePx * 0.04)),
-    bottom: Math.max(6, Math.round(fontSizePx * 0.16)),
+    // Match export: leave enough room for CJK descenders, outline, and shadow.
+    bottom: Math.max(18, Math.round(fontSizePx * 0.55)),
   }
 }
 
 /** Căn giữa khối chữ trong cover (đúng giữa khung tím). */
 function captionCenterInCover(coverY: number, coverH: number, textBlockH: number) {
   return Math.round(coverY + Math.max(0, (coverH - textBlockH) / 2))
+}
+
+/** OCR horizontal boxes often include blank space above while missing the lower stroke. */
+function shiftAutoCoverDown(box: PixelBox, fontSizePx: number, frameW: number, frameH: number): PixelBox {
+  const pad = coverPad(fontSizePx)
+  const shift = Math.max(0, Math.round(box.h * 0.26) - pad.top)
+  if (shift < 1) return box
+  return clampCoverBox(
+    { ...box, y: box.y + shift, h: Math.max(12, box.h - shift) },
+    frameW,
+    frameH,
+  )
 }
 
 const CAP_PAD_X = 2
@@ -728,7 +746,7 @@ function frameMaxInnerWidth(fontSizePx: number, frameW: number) {
 
 function coverBleedX(contentW: number, frameW = 1080) {
   // Bleed vừa đủ stroke CJK — không nới xa
-  return Math.max(6, Math.round(contentW * 0.028), Math.round(frameW * 0.006))
+  return Math.max(4, Math.round(contentW * 0.012), Math.round(frameW * 0.003))
 }
 
 /** Đo bề ngang mực chữ nguồn (CJK hardsub + outline) — không theo VI. */
@@ -952,8 +970,9 @@ function tightenStoredBbox(
   if (cjk < 1) return box
   const glyphW = Math.max(18, box.h * 0.68)
   const expectedW = Math.max(box.h * 1.15, cjk * glyphW + 12)
-  if (expectedW >= box.w * 0.82) return box
-  const w = Math.max(48, Math.min(box.w, Math.round(expectedW)))
+  if (expectedW >= box.w * 0.94) return box
+  // Tighten conservatively: at most 10%, and never below the estimated old text.
+  const w = Math.max(48, Math.min(box.w, Math.round(Math.max(expectedW, box.w * 0.9))))
   const cx = box.x + box.w / 2
   const x = Math.max(0, Math.min(frameW - w, Math.round(cx - w / 2)))
   return { ...box, x, w }
@@ -1125,16 +1144,27 @@ function resolveOverLayout(
   if (hasStoredLayout(seg, fontPx)) {
     const stored = storedOverLayout(seg, frameW, frameH)
     if (!stored) return null
+    if (seg.bboxInherited === false) {
+      const laid = manualCoverLayout(stored.cover, seg.translation, fontPx, frameW, frameH, true)
+      return { ...laid, fontPx }
+    }
     const autoFontPx = autoFontFromBbox(stored.cover, seg.translation, fontPx)
-    const laid = adaptiveCoverLayout(stored.cover, seg.translation, autoFontPx, frameW, frameH)
+    const autoCover = shiftAutoCoverDown(stored.cover, autoFontPx, frameW, frameH)
+    const laid = adaptiveCoverLayout(autoCover, seg.translation, autoFontPx, frameW, frameH)
     return { ...laid, fontPx: autoFontPx }
   }
 
   const seedRaw = seg.bbox
     ? tightenStoredBbox(seg, clampCoverBox(seg.bbox, frameW, frameH), frameW)
     : seedCoverBox(seg, frameW, frameH, fontPx)
-  if (!seedRaw) return null
-  const seed = normalizeCoverBox(seedRaw, frameW, frameH, fontPx)
+      // Whisper can provide a translated horizontal caption without an OCR bbox.
+      // In cover mode, use the same bottom fallback shown by the editor handles so
+      // the mask and translated text are rendered instead of silently disappearing.
+      ?? fallbackCoverBox(frameW, frameH, fontPx)
+  const normalizedSeed = normalizeCoverBox(seedRaw, frameW, frameH, fontPx)
+  const seed = seg.bbox && seg.bboxInherited !== false
+    ? shiftAutoCoverDown(normalizedSeed, fontPx, frameW, frameH)
+    : normalizedSeed
 
   // Bbox OCR là vùng che chữ gốc. Giữ cỡ chữ nhất quán; nếu bản dịch dài,
   // chỉ nới cover để đủ chữ, không thu nhỏ font theo từng câu.
@@ -1462,16 +1492,10 @@ function manualCoverLayout(
   fixed = false,
 ): OverLayout {
   if (fixed) {
-    let box = clampCoverBox(cover, frameW, frameH)
-    let laid = layoutCaptionInCover(box, text, fontSizePx, frameW)
-    const pad = coverPad(fontSizePx, frameW)
-    const needH = laid.caption.h + pad.top + pad.bottom + COVER_SHADOW_BOT
-    if (needH > box.h) {
-      // Giữ x + mép trên khi giãn cao — không recenter (kéo ngang bị nhảy)
-      box = clampCoverBox({ x: box.x, y: box.y, w: box.w, h: needH }, frameW, frameH)
-      laid = layoutCaptionInCover(box, text, fontSizePx, frameW)
-    }
-    return { cover: box, ...laid }
+    // A manually edited bbox is authoritative. Never grow or recenter it to
+    // accommodate text; doing so made the box snap back immediately on release.
+    const box = clampCoverBox(cover, frameW, frameH)
+    return { cover: box, ...layoutCaptionInCover(box, text, fontSizePx, frameW) }
   }
   return adaptiveCoverLayout(cover, text, fontSizePx, frameW, frameH)
 }
@@ -2766,7 +2790,7 @@ export default function LivePreviewEditor({
             sourceWidth,
             sourceHeight,
           )
-          onChange(segmentWithLayout(seg, {
+          onChange(segmentWithLayout({ ...seg, bboxInherited: false }, {
             cover: norm,
             caption: laid.caption,
             lines: laid.lines,
@@ -2777,9 +2801,9 @@ export default function LivePreviewEditor({
         if (overDrag) {
           const fontPx = resolveCaptionFontSize(seg, settings, sourceWidth, sourceHeight)
           const layout = manualCoverLayout(norm, seg.translation, fontPx, sourceWidth, sourceHeight, true)
-          onChange(segmentWithLayout(seg, { ...layout, cover: norm }, fontPx))
+          onChange(segmentWithLayout({ ...seg, bboxInherited: false }, { ...layout, cover: norm }, fontPx))
         } else {
-          onChange({ ...seg, bbox: norm, captionLayout: seg.captionLayout ?? null })
+          onChange({ ...seg, bbox: norm, bboxInherited: false, captionLayout: seg.captionLayout ?? null })
         }
       }
     }
@@ -3424,7 +3448,7 @@ export default function LivePreviewEditor({
         sourceWidth,
         sourceHeight,
       )
-      onChange(segmentWithLayout(selected, {
+      onChange(segmentWithLayout({ ...selected, bboxInherited: false }, {
         cover: norm,
         caption: laid.caption,
         lines: laid.lines,
@@ -3434,10 +3458,10 @@ export default function LivePreviewEditor({
     }
     if (overCoverMode && selected.translation.trim()) {
       const layout = manualCoverLayout(norm, selected.translation, selectedFontPx, sourceWidth, sourceHeight, true)
-      onChange(segmentWithLayout(selected, { ...layout, cover: norm }, selectedFontPx))
+      onChange(segmentWithLayout({ ...selected, bboxInherited: false }, { ...layout, cover: norm }, selectedFontPx))
       return
     }
-    onChange({ ...selected, bbox: norm, captionLayout: null })
+    onChange({ ...selected, bbox: norm, bboxInherited: false, captionLayout: null })
   }
 
   /** Kéo vùng che full ngang (~96% khung), giữ Y/Cao hiện tại. */
@@ -3467,9 +3491,9 @@ export default function LivePreviewEditor({
       const fontPx = resolveCaptionFontSize(seg, settings, sourceWidth, sourceHeight)
       if (overCoverMode) {
         const layout = manualCoverLayout(box, seg.translation, fontPx, sourceWidth, sourceHeight, true)
-        return segmentWithLayout(seg, layout, fontPx)
+        return segmentWithLayout({ ...seg, bboxInherited: false }, layout, fontPx)
       }
-      return { ...seg, bbox: { ...box }, captionLayout: null }
+      return { ...seg, bbox: { ...box }, bboxInherited: false, captionLayout: null }
     })
     void onSegmentsReplace(next)
   }

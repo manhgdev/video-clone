@@ -445,7 +445,7 @@ def _cover_max_h(frame_h: int, font_size: int = 36) -> int:
 
 def _preview_cover_pad(font_size: int, frame_w: int) -> tuple[int, int, int]:
     """Khớp LivePreviewEditor.coverPad — sát trên, dư đáy che stroke."""
-    pad_x = max(8, int(round(frame_w * 0.012)))
+    pad_x = max(3, int(round(frame_w * 0.003)))
     pad_top = max(2, int(round(font_size * 0.04)))
     pad_bot = max(18, int(round(font_size * 0.55)))
     return pad_x, pad_top, pad_bot
@@ -456,7 +456,7 @@ _COVER_SHADOW_BOT = 4
 
 def _cover_bleed_x(content_w: int, frame_w: int = 1080) -> int:
     # Bleed vừa đủ stroke — không nới xa (khớp LivePreviewEditor)
-    return max(6, int(round(content_w * 0.028)), int(round(frame_w * 0.006)))
+    return max(4, int(round(content_w * 0.012)), int(round(frame_w * 0.003)))
 
 
 def _cover_box_width(content_w: int, frame_w: int) -> int:
@@ -503,7 +503,7 @@ def _fit_hardsub_box(
     old_w = max(sw, _cover_box_width(src_w, frame_w) if src_w > 0 else 0)
     w = min(frame_w, max(old_w, auto_w))
     cx = (sx0 + sx1) / 2.0
-    top_slack = int(round(sh * 0.14))
+    top_slack = int(round(sh * 0.26))
     y0 = max(0, sy0 + top_slack - pad_top)
     bot_extra = max(pad_bot, int(round(sh * 0.4)), int(round(font_size * 0.7)))
     y1 = min(frame_h, sy1 + bot_extra)

@@ -81,7 +81,10 @@ def _serve_video_file(path: Path, request: Request) -> StarletteFileResponse:
         path,
         media_type="video/mp4",
         headers={
-            "Cache-Control": "private, no-cache, must-revalidate",
+            # Project video may be replaced in-place after preview/full rebakes.
+            # Never reuse a previously buffered response for the same endpoint.
+            "Cache-Control": "private, no-store, max-age=0, must-revalidate",
+            "Pragma": "no-cache",
             "ETag": f'"{st.st_mtime_ns:x}-{st.st_size:x}"',
         },
         force_full=force_full,
@@ -145,6 +148,8 @@ class SegmentIn(BaseModel):
     dub: bool | None = None
     # Override vùng che chữ (cover box pixel), mode over = đúng khung preview.
     bbox: dict[str, float] | None = None
+    # False after a manual editor move/resize; prevents inherited OCR tightening.
+    bboxInherited: bool | None = None
     # Tốc độ riêng đoạn video khi xuất.
     videoSpeed: float | None = None
     ttsVolume: float | None = None

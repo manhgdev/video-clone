@@ -177,8 +177,18 @@ export default function App() {
   const pollFailStreak = useRef(0)
   const pendingExportUrl = useRef<string | null>(null)
   const pendingExportPath = useRef<string | null>(null)
+  /** Guards project/video switches from late restore, upload, and poll responses. */
+  const projectSwitchRef = useRef(0)
+  const activeProjectRef = useRef<string | null>(null)
+  const videoRevisionRef = useRef(0)
   /** chặn double-click: Dịch/Xuất rồi dính nút Huỷ vừa hiện */
   const busyAt = useRef(0)
+
+  const freshVideoUrl = (url: string) => {
+    videoRevisionRef.current += 1
+    const join = url.includes('?') ? '&' : '?'
+    return `${url}${join}v=${videoRevisionRef.current}-${Date.now()}`
+  }
 
   useEffect(() => {
     if (status.running) setProgressMinimized(false)
@@ -221,6 +231,7 @@ export default function App() {
 
   // F5 / Vite HMR: mở lại project đang làm (kể cả đang export)
   useEffect(() => {
+    const switchVersion = projectSwitchRef.current
     let id = ''
     try {
       id = localStorage.getItem(SESSION_LS) || ''
@@ -232,10 +243,11 @@ export default function App() {
     ;(async () => {
       try {
         const [st, segs] = await Promise.all([api.status(id), api.segments(id)])
-        if (dead) return
+        if (dead || projectSwitchRef.current !== switchVersion) return
+        activeProjectRef.current = id
         setProjectId(id)
         // ?t= bust cache — tránh <video> Range cũ → 416 sau đổi preview/full
-        setVideoUrl(`/api/projects/${id}/video?t=${Date.now()}`)
+        setVideoUrl(freshVideoUrl(`/api/projects/${id}/video`))
         const dur = Number(st.duration || 0)
         if (dur > 0) setDuration(dur)
         if (typeof st.workClipSec === 'number') {
@@ -326,6 +338,7 @@ export default function App() {
       pollInFlight.current = true
       try {
         const s = await api.status(projectId)
+        if (activeProjectRef.current !== projectId) return
         pollFailStreak.current = 0
         const exportDone =
           !s.running &&
@@ -339,19 +352,20 @@ export default function App() {
             workClipSecRef.current = wc
             setWorkClipSec(wc)
             // Clip preview/full đổi kích thước — phải đổi URL kẻo Range cũ 416
-            setVideoUrl(`/api/projects/${projectId}/video?t=${Date.now()}`)
+            setVideoUrl(freshVideoUrl(`/api/projects/${projectId}/video`))
           }
         }
         const baked = Boolean(s.bakedPreferVideo)
         if (baked !== bakedPreferVideoRef.current) {
           bakedPreferVideoRef.current = baked
           setBakedPreferVideo(baked)
-          setVideoUrl(`/api/projects/${projectId}/video?t=${Date.now()}`)
+          setVideoUrl(freshVideoUrl(`/api/projects/${projectId}/video`))
         }
         if (typeof s.bakedSpeed === 'number' && s.bakedSpeed > 0) setBakedSpeed(s.bakedSpeed)
         if (!s.running) {
           try {
             const segs = await api.segments(projectId)
+            if (activeProjectRef.current !== projectId) return
             setSegments(applyDefaultVoice(asSegmentList(segs), settings.defaultVoice))
           } catch {
             /* status đã xong — segments có thể retry sau */
@@ -423,19 +437,32 @@ export default function App() {
   }, [viewExportSrc])
 
   async function onUpload(file: File) {
+    const switchVersion = ++projectSwitchRef.current
+    activeProjectRef.current = null
+    persistSession(null)
+    setProjectId(null)
+    setVideoUrl(null)
+    setDuration(0)
     setExportUrl(null)
     setExportPath(null)
     setSegments([])
     setOverlays([])
     setWorkClipSec(0)
+    workClipSecRef.current = 0
+    setBakedPreferVideo(false)
+    bakedPreferVideoRef.current = false
+    setBakedSpeed(1)
     setViewExportSrc(null)
+    setPreviewEditorOpen(false)
     setStatus({ step: 'video', progress: 10, message: 'Đang tải video…', running: true })
     try {
       const res = await api.upload(file)
+      if (projectSwitchRef.current !== switchVersion) return
+      activeProjectRef.current = res.projectId
       setProjectId(res.projectId)
       persistSession(res.projectId)
       // bust browser + <video> cache khi đổi / mở lại project
-      setVideoUrl(`${res.videoUrl}?t=${Date.now()}`)
+      setVideoUrl(freshVideoUrl(res.videoUrl))
       setDuration(res.duration)
       if (res.settings && typeof res.settings === 'object') {
         setSettings((s) => {
@@ -466,6 +493,7 @@ export default function App() {
         })
       }
     } catch (e) {
+      if (projectSwitchRef.current !== switchVersion) return
       setStatus({
         step: 'video',
         progress: 0,
@@ -482,7 +510,7 @@ export default function App() {
     const wc = Math.max(0, previewSec)
     workClipSecRef.current = wc
     setWorkClipSec(wc)
-    setVideoUrl(`/api/projects/${projectId}/video?t=${Date.now()}`)
+    setVideoUrl(freshVideoUrl(`/api/projects/${projectId}/video`))
     busyAt.current = Date.now()
     setStatus({
       step: 'asr',
@@ -684,7 +712,7 @@ export default function App() {
     bakedPreferVideoRef.current = res.bakedPreferVideo
     setBakedPreferVideo(res.bakedPreferVideo)
     setBakedSpeed(res.bakedSpeed > 0 ? res.bakedSpeed : res.bakedPreferVideo ? 0.8 : 1)
-    setVideoUrl(`${res.videoUrl}?t=${Date.now()}`)
+    setVideoUrl(freshVideoUrl(res.videoUrl))
   }
 
   useEffect(() => {
@@ -692,7 +720,17 @@ export default function App() {
       setOverlays([])
       return
     }
-    void api.overlays(projectId).then(setOverlays).catch(() => setOverlays([]))
+    let cancelled = false
+    void api.overlays(projectId)
+      .then((items) => {
+        if (!cancelled && activeProjectRef.current === projectId) setOverlays(items)
+      })
+      .catch(() => {
+        if (!cancelled && activeProjectRef.current === projectId) setOverlays([])
+      })
+    return () => {
+      cancelled = true
+    }
   }, [projectId])
 
   async function onOverlayChange(overlay: TextOverlay, isNew = false) {
@@ -802,6 +840,7 @@ export default function App() {
       />
       {editorOpen ? (
         <LivePreviewEditor
+          key={projectId}
           videoUrl={videoUrl}
           mediaDuration={duration}
           workClipSec={workClipSec}
