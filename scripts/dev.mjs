@@ -182,7 +182,37 @@ if (!py) {
   console.log('Ctrl+C để dừng. API crash sẽ tự restart — terminal không đóng.\n')
 
   spawnOne('api', py, ['-m', 'uvicorn', 'main:app', '--reload', '--host', '127.0.0.1', '--port', '8787'], backendDir)
-  spawnOne('web', webCmd, webArgs, root)
+
+  // Đợi API listen trước khi Vite proxy — tránh ECONNREFUSED ồ ạt lúc boot
+  const API_READY_URL = 'http://127.0.0.1:8787/api/tts/status'
+  const API_WAIT_MS = 60_000
+  const API_POLL_MS = 400
+
+  async function waitForApi() {
+    const deadline = Date.now() + API_WAIT_MS
+    let warned = false
+    while (Date.now() < deadline) {
+      if (shuttingDown) return false
+      try {
+        const res = await fetch(API_READY_URL, { signal: AbortSignal.timeout(1500) })
+        if (res.ok || res.status < 500) return true
+      } catch {
+        if (!warned) {
+          console.log('Đang chờ API sẵn sàng…')
+          warned = true
+        }
+      }
+      await new Promise((r) => setTimeout(r, API_POLL_MS))
+    }
+    console.error('API chưa sẵn sàng sau 60s — vẫn mở Vite (proxy có thể lỗi tạm).')
+    return false
+  }
+
+  void waitForApi().then((ok) => {
+    if (shuttingDown) return
+    if (ok) console.log('API sẵn sàng — mở Vite.\n')
+    spawnOne('web', webCmd, webArgs, root)
+  })
 
   // Giữ event loop sống dù cả hai child die tạm thời (đang restart)
   setInterval(() => {}, 60_000)

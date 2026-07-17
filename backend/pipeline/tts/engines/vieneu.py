@@ -10,8 +10,10 @@ Preset list can be read from package assets without loading ONNX graphs.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -133,6 +135,77 @@ def list_preset_from_assets() -> list[dict[str, str]]:
     return out
 
 
+def _hf_token() -> str:
+    return (
+        (os.environ.get("HF_TOKEN") or "").strip()
+        or (os.environ.get("HUGGING_FACE_HUB_TOKEN") or "").strip()
+        or (os.environ.get("HUGGINGFACE_HUB_TOKEN") or "").strip()
+    )
+
+
+class _DropHfUnauthFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        if "unauthenticated requests" in msg:
+            return False
+        if "HF_TOKEN" in msg and "rate limit" in msg.lower():
+            return False
+        return True
+
+
+def _apply_hf_token() -> None:
+    """Wire HF_TOKEN for Hub; silence unauth rate-limit nag when no token."""
+    token = _hf_token()
+    if token:
+        os.environ.setdefault("HF_TOKEN", token)
+        os.environ.setdefault("HUGGING_FACE_HUB_TOKEN", token)
+        try:
+            from huggingface_hub import login
+
+            login(token=token, add_to_git_credential=False)
+        except Exception:
+            pass
+        return
+    # No token: anonymous downloads still work; hide HF's rate-limit marketing warning.
+    warnings.filterwarnings("ignore", message=r".*unauthenticated requests to the HF Hub.*")
+    warnings.filterwarnings("ignore", message=r".*set a HF_TOKEN.*")
+    try:
+        for name in (
+            "huggingface_hub",
+            "huggingface_hub.utils",
+            "huggingface_hub.utils._http",
+            "transformers",
+            "transformers.utils",
+        ):
+            log = logging.getLogger(name)
+            if not any(isinstance(f, _DropHfUnauthFilter) for f in log.filters):
+                log.addFilter(_DropHfUnauthFilter())
+    except Exception:
+        pass
+
+
+def _register_vieneu_transformers() -> None:
+    """Register custom HF model_type so from_pretrained does not warn.
+
+    Checkpoint config.json has model_type=vieneu_v3 but transformers does not
+    know that class until we register it (SDK forgets this step).
+    """
+    try:
+        from transformers import AutoConfig, AutoModel
+        from vieneu._v3_turbo_engine.configuration_v3_turbo import VieNeuV3TurboConfig
+        from vieneu._v3_turbo_engine.modeling_v3_turbo import VieNeuV3TurboForTTS
+
+        AutoConfig.register("vieneu_v3", VieNeuV3TurboConfig)
+        # backbone is custom PreTrainedModel; AutoModel path used by some loaders
+        try:
+            AutoModel.register(VieNeuV3TurboConfig, VieNeuV3TurboForTTS)
+        except Exception:
+            pass
+    except Exception:
+        # onnx-only / missing torch path — warning may still appear, non-fatal
+        pass
+
+
 def get_client() -> Any:
     """Lazy singleton — only when synth/clone needs the model."""
     global _client, _client_err, _load_state
@@ -155,6 +228,8 @@ def get_client() -> Any:
                 prefer_torch_cudnn()
             except Exception:
                 pass
+            _apply_hf_token()
+            _register_vieneu_transformers()
             from vieneu import Vieneu
 
             backend, device = _resolve_backend()
@@ -281,6 +356,7 @@ def list_voices(lang: str | None = None) -> list[dict[str, Any]]:
                 "type": "zmAI",
                 "available": ref_path.is_file(),
                 "tags": voice_store.normalize_voice_tags(item.get("tags")),
+                "language": voice_store.normalize_voice_language(item.get("language")),
                 "previewUrl": f"/api/tts/voices/{voice_id}/preview" if ref_path.is_file() else None,
             }
         )
@@ -309,6 +385,7 @@ def list_voices(lang: str | None = None) -> list[dict[str, Any]]:
                 "engine": "clone",
                 "type": "clone",
                 "tags": voice_store.normalize_voice_tags(item.get("tags")),
+                "language": voice_store.normalize_voice_language(item.get("language")),
                 "previewUrl": f"/api/tts/voices/{PREFIX_VIENEU}clone:{cid}/preview",
             }
         )

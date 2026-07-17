@@ -173,9 +173,16 @@ export const api = {
   /** Đổi metadata / chuyển engine (zmAI ↔ clone) */
   ttsStudioVoicePatch: (
     voiceId: string,
-    body: { name?: string; tags?: string[]; engine?: 'zmai' | 'clone' },
+    body: { name?: string; tags?: string[]; language?: string; engine?: 'zmai' | 'clone' },
   ) =>
-    fetchJson<{ id: string; name: string; tags: string[]; engine?: string; type?: string }>(
+    fetchJson<{
+      id: string
+      name: string
+      tags: string[]
+      language?: string
+      engine?: string
+      type?: string
+    }>(
       `${base}/tts/studio/voices/${encodeURIComponent(voiceId)}`,
       {
         method: 'PATCH',

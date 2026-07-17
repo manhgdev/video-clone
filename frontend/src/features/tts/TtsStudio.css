@@ -337,12 +337,12 @@ html.dark .tts-ram {
   background: var(--tts-bg);
 }
 
-/* Resizable / movable overview — default 4 top + 2 bottom, content height */
+/* Resizable / movable overview — 24×4 fine grid, free resize */
 .tts-dash {
   display: grid;
-  grid-template-columns: repeat(12, minmax(0, 1fr));
-  grid-template-rows: auto auto;
-  gap: 12px;
+  grid-template-columns: repeat(24, minmax(0, 1fr));
+  grid-template-rows: repeat(4, minmax(0, auto));
+  gap: 10px;
   width: 100%;
   margin-bottom: 12px;
   padding: 10px 4px;
@@ -357,6 +357,7 @@ html.dark .tts-ram {
   display: flex;
   flex-direction: column;
   overflow: visible;
+  will-change: grid-column, grid-row;
 }
 
 .tts-dash-item .tts-card-title {
@@ -380,10 +381,10 @@ html.dark .tts-ram {
 
 .tts-dash-body > .tts-card {
   height: 100%;
-  min-height: 220px;
+  min-height: 180px;
 }
 
-/* Invisible resize hit-areas — cursor only (↑↓←→ / corners) */
+/* Invisible resize hit-areas — slightly larger for easier grab */
 .tts-dash-handle {
   position: absolute;
   z-index: 6;
@@ -396,9 +397,9 @@ html.dark .tts-ram {
 
 .tts-dash-handle-n,
 .tts-dash-handle-s {
-  left: 12px;
-  right: 12px;
-  height: 8px;
+  left: 10px;
+  right: 10px;
+  height: 10px;
   cursor: ns-resize;
 }
 
@@ -407,9 +408,9 @@ html.dark .tts-ram {
 
 .tts-dash-handle-e,
 .tts-dash-handle-w {
-  top: 12px;
-  bottom: 12px;
-  width: 8px;
+  top: 10px;
+  bottom: 10px;
+  width: 10px;
   cursor: ew-resize;
 }
 
@@ -420,8 +421,8 @@ html.dark .tts-ram {
 .tts-dash-handle-nw,
 .tts-dash-handle-se,
 .tts-dash-handle-sw {
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
 }
 
 .tts-dash-handle-ne { top: 0; right: 0; cursor: nesw-resize; }

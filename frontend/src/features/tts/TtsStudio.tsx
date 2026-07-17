@@ -92,11 +92,14 @@ function fmtDur(sec = 0) {
 }
 
 function engineOf(voiceId: string) {
+  if (!voiceId) return '—'
   if (voiceId.startsWith('vn:clone:')) return 'Clone'
   if (voiceId.startsWith('vn:')) return 'VieNeu Local'
   if (voiceId.startsWith('cc:')) return 'CapCut TTS'
   if (voiceId.startsWith('el:')) return 'ElevenLabs'
-  return 'System'
+  if (voiceId.startsWith('win:') || voiceId === 'system' || voiceId.startsWith('espeak:')) return 'System'
+  // bare id = giọng tham chiếu zmAI
+  return 'zmAI'
 }
 
 /** Bucket rõ ràng — clone không lẫn VieNeu Local / zmAI. */
@@ -179,7 +182,14 @@ function voiceMetadata(v: Voice): { description: string; tags: VoiceTag[] } {
 
 function engineLabel(engine?: string, voiceId?: string) {
   const e = (engine || '').toLowerCase()
-  if (e === 'vieneu' || e === 'vn') return voiceId?.startsWith('vn:clone:') ? 'Clone' : 'VieNeu Local'
+  if (e === 'zmai' || e === 'zmai_ref' || e === 'reference') return 'zmAI'
+  if (e === 'clone') return 'Clone'
+  if (e === 'vieneu' || e === 'vn') {
+    // meta cũ gộp hết vào vieneu — suy ra đúng bucket từ voice id
+    if (voiceId?.startsWith('vn:clone:')) return 'Clone'
+    if (voiceId && !voiceId.startsWith('vn:')) return 'zmAI'
+    return 'VieNeu Local'
+  }
   if (e === 'capcut' || e === 'cc') return 'CapCut TTS'
   if (e === 'elevenlabs' || e === 'eleven' || e === 'el') return 'ElevenLabs'
   if (e === 'system') return 'System'
@@ -818,8 +828,13 @@ export default function TtsStudio({ voices, onRefreshVoices }: Props) {
   }
 
   async function onPreview() {
-    const sample = previewSample.trim().slice(0, 200)
-    if (!sample || !voice) return
+    if (!voice) return
+    // Chưa có WAV mẫu / ô trống → tự điền câu mẫu theo ngôn ngữ
+    let sample = previewSample.trim().slice(0, 200)
+    if (!sample) {
+      sample = previewSampleFor(lang).slice(0, 200)
+      setPreviewSample(sample)
+    }
     setBusyKind('preview')
     setBusy(true)
     setError('')
@@ -898,12 +913,17 @@ export default function TtsStudio({ voices, onRefreshVoices }: Props) {
     }
   }
 
-  async function onSaveVoiceMetadata(voiceId: string, name: string, tags: VoiceTagLabel[]) {
+  async function onSaveVoiceMetadata(
+    voiceId: string,
+    name: string,
+    tags: VoiceTagLabel[],
+    language: string,
+  ) {
     setBusyKind('clone')
     setBusy(true)
     setError('')
     try {
-      const v = await api.ttsStudioVoicePatch(voiceId, { name, tags })
+      const v = await api.ttsStudioVoicePatch(voiceId, { name, tags, language })
       if (voice === voiceId) {
         preferredVoiceRef.current = v.id
         setVoice(v.id)
@@ -1559,16 +1579,6 @@ export default function TtsStudio({ voices, onRefreshVoices }: Props) {
               </div>
               <input ref={fileRef} type="file" accept=".txt,text/plain" hidden onChange={(e) => { const f = e.target.files?.[0]; if (f) onLoadTxt(f) }} />
               <input ref={srtRef} type="file" accept=".srt,text/plain" hidden onChange={(e) => { const f = e.target.files?.[0]; if (f) onLoadSrt(f) }} />
-              {section === 'srt' && (
-                <div style={{ marginBottom: 12 }}>
-                  <button type="button" className="tts-btn tts-btn-ghost" onClick={() => srtRef.current?.click()}>
-                    <IconList size={14} /> Chọn file .srt
-                  </button>
-                  <p style={{ margin: '8px 0 0', fontSize: '0.78rem', color: 'var(--tts-muted)' }}>
-                    Import SRT — giữ timeline + khớp thời lượng khi tạo giọng (batch).
-                  </p>
-                </div>
-              )}
               {section === 'srt' ? (
                 <textarea
                   className="tts-textarea"
@@ -1581,7 +1591,8 @@ export default function TtsStudio({ voices, onRefreshVoices }: Props) {
                       .filter((ln) => ln.trim() && !/^\d+$/.test(ln.trim()) && !/-->/.test(ln))
                     setText(lines.join('\n'))
                   }}
-                  placeholder="Dán nội dung file .srt (có timestamp)…"
+                  placeholder={"1\n00:00:01,000 --> 00:00:04,000\nDán SRT có timestamp — giữ đúng time khi tạo giọng…"}
+                  spellCheck={false}
                 />
               ) : (
                 <textarea
@@ -2055,13 +2066,13 @@ export default function TtsStudio({ voices, onRefreshVoices }: Props) {
                   type="text"
                   value={previewSample}
                   onChange={(e) => setPreviewSample(e.target.value)}
-                  placeholder="Nhập câu mẫu (tùy chọn)"
-                  title={`Gợi ý: ${previewSampleFor(lang)} — hoặc dùng nút Play nếu có WAV mẫu`}
+                  placeholder={previewSampleFor(lang)}
+                  title={`Trống → tự dùng: ${previewSampleFor(lang)}`}
                 />
                 <button
                   type="button"
                   className="tts-btn tts-btn-ghost"
-                  disabled={busy || !voice || !previewSample.trim()}
+                  disabled={busy || !voice}
                   onClick={() => void onPreview()}
                 >
                   <IconHeadphones size={14} /> Nghe thử
@@ -2519,8 +2530,11 @@ export default function TtsStudio({ voices, onRefreshVoices }: Props) {
         <VoiceMetadataModal
           name={voiceDisplayName(editingVoice.id, voices, editingVoice.name)}
           tags={editingVoice.tags || []}
+          language={editingVoice.language}
           onClose={() => setEditingVoice(null)}
-          onSave={(name, tags) => onSaveVoiceMetadata(editingVoice.id, name, tags)}
+          onSave={(name, tags, language) =>
+            onSaveVoiceMetadata(editingVoice.id, name, tags, language)
+          }
         />
       )}
 

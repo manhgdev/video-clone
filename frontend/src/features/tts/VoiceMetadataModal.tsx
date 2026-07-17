@@ -15,6 +15,32 @@ export const VOICE_TAGS = [
 
 export type VoiceTagLabel = (typeof VOICE_TAGS)[number]
 
+/** Ngôn ngữ gán cho giọng (metadata hiển thị / lọc). */
+export const VOICE_LANGUAGES = [
+  { code: 'vi', label: 'Tiếng Việt' },
+  { code: 'en', label: 'Tiếng Anh' },
+  { code: 'zh', label: 'Tiếng Trung' },
+  { code: 'ja', label: 'Tiếng Nhật' },
+  { code: 'ko', label: 'Tiếng Hàn' },
+  { code: 'th', label: 'Tiếng Thái' },
+  { code: 'id', label: 'Tiếng Indonesia' },
+  { code: 'es', label: 'Tiếng Tây Ban Nha' },
+  { code: 'fr', label: 'Tiếng Pháp' },
+  { code: 'de', label: 'Tiếng Đức' },
+  { code: 'pt', label: 'Tiếng Bồ Đào Nha' },
+] as const
+
+export type VoiceLanguageCode = (typeof VOICE_LANGUAGES)[number]['code']
+/** Rỗng = chưa gán ngôn ngữ (không mặc định VI). */
+export type VoiceLanguageValue = VoiceLanguageCode | ''
+
+export function normalizeVoiceLanguage(raw?: string | null): VoiceLanguageValue {
+  const s = (raw || '').trim()
+  if (!s) return ''
+  const base = s.toLowerCase().split(/[-_]/)[0]
+  return (VOICE_LANGUAGES.some((x) => x.code === base) ? base : '') as VoiceLanguageValue
+}
+
 const OPPOSITES: Partial<Record<VoiceTagLabel, VoiceTagLabel>> = {
   '👨 Nam': '👩 Nữ',
   '👩 Nữ': '👨 Nam',
@@ -76,16 +102,19 @@ export function VoiceTagPicker({
 export default function VoiceMetadataModal({
   name: initialName,
   tags: initialTags,
+  language: initialLanguage,
   onSave,
   onClose,
 }: {
   name: string
   tags: string[]
-  onSave: (name: string, tags: VoiceTagLabel[]) => Promise<void>
+  language?: string
+  onSave: (name: string, tags: VoiceTagLabel[], language: VoiceLanguageValue) => Promise<void>
   onClose: () => void
 }) {
   const [name, setName] = useState(initialName)
   const [tags, setTags] = useState<VoiceTagLabel[]>(() => canonicalVoiceTags(initialTags))
+  const [language, setLanguage] = useState<VoiceLanguageValue>(() => normalizeVoiceLanguage(initialLanguage))
   const [saving, setSaving] = useState(false)
   const [validation, setValidation] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
@@ -110,7 +139,7 @@ export default function VoiceMetadataModal({
     setSaving(true)
     setValidation('')
     try {
-      await onSave(cleanName, tags)
+      await onSave(cleanName, tags, language)
     } finally {
       setSaving(false)
     }
@@ -144,6 +173,21 @@ export default function VoiceMetadataModal({
               }
             }}
           />
+        </label>
+        <label className="tts-field">
+          <span>Ngôn ngữ giọng</span>
+          <select
+            value={language}
+            disabled={saving}
+            onChange={(event) => setLanguage(normalizeVoiceLanguage(event.target.value))}
+          >
+            <option value="">— Chưa chọn —</option>
+            {VOICE_LANGUAGES.map((item) => (
+              <option key={item.code} value={item.code}>
+                {item.label}
+              </option>
+            ))}
+          </select>
         </label>
         {validation && <p className="tts-modal-validation" role="alert">{validation}</p>}
         <VoiceTagPicker value={tags} onChange={setTags} disabled={saving} />

@@ -209,5 +209,19 @@
     "ref_text": "",
     "hidden": false,
     "favorite": false
+  },
+  {
+    "tags": [],
+    "id": "jett_-_gritty_and_spunky",
+    "name": "Jett - Gritty and Spunky",
+    "label": "Jett - Gritty and Spunky",
+    "type": "zmAI",
+    "engine": "vieneu",
+    "mode": "reference",
+    "language": "en",
+    "ref_file": "jett_-_gritty_and_spunky.wav",
+    "ref_text": "",
+    "hidden": false,
+    "favorite": false
   }
 ]

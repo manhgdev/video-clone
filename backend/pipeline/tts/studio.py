@@ -132,12 +132,29 @@ def _is_cancelled(job_id: str) -> bool:
 
 
 def _engine_of(voice: str) -> str:
-    if parse_vieneu_voice(voice or ""):
+    """Bucket hiển thị: zmai | clone | vieneu | capcut | elevenlabs | system."""
+    v = voice or ""
+    parsed = parse_vieneu_voice(v)
+    if parsed:
+        kind, _ = parsed
+        if kind == "reference":
+            return "zmai"
+        if kind == "clone":
+            return "clone"
         return "vieneu"
-    if (voice or "").startswith("cc:"):
+    if v.startswith("vn:clone:"):
+        return "clone"
+    if v.startswith("vn:"):
+        return "vieneu"
+    if v.startswith("cc:"):
         return "capcut"
-    if (voice or "").startswith("el:"):
+    if v.startswith("el:"):
         return "elevenlabs"
+    if v.startswith("win:") or v == "system" or v.startswith("espeak:"):
+        return "system"
+    # bare zmAI reference id (no prefix)
+    if v and not v.startswith(("cc:", "el:", "vn:", "win:")):
+        return "zmai"
     return "system"
 
 
@@ -312,6 +329,7 @@ def synth_text_job(
             "cueCount": len(cues),
         }
         _write_meta(job_dir, meta)
+        prune_history(HISTORY_MAX)
         return {
             "id": job_id,
             "duration": dur,
@@ -482,6 +500,7 @@ def synth_srt_job(
             "cueCount": len(out_cues),
         }
         _write_meta(job_dir, meta)
+        prune_history(HISTORY_MAX)
         return {
             "id": job_id,
             "duration": dur,
@@ -677,8 +696,32 @@ def ensure_zip(job_id: str, srt_style: str = "hard") -> Path:
     return zpath
 
 
-def list_history(limit: int = 50) -> list[dict[str, Any]]:
+HISTORY_MAX = 50
+
+
+def prune_history(keep: int = HISTORY_MAX) -> int:
+    """Xóa job cũ trên đĩa, chỉ giữ `keep` bản mới nhất (theo mtime)."""
     ensure_vieneu_dirs()
+    if not TTS_OUTPUT.is_dir() or keep < 0:
+        return 0
+    dirs = sorted(
+        (d for d in TTS_OUTPUT.iterdir() if d.is_dir()),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    removed = 0
+    for d in dirs[keep:]:
+        try:
+            shutil.rmtree(d, ignore_errors=True)
+            removed += 1
+        except Exception:
+            pass
+    return removed
+
+
+def list_history(limit: int = HISTORY_MAX) -> list[dict[str, Any]]:
+    ensure_vieneu_dirs()
+    prune_history(HISTORY_MAX)
     items: list[dict[str, Any]] = []
     if not TTS_OUTPUT.is_dir():
         return items

@@ -1,11 +1,11 @@
-/** TTS overview dashboard: 12×2 CSS grid, resize/move, no overlap. */
+/** TTS overview dashboard: fine grid, free resize (push peers), move, no overlap. */
 
 import type { CSSProperties } from 'react'
 
-export const TTS_DASH_LAYOUT_KEY = 'video-clone:tts-dash-layout:v4'
-export const DASH_COLS = 12
-export const DASH_ROWS = 2
-export const DASH_MIN_W = 2
+export const TTS_DASH_LAYOUT_KEY = 'video-clone:tts-dash-layout:v7'
+export const DASH_COLS = 24
+export const DASH_ROWS = 4
+export const DASH_MIN_W = 3
 export const DASH_MIN_H = 1
 
 export const DASH_IDS = ['input', 'voice', 'advanced', 'clone', 'preview', 'export'] as const
@@ -15,14 +15,14 @@ export type DashItem = { id: DashId; col: number; row: number; w: number; h: num
 export type DashLayout = Record<DashId, DashItem>
 export type ResizeHandle = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw'
 
-/** Default = bố cục cũ 4 trên + 2 dưới. */
+/** Default: 4 top + preview | export side-by-side (như UI cũ). */
 export const DEFAULT_DASH_LAYOUT: DashLayout = {
-  input: { id: 'input', col: 0, row: 0, w: 3, h: 1 },
-  voice: { id: 'voice', col: 3, row: 0, w: 3, h: 1 },
-  advanced: { id: 'advanced', col: 6, row: 0, w: 3, h: 1 },
-  clone: { id: 'clone', col: 9, row: 0, w: 3, h: 1 },
-  preview: { id: 'preview', col: 0, row: 1, w: 8, h: 1 },
-  export: { id: 'export', col: 8, row: 1, w: 4, h: 1 },
+  input: { id: 'input', col: 0, row: 0, w: 6, h: 2 },
+  voice: { id: 'voice', col: 6, row: 0, w: 6, h: 2 },
+  advanced: { id: 'advanced', col: 12, row: 0, w: 6, h: 2 },
+  clone: { id: 'clone', col: 18, row: 0, w: 6, h: 2 },
+  preview: { id: 'preview', col: 0, row: 2, w: 16, h: 2 },
+  export: { id: 'export', col: 16, row: 2, w: 8, h: 2 },
 }
 
 function clamp(n: number, lo: number, hi: number) {
@@ -45,7 +45,60 @@ function anyOverlap(layout: DashLayout, id: DashId, item: DashItem) {
   return DASH_IDS.some((other) => other !== id && overlaps(item, layout[other]))
 }
 
-/** Undo growth toward origin until no overlap (stop at neighbor). */
+/** Compress peers that block growth along the active handle; keep min size. */
+function pushPeers(
+  layout: DashLayout,
+  id: DashId,
+  item: DashItem,
+  handle: ResizeHandle,
+): DashLayout | null {
+  let next = { ...layout, [id]: clampItem(item) }
+  for (let guard = 0; guard < 64; guard++) {
+    const me = next[id]
+    const hit = DASH_IDS.find((other) => other !== id && overlaps(me, next[other]))
+    if (!hit) return next
+    const peer = next[hit]
+    let p = { ...peer }
+    let changed = false
+
+    if (handle.includes('e') && me.col + me.w > peer.col && me.col < peer.col + peer.w) {
+      const cut = me.col + me.w - peer.col
+      if (cut > 0 && peer.w - cut >= DASH_MIN_W) {
+        p = { ...p, col: peer.col + cut, w: peer.w - cut }
+        changed = true
+      }
+    }
+    if (handle.includes('w') && me.col < peer.col + peer.w && me.col + me.w > peer.col) {
+      const cut = peer.col + peer.w - me.col
+      if (cut > 0 && peer.w - cut >= DASH_MIN_W) {
+        p = { ...p, w: peer.w - cut }
+        changed = true
+      }
+    }
+    if (handle.includes('s') && me.row + me.h > peer.row && me.row < peer.row + peer.h) {
+      const cut = me.row + me.h - peer.row
+      if (cut > 0 && peer.h - cut >= DASH_MIN_H) {
+        p = { ...p, row: peer.row + cut, h: peer.h - cut }
+        changed = true
+      }
+    }
+    if (handle.includes('n') && me.row < peer.row + peer.h && me.row + me.h > peer.row) {
+      const cut = peer.row + peer.h - me.row
+      if (cut > 0 && peer.h - cut >= DASH_MIN_H) {
+        p = { ...p, h: peer.h - cut }
+        changed = true
+      }
+    }
+
+    if (!changed) return null
+    p = clampItem(p)
+    if (overlaps(me, p)) return null
+    next = { ...next, [hit]: p }
+  }
+  return null
+}
+
+/** Undo growth toward origin until no overlap (fallback when push fails). */
 function shrinkGrownEdges(
   layout: DashLayout,
   id: DashId,
@@ -54,7 +107,7 @@ function shrinkGrownEdges(
   handle: ResizeHandle,
 ): DashItem {
   let next = clampItem(candidate)
-  for (let guard = 0; guard < 48; guard++) {
+  for (let guard = 0; guard < 96; guard++) {
     if (!anyOverlap(layout, id, next)) return next
     let changed = false
     if (handle.includes('e') && next.w > origin.w) {
@@ -80,7 +133,6 @@ export function parseDashLayout(raw: unknown): DashLayout {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return structuredClone(DEFAULT_DASH_LAYOUT)
   const src = raw as Record<string, unknown>
   const sample = src.input
-  // Reject free-canvas {x,y} layouts
   if (sample && typeof sample === 'object' && 'x' in (sample as object) && !('col' in (sample as object))) {
     return structuredClone(DEFAULT_DASH_LAYOUT)
   }
@@ -126,7 +178,7 @@ export function itemStyle(item: DashItem): CSSProperties {
   }
 }
 
-/** Resize from origin snapshot + cell deltas; never overlaps peers. */
+/** Resize from origin + cell deltas; push peers when possible, else stop at edge. */
 export function resizeFromHandle(
   layout: DashLayout,
   id: DashId,
@@ -160,7 +212,13 @@ export function resizeFromHandle(
     h = DASH_MIN_H
   }
 
-  const next = shrinkGrownEdges(layout, id, { id, col, row, w, h }, origin, handle)
+  const candidate = clampItem({ id, col, row, w, h })
+  if (!anyOverlap(layout, id, candidate)) return { ...layout, [id]: candidate }
+
+  const pushed = pushPeers(layout, id, candidate, handle)
+  if (pushed) return pushed
+
+  const next = shrinkGrownEdges(layout, id, candidate, origin, handle)
   return { ...layout, [id]: next }
 }
 
@@ -176,7 +234,6 @@ export function moveDashItem(
   const hit = DASH_IDS.find((other) => other !== id && overlaps(tentative, layout[other]))
   if (!hit) return { ...layout, [id]: tentative }
   const peer = layout[hit]
-  // Swap top-left only — sizes stay; skip if swap still overlaps others
   const a = clampItem({ ...origin, col: peer.col, row: peer.row })
   const b = clampItem({ ...peer, col: origin.col, row: origin.row })
   const trial = { ...layout, [id]: a, [hit]: b }
@@ -186,26 +243,24 @@ export function moveDashItem(
 
 export function __checkDashLayout() {
   const a = clampItem({ id: 'input', col: 99, row: -2, w: 1, h: 9 })
-  if (a.w !== 2 || a.h !== 2 || a.col !== 10 || a.row !== 0) throw new Error('clamp failed')
+  if (a.w !== DASH_MIN_W || a.h !== DASH_ROWS || a.col !== DASH_COLS - DASH_MIN_W || a.row !== 0) {
+    throw new Error('clamp failed')
+  }
 
   const west = resizeFromHandle(DEFAULT_DASH_LAYOUT, 'voice', DEFAULT_DASH_LAYOUT.voice, 'w', -1, 0)
-  // Growing west into input must stop — no overlap
   if (anyOverlap(west, 'voice', west.voice)) throw new Error('west overlap')
-  if (west.voice.col !== 3 || west.voice.w !== 3) throw new Error('west should not grow into neighbor')
-
-  const east = resizeFromHandle(DEFAULT_DASH_LAYOUT, 'input', DEFAULT_DASH_LAYOUT.input, 'e', 1, 0)
-  if (anyOverlap(east, 'input', east.input)) throw new Error('east overlap')
-  if (east.input.w !== 3) throw new Error('east should not grow into voice')
+  // Growing west should push/shrink input, not stay stuck
+  if (west.voice.col >= DEFAULT_DASH_LAYOUT.voice.col) throw new Error('west should grow left')
 
   const room = {
     ...DEFAULT_DASH_LAYOUT,
-    voice: { id: 'voice' as const, col: 5, row: 0, w: 2, h: 1 },
-    advanced: { id: 'advanced' as const, col: 8, row: 0, w: 2, h: 1 },
-    clone: { id: 'clone' as const, col: 10, row: 0, w: 2, h: 1 },
+    voice: { id: 'voice' as const, col: 10, row: 0, w: 4, h: 2 },
+    advanced: { id: 'advanced' as const, col: 16, row: 0, w: 4, h: 2 },
+    clone: { id: 'clone' as const, col: 20, row: 0, w: 4, h: 2 },
   }
-  const grown = resizeFromHandle(room, 'input', room.input, 'e', 1, 0)
-  if (grown.input.w !== 4 || grown.input.col !== 0) throw new Error('east grow into gap failed')
+  const grown = resizeFromHandle(room, 'input', room.input, 'e', 2, 0)
+  if (grown.input.w < room.input.w + 2) throw new Error('east grow into gap failed')
 
-  const swapped = moveDashItem(DEFAULT_DASH_LAYOUT, 'input', DEFAULT_DASH_LAYOUT.input, 3, 0)
-  if (swapped.input.col !== 3 || swapped.voice.col !== 0) throw new Error('swap move failed')
+  const swapped = moveDashItem(DEFAULT_DASH_LAYOUT, 'input', DEFAULT_DASH_LAYOUT.input, 6, 0)
+  if (swapped.input.col !== 6 || swapped.voice.col !== 0) throw new Error('swap move failed')
 }

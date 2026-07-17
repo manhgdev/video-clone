@@ -1,4 +1,4 @@
-"""System TTS — macOS say / Linux espeak-ng."""
+"""System TTS — Windows SAPI / macOS say / Linux espeak-ng."""
 from __future__ import annotations
 
 import platform
@@ -6,17 +6,65 @@ import re
 import subprocess
 from pathlib import Path
 
+PREFIX_WIN = "win:"
 
-def list_voices(lang: str | None = None) -> list[dict[str, str]]:
-    voices = [{"id": "system", "name": "Giọng hệ thống (theo ngôn ngữ đích)"}]
+
+def _windows_voices() -> list[dict[str, str]]:
+    """List installed SAPI voices via System.Speech (PowerShell)."""
+    if platform.system() != "Windows":
+        return []
+    ps = (
+        "Add-Type -AssemblyName System.Speech; "
+        "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+        "$s.GetInstalledVoices() | ForEach-Object { "
+        "$i = $_.VoiceInfo; "
+        "Write-Output ($i.Name + '|' + $i.Culture + '|' + $i.Gender) "
+        "}"
+    )
+    try:
+        raw = subprocess.check_output(
+            ["powershell", "-NoProfile", "-Command", ps],
+            text=True,
+            timeout=12,
+            stderr=subprocess.DEVNULL,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError, OSError):
+        return []
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for line in raw.splitlines():
+        parts = line.strip().split("|")
+        if len(parts) < 2:
+            continue
+        name, culture = parts[0].strip(), parts[1].strip()
+        gender = parts[2].strip().lower() if len(parts) > 2 else ""
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        locale = culture.replace("-", "_") if culture else ""
+        gender_key = "female" if "female" in gender else "male" if "male" in gender else ""
+        out.append(
+            {
+                "id": f"{PREFIX_WIN}{name}",
+                "name": f"Windows · {name}",
+                "engine": "system",
+                "type": "system",
+                "description": f"Giọng hệ thống Windows · {culture or 'local'}",
+                "language": locale or culture,
+                "gender": gender_key,
+            }
+        )
+    return out
+
+
+def _parse_say_voices() -> list[tuple[str, str, str]]:
     if platform.system() != "Darwin":
-        return voices
+        return []
     try:
         raw = subprocess.check_output(["say", "-v", "?"], text=True, timeout=5)
     except (FileNotFoundError, subprocess.SubprocessError):
-        return voices
-    prefer = (lang or "vi").split("-")[0].lower()
-    rows: list[tuple[str, str, str]] = []
+        return []
+    out: list[tuple[str, str, str]] = []
     seen: set[str] = set()
     for line in raw.splitlines():
         left = line.split("#", 1)[0].rstrip()
@@ -28,18 +76,114 @@ def list_voices(lang: str | None = None) -> list[dict[str, str]]:
         if not say_id or say_id in seen:
             continue
         seen.add(say_id)
-        rows.append((say_id, locale, f"{say_id} ({locale})"))
-    rows.sort(key=lambda x: (0 if x[1].lower().startswith(prefer) else 1, x[0]))
-    for say_id, locale, label in rows:
-        if locale.startswith(("vi", "en", "zh", "ja", "ko")):
-            voices.append({"id": say_id, "name": f"macOS · {label}"})
+        out.append((say_id, locale, f"{say_id} ({locale})"))
+    return out
+
+
+def list_voices(lang: str | None = None) -> list[dict[str, str]]:
+    prefer = (lang or "vi").split("-")[0].lower()
+    voices: list[dict[str, str]] = [
+        {
+            "id": "system",
+            "name": "Giọng hệ thống (theo ngôn ngữ đích)",
+            "engine": "system",
+            "type": "system",
+            "description": "Giọng mặc định của hệ điều hành theo ngôn ngữ đích.",
+            "language": lang or "auto",
+        }
+    ]
+    if platform.system() == "Windows":
+        win = _windows_voices()
+        win.sort(
+            key=lambda v: (
+                0 if str(v.get("language") or "").lower().startswith(prefer) else 1,
+                v.get("name") or "",
+            )
+        )
+        voices.extend(win)
+        return voices
+
+    if platform.system() == "Darwin":
+        rows = _parse_say_voices()
+        rows.sort(key=lambda x: (0 if x[1].lower().startswith(prefer) else 1, x[0]))
+        for say_id, locale, label in rows:
+            if locale.startswith(("vi", "en", "zh", "ja", "ko")):
+                voices.append(
+                    {
+                        "id": say_id,
+                        "name": f"macOS · {label}",
+                        "engine": "system",
+                        "type": "system",
+                        "description": f"Giọng hệ thống macOS · {locale}",
+                        "language": locale,
+                    }
+                )
+        return voices
+
+    # Linux: espeak-ng voice codes commonly available
+    for code, label in (
+        ("vi", "Tiếng Việt"),
+        ("en", "English"),
+        ("zh", "Chinese"),
+        ("ja", "Japanese"),
+        ("ko", "Korean"),
+    ):
+        voices.append(
+            {
+                "id": f"espeak:{code}",
+                "name": f"espeak · {label}",
+                "engine": "system",
+                "type": "system",
+                "description": f"espeak-ng · {code}",
+                "language": code,
+            }
+        )
     return voices
+
+
+def _windows_synthesize(text: str, voice_name: str, out_wav: Path) -> None:
+    # Escape for PowerShell single-quoted string
+    safe_text = (text or ".").replace("'", "''")
+    safe_voice = voice_name.replace("'", "''")
+    out = str(out_wav.resolve()).replace("'", "''")
+    ps = (
+        "Add-Type -AssemblyName System.Speech; "
+        "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+        f"try {{ $s.SelectVoice('{safe_voice}') }} catch {{ }}; "
+        f"$s.SetOutputToWaveFile('{out}'); "
+        f"$s.Speak('{safe_text}'); "
+        "$s.Dispose()"
+    )
+    subprocess.check_call(
+        ["powershell", "-NoProfile", "-Command", ps],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=120,
+    )
 
 
 def synthesize(text: str, voice: str, out_wav: Path, lang: str = "vi") -> None:
     out_wav.parent.mkdir(parents=True, exist_ok=True)
-    resolved = voice if voice and voice != "system" else "Samantha"
-    if platform.system() == "Darwin":
+    system = platform.system()
+
+    if system == "Windows":
+        name = voice
+        if voice.startswith(PREFIX_WIN):
+            name = voice[len(PREFIX_WIN) :]
+        elif voice == "system" or not voice:
+            # Prefer culture matching lang, else first installed
+            prefer = (lang or "vi").split("-")[0].lower()
+            win = _windows_voices()
+            pick = next(
+                (v for v in win if str(v.get("language") or "").lower().startswith(prefer)),
+                win[0] if win else None,
+            )
+            name = (pick["id"][len(PREFIX_WIN) :] if pick else "Microsoft Zira Desktop")
+        _windows_synthesize(text, name, out_wav)
+        return
+
+    if system == "Darwin":
+        resolved = voice if voice and voice != "system" else "Samantha"
         tmp = out_wav.with_suffix(".aiff")
         subprocess.check_call(
             ["say", "-v", resolved, "-o", str(tmp), text or "."],
@@ -53,7 +197,14 @@ def synthesize(text: str, voice: str, out_wav: Path, lang: str = "vi") -> None:
         )
         tmp.unlink(missing_ok=True)
         return
-    v = "vi" if (lang or "").startswith("vi") else resolved
+
+    # Linux espeak-ng
+    if voice.startswith("espeak:"):
+        v = voice.split(":", 1)[1] or "en"
+    elif voice and voice != "system":
+        v = voice
+    else:
+        v = "vi" if (lang or "").startswith("vi") else "en"
     subprocess.check_call(
         ["espeak-ng", "-v", v, "-w", str(out_wav), text or "."],
         stdout=subprocess.DEVNULL,

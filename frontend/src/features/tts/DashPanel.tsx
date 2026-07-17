@@ -41,9 +41,11 @@ type DragState = {
   cellW: number
   cellH: number
   pointerId: number
+  lastDx: number
+  lastDy: number
 }
 
-/** Grid panel: edge/corner resize + title move; no overlap. */
+/** Grid panel: edge/corner resize + title move; free size via fine grid + peer push. */
 export default function DashPanel({
   id,
   item,
@@ -54,14 +56,20 @@ export default function DashPanel({
   gridRef,
 }: Props) {
   const dragRef = useRef<DragState | null>(null)
+  const rafRef = useRef(0)
+  const pendingRef = useRef<{ dx: number; dy: number } | null>(null)
 
   useEffect(() => {
-    const onMove = (e: PointerEvent) => {
+    const flush = () => {
+      rafRef.current = 0
       const drag = dragRef.current
-      if (!drag || e.pointerId !== drag.pointerId) return
-      e.preventDefault()
-      const dx = Math.round((e.clientX - drag.startX) / drag.cellW)
-      const dy = Math.round((e.clientY - drag.startY) / drag.cellH)
+      const pending = pendingRef.current
+      if (!drag || !pending) return
+      pendingRef.current = null
+      const { dx, dy } = pending
+      if (dx === drag.lastDx && dy === drag.lastDy) return
+      drag.lastDx = dx
+      drag.lastDy = dy
       if (drag.kind === 'resize' && drag.handle) {
         onChange((prev) => resizeFromHandle(prev, id, drag.origin, drag.handle!, dx, dy))
         return
@@ -69,10 +77,26 @@ export default function DashPanel({
       onChange((prev) => moveDashItem(prev, id, drag.origin, dx, dy))
     }
 
+    const onMove = (e: PointerEvent) => {
+      const drag = dragRef.current
+      if (!drag || e.pointerId !== drag.pointerId) return
+      e.preventDefault()
+      const dx = Math.round((e.clientX - drag.startX) / drag.cellW)
+      const dy = Math.round((e.clientY - drag.startY) / drag.cellH)
+      pendingRef.current = { dx, dy }
+      if (!rafRef.current) rafRef.current = requestAnimationFrame(flush)
+    }
+
     const onUp = (e: PointerEvent) => {
       const drag = dragRef.current
       if (!drag || e.pointerId !== drag.pointerId) return
+      if (rafRef.current) {
+        cancelAnimationFrame(rafRef.current)
+        rafRef.current = 0
+      }
+      if (pendingRef.current) flush()
       dragRef.current = null
+      pendingRef.current = null
       document.body.classList.remove('tts-dash-resizing')
       document.body.style.removeProperty('cursor')
       onActive(null)
@@ -85,6 +109,7 @@ export default function DashPanel({
       window.removeEventListener('pointermove', onMove)
       window.removeEventListener('pointerup', onUp)
       window.removeEventListener('pointercancel', onUp)
+      if (rafRef.current) cancelAnimationFrame(rafRef.current)
     }
   }, [id, onActive, onChange])
 
@@ -102,6 +127,8 @@ export default function DashPanel({
       cellW: Math.max(1, grid.width / DASH_COLS),
       cellH: Math.max(1, grid.height / DASH_ROWS),
       pointerId: e.pointerId,
+      lastDx: 0,
+      lastDy: 0,
     }
     document.body.classList.add('tts-dash-resizing')
     document.body.style.cursor = handle ? cursorFor(handle) : 'move'

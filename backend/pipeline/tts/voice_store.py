@@ -37,6 +37,38 @@ VOICE_TAGS = (
 )
 _VOICE_TAG_SET = frozenset(VOICE_TAGS)
 
+VOICE_LANGUAGES = ("vi", "en", "zh", "ja", "ko", "th", "id", "es", "fr", "de", "pt")
+_VOICE_LANGUAGE_SET = frozenset(VOICE_LANGUAGES)
+_LANGUAGE_ALIASES = {
+    "vn": "vi",
+    "vie": "vi",
+    "vi-vn": "vi",
+    "en-us": "en",
+    "en-gb": "en",
+    "zh-cn": "zh",
+    "zh-tw": "zh",
+    "cmn": "zh",
+}
+
+
+def normalize_voice_language(raw: Any, *, strict: bool = False) -> str:
+    """Canonical language code for voice metadata (vi, en, …). Empty if unset."""
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return ""
+    if not isinstance(raw, str):
+        if strict:
+            raise ValueError("language phải là chuỗi")
+        return ""
+    key = raw.strip().lower().replace("_", "-")
+    if key in _LANGUAGE_ALIASES:
+        return _LANGUAGE_ALIASES[key]
+    base = key.split("-", 1)[0]
+    if base in _VOICE_LANGUAGE_SET:
+        return base
+    if strict:
+        raise ValueError(f"language không hợp lệ: {raw}")
+    return ""
+
 
 def normalize_voice_tags(tags: Any, *, strict: bool = False) -> list[str]:
     """Deduplicate canonical tags; reject request data, filter legacy storage."""
@@ -213,11 +245,15 @@ def update_reference(
     *,
     name: str | None = None,
     tags: list[str] | None = None,
+    language: str | None = None,
 ) -> dict[str, Any] | None:
     clean_name = (name or "").strip() if name is not None else None
     if name is not None and not clean_name:
         return None
     clean_tags = normalize_voice_tags(tags, strict=True) if tags is not None else None
+    clean_language = (
+        normalize_voice_language(language, strict=True) if language is not None else None
+    )
     items = _read_reference_raw()
     hit: dict[str, Any] | None = None
     for x in items:
@@ -227,6 +263,8 @@ def update_reference(
                 x["label"] = clean_name
             if clean_tags is not None:
                 x["tags"] = clean_tags
+            if clean_language is not None:
+                x["language"] = clean_language
             hit = x
             break
     if not hit:
@@ -295,7 +333,7 @@ def move_voice_engine(voice_id: str, target: str) -> dict[str, Any]:
             "type": "zmAI",
             "engine": "vieneu",
             "mode": "reference",
-            "language": "vi-VN",
+            "language": normalize_voice_language(src_item.get("language")) or "",
             "ref_file": ref_file,
             "ref_text": "",
             "hidden": False,
@@ -420,11 +458,15 @@ def update_cloned(
     *,
     name: str | None = None,
     tags: list[str] | None = None,
+    language: str | None = None,
 ) -> dict[str, Any] | None:
     clean_name = clean_display_name(name or "", fallback="") if name is not None else None
     if name is not None and not clean_name:
         return None
     clean_tags = normalize_voice_tags(tags, strict=True) if tags is not None else None
+    clean_language = (
+        normalize_voice_language(language, strict=True) if language is not None else None
+    )
     items = load_cloned()
     hit: dict[str, Any] | None = None
     for x in items:
@@ -433,6 +475,8 @@ def update_cloned(
                 x["name"] = clean_name
             if clean_tags is not None:
                 x["tags"] = clean_tags
+            if clean_language is not None:
+                x["language"] = clean_language
             hit = x
             break
     if not hit:

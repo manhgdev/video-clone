@@ -248,25 +248,46 @@ def write_srt(
     path.write_text("\n".join(lines), encoding="utf-8-sig")
 
 
+def _ms_frac(raw: str) -> float:
+    """1–3 digit fractional seconds → milliseconds (SRT standard = 3 digits)."""
+    s = (raw or "0").strip()
+    if not s:
+        return 0.0
+    if len(s) >= 3:
+        return int(s[:3]) / 1000.0
+    return int(s.ljust(3, "0")) / 1000.0
+
+
 def parse_srt(text: str) -> list[dict]:
+    """Parse SRT timestamps exactly (HH:MM:SS,mmm → seconds float)."""
     # strip BOM
     if text and text.startswith("\ufeff"):
         text = text[1:]
-    blocks = re.split(r"\n\s*\n", (text or "").strip())
+    # normalize newlines; allow single blank-line or multi-blank between cues
+    normalized = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not normalized:
+        return []
+    blocks = re.split(r"\n\s*\n+", normalized)
     out: list[dict] = []
+    ts_re = re.compile(
+        r"(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})\s*-->\s*(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})"
+    )
     for b in blocks:
         lines = [ln.strip() for ln in b.splitlines() if ln.strip()]
         if len(lines) < 2:
             continue
-        m = re.search(
-            r"(\d{2}):(\d{2}):(\d{2})[,.](\d{1,3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[,.](\d{1,3})",
-            lines[1] if "-->" in lines[1] else lines[0],
-        )
+        # find timestamp line (index 0 or 1 — some files omit cue index)
+        ts_i = 1 if "-->" in lines[1] else 0 if "-->" in lines[0] else -1
+        if ts_i < 0:
+            continue
+        m = ts_re.search(lines[ts_i])
         if not m:
             continue
-        g = [int(x) for x in m.groups()]
-        start = g[0] * 3600 + g[1] * 60 + g[2] + g[3] / 1000
-        end = g[4] * 3600 + g[5] * 60 + g[6] + g[7] / 1000
-        body_lines = lines[2:] if "-->" in lines[1] else lines[1:]
+        h1, m1, s1, f1, h2, m2, s2, f2 = m.groups()
+        start = int(h1) * 3600 + int(m1) * 60 + int(s1) + _ms_frac(f1)
+        end = int(h2) * 3600 + int(m2) * 60 + int(s2) + _ms_frac(f2)
+        if end < start:
+            end = start
+        body_lines = lines[ts_i + 1 :]
         out.append({"start": start, "end": end, "text": "\n".join(body_lines)})
     return out

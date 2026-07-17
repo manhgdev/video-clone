@@ -12,6 +12,7 @@ from ..core.config import EL_ADAM
 from ..core.media import ffprobe_duration
 from . import audio_utils
 from .engines import vieneu as vieneu_engine
+from .engines import system as system_engine
 from .eleven import (
     EL_MODEL,
     EL_TTS_VER,
@@ -154,34 +155,7 @@ def list_voices(lang: str | None = None) -> list[dict[str, Any]]:
     voices.extend(vieneu_engine.list_voices(lang))
     voices.extend(_cc_voice_options(lang))
     voices.extend(_el_voice_options())
-    voices.append(
-        {
-            "id": "system",
-            "name": "Giọng hệ thống (theo ngôn ngữ đích)",
-            "engine": "system",
-            "type": "system",
-            "description": "Giọng mặc định của hệ điều hành theo ngôn ngữ đích.",
-            "language": lang or "auto",
-        }
-    )
-    parsed = _parse_say_voices()
-    prefer = (lang or "vi").split("-")[0].lower()
-    ordered = sorted(
-        parsed,
-        key=lambda x: (0 if x[1].lower().startswith(prefer) else 1, x[0]),
-    )
-    for say_id, locale, label in ordered:
-        if locale.startswith(("vi", "en", "zh", "ja", "ko")):
-            voices.append(
-                {
-                    "id": say_id,
-                    "name": f"macOS · {label}",
-                    "engine": "system",
-                    "type": "system",
-                    "description": f"Giọng hệ thống macOS · {locale}",
-                    "language": locale,
-                }
-            )
+    voices.extend(system_engine.list_voices(lang))
     return voices[:200]
 
 
@@ -247,23 +221,8 @@ def synthesize_raw(
         _capcut_tts(text, cc[0], cc[1], out_wav)
     elif el:
         _el_tts(text, el, out_wav, lang=lang)
-    elif platform.system() == "Darwin":
-        tmp = out_wav.with_suffix(".aiff")
-        cmd = ["say", "-v", resolved, "-o", str(tmp), text or "."]
-        subprocess.check_call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.check_call(
-            ["afconvert", "-f", "WAVE", "-d", "LEI16", str(tmp), str(out_wav)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        tmp.unlink(missing_ok=True)
     else:
-        v = "vi" if lang.startswith("vi") else resolved
-        subprocess.check_call(
-            ["espeak-ng", "-v", v, "-w", str(out_wav), text or "."],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        system_engine.synthesize(text, resolved, out_wav, lang=lang)
 
 
 def tts_segment(

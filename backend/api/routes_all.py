@@ -502,6 +502,7 @@ class CloneRenameIn(BaseModel):
 class VoicePatchIn(BaseModel):
     name: str | None = None
     tags: list[str] | None = None
+    language: str | None = None
     # zmai | clone — chuyển bucket (chỉ local VieNeu ref)
     engine: str | None = None
 
@@ -516,6 +517,7 @@ def _studio_voice_payload(entry: dict) -> dict:
     name = str(entry.get("name") or eid)
     eng = str(entry.get("engine") or "")
     tags = voice_store.normalize_voice_tags(entry.get("tags"))
+    language = voice_store.normalize_voice_language(entry.get("language"))
     if eng == "clone" or eid.startswith("vn:clone:"):
         cid = eid.removeprefix("vn:clone:")
         return {
@@ -523,8 +525,16 @@ def _studio_voice_payload(entry: dict) -> dict:
             "name": f"VieNeu · Clone · {name}",
             "engine": "clone",
             "tags": tags,
+            "language": language,
         }
-    return {"id": eid, "name": name, "engine": "zmai", "type": "zmAI", "tags": tags}
+    return {
+        "id": eid,
+        "name": name,
+        "engine": "zmai",
+        "type": "zmAI",
+        "tags": tags,
+        "language": language,
+    }
 
 
 @router.post("/api/tts/studio/voices/bulk-move")
@@ -596,12 +606,18 @@ def api_tts_studio_voice_patch(voice_id: str, body: VoicePatchIn):
     name = (body.name or "").strip() if body.name is not None else None
     engine = (body.engine or "").strip().lower() if body.engine is not None else None
     tags_supplied = "tags" in body.model_fields_set
+    language_supplied = "language" in body.model_fields_set
     try:
         tags = voice_store.normalize_voice_tags(body.tags, strict=True) if tags_supplied else None
+        language = (
+            voice_store.normalize_voice_language(body.language, strict=True)
+            if language_supplied
+            else None
+        )
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
-    if name is None and not engine and not tags_supplied:
-        raise HTTPException(400, "Cần name, tags và/hoặc engine")
+    if name is None and not engine and not tags_supplied and not language_supplied:
+        raise HTTPException(400, "Cần name, tags, language và/hoặc engine")
     if body.name is not None and not name:
         raise HTTPException(400, "Tên giọng không được trống")
 
@@ -610,17 +626,20 @@ def api_tts_studio_voice_patch(voice_id: str, body: VoicePatchIn):
             entry = voice_store.move_voice_engine(vid, engine)
             # Metadata update after moving because the id may change.
             new_id = str(entry["id"])
-            if name is not None or tags_supplied:
+            if name is not None or tags_supplied or language_supplied:
                 if new_id.startswith("vn:clone:") or entry.get("engine") == "clone":
                     updated = voice_store.update_cloned(
                         new_id.removeprefix("vn:clone:"),
                         name=name,
                         tags=tags,
+                        language=language,
                     )
                     if updated:
                         entry = {**updated, "id": f"vn:clone:{updated['id']}", "engine": "clone"}
                 else:
-                    updated = voice_store.update_reference(new_id, name=name, tags=tags)
+                    updated = voice_store.update_reference(
+                        new_id, name=name, tags=tags, language=language
+                    )
                     if updated:
                         entry = {**updated, "engine": "zmai", "type": "zmAI"}
             return _studio_voice_payload(entry)
@@ -628,16 +647,16 @@ def api_tts_studio_voice_patch(voice_id: str, body: VoicePatchIn):
         # metadata only
         if vid.startswith("vn:clone:"):
             cid = vid.removeprefix("vn:clone:").strip()
-            entry = voice_store.update_cloned(cid, name=name, tags=tags)
+            entry = voice_store.update_cloned(cid, name=name, tags=tags, language=language)
             if not entry:
                 raise HTTPException(404, "Không tìm thấy giọng clone")
             return _studio_voice_payload({**entry, "id": f"vn:clone:{entry['id']}", "engine": "clone"})
 
-        entry = voice_store.update_reference(vid, name=name, tags=tags)
+        entry = voice_store.update_reference(vid, name=name, tags=tags, language=language)
         if entry:
             return _studio_voice_payload({**entry, "engine": "zmai"})
         # fallback: bare clone id
-        entry = voice_store.update_cloned(vid, name=name, tags=tags)
+        entry = voice_store.update_cloned(vid, name=name, tags=tags, language=language)
         if not entry:
             raise HTTPException(404, "Không tìm thấy giọng")
         return _studio_voice_payload({**entry, "id": f"vn:clone:{entry['id']}", "engine": "clone"})
