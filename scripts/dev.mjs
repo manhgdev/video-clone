@@ -1,23 +1,26 @@
-/** Chạy API :8787 + Vite :5173 — một terminal, Ctrl+C dừng cả hai. */
+/** Chạy API :8787 + Vite :5173 — một terminal, Ctrl+C dừng cả hai.
+ *  API crash (WinError 10055, reload worker…) KHÔNG tắt Vite / đóng terminal.
+ */
 import { spawn, spawnSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const serverDir = path.join(root, 'server')
+const backendDir = path.join(root, 'backend')
+const frontendDir = path.join(root, 'frontend')
 const isWin = process.platform === 'win32'
 const PORTS = [5173, 8787]
 
 function venvPython() {
   const candidates = isWin
     ? [
-        path.join(serverDir, '.venv', 'Scripts', 'python.exe'),
+        path.join(backendDir, '.venv', 'Scripts', 'python.exe'),
         path.join(root, '.venv', 'Scripts', 'python.exe'),
       ]
     : [
-        path.join(serverDir, '.venv', 'bin', 'python3'),
-        path.join(serverDir, '.venv', 'bin', 'python'),
+        path.join(backendDir, '.venv', 'bin', 'python3'),
+        path.join(backendDir, '.venv', 'bin', 'python'),
         path.join(root, '.venv', 'bin', 'python3'),
       ]
   for (const p of candidates) {
@@ -26,7 +29,6 @@ function venvPython() {
   return null
 }
 
-/** Quote 1 arg cho cmd.exe khi ghép chuỗi (tránh DEP0190: shell+args). */
 function shQuote(arg) {
   const s = String(arg)
   if (!/[ \t"&<>|^()]/.test(s)) return s
@@ -38,14 +40,13 @@ function shellCmd(cmd, args) {
 }
 
 function hasCmd(cmd, args = ['--version']) {
-  // npm/bun trên Windows là .cmd → cần shell; 1 chuỗi lệnh = không DEP0190
   if (isWin && (cmd === 'npm' || cmd === 'bun')) {
     return spawnSync(shellCmd(cmd, args), { stdio: 'ignore', shell: true }).status === 0
   }
   return spawnSync(cmd, args, { stdio: 'ignore', shell: false }).status === 0
 }
 
-/** Windows: Vite đôi khi LISTEN nhưng không trả HTML (xoay trang mãi) — kill trước khi start. */
+/** Chỉ kill PID đang LISTEN cổng — không quét lan. */
 function freePorts(ports) {
   if (!isWin) return
   for (const port of ports) {
@@ -60,7 +61,8 @@ function freePorts(ports) {
       if (m) pids.add(m[1])
     }
     for (const pid of pids) {
-      spawnSync('taskkill', ['/pid', pid, '/T', '/F'], { stdio: 'ignore' })
+      // Không /T — tránh giết nhầm parent shell / terminal VS Code
+      spawnSync('taskkill', ['/pid', pid, '/F'], { stdio: 'ignore' })
       console.log(`Đã giải phóng cổng ${port} (pid ${pid})`)
     }
   }
@@ -69,54 +71,119 @@ function freePorts(ports) {
 const py = venvPython() ?? (hasCmd('python') ? 'python' : hasCmd('python3') ? 'python3' : null)
 if (!py) {
   console.error('Không tìm thấy python — cài Python 3 rồi thử lại.')
-  process.exit(1)
-}
+  process.exitCode = 1
+  // Không process.exit — để shell còn mở
+  console.error('Giữ terminal. Sửa Python rồi chạy lại: npm start')
+  process.stdin.resume()
+} else {
+  const webCmd = isWin
+    ? hasCmd('npm', ['--version'])
+      ? 'npm'
+      : 'bun'
+    : hasCmd('bun', ['--version'])
+      ? 'bun'
+      : 'npm'
+  const webArgs = ['run', 'dev']
 
-// ponytail: trên Windows ưu tiên npm — bun đôi khi để Vite treo nhận TCP nhưng không trả trang
-const webCmd = isWin ? (hasCmd('npm', ['--version']) ? 'npm' : 'bun') : hasCmd('bun', ['--version']) ? 'bun' : 'npm'
-const webArgs = ['run', 'dev']
+  /** @type {Map<string, import('node:child_process').ChildProcess>} */
+  const children = new Map()
+  let shuttingDown = false
+  const restartAt = new Map() // label → last restart ms
+  const RESTART_COOLDOWN_MS = 2500
 
-const children = []
-
-function run(label, cmd, args, cwd) {
-  const opts = { cwd, stdio: 'inherit', env: process.env }
-  // Windows npm/bun: shell + 1 chuỗi (không truyền args → hết DEP0190)
-  const child =
-    isWin && (cmd === 'npm' || cmd === 'bun')
-      ? spawn(shellCmd(cmd, args), { ...opts, shell: true })
-      : spawn(cmd, args, { ...opts, shell: false })
-  child.on('exit', (code, signal) => {
-    if (signal) return
-    if (code && code !== 0) {
-      console.error(`[${label}] thoát mã ${code}`)
-      shutdown(code ?? 1)
+  function spawnOne(label, cmd, args, cwd) {
+    const opts = {
+      cwd,
+      stdio: 'inherit',
+      env: process.env,
+      // Windows: tách khỏi job object của terminal khi có thể
+      detached: false,
     }
-  })
-  children.push(child)
-  return child
-}
+    const child =
+      isWin && (cmd === 'npm' || cmd === 'bun')
+        ? spawn(shellCmd(cmd, args), { ...opts, shell: true })
+        : spawn(cmd, args, { ...opts, shell: false })
 
-function shutdown(code = 0) {
-  for (const c of children) {
-    if (!c.pid) continue
-    if (isWin) {
-      spawnSync('taskkill', ['/pid', String(c.pid), '/T', '/F'], { stdio: 'ignore' })
-    } else if (!c.killed) {
-      c.kill('SIGTERM')
-    }
+    children.set(label, child)
+
+    child.on('error', (err) => {
+      console.error(`[${label}] spawn error:`, err.message)
+    })
+
+    child.on('exit', (code, signal) => {
+      children.delete(label)
+      if (shuttingDown) return
+      if (signal === 'SIGTERM' || signal === 'SIGINT') return
+
+      const bad = code !== 0 && code != null
+      if (bad) {
+        console.error(`[${label}] thoát mã ${code} — KHÔNG tắt terminal / Vite.`)
+      } else {
+        console.log(`[${label}] đã dừng (0).`)
+      }
+
+      // Tự restart API (uvicorn crash / WinError 10055); Vite hiếm khi cần
+      if (label === 'api' || (label === 'web' && bad)) {
+        const now = Date.now()
+        const last = restartAt.get(label) || 0
+        if (now - last < RESTART_COOLDOWN_MS) {
+          console.error(`[${label}] crash liên tục — chờ ${RESTART_COOLDOWN_MS}ms rồi thử lại…`)
+        }
+        const wait = Math.max(0, RESTART_COOLDOWN_MS - (now - last))
+        setTimeout(() => {
+          if (shuttingDown) return
+          restartAt.set(label, Date.now())
+          console.log(`[${label}] khởi động lại…`)
+          if (label === 'api') freePorts([8787])
+          if (label === 'web') freePorts([5173])
+          spawnOne(label, cmd, args, cwd)
+        }, wait + 400)
+      }
+    })
+
+    return child
   }
+
+  function shutdown() {
+    if (shuttingDown) return
+    shuttingDown = true
+    console.log('\nĐang dừng API + Vite…')
+    for (const [, c] of children) {
+      if (!c.pid) continue
+      try {
+        if (isWin) {
+          // Chỉ process con, không /T để tránh kill terminal host
+          spawnSync('taskkill', ['/pid', String(c.pid), '/F'], { stdio: 'ignore' })
+        } else if (!c.killed) {
+          c.kill('SIGTERM')
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+    // Thoát 0 — VS Code không báo "terminated with exit code 5"
+    setTimeout(() => process.exit(0), 200)
+  }
+
+  process.on('SIGINT', shutdown)
+  process.on('SIGTERM', shutdown)
+  // Uncaught trong script dev không được sập im lặng
+  process.on('uncaughtException', (err) => {
+    console.error('[dev] uncaughtException:', err)
+  })
+  process.on('unhandledRejection', (err) => {
+    console.error('[dev] unhandledRejection:', err)
+  })
+
   freePorts(PORTS)
-  process.exit(code)
+
+  console.log(`API  → http://127.0.0.1:8787  (${py} uvicorn)`)
+  console.log(`Web  → http://127.0.0.1:5173  (${webCmd} run dev)`)
+  console.log('Ctrl+C để dừng. API crash sẽ tự restart — terminal không đóng.\n')
+
+  spawnOne('api', py, ['-m', 'uvicorn', 'main:app', '--reload', '--host', '127.0.0.1', '--port', '8787'], backendDir)
+  spawnOne('web', webCmd, webArgs, root)
+
+  // Giữ event loop sống dù cả hai child die tạm thời (đang restart)
+  setInterval(() => {}, 60_000)
 }
-
-process.on('SIGINT', () => shutdown(0))
-process.on('SIGTERM', () => shutdown(0))
-
-freePorts(PORTS)
-
-console.log(`API  → http://127.0.0.1:8787  (${py} uvicorn)`)
-console.log(`Web  → http://127.0.0.1:5173  (${webCmd} run dev)`)
-console.log('Ctrl+C để dừng cả hai.\n')
-
-run('api', py, ['-m', 'uvicorn', 'main:app', '--reload', '--host', '127.0.0.1', '--port', '8787'], serverDir)
-run('web', webCmd, webArgs, root)

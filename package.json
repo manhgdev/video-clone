@@ -5,11 +5,11 @@
   "type": "module",
   "scripts": {
     "setup": "node scripts/setup.mjs",
-    "dev": "vite",
-    "build": "tsc -b && vite build",
+    "dev": "vite --config frontend/vite.config.ts",
+    "build": "tsc -b frontend/tsconfig.json && vite build --config frontend/vite.config.ts",
     "build:app": "node build_app/build.mjs",
-    "preview": "vite preview",
-    "server": "cd server && python -m uvicorn main:app --reload --port 8787",
+    "preview": "vite preview --config frontend/vite.config.ts",
+    "server": "cd backend && python -m uvicorn main:app --reload --port 8787",
     "dev:all": "node scripts/dev.mjs",
     "start": "node scripts/dev.mjs"
   },

@@ -3,9 +3,10 @@ dist/
 build_app/.work/
 build_app/release/
 build_app/*.spec
-server/data/
-server/.venv/
-server/.venv-demucs/
+backend/data/
+backend/public/
+backend/.venv/
+backend/.venv-demucs/
 ex_video/
 package-lock.json
 __pycache__/
@@ -18,5 +19,7 @@ __pycache__/
 .env
 capcut_device.json
 *.wav
+!backend/resources/voice-ref/ngoc-huyen.wav
+!backend/resources/voice-ref/adam-low-tone.wav
 *.mp3
 *.aiff

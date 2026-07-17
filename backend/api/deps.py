@@ -1,0 +1,171 @@
+"""Shared API helpers / schemas used by routes."""
+from __future__ import annotations
+
+import math
+from pathlib import Path
+from typing import Any
+
+from fastapi import HTTPException
+from pydantic import BaseModel, Field
+
+from pipeline.core.media import video_size
+
+
+class Settings(BaseModel):
+    workflow: str | None = None
+    engine: str = "whisper"
+    sourceLang: str = "auto"
+    targetLang: str = "vi"
+    translator: str = "google"
+    matchDuration: str = "preferVideo"
+    defaultVoice: str = "cc:BV075_streaming:7102355803792740865"
+    coverHardsubs: bool = True
+    coverMaskStyle: str = "blur"
+    coverMaskColor: str = "#4c1d95"
+    coverMaskOpacity: int = 40
+    burnSubs: bool = True
+    captionPlacement: str = "below"
+    subtitleFontSize: int = 0
+    subtitleFontFamily: str = "system"
+    captionTextColor: str = "#ffffff"
+    captionBgStyle: str = "none"
+    captionBgColor: str = "#000000"
+    captionBgOpacity: int = 55
+    captionStroke: bool = True
+    processOriginalAudio: bool = False
+    originalAudioMode: str = "original"
+    originalAudioVolume: int = 100
+    previewSec: int = 0
+    workers: int = 0
+    previewAspectRatio: str = "original"
+    forceTts: bool = False
+
+
+class SegmentIn(BaseModel):
+    id: str
+    index: int
+    start: float
+    end: float
+    source: str
+    translation: str
+    voice: str
+    audioUrl: str | None = None
+    audioFile: str | None = None
+    audioDuration: float | None = None
+    coverStart: float | None = None
+    coverEnd: float | None = None
+    layout: str | None = None
+    dub: bool | None = None
+    bbox: dict[str, float] | None = None
+    bboxInherited: bool | None = None
+    videoSpeed: float | None = None
+    ttsVolume: float | None = None
+    ttsSpeed: float | None = None
+    fontSize: int | None = None
+    captionLayout: dict[str, Any] | None = None
+
+
+class ExportPayload(Settings):
+    segments: list[SegmentIn] | None = None
+
+
+class TextOverlayIn(BaseModel):
+    id: str
+    start: float
+    end: float
+    text: str = ""
+    x: float
+    y: float
+    w: float
+    h: float
+    fontSize: int = 42
+    color: str = "#ffffff"
+    kind: str | None = "text"
+    maskStyle: str | None = None
+    maskColor: str | None = None
+    maskOpacity: int | None = None
+
+
+class CloudBlock(BaseModel):
+    apiKey: str | None = None
+    baseUrl: str | None = None
+    model: str | None = None
+
+
+class ElevenLabsBlock(BaseModel):
+    apiKeys: str | None = None
+
+
+class TtsBlock(BaseModel):
+    elevenlabs: ElevenLabsBlock | None = None
+
+
+class AppConfigIn(BaseModel):
+    cloud: dict[str, CloudBlock] | None = None
+    tts: TtsBlock | None = None
+
+
+class PreviewTtsIn(BaseModel):
+    text: str
+    voice: str = "el:pNInz6obpgDQGcFmaJgB"
+    lang: str = "vi"
+
+
+class RebakeSpeedIn(BaseModel):
+    speed: float = 1.0
+
+
+class RetranslateIn(BaseModel):
+    text: str = ""
+    sourceLang: str | None = None
+    targetLang: str | None = None
+    translator: str | None = None
+
+
+class StudioSynthIn(BaseModel):
+    text: str = ""
+    voice: str = "system"
+    lang: str = "vi"
+    speed: float = 1.0
+    volume: float = 1.0
+    pitch: float = 0.0
+    style: str = "tu_nhien"
+    matchDuration: str = "none"
+    title: str = ""
+
+
+def validate_segment_editor_fields(body: SegmentIn, meta: dict) -> None:
+    if body.videoSpeed is not None:
+        if not math.isfinite(body.videoSpeed) or not 0.5 <= body.videoSpeed <= 2.0:
+            raise HTTPException(422, "videoSpeed phải nằm trong khoảng 0.5–2.0")
+    if body.ttsVolume is not None and (
+        not math.isfinite(body.ttsVolume) or not 0 <= body.ttsVolume <= 200
+    ):
+        raise HTTPException(422, "ttsVolume phải nằm trong khoảng 0–200")
+    if body.ttsSpeed is not None and (
+        not math.isfinite(body.ttsSpeed) or not 0.75 <= body.ttsSpeed <= 1.5
+    ):
+        raise HTTPException(422, "ttsSpeed phải nằm trong khoảng 0.75–1.5")
+    if body.fontSize is not None and body.fontSize != 0 and not 12 <= body.fontSize <= 240:
+        raise HTTPException(422, "fontSize phải là 0 (tự động) hoặc 12–240 px")
+    if body.bbox is None:
+        return
+    keys = {"x", "y", "w", "h"}
+    if set(body.bbox) != keys:
+        raise HTTPException(422, "bbox cần đủ x, y, w, h")
+    x, y, bw, bh = (float(body.bbox[key]) for key in ("x", "y", "w", "h"))
+    if not all(math.isfinite(value) for value in (x, y, bw, bh)) or bw <= 0 or bh <= 0:
+        raise HTTPException(422, "bbox không hợp lệ")
+    width, height = video_size(Path(meta["videoPath"]))
+    if x < 0 or y < 0 or x + bw > width or y + bh > height:
+        raise HTTPException(422, "bbox nằm ngoài khung video")
+    body.bbox = {"x": x, "y": y, "w": bw, "h": bh}
+
+
+def require_meta(project_id: str) -> dict:
+    from pipeline import load_meta
+
+    meta = load_meta(project_id)
+    if not meta:
+        raise HTTPException(404, "Project not found")
+    return meta

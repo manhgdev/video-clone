@@ -6,7 +6,7 @@ import path from 'node:path'
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const isWin = process.platform === 'win32'
 const isMac = process.platform === 'darwin'
-const python = path.join(root, 'server', '.venv', isWin ? 'Scripts/python.exe' : 'bin/python')
+const python = path.join(root, 'backend', '.venv', isWin ? 'Scripts/python.exe' : 'bin/python')
 const dataSep = isWin ? ';' : ':'
 const packageJsonPath = path.join(root, 'package.json')
 const versionFilePath = path.join(root, 'build_app', 'VERSION')
@@ -55,7 +55,7 @@ function bumpPatch(version) {
 }
 
 if (!existsSync(python)) {
-  console.error('Thiếu server/.venv. Chạy npm run setup trước.')
+  console.error('Thiếu backend/.venv. Chạy npm run setup trước.')
   process.exit(1)
 }
 
@@ -73,7 +73,7 @@ if (isWin && !pyOk('import onnxruntime')) {
 }
 
 const iconIco = path.join(root, 'build_app', 'app.ico')
-const iconPng = path.join(root, 'public', 'zm-logo.png')
+const iconPng = path.join(root, 'frontend', 'public', 'zm-logo.png')
 
 const args = [
   '-m', 'PyInstaller',
@@ -84,9 +84,9 @@ const args = [
   '--distpath', path.join(root, 'build_app', 'release'),
   '--workpath', path.join(root, 'build_app', '.work'),
   '--specpath', path.join(root, 'build_app'),
-  '--paths', path.join(root, 'server'),
+  '--paths', path.join(root, 'backend'),
   '--add-data', `${path.join(root, 'dist')}${dataSep}dist`,
-  '--add-data', `${path.join(root, 'server', 'pipeline', 'tts', 'voices_capcut.json')}${dataSep}pipeline/tts`,
+  '--add-data', `${path.join(root, 'backend', 'pipeline', 'tts', 'voices_capcut.json')}${dataSep}pipeline/tts`,
   '--add-data', `${versionFilePath}${dataSep}.`,
   ...(existsSync(iconIco) ? ['--add-data', `${iconIco}${dataSep}.`] : []),
   '--collect-all', 'faster_whisper',

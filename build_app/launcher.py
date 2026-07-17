@@ -27,6 +27,7 @@ home = app_home()
 home.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("VIDEO_CLONE_HOME", str(home))
 os.environ.setdefault("VIDEO_CLONE_DATA", str(home / "data"))
+os.environ.setdefault("VIDEO_CLONE_PUBLIC_DATA", str(home / "public_data"))
 os.environ.setdefault("CAPCUT_DEVICE_JSON", str(home / "capcut_device.json"))
 
 if getattr(sys, "frozen", False) and sys.stdout is None:

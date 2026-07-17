@@ -1,0 +1,704 @@
+"""TTS Studio jobs — synthesize text/SRT, export mp3/zip, cancel."""
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess
+import threading
+import uuid
+import zipfile
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from ..core.media import ffprobe_duration
+from ..export.srt import SRT_STYLES, cues_from_parts, parse_srt, style_params, write_srt, _split_for_style, wrap_capcut_text
+from . import audio_utils
+from .engines.vieneu import parse_voice as parse_vieneu_voice
+from .engines.vieneu import reference_cache_token
+from .manager import list_voices, tts_segment
+from .text_split import split_sentences
+from .voice_store import TTS_OUTPUT, TTS_TEMP, ensure_vieneu_dirs
+
+
+def _job_fingerprint(
+    *,
+    text: str,
+    srt_text: str,
+    voice: str,
+    lang: str,
+    speed: float,
+    volume: float,
+    pitch: float,
+    style: str,
+    match_duration: str,
+    keep_timeline: bool,
+    auto_split: bool,
+    gap_ms: int,
+) -> str:
+    """Same voice + text + settings → reuse job (không tạo lịch sử trùng)."""
+    import hashlib
+
+    raw = "|".join(
+        [
+            "v3",  # CapCut short cues SRT
+            (text or "").strip(),
+            (srt_text or "").strip(),
+            (voice or "").strip(),
+            reference_cache_token(voice or ""),
+            (lang or "vi").strip(),
+            f"{float(speed):.4f}",
+            f"{float(volume):.4f}",
+            f"{float(pitch):.2f}",
+            (style or "tu_nhien").strip(),
+            (match_duration or "none").strip(),
+            "1" if keep_timeline else "0",
+            "1" if auto_split else "0",
+            str(int(gap_ms or 0)),
+        ]
+    )
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:24]
+
+
+def _find_cached_job(fp: str) -> dict[str, Any] | None:
+    ensure_vieneu_dirs()
+    if not TTS_OUTPUT.is_dir():
+        return None
+    for d in sorted(TTS_OUTPUT.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+        if not d.is_dir():
+            continue
+        meta_p = d / "meta.json"
+        wav = d / "audio.wav"
+        if not meta_p.is_file() or not wav.is_file() or wav.stat().st_size < 64:
+            continue
+        try:
+            m = json.loads(meta_p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if m.get("fingerprint") != fp:
+            continue
+        jid = d.name
+        m["id"] = jid
+        return {
+            "id": jid,
+            "duration": float(m.get("duration") or ffprobe_duration(wav)),
+            "audioUrl": f"/api/tts/studio/jobs/{jid}/audio.wav",
+            "mp3Url": f"/api/tts/studio/jobs/{jid}/audio.mp3",
+            "srtUrl": f"/api/tts/studio/jobs/{jid}/subs.srt",
+            "zipUrl": f"/api/tts/studio/jobs/{jid}/bundle.zip",
+            "meta": m,
+            "cached": True,
+        }
+    return None
+
+
+def _voice_display(voice: str, lang: str = "vi") -> str:
+    """Human name for history (CapCut display_name, VieNeu label…)."""
+    try:
+        for v in list_voices(lang):
+            if v.get("id") == voice:
+                name = str(v.get("name") or voice)
+                for p in ("CapCut · ", "VieNeu · Clone · ", "VieNeu · ", "ElevenLabs · ", "macOS · "):
+                    if name.startswith(p):
+                        name = name[len(p) :]
+                return name
+    except Exception:
+        pass
+    if voice.startswith("vn:clone:"):
+        return voice[9:]
+    if voice.startswith(("vn:", "cc:", "el:")):
+        return voice.split(":", 1)[-1] if voice.startswith("el:") else voice.split(":", 1)[-1]
+    # cc:type:rid → last not ideal; strip cc:
+    if voice.startswith("cc:"):
+        return voice[3:].split(":")[0]
+    return voice
+
+_jobs_lock = threading.Lock()
+_cancel_flags: dict[str, bool] = {}
+_running: dict[str, bool] = {}
+
+
+def request_cancel(job_id: str) -> bool:
+    with _jobs_lock:
+        if job_id in _running:
+            _cancel_flags[job_id] = True
+            return True
+        return False
+
+
+def _is_cancelled(job_id: str) -> bool:
+    with _jobs_lock:
+        return bool(_cancel_flags.get(job_id))
+
+
+def _engine_of(voice: str) -> str:
+    if parse_vieneu_voice(voice or ""):
+        return "vieneu"
+    if (voice or "").startswith("cc:"):
+        return "capcut"
+    if (voice or "").startswith("el:"):
+        return "elevenlabs"
+    return "system"
+
+
+def _write_meta(job_dir: Path, meta: dict[str, Any]) -> None:
+    (job_dir / "meta.json").write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _concat_wavs(parts: list[Path], out: Path, gap_ms: int = 0) -> float:
+    if len(parts) == 1:
+        shutil.copy2(parts[0], out)
+        return ffprobe_duration(out)
+    ensure_vieneu_dirs()
+    list_f = TTS_TEMP / f"concat_{uuid.uuid4().hex[:8]}.txt"
+    lines: list[str] = []
+    silence: Path | None = None
+    if gap_ms > 0:
+        silence = TTS_TEMP / f"sil_{gap_ms}.wav"
+        if not silence.is_file():
+            subprocess.check_call(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    f"anullsrc=r=48000:cl=mono",
+                    "-t",
+                    f"{gap_ms / 1000.0:.3f}",
+                    str(silence),
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+    for i, p in enumerate(parts):
+        lines.append(f"file '{p.resolve().as_posix()}'")
+        if silence and i < len(parts) - 1:
+            lines.append(f"file '{silence.resolve().as_posix()}'")
+    list_f.write_text("\n".join(lines), encoding="utf-8")
+    subprocess.check_call(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(list_f),
+            "-c",
+            "copy",
+            str(out),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    list_f.unlink(missing_ok=True)
+    return ffprobe_duration(out)
+
+
+def synth_text_job(
+    *,
+    text: str,
+    voice: str,
+    lang: str = "vi",
+    speed: float = 1.0,
+    volume: float = 1.0,
+    pitch: float = 0.0,
+    style: str = "tu_nhien",
+    match_duration: str = "none",
+    title: str = "",
+    auto_split: bool = True,
+    gap_ms: int = 0,
+    job_id: str | None = None,
+) -> dict[str, Any]:
+    ensure_vieneu_dirs()
+    fp = _job_fingerprint(
+        text=text,
+        srt_text="",
+        voice=voice,
+        lang=lang,
+        speed=speed,
+        volume=volume,
+        pitch=pitch,
+        style=style,
+        match_duration=match_duration,
+        keep_timeline=True,
+        auto_split=auto_split,
+        gap_ms=gap_ms,
+    )
+    hit = _find_cached_job(fp)
+    if hit:
+        return hit
+    job_id = job_id or uuid.uuid4().hex[:12]
+    job_dir = TTS_OUTPUT / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+    wav = job_dir / "audio.wav"
+    with _jobs_lock:
+        _running[job_id] = True
+        _cancel_flags[job_id] = False
+    try:
+        # auto_split: mỗi câu 1 part TTS + 1 cue SRT (timeline = độ dài audio thật)
+        chunks = (
+            split_sentences(text, max_chars=240)
+            if auto_split
+            else [text.strip() or "."]
+        )
+        part_paths: list[Path] = []
+        part_durs: list[float] = []
+        for i, chunk in enumerate(chunks):
+            if _is_cancelled(job_id):
+                raise RuntimeError("Job đã hủy")
+            part = job_dir / f"part_{i:03d}.wav"
+            tts_segment(
+                chunk,
+                voice,
+                part,
+                None,
+                "none",
+                lang=lang,
+                speed=speed,
+                volume=volume,
+                pitch=pitch,
+                style=style,
+            )
+            part_paths.append(part)
+            part_durs.append(ffprobe_duration(part))
+        gap = max(0, int(gap_ms)) / 1000.0
+        # CapCut: cue ngắn (~42 ký tự), timeline ∝ audio từng part
+        cues = cues_from_parts(
+            chunks,
+            part_durs,
+            gap_sec=gap,
+            max_chars=42,
+            max_words=12,
+        )
+        if len(part_paths) == 1:
+            shutil.copy2(part_paths[0], wav)
+            part_paths[0].unlink(missing_ok=True)
+            dur = part_durs[0] if part_durs else ffprobe_duration(wav)
+        else:
+            dur = _concat_wavs(part_paths, wav, gap_ms=max(0, int(gap_ms)))
+            for p in part_paths:
+                p.unlink(missing_ok=True)
+        srt_path = job_dir / "subs.srt"
+        write_srt(srt_path, cues, capcut=True)
+        _ = match_duration
+        meta = {
+            "id": job_id,
+            "title": (title or text[:48]).strip(),
+            "voice": voice,
+            "voiceName": _voice_display(voice, lang),
+            "lang": lang,
+            "duration": dur,
+            "engine": _engine_of(voice),
+            "createdAt": datetime.now().isoformat(timespec="seconds"),
+            "audioFile": "audio.wav",
+            "srtFile": "subs.srt",
+            "text": text,
+            "chunks": chunks,
+            "partDurs": part_durs,
+            "gapMs": gap_ms,
+            "status": "done",
+            "fingerprint": fp,
+            "style": style,
+            "speed": speed,
+            "volume": volume,
+            "pitch": pitch,
+            "autoSplit": auto_split,
+            "cueCount": len(cues),
+        }
+        _write_meta(job_dir, meta)
+        return {
+            "id": job_id,
+            "duration": dur,
+            "audioUrl": f"/api/tts/studio/jobs/{job_id}/audio.wav",
+            "mp3Url": f"/api/tts/studio/jobs/{job_id}/audio.mp3",
+            "srtUrl": f"/api/tts/studio/jobs/{job_id}/subs.srt",
+            "zipUrl": f"/api/tts/studio/jobs/{job_id}/bundle.zip",
+            "meta": meta,
+            "cached": False,
+        }
+    except Exception:
+        if job_dir.is_dir() and not (job_dir / "audio.wav").is_file():
+            shutil.rmtree(job_dir, ignore_errors=True)
+        raise
+    finally:
+        with _jobs_lock:
+            _running.pop(job_id, None)
+            _cancel_flags.pop(job_id, None)
+
+
+def synth_srt_job(
+    *,
+    srt_text: str,
+    voice: str,
+    lang: str = "vi",
+    speed: float = 1.0,
+    volume: float = 1.0,
+    pitch: float = 0.0,
+    style: str = "tu_nhien",
+    match_duration: str = "natural",
+    keep_timeline: bool = True,
+    title: str = "",
+    gap_ms: int = 0,
+    job_id: str | None = None,
+) -> dict[str, Any]:
+    """Batch synth each SRT cue; fit duration with safe caps."""
+    cues = parse_srt(srt_text)
+    if not cues:
+        raise ValueError("SRT rỗng hoặc không parse được")
+    ensure_vieneu_dirs()
+    fp = _job_fingerprint(
+        text="",
+        srt_text=srt_text,
+        voice=voice,
+        lang=lang,
+        speed=speed,
+        volume=volume,
+        pitch=pitch,
+        style=style,
+        match_duration=match_duration,
+        keep_timeline=keep_timeline,
+        auto_split=False,
+        gap_ms=gap_ms,
+    )
+    hit = _find_cached_job(fp)
+    if hit:
+        return hit
+    job_id = job_id or uuid.uuid4().hex[:12]
+    job_dir = TTS_OUTPUT / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+    with _jobs_lock:
+        _running[job_id] = True
+        _cancel_flags[job_id] = False
+    part_paths: list[Path] = []
+    out_cues: list[dict] = []
+    cursor = 0.0
+    try:
+        match = match_duration if match_duration in ("none", "natural", "stretch", "preferVideo") else "natural"
+        for i, cue in enumerate(cues):
+            if _is_cancelled(job_id):
+                raise RuntimeError("Job đã hủy")
+            text = str(cue.get("text") or "").strip() or "…"
+            slot = max(0.15, float(cue["end"]) - float(cue["start"]))
+            part = job_dir / f"cue_{i:03d}.wav"
+            # Safe match: natural ≤1.25×, stretch capped in audio_utils
+            use_match = "none" if match in ("none", "preferVideo") else match
+            target = slot if use_match != "none" else None
+            tts_segment(
+                text,
+                voice,
+                part,
+                target,
+                use_match,
+                lang=lang,
+                speed=speed,
+                volume=volume,
+                pitch=pitch,
+                style=style,
+            )
+            part_paths.append(part)
+            dur = ffprobe_duration(part)
+            if keep_timeline:
+                start = float(cue["start"])
+                end = start + dur
+            else:
+                start = cursor
+                end = start + dur
+                if gap_ms > 0:
+                    end += gap_ms / 1000.0
+                cursor = end
+            out_cues.append({"start": start, "end": end, "text": text, "_dur": dur})
+        wav = job_dir / "audio.wav"
+        if keep_timeline:
+            _mix_timeline(
+                part_paths,
+                [{"start": c["start"], "end": c["end"]} for c in out_cues],
+                wav,
+            )
+        else:
+            _concat_wavs(part_paths, wav, gap_ms=max(0, int(gap_ms)))
+        for p in part_paths:
+            p.unlink(missing_ok=True)
+        # Save source cues for re-segmenting with different styles later
+        source_cues = [
+            {"start": c["start"], "end": c["end"], "text": c["text"], "dur": c["_dur"]}
+            for c in out_cues
+        ]
+
+        from pipeline.export.srt import split_display_cues
+
+        capcut_cues: list[dict] = []
+        for c in out_cues:
+            shorts = split_display_cues(str(c["text"]), max_chars=42, max_words=12)
+            seg_start = float(c["start"])
+            seg_dur = max(0.08, float(c.get("_dur") or (float(c["end"]) - seg_start)))
+            weights = [max(1, len(s)) for s in shorts]
+            tw = sum(weights) or 1
+            acc = 0.0
+            for j, s in enumerate(shorts):
+                share = (
+                    seg_dur * (weights[j] / tw)
+                    if j < len(shorts) - 1
+                    else max(0.06, seg_dur - acc)
+                )
+                capcut_cues.append(
+                    {
+                        "start": seg_start + acc,
+                        "end": seg_start + acc + max(0.06, share),
+                        "text": s,
+                    }
+                )
+                acc += max(0.06, share)
+        srt_path = job_dir / "subs.srt"
+        write_srt(srt_path, capcut_cues, capcut=True)
+        out_cues = capcut_cues
+        dur = ffprobe_duration(wav)
+        meta = {
+            "id": job_id,
+            "title": (title or (out_cues[0]["text"][:48] if out_cues else "SRT")).strip(),
+            "voice": voice,
+            "voiceName": _voice_display(voice, lang),
+            "lang": lang,
+            "duration": dur,
+            "engine": _engine_of(voice),
+            "createdAt": datetime.now().isoformat(timespec="seconds"),
+            "audioFile": "audio.wav",
+            "srtFile": "subs.srt",
+            "text": "\n".join(c["text"] for c in out_cues),
+            "sourceCues": source_cues,
+            "gapMs": gap_ms,
+            "status": "done",
+            "mode": "srt",
+            "fingerprint": fp,
+            "style": style,
+            "speed": speed,
+            "volume": volume,
+            "pitch": pitch,
+            "cueCount": len(out_cues),
+        }
+        _write_meta(job_dir, meta)
+        return {
+            "id": job_id,
+            "duration": dur,
+            "audioUrl": f"/api/tts/studio/jobs/{job_id}/audio.wav",
+            "mp3Url": f"/api/tts/studio/jobs/{job_id}/audio.mp3",
+            "srtUrl": f"/api/tts/studio/jobs/{job_id}/subs.srt",
+            "zipUrl": f"/api/tts/studio/jobs/{job_id}/bundle.zip",
+            "meta": meta,
+            "cached": False,
+        }
+    except Exception:
+        if job_dir.is_dir() and not (job_dir / "audio.wav").is_file():
+            shutil.rmtree(job_dir, ignore_errors=True)
+        raise
+    finally:
+        with _jobs_lock:
+            _running.pop(job_id, None)
+            _cancel_flags.pop(job_id, None)
+
+
+def _mix_timeline(parts: list[Path], cues: list[dict], out: Path) -> None:
+    """Place each part at cue.start with silence padding (absolute timeline)."""
+    if not parts:
+        raise ValueError("no parts")
+    total = max(float(c["end"]) for c in cues) + 0.05
+    # filter complex: adelay per segment then amix
+    # simpler: build with anullsrc + adelay concat via ffmpeg filter_complex
+    inputs: list[str] = ["-f", "lavfi", "-t", f"{total:.3f}", "-i", "anullsrc=r=48000:cl=mono"]
+    filters: list[str] = []
+    mix_ins = ["[0:a]"]
+    for i, p in enumerate(parts):
+        inputs.extend(["-i", str(p)])
+        delay_ms = int(max(0.0, float(cues[i]["start"])) * 1000)
+        filters.append(f"[{i + 1}:a]adelay={delay_ms}|{delay_ms}[a{i}]")
+        mix_ins.append(f"[a{i}]")
+    n = len(parts) + 1
+    filters.append(
+        f"{''.join(mix_ins)}amix=inputs={n}:duration=longest:dropout_transition=0,volume={n}[out]"
+    )
+    cmd = [
+        "ffmpeg",
+        "-y",
+        *inputs,
+        "-filter_complex",
+        ";".join(filters),
+        "-map",
+        "[out]",
+        str(out),
+    ]
+    subprocess.check_call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def rebuild_srt(job_id: str, srt_style: str = "hard") -> Path:
+    """Re-segment existing job into a different SRT style (no TTS re-run)."""
+    if srt_style not in SRT_STYLES:
+        raise ValueError(f"Unknown style: {srt_style}")
+    job_dir = TTS_OUTPUT / job_id
+    meta_p = job_dir / "meta.json"
+    if not meta_p.is_file():
+        raise FileNotFoundError("meta.json missing")
+    m = json.loads(meta_p.read_text(encoding="utf-8"))
+
+    sp = style_params(srt_style)
+    # ponytail: cache per style so we don't rebuild every download
+    cached = job_dir / f"subs_{srt_style}.srt"
+    if cached.is_file():
+        return cached
+
+    src_cues = m.get("sourceCues")
+    chunks = m.get("chunks")
+    part_durs = m.get("partDurs")
+    gap_ms = m.get("gapMs", 0)
+    duration = float(m.get("duration") or 0)
+
+    if src_cues:
+        # SRT job path: re-split each source cue
+        cues: list[dict] = []
+        for c in src_cues:
+            text = str(c.get("text") or "").strip() or "…"
+            seg_start = float(c["start"])
+            seg_dur = max(0.08, float(c.get("dur") or (float(c["end"]) - seg_start)))
+            pieces = _split_for_style(text, sp)
+            weights = [max(1, len(s)) for s in pieces]
+            tw = sum(weights) or 1
+            acc = 0.0
+            for j, s in enumerate(pieces):
+                share = seg_dur * (weights[j] / tw) if j < len(pieces) - 1 else max(0.06, seg_dur - acc)
+                cues.append({
+                    "start": seg_start + acc,
+                    "end": seg_start + acc + max(0.06, share),
+                    "text": wrap_capcut_text(s, max_line=sp.wrap_line, max_lines=2),
+                })
+                acc += max(0.06, share)
+    elif chunks and part_durs and len(chunks) == len(part_durs):
+        # Text job path
+        gap = max(0, int(gap_ms)) / 1000.0
+        cues = cues_from_parts(chunks, part_durs, gap_sec=gap, style=srt_style)
+    elif chunks and duration > 0:
+        # Fallback: old job without partDurs — spread evenly
+        total_chars = sum(max(1, len(c)) for c in chunks) or 1
+        fake_durs = [duration * (max(1, len(c)) / total_chars) for c in chunks]
+        gap = max(0, int(gap_ms)) / 1000.0
+        cues = cues_from_parts(chunks, fake_durs, gap_sec=gap, style=srt_style)
+    else:
+        # Last resort: single cue
+        text = str(m.get("text") or "…")
+        cues = [{"start": 0.0, "end": max(0.5, duration), "text": text}]
+
+    write_srt(cached, cues, capcut=True, wrap_line=sp.wrap_line)
+    return cached
+
+
+def ensure_mp3(job_id: str) -> Path:
+    job_dir = TTS_OUTPUT / job_id
+    wav = job_dir / "audio.wav"
+    mp3 = job_dir / "audio.mp3"
+    if not wav.is_file():
+        raise FileNotFoundError("audio.wav missing")
+    if mp3.is_file() and mp3.stat().st_mtime >= wav.stat().st_mtime:
+        return mp3
+    subprocess.check_call(
+        ["ffmpeg", "-y", "-i", str(wav), "-codec:a", "libmp3lame", "-qscale:a", "2", str(mp3)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return mp3
+
+
+def ensure_zip(job_id: str, srt_style: str = "hard") -> Path:
+    job_dir = TTS_OUTPUT / job_id
+    wav = job_dir / "audio.wav"
+    if not wav.is_file():
+        raise FileNotFoundError("audio.wav missing")
+
+    # Get the SRT file for requested style
+    if srt_style != "hard":
+        try:
+            srt = rebuild_srt(job_id, srt_style)
+        except Exception:
+            srt = job_dir / "subs.srt"
+    else:
+        srt = job_dir / "subs.srt"
+
+    if not srt.is_file():
+        meta_p = job_dir / "meta.json"
+        text = ""
+        chunks: list[str] = []
+        dur = ffprobe_duration(wav)
+        if meta_p.is_file():
+            try:
+                m = json.loads(meta_p.read_text(encoding="utf-8"))
+                text = str(m.get("text") or "")
+                ch = m.get("chunks")
+                if isinstance(ch, list) and ch:
+                    chunks = [str(x).strip() for x in ch if str(x).strip()]
+            except Exception:
+                text = ""
+        if chunks and len(chunks) > 1:
+            total_chars = sum(max(1, len(c)) for c in chunks) or 1
+            cues = []
+            cursor = 0.0
+            for i, c in enumerate(chunks):
+                share = dur * (len(c) / total_chars) if i < len(chunks) - 1 else max(0.05, dur - cursor)
+                cues.append({"start": cursor, "end": cursor + max(0.05, share), "text": c})
+                cursor += max(0.05, share)
+            write_srt(srt, cues)
+        else:
+            write_srt(srt, [{"start": 0.0, "end": max(0.5, dur), "text": text or "…"}])
+
+    mp3 = job_dir / "audio.mp3"
+    if not mp3.is_file():
+        try:
+            ensure_mp3(job_id)
+        except Exception:
+            pass
+
+    suffix = f"_{srt_style}" if srt_style != "hard" else ""
+    zpath = job_dir / f"bundle{suffix}.zip"
+    # ponytail: reuse zip if newer than inputs — avoids truncate-while-serve Content-Length race
+    inputs = [p for p in (wav, srt, mp3) if p.is_file()]
+    if zpath.is_file() and inputs:
+        zt = zpath.stat().st_mtime
+        if all(zt >= p.stat().st_mtime for p in inputs):
+            return zpath
+
+    tmp = zpath.with_suffix(".zip.tmp")
+    with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.write(wav, "audio.wav")
+        zf.write(srt, "subs.srt")
+        if mp3.is_file():
+            zf.write(mp3, "audio.mp3")
+    tmp.replace(zpath)
+    return zpath
+
+
+def list_history(limit: int = 50) -> list[dict[str, Any]]:
+    ensure_vieneu_dirs()
+    items: list[dict[str, Any]] = []
+    if not TTS_OUTPUT.is_dir():
+        return items
+    for d in sorted(TTS_OUTPUT.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+        if not d.is_dir():
+            continue
+        meta_p = d / "meta.json"
+        if not meta_p.is_file():
+            continue
+        try:
+            m = json.loads(meta_p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        jid = d.name
+        m["id"] = jid
+        m["audioUrl"] = f"/api/tts/studio/jobs/{jid}/audio.wav"
+        m["mp3Url"] = f"/api/tts/studio/jobs/{jid}/audio.mp3"
+        m["srtUrl"] = f"/api/tts/studio/jobs/{jid}/subs.srt"
+        m["zipUrl"] = f"/api/tts/studio/jobs/{jid}/bundle.zip"
+        items.append(m)
+        if len(items) >= limit:
+            break
+    return items

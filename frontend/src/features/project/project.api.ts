@@ -1,0 +1,387 @@
+import type {
+  AppConfig,
+  HardwareInfo,
+  JobStatus,
+  ProjectSettings,
+  Segment,
+  SystemChecks,
+  TextOverlay,
+} from '@/features/project/project.types'
+import { fetchJson } from '@/shared/api/fetchJson'
+
+const base = '/api'
+
+export const api = {
+  hardware: () => fetchJson<HardwareInfo>(`${base}/hardware`, undefined, 8000),
+
+  systemChecks: () =>
+    fetchJson<SystemChecks>(`${base}/system/checks`, undefined, 20_000),
+
+  installOcrCuda: () =>
+    fetchJson<{ ok: boolean; message: string; detail: string }>(
+      `${base}/system/install/ocr_cuda`,
+      { method: 'POST' },
+      15 * 60_000,
+    ),
+
+  installDemucsCuda: () =>
+    fetchJson<{ ok: boolean; message: string; detail: string }>(
+      `${base}/system/install/demucs_cuda`,
+      { method: 'POST' },
+      40 * 60_000,
+    ),
+
+  getConfig: () => fetchJson<AppConfig>(`${base}/config`, undefined, 8000),
+
+  saveConfig: (body: {
+    cloud?: Record<
+      string,
+      { apiKey?: string; baseUrl?: string; model?: string }
+    >
+    tts?: {
+      elevenlabs?: { apiKeys?: string }
+    }
+  }) =>
+    fetchJson<AppConfig>(`${base}/config`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+
+  voices: (lang = 'vi') =>
+    fetchJson<{
+      id: string
+      name: string
+      previewUrl?: string
+      type?: string
+      engine?: string
+      description?: string
+      gender?: string
+      language?: string
+      accent?: string
+      age?: string
+      style?: string
+      category?: string
+    }[]>(
+      `${base}/voices?lang=${encodeURIComponent(lang)}`,
+      undefined,
+      15_000,
+    ),
+
+  ttsStatus: () =>
+    fetchJson<Record<string, {
+      id?: string
+      name?: string
+      local?: boolean
+      installed?: boolean
+      ready?: boolean
+      loaded?: boolean
+      loadState?: string
+      device?: string
+      model?: string
+      version?: string
+      message?: string
+      presetCount?: number
+      installHint?: string
+      cloneRequiresPytorch?: boolean
+    }>>(`${base}/tts/status`, undefined, 15_000),
+
+  ttsStudioSynth: (body: {
+    text?: string
+    srtText?: string
+    voice: string
+    lang?: string
+    speed?: number
+    volume?: number
+    pitch?: number
+    style?: string
+    matchDuration?: string
+    keepTimeline?: boolean
+    autoSplit?: boolean
+    gapMs?: number
+    title?: string
+  }) =>
+    fetchJson<{
+      id: string
+      duration: number
+      audioUrl: string
+      mp3Url?: string
+      srtUrl?: string
+      zipUrl?: string
+      meta: Record<string, unknown>
+      cached?: boolean
+    }>(
+      `${base}/tts/studio/synthesize`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+      10 * 60_000,
+    ),
+
+  ttsStudioHistory: () =>
+    fetchJson<Array<Record<string, unknown>>>(
+      `${base}/tts/studio/history`,
+      undefined,
+      12_000,
+    ),
+
+  ttsStudioDelete: (jobId: string) =>
+    fetchJson<{ ok: boolean }>(`${base}/tts/studio/jobs/${jobId}`, {
+      method: 'DELETE',
+    }),
+
+  ttsStudioCancel: (jobId: string) =>
+    fetchJson<{ ok: boolean; cancelled?: boolean }>(
+      `${base}/tts/studio/jobs/${jobId}/cancel`,
+      { method: 'POST' },
+      5000,
+    ),
+
+  ttsStudioClone: async (name: string, file: File, transcript = '', tags: string[] = []) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    const q = new URLSearchParams({ name, transcript, tags: JSON.stringify(tags) })
+    return fetchJson<{ id: string; name: string; tags: string[] }>(
+      `${base}/tts/studio/clone?${q.toString()}`,
+      { method: 'POST', body: fd },
+      180_000,
+    )
+  },
+
+  ttsStudioCloneRename: (voiceId: string, name: string) => {
+    const id = voiceId.replace(/^vn:clone:/, '')
+    return fetchJson<{ id: string; name: string }>(
+      `${base}/tts/studio/clone/${encodeURIComponent(id)}`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      },
+    )
+  },
+
+  ttsStudioCloneDelete: (voiceId: string) => {
+    const id = voiceId.replace(/^vn:clone:/, '')
+    return fetchJson<{ ok: boolean }>(
+      `${base}/tts/studio/clone/${encodeURIComponent(id)}`,
+      { method: 'DELETE' },
+    )
+  },
+
+  /** Đổi metadata / chuyển engine (zmAI ↔ clone) */
+  ttsStudioVoicePatch: (
+    voiceId: string,
+    body: { name?: string; tags?: string[]; engine?: 'zmai' | 'clone' },
+  ) =>
+    fetchJson<{ id: string; name: string; tags: string[]; engine?: string; type?: string }>(
+      `${base}/tts/studio/voices/${encodeURIComponent(voiceId)}`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+    ),
+
+  ttsStudioVoicesBulkMove: (voiceIds: string[], target: 'zmai' | 'clone') =>
+    fetchJson<{
+      target: 'zmai' | 'clone'
+      successes: Array<{
+        voiceId: string
+        voice: { id: string; name: string; engine?: string; type?: string }
+      }>
+      failures: Array<{ voiceId: string; error: string; errorType: string }>
+    }>(
+      `${base}/tts/studio/voices/bulk-move`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ voiceIds, target }),
+      },
+    ),
+
+  ttsStudioVoiceDelete: (voiceId: string) =>
+    fetchJson<{ ok: boolean }>(
+      `${base}/tts/studio/voices/${encodeURIComponent(voiceId)}`,
+      { method: 'DELETE' },
+    ),
+
+  upload: async (file: File) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    return fetchJson<{
+      projectId: string
+      videoUrl: string
+      duration: number
+      cached?: boolean
+      segments?: Segment[]
+      settings?: Partial<ProjectSettings>
+    }>(`${base}/upload`, { method: 'POST', body: fd }, 120_000)
+  },
+
+  saveSettings: (projectId: string, settings: ProjectSettings) =>
+    fetchJson<{ ok: boolean }>(`${base}/projects/${projectId}/settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(settings),
+    }),
+
+  status: (projectId: string) =>
+    fetchJson<JobStatus>(`${base}/projects/${projectId}/status`, undefined, 6000),
+
+  segments: (projectId: string) =>
+    fetchJson<Segment[]>(`${base}/projects/${projectId}/segments`, undefined, 10_000),
+
+  updateSegment: (projectId: string, seg: Segment) =>
+    fetchJson<Segment>(`${base}/projects/${projectId}/segments/${seg.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(seg),
+    }),
+
+  replaceSegments: (projectId: string, segments: Segment[]) =>
+    fetchJson<Segment[]>(`${base}/projects/${projectId}/segments`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(segments),
+    }),
+
+  overlays: (projectId: string) =>
+    fetchJson<TextOverlay[]>(`${base}/projects/${projectId}/overlays`, undefined, 10_000),
+
+  createOverlay: (projectId: string, overlay: TextOverlay) =>
+    fetchJson<TextOverlay>(`${base}/projects/${projectId}/overlays`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(overlay),
+    }),
+
+  replaceOverlays: (projectId: string, overlays: TextOverlay[]) =>
+    fetchJson<TextOverlay[]>(`${base}/projects/${projectId}/overlays`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(overlays),
+    }),
+
+  updateOverlay: (projectId: string, overlay: TextOverlay) =>
+    fetchJson<TextOverlay>(`${base}/projects/${projectId}/overlays/${overlay.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(overlay),
+    }),
+
+  deleteOverlay: (projectId: string, overlayId: string) =>
+    fetchJson<{ ok: boolean }>(`${base}/projects/${projectId}/overlays/${overlayId}`, {
+      method: 'DELETE',
+    }),
+
+  run: (projectId: string, settings: ProjectSettings) =>
+    fetchJson<{ ok: boolean }>(`${base}/projects/${projectId}/run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(settings),
+    }),
+
+  dub: (projectId: string, settings: ProjectSettings & { forceTts?: boolean }) =>
+    fetchJson<{ ok: boolean }>(`${base}/projects/${projectId}/dub`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(settings),
+    }),
+
+  cancel: (projectId: string) =>
+    fetchJson<{ ok: boolean; ignored?: boolean }>(
+      `${base}/projects/${projectId}/cancel`,
+      { method: 'POST' },
+      5000,
+    ),
+
+  export: (projectId: string, settings: ProjectSettings, segments?: Segment[]) =>
+    fetchJson<{ ok: boolean; url: string; path?: string; exports?: string }>(
+      `${base}/projects/${projectId}/export`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(segments ? { ...settings, segments } : settings),
+      },
+    ),
+
+  revealOutput: (projectId: string) =>
+    fetchJson<{ ok: boolean; path: string }>(
+      `${base}/projects/${projectId}/reveal-output`,
+      { method: 'POST' },
+    ),
+
+  /** Demucs xóa lời — lần đầu (cài torch) có thể rất lâu; tái dùng cache. */
+  prepareNoVocals: (projectId: string) =>
+    fetchJson<{ audioUrl: string; file: string }>(
+      `${base}/projects/${projectId}/audio/no-vocals`,
+      { method: 'POST' },
+      900_000,
+    ),
+
+  /** Tiến độ tách stem (poll khi đang prepareNoVocals). */
+  noVocalsProgress: (projectId: string) =>
+    fetchJson<{ progress: number; message: string; running: boolean }>(
+      `${base}/projects/${projectId}/audio/no-vocals/progress`,
+      undefined,
+      4000,
+    ),
+
+  /** Bake tốc độ preview toàn bộ + remap timeline. */
+  rebakeSpeed: (projectId: string, speed: number) =>
+    fetchJson<{
+      ok: boolean
+      bakedSpeed: number
+      bakedPreferVideo: boolean
+      workClipSec: number
+      duration: number
+      segments: Segment[]
+      overlays: TextOverlay[]
+      videoUrl: string
+    }>(
+      `${base}/projects/${projectId}/rebake-speed`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ speed }),
+      },
+      600_000,
+    ),
+
+  previewTts: (
+    projectId: string,
+    segId: string,
+    body: { text: string; voice: string; lang: string },
+  ) =>
+    fetchJson<{ audioUrl: string; duration: number }>(
+      `${base}/projects/${projectId}/segments/${segId}/preview-tts`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+      60_000,
+    ),
+
+  retranslate: (
+    projectId: string,
+    segId: string,
+    body?: {
+      text?: string
+      sourceLang?: string
+      targetLang?: string
+      translator?: string
+    },
+  ) =>
+    fetchJson<{ translation: string; segment: Segment }>(
+      `${base}/projects/${projectId}/segments/${segId}/retranslate`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body || {}),
+      },
+      60_000,
+    ),
+}

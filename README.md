@@ -85,7 +85,7 @@ Hoặc:
 npm run server   # chỉ backend
 ```
 
-Env mẫu: `server/.env.example` → `server/.env`
+Env mẫu: `backend/.env.example` → `backend/.env`
 
 ```env
 ELEVENLABS_API_KEYS=sk_xxx,sk_yyy
@@ -105,31 +105,29 @@ ELEVENLABS_API_KEYS=sk_xxx,sk_yyy
 5. **Lồng tiếng** → TTS  
 6. **Xuất bản** → cover + burn + mux → tải MP4  
 
-Dữ liệu project: `server/data/<project_id>/` (`source.mp4`, `meta.json`, `cache/`, `tts/`, `out/`).
+Dữ liệu project (public media): `backend/public/<project_id>/`.
+Clone voices (private): `backend/data/voices/vieneu/cloned/`.
 
 ---
 
 ## Cấu trúc repo
 
 ```
-src/                      React UI
-  components/             Header, Sidebar, Stepper, SegmentCard/List, ConfigModal
-  services/api.ts         HTTP client → :8787
-server/
+frontend/
+  src/                    React UI (app, pages, features, shared)
+  public/                 static frontend (favicon, logo)
+  index.html
+  vite.config.ts
+backend/
   main.py                 FastAPI
   requirements.txt
+  data/                   private (clone voices, app_config, temp)
+  public/                 video/audio jobs
+  resources/voice-ref/    zmAI reference wav
   pipeline/
-    asr.py                Whisper + OCR multi-pass
-    translate.py          MT free + LLM + clean dấu câu VI
-    tts/                  capcut.py, eleven.py, voices_capcut.json
-    export/
-      burn.py             cover/burn pipeline
-      labels.py           layout/cover nhãn (dọc vs ngang)
-      ocr_locate.py       định vị box lúc burn
-      mux.py              ghép audio
-    core/                 project, jobs, media, config
-    run.py                orchestrate bước
-  tests/                  smoke / unit burn
+    asr/ ocr/ tts/ export/ core/ run.py
+  tests/
+scripts/                  setup + dev:all
 ```
 
 ---

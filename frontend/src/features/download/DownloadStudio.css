@@ -1,0 +1,95 @@
+.dl-studio {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 24px 20px 40px;
+}
+
+.dl-head h1 {
+  margin: 0;
+  font-size: 1.4rem;
+  font-weight: 800;
+}
+
+.dl-head p {
+  margin: 6px 0 0;
+  color: var(--muted-foreground, #64748b);
+  font-size: 0.9rem;
+}
+
+.dl-card {
+  margin-top: 16px;
+  background: var(--card, #fff);
+  border: 1px solid var(--border, #e2e8f0);
+  border-radius: 14px;
+  padding: 16px 18px;
+}
+
+.dl-card h2 {
+  margin: 0 0 12px;
+  font-size: 0.95rem;
+}
+
+.dl-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+  font-size: 0.8rem;
+  color: var(--muted-foreground, #64748b);
+}
+
+.dl-field input,
+.dl-field select {
+  border: 1px solid var(--border, #e2e8f0);
+  border-radius: 8px;
+  padding: 9px 12px;
+  font-size: 0.9rem;
+}
+
+.dl-btn {
+  border: 0;
+  border-radius: 10px;
+  padding: 10px 16px;
+  background: #2563eb;
+  color: #fff;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.dl-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.dl-error {
+  margin: 10px 0 0;
+  color: #b91c1c;
+  font-size: 0.85rem;
+}
+
+.dl-empty {
+  color: var(--muted-foreground, #64748b);
+  font-size: 0.88rem;
+  margin: 0;
+}
+
+.dl-jobs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.dl-jobs li {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border, #e2e8f0);
+  font-size: 0.86rem;
+}
+
+.dl-jobs em {
+  color: var(--muted-foreground, #64748b);
+  font-style: normal;
+  font-size: 0.78rem;
+}

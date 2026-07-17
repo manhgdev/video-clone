@@ -5,7 +5,7 @@ import path from 'node:path'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const isWin = process.platform === 'win32'
-const venvPython = path.join(root, 'server', '.venv', isWin ? 'Scripts/python.exe' : 'bin/python')
+const venvPython = path.join(root, 'backend', '.venv', isWin ? 'Scripts/python.exe' : 'bin/python')
 
 function run(command, args) {
   const result = spawnSync(command, args, { cwd: root, stdio: 'inherit', shell: false })
@@ -24,12 +24,12 @@ console.log('Cài frontend dependencies...')
 run(isWin ? process.env.ComSpec || 'cmd.exe' : 'npm', isWin ? ['/d', '/s', '/c', 'npm install'] : ['install'])
 
 if (!existsSync(venvPython)) {
-  console.log('Tạo server/.venv...')
-  run(findPython(), ['-m', 'venv', path.join(root, 'server', '.venv')])
+  console.log('Tạo backend/.venv...')
+  run(findPython(), ['-m', 'venv', path.join(root, 'backend', '.venv')])
 }
 
 console.log('Cài backend dependencies...')
 run(venvPython, ['-m', 'pip', 'install', '--upgrade', 'pip'])
-run(venvPython, ['-m', 'pip', 'install', '-r', path.join(root, 'server', 'requirements.txt')])
+run(venvPython, ['-m', 'pip', 'install', '-r', path.join(root, 'backend', 'requirements.txt')])
 
 console.log('\nĐã cài xong. Chạy: npm run dev:all')
