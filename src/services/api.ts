@@ -159,7 +159,7 @@ export const api = {
       body: JSON.stringify(settings),
     }),
 
-  dub: (projectId: string, settings: ProjectSettings) =>
+  dub: (projectId: string, settings: ProjectSettings & { forceTts?: boolean }) =>
     fetchJson<{ ok: boolean }>(`${base}/projects/${projectId}/dub`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

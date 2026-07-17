@@ -119,6 +119,13 @@ def run_cmd(project_id: str | None, cmd: list[str], **kwargs: Any) -> None:
     kw = dict(kwargs)
     kw.setdefault("stdout", subprocess.DEVNULL)
     kw.setdefault("stderr", subprocess.DEVNULL)
+    try:
+        from .winproc import hide_console_kwargs
+
+        for k, v in hide_console_kwargs().items():
+            kw.setdefault(k, v)
+    except Exception:
+        pass
     p = subprocess.Popen(cmd, **kw)
     if project_id:
         with _lock:

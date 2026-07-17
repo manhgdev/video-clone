@@ -1,5 +1,8 @@
 node_modules/
 dist/
+build_app/.work/
+build_app/release/
+build_app/*.spec
 server/data/
 server/.venv/
 server/.venv-demucs/

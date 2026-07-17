@@ -42,6 +42,8 @@ export type Segment = {
   dub?: boolean
 }
 
+export type OverlayMaskStyle = 'blur' | 'solid' | 'mosaic'
+
 export type TextOverlay = {
   id: string
   start: number
@@ -53,6 +55,13 @@ export type TextOverlay = {
   h: number
   fontSize: number
   color: string
+  /** text = chữ tự do; effect = vùng hiệu ứng (làm mờ / màu / khối) */
+  kind?: 'text' | 'effect'
+  /** Kiểu mặt nạ khi kind=effect */
+  maskStyle?: OverlayMaskStyle
+  maskColor?: string
+  /** 0–100 */
+  maskOpacity?: number
 }
 
 export type ProjectSettings = {
@@ -73,6 +82,8 @@ export type ProjectSettings = {
     | 'grok'
   matchDuration: 'natural' | 'stretch' | 'none' | 'preferVideo'
   defaultVoice: string
+  /** true khi bấm Lồng tiếng — server xóa cache TTS và gen lại */
+  forceTts?: boolean
   /** Che hardsub cũ (blur). Tắt = giữ chữ OCR trên khung */
   coverHardsubs: boolean
   /** Kiểu mặt nạ che chữ gốc khi cover: blur | solid | mosaic */
@@ -87,6 +98,18 @@ export type ProjectSettings = {
   captionPlacement: 'below' | 'above'
   /** Cỡ chữ bản dịch theo pixel; 0 = tự động theo bbox/độ phân giải */
   subtitleFontSize: number
+  /** Phông chữ phụ đề (CSS / tên font hệ thống) */
+  subtitleFontFamily?: string
+  /** Màu chữ phụ đề #RRGGBB */
+  captionTextColor?: string
+  /** Nền sau chữ: none | solid | blur | box */
+  captionBgStyle?: 'none' | 'solid' | 'blur' | 'box'
+  /** Màu nền chữ #RRGGBB */
+  captionBgColor?: string
+  /** Độ đậm nền 0–100 */
+  captionBgOpacity?: number
+  /** Viền chữ (outline) */
+  captionStroke?: boolean
   /** Bật bộ lọc track âm thanh có sẵn trong video */
   processOriginalAudio: boolean
   /** Chế độ xử lý track âm thanh gốc */

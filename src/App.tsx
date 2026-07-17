@@ -52,6 +52,12 @@ const defaultSettings: ProjectSettings = {
   burnSubs: true,
   captionPlacement: 'below',
   subtitleFontSize: 0,
+  subtitleFontFamily: 'system',
+  captionTextColor: '#ffffff',
+  captionBgStyle: 'none',
+  captionBgColor: '#000000',
+  captionBgOpacity: 55,
+  captionStroke: true,
   processOriginalAudio: false,
   originalAudioMode: 'original',
   originalAudioVolume: 100,
@@ -93,6 +99,28 @@ function loadSettings(): ProjectSettings {
     if (typeof s.coverMaskColor !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(s.coverMaskColor)) {
       s.coverMaskColor = '#4c1d95'
     }
+    const okFont = [
+      'system', 'segoe', 'arial', 'bold', 'helvetica', 'verdana', 'tahoma',
+      'trebuchet', 'rounded', 'impact', 'georgia', 'times', 'palatino', 'garamond',
+      'courier', 'mono', 'comic', 'cjk', 'meiryo', 'malgun',
+    ] as const
+    if (!okFont.includes(s.subtitleFontFamily as (typeof okFont)[number])) {
+      s.subtitleFontFamily = 'system'
+    }
+    if (typeof s.captionTextColor !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(s.captionTextColor)) {
+      s.captionTextColor = '#ffffff'
+    }
+    const okBg = ['none', 'solid', 'blur', 'box'] as const
+    if (!okBg.includes(s.captionBgStyle as (typeof okBg)[number])) s.captionBgStyle = 'none'
+    if (typeof s.captionBgColor !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(s.captionBgColor)) {
+      s.captionBgColor = '#000000'
+    }
+    if (typeof s.captionBgOpacity !== 'number' || Number.isNaN(s.captionBgOpacity)) {
+      s.captionBgOpacity = 55
+    } else {
+      s.captionBgOpacity = Math.max(0, Math.min(100, s.captionBgOpacity))
+    }
+    if (typeof s.captionStroke !== 'boolean') s.captionStroke = true
     const okAspect = [
       'original', 'custom', '16:9', '4:3', '2.35:1', '2:1', '1.85:1',
       '9:16', '3:4', '58inch', '1:1',
@@ -185,9 +213,10 @@ export default function App() {
   const busyAt = useRef(0)
 
   const freshVideoUrl = (url: string) => {
+    // Chỉ revision (không Date.now) — giảm abort Range storm khi poll/bake
     videoRevisionRef.current += 1
-    const join = url.includes('?') ? '&' : '?'
-    return `${url}${join}v=${videoRevisionRef.current}-${Date.now()}`
+    const base = url.split('?')[0]
+    return `${base}?v=${videoRevisionRef.current}`
   }
 
   useEffect(() => {
@@ -332,8 +361,8 @@ export default function App() {
       return
     }
     pollFailStreak.current = 0
+    // 1.5s: giảm storm HTTP status (Windows WinError 10055 khi quá nhiều socket)
     pollRef.current = window.setInterval(async () => {
-      // backend reload: bỏ tick nếu request trước còn treo
       if (pollInFlight.current) return
       pollInFlight.current = true
       try {
@@ -366,7 +395,14 @@ export default function App() {
           try {
             const segs = await api.segments(projectId)
             if (activeProjectRef.current !== projectId) return
-            setSegments(applyDefaultVoice(asSegmentList(segs), settings.defaultVoice))
+            // Cache-bust ổn định theo audioDuration (không Date.now mỗi poll → storm Range)
+            const list = applyDefaultVoice(asSegmentList(segs), settings.defaultVoice).map((seg) => {
+              if (!seg.audioUrl || !seg.audioFile) return seg
+              const base = seg.audioUrl.split('?')[0]
+              const v = Math.round((seg.audioDuration || 0) * 1000)
+              return { ...seg, audioUrl: `${base}?v=${v}` }
+            })
+            setSegments(list)
           } catch {
             /* status đã xong — segments có thể retry sau */
           }
@@ -387,7 +423,7 @@ export default function App() {
         }
       } catch {
         pollFailStreak.current += 1
-        // ~4s (5×800ms) backend down → bỏ trạng thái "Đang xử lý" (tránh UI đơ)
+        // ~7.5s (5×1.5s) backend down
         if (pollFailStreak.current >= 5) {
           setStatus((prev) => ({
             ...prev,
@@ -401,7 +437,7 @@ export default function App() {
       } finally {
         pollInFlight.current = false
       }
-    }, 800)
+    }, 1500)
     return () => {
       if (pollRef.current) window.clearInterval(pollRef.current)
       pollRef.current = null
@@ -526,8 +562,25 @@ export default function App() {
   async function onDub() {
     if (!projectId) return
     busyAt.current = Date.now()
-    setStatus({ step: 'dub', progress: 0, message: 'Đang lồng tiếng…', running: true, error: undefined })
-    await api.dub(projectId, settings)
+    setProgressMinimized(false)
+    // Xóa audio local cũ — tránh preview lệch khi TTS gen lại (cache file)
+    setSegments((segs) =>
+      (Array.isArray(segs) ? segs : []).map((s) => ({
+        ...s,
+        audioFile: undefined,
+        audioUrl: undefined,
+        audioDuration: undefined,
+        videoSpeed: undefined,
+      })),
+    )
+    setStatus({
+      step: 'dub',
+      progress: 0,
+      message: 'Đang lồng tiếng…',
+      running: true,
+      error: undefined,
+    })
+    await api.dub(projectId, { ...settings, forceTts: true })
     setStatus((s) => ({ ...s, running: true }))
   }
 
@@ -851,6 +904,9 @@ export default function App() {
           settings={settings}
           voices={voices}
           busy={status.running}
+          jobStep={status.step}
+          jobProgress={status.progress}
+          jobMessage={status.message}
           onDub={onDub}
           onBack={() => setPreviewEditorOpen(false)}
           onChange={onSegmentChange}

@@ -391,7 +391,8 @@ def retime_video_segments(
             gap = start - cursor
             spans.append((cursor, start, 1.0, out_cursor, out_cursor + gap))
             out_cursor += gap
-        speed = max(0.5, min(2.0, float(segment.get("videoSpeed") or 1)))
+        # <1 = chậm (kéo dài span, đẩy timeline sau); >1 = nhanh
+        speed = max(0.4, min(2.0, float(segment.get("videoSpeed") or 1)))
         if end > start + 0.001:
             out_end = out_cursor + (end - start) / speed
             spans.append((start, end, speed, out_cursor, out_end))
@@ -411,6 +412,18 @@ def retime_video_segments(
         mapped = dict(segment)
         mapped["start"] = map_time(float(segment.get("start") or 0))
         mapped["end"] = map_time(float(segment.get("end") or 0))
+        if segment.get("coverStart") is not None:
+            try:
+                mapped["coverStart"] = map_time(float(segment["coverStart"]))
+            except (TypeError, ValueError):
+                pass
+        if segment.get("coverEnd") is not None:
+            try:
+                mapped["coverEnd"] = map_time(float(segment["coverEnd"]))
+            except (TypeError, ValueError):
+                pass
+        # speed đã “nướng” vào timeline — đừng retime lần 2
+        mapped.pop("videoSpeed", None)
         remapped.append(mapped)
 
     if not out.exists():

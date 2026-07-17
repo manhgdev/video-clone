@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
 import re
 import shutil
@@ -43,7 +44,11 @@ from pipeline.export.mux import separate_no_vocals, read_stem_progress
 
 
 class _VideoFileResponse(StarletteFileResponse):
-    """Bỏ Range vượt EOF — tránh 416 khi đổi preview↔full / ghi đè clip."""
+    """Bỏ Range vượt EOF — tránh 416 khi đổi preview↔full / ghi đè clip.
+
+    Nuốt CancelledError / disconnect client — tránh log ASGI + WinError 10055
+    khi UI abort hàng loạt Range request (poll / đổi URL / pause).
+    """
 
     def __init__(self, *args: Any, force_full: bool = False, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -53,7 +58,11 @@ class _VideoFileResponse(StarletteFileResponse):
         if self.force_full:
             headers = [(k, v) for k, v in scope.get("headers", []) if k.lower() != b"range"]
             scope = {**scope, "headers": headers}
-        await super().__call__(scope, receive, send)
+        try:
+            await super().__call__(scope, receive, send)
+        except (asyncio.CancelledError, ConnectionResetError, BrokenPipeError, OSError):
+            # Client đóng socket giữa chừng (tua / đổi src / reload) — không crash worker
+            return
 
 
 def _range_start(range_header: str | None) -> int | None:
@@ -81,15 +90,23 @@ def _serve_video_file(path: Path, request: Request) -> StarletteFileResponse:
         path,
         media_type="video/mp4",
         headers={
-            # Project video may be replaced in-place after preview/full rebakes.
-            # Never reuse a previously buffered response for the same endpoint.
-            "Cache-Control": "private, no-store, max-age=0, must-revalidate",
-            "Pragma": "no-cache",
+            # ETag đổi khi file ghi đè; short cache giảm storm Range trên Windows
+            # (no-store + tua liên tục → cạn socket WinError 10055).
+            "Cache-Control": "private, max-age=2, must-revalidate",
             "ETag": f'"{st.st_mtime_ns:x}-{st.st_size:x}"',
+            "Accept-Ranges": "bytes",
         },
         force_full=force_full,
     )
 
+
+# Windows packaged GUI: ẩn CMD khi spawn ffmpeg / python / nvidia-smi
+try:
+    from pipeline.core.winproc import apply_subprocess_no_window
+
+    apply_subprocess_no_window()
+except Exception:
+    pass
 
 app = FastAPI(title="Video-Clone Local")
 app.add_middleware(
@@ -116,6 +133,12 @@ class Settings(BaseModel):
     burnSubs: bool = True
     captionPlacement: str = "below"  # below | above
     subtitleFontSize: int = 0  # 0 = tự động theo bbox / độ phân giải
+    subtitleFontFamily: str = "system"  # system | bold | rounded | mono
+    captionTextColor: str = "#ffffff"
+    captionBgStyle: str = "none"  # none | solid | blur | box
+    captionBgColor: str = "#000000"
+    captionBgOpacity: int = 55  # 0–100
+    captionStroke: bool = True
     processOriginalAudio: bool = False
     originalAudioMode: str = "original"
     # 0–100: volume track gốc / nền sau lọc
@@ -126,6 +149,8 @@ class Settings(BaseModel):
     workers: int = 0
     # Khớp LivePreviewEditor: original | 16:9 | 9:16 | …
     previewAspectRatio: str = "original"
+    # true = xóa file TTS cache + gen lại (nút Lồng tiếng trong editor)
+    forceTts: bool = False
 
 
 class SegmentIn(BaseModel):
@@ -168,13 +193,18 @@ class TextOverlayIn(BaseModel):
     id: str
     start: float
     end: float
-    text: str
+    text: str = ""
     x: float
     y: float
     w: float
     h: float
     fontSize: int = 42
     color: str = "#ffffff"
+    # text | effect — effect = vùng làm mờ/màu/khối tự do
+    kind: str | None = "text"
+    maskStyle: str | None = None  # blur | solid | mosaic
+    maskColor: str | None = None
+    maskOpacity: int | None = None
 
 
 def _validate_segment_editor_fields(body: SegmentIn, meta: dict) -> None:
@@ -588,7 +618,8 @@ def api_replace_segments(project_id: str, body: list[SegmentIn]):
         ordered = sorted(body, key=lambda s: (s.start, s.end, s.id))
         out: list[dict] = []
         for i, item in enumerate(ordered):
-            dumped = item.model_dump()
+            # exclude_none: tránh dub=null (Pydantic optional) → backend bỏ hết TTS
+            dumped = item.model_dump(exclude_none=True)
             dumped["index"] = i
             out.append(dumped)
         meta["segments"] = out
@@ -627,7 +658,10 @@ def api_dub(project_id: str, settings: Settings):
     if not meta:
         raise HTTPException(404)
     old_default = (meta.get("settings") or {}).get("defaultVoice") or ""
-    meta["settings"] = settings.model_dump()
+    force_tts = bool(settings.forceTts)
+    dumped = settings.model_dump()
+    dumped.pop("forceTts", None)
+    meta["settings"] = dumped
     default = settings.defaultVoice
     segs = meta.get("segments") or []
     uniq = {(s.get("voice") or "").strip() for s in segs}
@@ -639,9 +673,24 @@ def api_dub(project_id: str, settings: Settings):
         v = (seg.get("voice") or "").strip()
         if batch or not v or v == "system" or v == old_default:
             seg["voice"] = default
+        if force_tts:
+            # Xóa trỏ cache — run_dub gen lại; file .wav xóa trong run_dub
+            seg.pop("audioFile", None)
+            seg.pop("audioUrl", None)
+            seg.pop("audioDuration", None)
+            seg.pop("videoSpeed", None)
+    if force_tts:
+        meta["forceTts"] = True
     save_meta(project_id, meta)
     arm_job(project_id)
-    set_status(project_id, step="dub", progress=1, message="Queued…", running=True, error=None)
+    set_status(
+        project_id,
+        step="dub",
+        progress=1,
+        message="Queued… (gen lại TTS)" if force_tts else "Queued…",
+        running=True,
+        error=None,
+    )
     _spawn(run_dub, project_id)
     return {"ok": True}
 
@@ -882,7 +931,15 @@ def api_tts(project_id: str, name: str):
     path = ensure_layout(project_id) / "tts" / name
     if not path.exists():
         raise HTTPException(404)
-    return FileResponse(path, media_type="audio/wav")
+    st = path.stat()
+    return FileResponse(
+        path,
+        media_type="audio/wav",
+        headers={
+            "Cache-Control": "private, max-age=60",
+            "ETag": f'"{st.st_mtime_ns:x}-{st.st_size:x}"',
+        },
+    )
 
 
 @app.post("/api/projects/{project_id}/audio/no-vocals")
@@ -930,7 +987,11 @@ def api_system_checks():
     """Dependency checklist cho tab Thiết lập / first-run."""
     from pipeline.core.system_check import system_checks
 
-    return system_checks()
+    try:
+        return system_checks()
+    except Exception as e:
+        # Không để exception Python kéo sập UI; native crash vẫn chỉ tránh bằng check nhẹ.
+        raise HTTPException(500, f"system checks failed: {e}") from e
 
 
 @app.post("/api/system/install/ocr_cuda")

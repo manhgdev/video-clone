@@ -1,11 +1,13 @@
 {
   "name": "video-clone",
   "private": true,
-  "version": "0.1.0",
+  "version": "1.0.5",
   "type": "module",
   "scripts": {
+    "setup": "node scripts/setup.mjs",
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "build:app": "node build_app/build.mjs",
     "preview": "vite preview",
     "server": "cd server && python -m uvicorn main:app --reload --port 8787",
     "dev:all": "node scripts/dev.mjs",

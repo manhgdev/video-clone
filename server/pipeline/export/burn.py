@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -882,6 +883,17 @@ def _text_fill_rgba(segment: dict[str, Any] | None) -> tuple[int, int, int, int]
     return (r, g, b, 255)
 
 
+def _hex_rgba(hex_color: str, alpha: int = 255) -> tuple[int, int, int, int]:
+    h = (hex_color or "#ffffff").lstrip("#")
+    if len(h) != 6:
+        return (255, 255, 255, alpha)
+    try:
+        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+        return (r, g, b, max(0, min(255, alpha)))
+    except ValueError:
+        return (255, 255, 255, alpha)
+
+
 def _caption_overlay(layout: dict[str, Any]) -> tuple[Any, int, int] | None:
     """Render RGBA một lần / câu — blit nhanh mỗi khung."""
     import numpy as np
@@ -895,6 +907,14 @@ def _caption_overlay(layout: dict[str, Any]) -> tuple[Any, int, int] | None:
     line_hs: list[int] = layout.get("line_hs") or []
     gap_line = int(layout.get("gap_line") or max(2, layout.get("line_h", 20) // 8))
     fill = layout.get("fill") or (255, 255, 255, 255)
+    if isinstance(layout.get("fill_hex"), str):
+        fill = _hex_rgba(str(layout["fill_hex"]), 255)
+    stroke_on = layout.get("stroke", True)
+    if stroke_on is None:
+        stroke_on = True
+    bg_style = str(layout.get("bg_style") or "none").lower()
+    bg_hex = str(layout.get("bg_hex") or "#000000")
+    bg_op = max(0, min(100, int(layout.get("bg_opacity") if layout.get("bg_opacity") is not None else 55)))
     m = 6
     bw, bh = (x1 - x0) + 2 * m, (y1 - y0) + 2 * m
     if bw < 4 or bh < 4:
@@ -903,9 +923,19 @@ def _caption_overlay(layout: dict[str, Any]) -> tuple[Any, int, int] | None:
     draw = ImageDraw.Draw(overlay)
     box_w = x1 - x0
     box_h = y1 - y0
+    # Nền chữ (solid / box / blur ≈ semi-solid)
+    if bg_style in ("solid", "box", "blur"):
+        a = int(255 * max(0.15, min(0.92, bg_op / 100.0 * (0.55 if bg_style == "blur" else 1.0))))
+        br, bg, bb, _ = _hex_rgba(bg_hex, a)
+        pad = 4 if bg_style == "box" else 2
+        draw.rounded_rectangle(
+            (m - pad, m - pad, m + box_w + pad, m + box_h + pad),
+            radius=6 if bg_style == "box" else 4,
+            fill=(br, bg, bb, a),
+        )
     ty = m + max(0, (box_h - text_h) // 2)
     thick = bool(layout.get("vertical") or layout.get("label"))
-    # Dọc/nhãn: viền dày. Mid/ngang: soft drop-shadow khớp preview (drop-shadow 0 2px 4px).
+    # Dọc/nhãn: viền dày. Mid/ngang: soft drop-shadow khớp preview.
     outline_thick = (
         (-3, 0),
         (3, 0),
@@ -945,15 +975,15 @@ def _caption_overlay(layout: dict[str, Any]) -> tuple[Any, int, int] | None:
         tw = bb[2] - bb[0]
         th = line_hs[i] if i < len(line_hs) else (bb[3] - bb[1])
         tx = m + (box_w - tw) // 2
-        # bù top bearing của font (textbbox top thường > 0) → căn giữa đúng nét.
         top = bb[1]
         gy = ty - top
-        if thick:
-            for dx, dy in outline_thick:
-                draw.text((tx + dx, gy + dy), line, font=font, fill=(0, 0, 0, 250))
-        else:
-            for dx, dy, aa in soft_shadow:
-                draw.text((tx + dx, gy + dy), line, font=font, fill=(0, 0, 0, aa))
+        if stroke_on:
+            if thick:
+                for dx, dy in outline_thick:
+                    draw.text((tx + dx, gy + dy), line, font=font, fill=(0, 0, 0, 250))
+            else:
+                for dx, dy, aa in soft_shadow:
+                    draw.text((tx + dx, gy + dy), line, font=font, fill=(0, 0, 0, aa))
         draw.text((tx, gy), line, font=font, fill=fill)
         ty += th + (gap_line if i + 1 < len(lines) else 0)
     rgba = np.asarray(overlay)
@@ -1663,10 +1693,13 @@ def _editor_layout_locked(segment: dict[str, Any]) -> bool:
 
 
 def _should_paint_cover_mask(cover: bool, layout: str) -> bool:
-    """Khớp preview: mid/dọc/nhãn che khi burnSubs; ngang chỉ khi coverHardsubs."""
+    """Che hardsub: cover=True → tất cả; cover=False (below/above) → chỉ watermark dọc/nhãn.
+
+    Mid/horizontal khi below/above: không che (chữ dịch neo phía trên/dưới OCR).
+    """
     if cover:
         return True
-    return (layout or "horizontal") in ("mid", "vertical", "label")
+    return (layout or "horizontal") in ("vertical", "label")
 
 
 def _stored_cover_should_relocate(
@@ -2370,6 +2403,11 @@ def cover_and_burn(
     cover_mask_style: str = "blur",
     cover_mask_color: str = "#4c1d95",
     cover_mask_opacity: int = 40,
+    caption_text_color: str = "#ffffff",
+    caption_bg_style: str = "none",
+    caption_bg_color: str = "#000000",
+    caption_bg_opacity: int = 55,
+    caption_stroke: bool = True,
 ) -> Path:
     """cover = blur hardsub; burn = đè chữ dịch. placement: below|above khi không cover."""
     import cv2
@@ -2399,7 +2437,14 @@ def cover_and_burn(
         mask_style = "blur"
     mask_color = str(cover_mask_color or "#4c1d95")
     mask_opacity = max(0, min(100, int(cover_mask_opacity if cover_mask_opacity is not None else 40)))
-    # cover → chữ đè đúng dải OCR; không cover → above/below hardsub
+    cap_fill_hex = str(caption_text_color or "#ffffff")
+    cap_bg_style = str(caption_bg_style or "none").lower()
+    if cap_bg_style not in ("none", "solid", "blur", "box"):
+        cap_bg_style = "none"
+    cap_bg_hex = str(caption_bg_color or "#000000")
+    cap_bg_op = max(0, min(100, int(caption_bg_opacity if caption_bg_opacity is not None else 55)))
+    cap_stroke = bool(caption_stroke if caption_stroke is not None else True)
+    # cover → chữ đè đúng dải OCR; không cover → above/below hardsub (mid cũng below/above)
     layout_place = "over" if cover else place
     try:
         font = ImageFont.truetype(_subtitle_font(), fontsize)
@@ -2414,7 +2459,9 @@ def cover_and_burn(
         raw = (seg.get("translation") or "").strip()
         source = (seg.get("source") or "").strip()
         burn_text = _clean_burn_text(raw)
-        if not burn_text:
+        mask_only = bool(seg.get("maskOnly"))
+        # maskOnly: vùng hiệu ứng tự do (làm mờ) — không cần chữ
+        if not burn_text and not mask_only:
             continue
         layout = str(seg.get("layout") or "horizontal")
         if layout not in ("horizontal", "vertical", "label", "mid"):
@@ -2448,6 +2495,11 @@ def cover_and_burn(
             cover_start, cover_end = resolve_cover_window(seg)
             burn_start = max(0.0, s0)
             burn_end = max(e0, burn_start + 0.04)
+        if mask_only:
+            # Effect region: che theo [start,end), không burn chữ
+            cover_start, cover_end = max(0.0, s0), max(e0, s0 + 0.04)
+            burn_start, burn_end = cover_start, cover_start  # zero-length burn
+            burn_text = ""
         cues.append(
             (cover_start, cover_end, burn_start, burn_end, burn_text, source, layout)
         )
@@ -2736,8 +2788,10 @@ def cover_and_burn(
             )
             editor_locked = _editor_layout_locked(seg_meta)
             lay: dict[str, Any] | None = None
-            # Mid: ưu tiên layout bake từ preview (caption trong bbox); fallback fit OCR
-            if is_mid and paint is not None:
+            # below/above: không ép mid layout "over" — dùng placement above/below OCR
+            force_below_above = (not cover) and layout_place in ("below", "above")
+            # Mid + cover: ưu tiên layout bake từ preview; mid + below/above → skip
+            if is_mid and paint is not None and not force_below_above:
                 if preview_lay is not None and editor_locked:
                     lay = preview_lay
                     cover_box = paint
@@ -2796,7 +2850,7 @@ def cover_and_burn(
                 lay = _layout_caption_vertical(
                     text, cue_font, cue_fs, layout_paint if layout_paint else paint, w, h
                 )
-            elif lay is None and is_mid and paint is not None:
+            elif lay is None and is_mid and paint is not None and not force_below_above:
                 mid_pref = int(seg_meta.get("fontSize") or 0)
                 lay = _layout_mid_caption(
                     text,
@@ -2859,17 +2913,35 @@ def cover_and_burn(
                 )
         else:
             lay = None
+        if lay is not None:
+            lay = {
+                **lay,
+                "fill_hex": cap_fill_hex,
+                "bg_style": cap_bg_style,
+                "bg_hex": cap_bg_hex,
+                "bg_opacity": cap_bg_op,
+                "stroke": cap_stroke,
+            }
         cue_overlays.append(_caption_overlay(lay) if lay else None)
-        # che mid/dọc dù coverHardsubs=false (preview maskBoxes cũng vậy);
-        # is_mid có thể set sau khi OCR bbox nằm giữa khung
+        # cover=True: che hardsub; below/above: chỉ dọc/nhãn (không che mid)
+        # is_mid khi cover=False không được bật mask (tránh giống «che chữ + chèn»)
         need_mask = _should_paint_cover_mask(
-            cover, "mid" if is_mid else lay_mode
+            cover, lay_mode if not (is_mid and not cover) else ("mid" if cover else "horizontal")
         )
+        if not cover and is_mid:
+            need_mask = False
         if seg_meta.get("skipCoverMask"):
             need_mask = False
+        if seg_meta.get("maskOnly"):
+            # Effect region: luôn che đúng bbox editor
+            need_mask = True
+            paint = _segment_bbox_override(seg_meta, w, h) or paint
+            cover_box = paint
         cue_need_mask.append(need_mask)
         if need_mask:
-            if used_preview_layout and cover_box is not None:
+            if seg_meta.get("maskOnly") and paint is not None:
+                cue_fits.append([paint])
+            elif used_preview_layout and cover_box is not None:
                 cue_fits.append([cover_box])
             elif used_preview_layout and paint is not None:
                 cue_fits.append([paint])
@@ -2947,6 +3019,13 @@ def cover_and_burn(
         raise RuntimeError(f"Không mở được video: {video}")
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
     frame_total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    _ff_kw: dict = dict(
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if sys.platform == "win32":
+        _ff_kw["creationflags"] = int(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
     proc = subprocess.Popen(
         [
             "ffmpeg",
@@ -2980,9 +3059,7 @@ def cover_and_burn(
             "-shortest",
             str(out),
         ],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        **_ff_kw,
     )
     assert proc.stdin is not None
     if project_id:
@@ -3011,14 +3088,20 @@ def cover_and_burn(
         bis = burn_idx[fi] if fi < len(burn_idx) else []
         for ci in cis:
             fits = cue_fits[ci] if ci < len(cue_fits) else []
+            # Per-cue mask style (effect overlay) hoặc global cover mask
+            sid = cue_segment_ids[ci] if ci < len(cue_segment_ids) else ""
+            sm = segments_by_id.get(sid, {}) if sid else {}
+            st_cue = str(sm.get("coverMaskStyle") or mask_style)
+            col_cue = str(sm.get("coverMaskColor") or mask_color)
+            op_cue = int(sm.get("coverMaskOpacity") if sm.get("coverMaskOpacity") is not None else mask_opacity)
             for fit in fits:
                 if fit is not None:
                     fr = _apply_cover_mask(
                         fr,
                         fit,
-                        style=mask_style,
-                        color_hex=mask_color,
-                        opacity_pct=mask_opacity,
+                        style=st_cue,
+                        color_hex=col_cue,
+                        opacity_pct=op_cue,
                     )
         for bi in bis:
             # Không ẩn watermark dọc khi label trùng nguồn (OCR flicker cùng cột) —

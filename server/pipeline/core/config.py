@@ -4,11 +4,12 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-DATA = Path(__file__).resolve().parents[2] / "data"
-DATA.mkdir(exist_ok=True)
+SERVER_ROOT = Path(os.environ.get("VIDEO_CLONE_HOME", Path(__file__).resolve().parents[2]))
+DATA = Path(os.environ.get("VIDEO_CLONE_DATA", SERVER_ROOT / "data"))
+DATA.mkdir(parents=True, exist_ok=True)
 
 # ponytail: load server/.env once; no python-dotenv dep
-_env_path = Path(__file__).resolve().parents[2] / ".env"
+_env_path = SERVER_ROOT / ".env"
 if _env_path.exists():
     for _line in _env_path.read_text(encoding="utf-8").splitlines():
         _line = _line.strip()

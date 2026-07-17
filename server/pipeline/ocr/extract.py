@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import uuid
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
@@ -59,18 +60,79 @@ def _limit_onnx_threads() -> None:
     os.environ.setdefault("ORT_NUM_THREADS", "1")
 
 
-def prepare_cuda_dlls() -> None:
-    """PATH CUDA pip wheels — dùng chung Whisper + RapidOCR trên Windows."""
-    if os.name != "nt":
-        return
-    import sysconfig
+_cuda_dlls_ready = False
 
-    root = Path(sysconfig.get_paths()["purelib"]) / "nvidia"
+
+def _nvidia_bin_dirs() -> list[Path]:
+    """Mọi thư mục nvidia/*/bin (pip CUDA wheels) — purelib + .venv-ocr + sys.path."""
+    roots: list[Path] = []
+    try:
+        import sysconfig
+
+        roots.append(Path(sysconfig.get_paths()["purelib"]))
+    except Exception:
+        pass
+    home = os.environ.get("VIDEO_CLONE_HOME", "").strip()
+    if home:
+        ocr_site = (
+            Path(home) / ".venv-ocr" / "Lib" / "site-packages"
+            if os.name == "nt"
+            else Path(home)
+            / ".venv-ocr"
+            / "lib"
+            / f"python{sys.version_info.major}.{sys.version_info.minor}"
+            / "site-packages"
+        )
+        roots.append(ocr_site)
+    try:
+        import onnxruntime as ort
+
+        # .../site-packages/onnxruntime → sibling nvidia/
+        roots.append(Path(ort.__file__).resolve().parent.parent)
+    except Exception:
+        pass
+    for p in sys.path:
+        if p:
+            roots.append(Path(p))
+
+    seen: set[str] = set()
+    bins: list[Path] = []
+    for root in roots:
+        nvidia = root / "nvidia"
+        if not nvidia.is_dir():
+            continue
+        for b in nvidia.glob("*/bin"):
+            key = str(b.resolve()) if b.exists() else str(b)
+            if key in seen:
+                continue
+            if b.is_dir():
+                seen.add(key)
+                bins.append(b)
+    return bins
+
+
+def prepare_cuda_dlls() -> None:
+    """PATH + add_dll_directory cho CUDA pip wheels (Whisper + RapidOCR)."""
+    global _cuda_dlls_ready
+    if os.name != "nt" or _cuda_dlls_ready:
+        return
+    bins = _nvidia_bin_dirs()
+    if not bins:
+        return
     path = os.environ.get("PATH", "")
-    bins = [str(p) for p in root.glob("*/bin") if str(p) not in path]
-    if bins:
-        # ponytail: pip's CUDA sub-libraries are loaded by name at runtime.
-        os.environ["PATH"] = os.pathsep.join(bins + [path])
+    path_parts = path.split(os.pathsep) if path else []
+    prepend = [str(b) for b in bins if str(b) not in path_parts]
+    if prepend:
+        os.environ["PATH"] = os.pathsep.join(prepend + path_parts)
+    # Windows: LoadLibrary tìm DLL qua add_dll_directory (PATH đôi khi không đủ).
+    add_dir = getattr(os, "add_dll_directory", None)
+    if add_dir:
+        for b in bins:
+            try:
+                add_dir(str(b))
+            except (OSError, FileNotFoundError):
+                pass
+    _cuda_dlls_ready = True
 
 
 def _is_cjk(ch: str) -> bool:

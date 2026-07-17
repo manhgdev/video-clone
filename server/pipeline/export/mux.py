@@ -259,11 +259,49 @@ def _pip_install_demucs_torch(py: Path, project_id: str | None) -> None:
         )
 
 
+def _demucs_root_candidates() -> list[Path]:
+    """Ưu tiên VIDEO_CLONE_HOME (app), rồi server/, rồi LocalAppData."""
+    roots: list[Path] = []
+    home = os.environ.get("VIDEO_CLONE_HOME", "").strip()
+    if home:
+        roots.append(Path(home))
+    server = Path(__file__).resolve().parents[2]
+    roots.append(server)
+    if sys.platform == "win32":
+        la = Path(os.environ.get("LOCALAPPDATA", "") or "") / "VideoClone"
+        if str(la):
+            roots.append(la)
+    elif sys.platform == "darwin":
+        roots.append(Path.home() / "Library" / "Application Support" / "VideoClone")
+    else:
+        roots.append(Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "VideoClone")
+    seen: set[str] = set()
+    out: list[Path] = []
+    for r in roots:
+        key = str(r.resolve()) if r.exists() else str(r)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(r)
+    return out
+
+
+def _demucs_py_in(root: Path) -> Path:
+    return root / ".venv-demucs" / (
+        "Scripts/python.exe" if sys.platform == "win32" else "bin/python"
+    )
+
+
+def _demucs_install_root() -> Path:
+    """Nơi tạo/cài venv Demucs: app home khi frozen, server/ khi dev."""
+    home = os.environ.get("VIDEO_CLONE_HOME", "").strip()
+    if home or getattr(sys, "frozen", False):
+        return Path(home or _demucs_root_candidates()[0])
+    return Path(__file__).resolve().parents[2]
+
+
 def _demucs_python(project_id: str | None = None, *, report: bool = True) -> str:
     """Python có demucs: Apple Silicon → demucs-mlx; NVIDIA → torch CUDA; khác → CPU."""
-    server_root = Path(__file__).resolve().parents[2]
-    venv = server_root / ".venv-demucs"
-    py = venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
     wanted = _demucs_backend_wanted()
 
     def _ready(exe: Path) -> bool:
@@ -319,14 +357,30 @@ def _demucs_python(project_id: str | None = None, *, report: bool = True) -> str
         )
         _pip_install_demucs_torch(exe, project_id)
 
-    if _ready(py):
-        if wanted == "cuda" and _torch_device(py) != "cuda":
-            _ensure(py)
-        return str(py)
+    # 1) Dùng venv đã có demucs (app home / server / LocalAppData)
+    for root in _demucs_root_candidates():
+        cand = _demucs_py_in(root)
+        if not _ready(cand):
+            continue
+        if wanted == "cuda" and _torch_device(cand) != "cuda":
+            try:
+                _ensure(cand)
+            except Exception:
+                pass
+            if _ready(cand):
+                return str(cand)
+            continue
+        return str(cand)
 
-    cur = Path(sys.executable)
-    if _ready(cur) and wanted != "cuda":
-        return str(cur)
+    if not getattr(sys, "frozen", False):
+        cur = Path(sys.executable)
+        if _ready(cur) and wanted != "cuda":
+            return str(cur)
+
+    # 2) Cài vào root chuẩn (app home khi packaged)
+    install_root = _demucs_install_root()
+    venv = install_root / ".venv-demucs"
+    py = _demucs_py_in(install_root)
 
     if report and project_id:
         set_status(
@@ -338,19 +392,30 @@ def _demucs_python(project_id: str | None = None, *, report: bool = True) -> str
         )
     set_stem_progress(project_id, 4, "Đang cài Demucs / backend GPU (lần đầu)…")
     if not py.is_file():
-        subprocess.run(
-            [sys.executable, "-m", "venv", str(venv)],
-            check=True,
-            capture_output=True,
-            timeout=180,
-        )
+        if getattr(sys, "frozen", False):
+            uv = shutil.which("uv")
+            if not uv:
+                raise RuntimeError("Bản ứng dụng thiếu uv để cài Demucs")
+            subprocess.run(
+                [uv, "venv", "--python", "3.12", "--seed", str(venv)],
+                check=True,
+                capture_output=True,
+                timeout=900,
+            )
+        else:
+            subprocess.run(
+                [sys.executable, "-m", "venv", str(venv)],
+                check=True,
+                capture_output=True,
+                timeout=180,
+            )
     pip = [str(py), "-m", "pip"]
     set_stem_progress(project_id, 6, "Cài pip / wheel…")
     subprocess.run(pip + ["install", "-U", "pip", "wheel"], capture_output=True, timeout=300)
     _ensure(py)
     if not _ready(py):
         raise RuntimeError(
-            "Đã cài Demucs nhưng import vẫn lỗi — kiểm tra server/.venv-demucs"
+            f"Đã cài Demucs nhưng import vẫn lỗi — kiểm tra {venv}"
         )
     accel = _demucs_accel(py)
     set_stem_progress(project_id, 16, f"Đã sẵn sàng Demucs ({accel})")
@@ -410,13 +475,18 @@ def _run_demucs_mlx_progress(
     set_stem_progress(project_id, 18, "Demucs-MLX (Apple GPU) đang tách…")
     separated.mkdir(parents=True, exist_ok=True)
     env = {**os.environ, "PYTHONUNBUFFERED": "1"}
-    proc = subprocess.Popen(
-        [python, "-c", _MLX_SEPARATE_PY, str(source_wav), str(separated)],
+    kw: dict = dict(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
         env=env,
+    )
+    if sys.platform == "win32":
+        kw["creationflags"] = int(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
+    proc = subprocess.Popen(
+        [python, "-c", _MLX_SEPARATE_PY, str(source_wav), str(separated)],
+        **kw,
     )
     assert proc.stdout is not None
     last_pct = 18
@@ -498,14 +568,16 @@ def _run_demucs_progress(
             cmd.extend(["--segment", seg])
         cmd.append(str(source_wav))
         env = {**os.environ, "PYTHONUNBUFFERED": "1", "TQDM_MINITERS": "1"}
-        return subprocess.Popen(
-            cmd,
+        kw: dict = dict(
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
             env=env,
         )
+        if sys.platform == "win32":
+            kw["creationflags"] = int(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
+        return subprocess.Popen(cmd, **kw)
 
     def _consume(proc: subprocess.Popen[str]) -> tuple[int, str]:
         assert proc.stdout is not None
@@ -785,20 +857,27 @@ def _tts_clip_plan(
 ) -> tuple[list[tuple[Path, float, float, float, float]], float]:
     """Trả (clips, video_factor).
 
-    video_factor > 1 = chậm **toàn bộ** video để TTS gần tốc độ tự nhiên (áp dụng tất cả).
-    preferVideo: cố định 0.80× (factor 1.25), gần như không ép TTS.
-    clips: (wav, start_sec_scaled, slot_sec, tts_speed, volume)
+    video_factor > 1 = chậm **toàn bộ** video để TTS gần tốc độ tự nhiên.
+    clips: (wav, start_sec_scaled, play_sec, tts_speed, volume)
+
+    preferVideo đã bake 0.80×: **cascade** — không atrim giữa câu.
+    start_i = max(seg.start, prev_end + gap); speed nhẹ ≤1.25; full audio.
     """
     ordered = sorted(
         [s for s in segments if s],
         key=lambda s: float(s.get("start") or 0),
     )
-    gap = 0.04
+    gap = 0.03
+    # Timeline đã giãn bằng retime_video_segments (videoSpeed) khi TTS dài.
+    # Ở đây: full TTS, speed ≈ 1; chỉ atempo nhẹ nếu vẫn tràn.
+    baked_prefer = match == "preferVideo" and not allow_video_slowdown
     if match == "preferVideo":
         max_video_factor = PREFER_VIDEO_FACTOR
-        soft_tts_speed = 1.02
-        hard_tts_cap = 1.12
-        fixed_factor = PREFER_VIDEO_FACTOR if allow_video_slowdown else 1.0
+        soft_tts_speed = 1.06
+        hard_tts_cap = 1.15  # sau retime hiếm khi cần; không cắt
+        fixed_factor = 1.0 if baked_prefer else (
+            PREFER_VIDEO_FACTOR if allow_video_slowdown else 1.0
+        )
     elif match == "none":
         max_video_factor = 1.45
         soft_tts_speed = 1.08
@@ -807,9 +886,10 @@ def _tts_clip_plan(
     else:
         max_video_factor = 1.35
         soft_tts_speed = 1.12
-        hard_tts_cap = 1.60
+        hard_tts_cap = 1.45
         fixed_factor = None
-    raw: list[tuple[Path, float, float, float, float, float]] = []  # wav, start, slot0, ad, volume, manual speed
+
+    raw: list[tuple[Path, float, float, float, float, float]] = []
     for i, seg in enumerate(ordered):
         name = seg.get("audioFile") or f"{seg['id']}.wav"
         wav = root / "tts" / name
@@ -829,9 +909,10 @@ def _tts_clip_plan(
                 next_start = ns
                 break
         if next_start is not None:
-            slot0 = max(0.15, next_start - start - gap)
+            slot0 = max(0.12, next_start - start - gap)
         else:
-            slot0 = max(0.15, (ad if ad > 0.05 else end - start) + 0.12)
+            # câu cuối / sau retime: đủ chỗ full TTS
+            slot0 = max(0.15, ad + 0.15 if ad > 0.05 else end - start + 0.12)
         raw.append(
             (
                 wav,
@@ -852,9 +933,9 @@ def _tts_clip_plan(
     elif allow_video_slowdown:
         needs: list[float] = []
         for _wav, _start, slot0, ad, _volume, manual_speed in raw:
-            ad /= manual_speed
-            if ad > 0.08 and slot0 > 0.05 and ad > slot0 * soft_tts_speed:
-                needs.append(ad / (slot0 * soft_tts_speed))
+            ad_m = ad / manual_speed
+            if ad_m > 0.08 and slot0 > 0.05 and ad_m > slot0 * soft_tts_speed:
+                needs.append(ad_m / (slot0 * soft_tts_speed))
         if needs:
             needs.sort()
             idx = min(len(needs) - 1, max(0, int(len(needs) * 0.90) - 1))
@@ -863,22 +944,34 @@ def _tts_clip_plan(
             video_factor = max(video_factor, min(mid, max_video_factor))
         video_factor = min(max_video_factor, max(1.0, video_factor))
 
+    # Full TTS: trim = toàn bộ audio sau atempo nhẹ; không atrim theo slot ngắn
     clips: list[tuple[Path, float, float, float, float]] = []
     for wav, start, slot0, ad, volume, manual_speed in raw:
         slot = slot0 * video_factor
+        ad_eff = ad / max(manual_speed, 0.05) if ad > 0.05 else slot
         speed = 1.0
-        if ad > 0.08 and ad > slot * 1.005:
-            speed = min(hard_tts_cap, ad / max(slot, 0.05))
+        if ad_eff > 0.08 and ad_eff > slot * soft_tts_speed:
+            speed = min(hard_tts_cap, ad_eff / max(slot, 0.05))
             speed = max(1.0, speed)
-        eff = ad / max(speed * manual_speed, 0.05) if ad > 0.05 else slot
-        trim = max(0.08, min(slot, eff + 0.02))
+        played = ad_eff / max(speed, 0.05) if ad_eff > 0.05 else slot
+        # Ưu tiên đọc hết — trim = full play (slot đã giãn bởi retime)
+        trim = max(0.08, played + 0.04)
         clips.append((wav, start * video_factor, trim, speed * manual_speed, volume))
     clips.sort(key=lambda c: c[1])
     out: list[tuple[Path, float, float, float, float]] = []
     for i, (wav, start, trim, sp, volume) in enumerate(clips):
         next_start = clips[i + 1][1] if i + 1 < len(clips) else None
-        if next_start is not None:
-            trim = min(trim, max(0.08, next_start - start - 0.03))
+        if next_start is not None and trim > next_start - start - 0.02:
+            # retime đã đẩy câu sau — hiếm; chỉ siết nếu vẫn đè
+            room = max(0.08, next_start - start - 0.02)
+            if trim > room * 1.02:
+                # tăng tốc thêm thay vì cắt (giữ full nếu có thể)
+                need_sp = sp * (trim / room)
+                if need_sp <= hard_tts_cap * 1.05:
+                    sp = min(hard_tts_cap, need_sp)
+                    trim = room
+                else:
+                    trim = room
         out.append((wav, start, trim, sp, volume))
     return out, video_factor
 
@@ -914,7 +1007,7 @@ def _mix_tts_track(
         for w, s, slot, sp, volume in ordered_plan
     ]
     key = hashlib.sha1(
-        (f"v8|vf{plan_vf:.3f}|" + "|".join(signature)).encode()
+        (f"v11|retime-fit|vf{plan_vf:.3f}|{match}|" + "|".join(signature)).encode()
     ).hexdigest()[:16]
     out = root / "cache" / f"tts_mix_{key}.wav"
     if out.exists():
@@ -937,9 +1030,11 @@ def _mix_tts_track(
             elif speed < 0.97:
                 parts.append(_atempo_chain(speed))
             parts.append(f"volume={volume:.3f}")
-            fade = min(0.08, max(0.025, max_sec * 0.08))
-            st_fade = max(0.0, max_sec - fade)
-            parts.append(f"atrim=0:{max_sec:.3f}")
+            # max_sec = full play duration (cascade); pad nhỏ tránh cắt sample cuối
+            play_sec = max(0.08, float(max_sec) + 0.05)
+            fade = min(0.03, max(0.012, play_sec * 0.02))
+            st_fade = max(0.0, play_sec - fade)
+            parts.append(f"atrim=0:{play_sec:.3f}")
             parts.append("asetpts=PTS-STARTPTS")
             parts.append(f"afade=t=out:st={st_fade:.3f}:d={fade:.3f}")
             parts.append(f"adelay={delay_ms}|{delay_ms}")

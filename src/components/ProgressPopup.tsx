@@ -13,7 +13,7 @@ export type ProgressPopupProps = {
   error?: string | null
   /** Job còn chạy (khác lỗi đã xong) — bật đồng hồ / heartbeat */
   running?: boolean
-  /** X / “Chạy nền” — ẩn popup, job vẫn chạy */
+  /** Chỉ “Chạy nền” ẩn popup, job vẫn chạy */
   onMinimize: () => void
   /** Click pill → mở lại popup */
   onRestore: () => void
@@ -35,7 +35,7 @@ function fmtElapsed(sec: number) {
 }
 
 /**
- * Popup tiến độ tái sử dụng: % + X chạy nền.
+ * Popup tiến độ tái sử dụng: % + X hủy + nút chạy nền.
  * Parent giữ state `minimized`; job không phụ thuộc vào việc đóng popup.
  * % đứng lâu vẫn hiện đồng hồ + “vẫn đang chạy” — tránh tưởng UI đơ.
  */
@@ -82,7 +82,7 @@ export default function ProgressPopup({
       <button
         type="button"
         className={cn(
-          'fixed bottom-4 right-4 z-[80] flex items-center gap-2 rounded-lg border border-border bg-background/95 px-3 py-2 text-left shadow-lg backdrop-blur-sm',
+          'fixed bottom-4 right-4 z-[200] flex items-center gap-2 rounded-lg border border-border bg-background/95 px-3 py-2 text-left shadow-lg backdrop-blur-sm',
           'hover:bg-accent/40 transition-colors max-w-[min(360px,90vw)]',
           className,
         )}
@@ -104,7 +104,7 @@ export default function ProgressPopup({
   return (
     <div
       className={cn(
-        'fixed inset-0 z-[80] flex items-center justify-center bg-black/45 p-4',
+        'fixed inset-0 z-[200] flex items-center justify-center bg-black/45 p-4',
         className,
       )}
       role="dialog"
@@ -122,9 +122,9 @@ export default function ProgressPopup({
           <button
             type="button"
             className="shrink-0 rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
-            title="Chạy nền"
-            aria-label="Chạy nền"
-            onClick={onMinimize}
+            title={onCancel ? 'Hủy' : 'Đóng'}
+            aria-label={onCancel ? 'Hủy' : 'Đóng'}
+            onClick={onCancel ?? onMinimize}
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
               <path d="M18 6L6 18M6 6l12 12" />

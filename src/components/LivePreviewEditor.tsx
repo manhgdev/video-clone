@@ -23,6 +23,10 @@ type Props = {
   settings: ProjectSettings
   voices: { id: string; name: string }[]
   busy: boolean
+  /** Tiến độ job (lồng tiếng / xuất…) — hiện % trên track như Âm gốc */
+  jobStep?: string
+  jobProgress?: number
+  jobMessage?: string
   /** Tạo TTS toàn bộ (track Lồng tiếng trống → bấm) */
   onDub?: () => void
   onBack: () => void
@@ -252,6 +256,92 @@ const COVER_MASK_STYLES: { id: ProjectSettings['coverMaskStyle']; label: string 
   { id: 'blur', label: 'Làm mờ' },
   { id: 'solid', label: 'Màu nền' },
   { id: 'mosaic', label: 'Khối' },
+]
+
+const CAPTION_FONT_PRESETS: { id: string; label: string; css: string }[] = [
+  { id: 'system', label: 'Hệ thống', css: 'system-ui, "Segoe UI", sans-serif' },
+  { id: 'segoe', label: 'Segoe UI', css: '"Segoe UI", system-ui, sans-serif' },
+  { id: 'arial', label: 'Arial', css: 'Arial, Helvetica, sans-serif' },
+  { id: 'bold', label: 'Arial Black', css: '"Arial Black", "Helvetica Neue", Arial, sans-serif' },
+  { id: 'helvetica', label: 'Helvetica', css: '"Helvetica Neue", Helvetica, Arial, sans-serif' },
+  { id: 'verdana', label: 'Verdana', css: 'Verdana, Geneva, sans-serif' },
+  { id: 'tahoma', label: 'Tahoma', css: 'Tahoma, Geneva, sans-serif' },
+  { id: 'trebuchet', label: 'Trebuchet', css: '"Trebuchet MS", "Segoe UI", sans-serif' },
+  { id: 'rounded', label: 'Nunito / tròn', css: 'Nunito, "Segoe UI", "Trebuchet MS", sans-serif' },
+  { id: 'impact', label: 'Impact', css: 'Impact, Haettenschweiler, "Arial Narrow Bold", sans-serif' },
+  { id: 'georgia', label: 'Georgia', css: 'Georgia, "Times New Roman", serif' },
+  { id: 'times', label: 'Times', css: '"Times New Roman", Times, serif' },
+  { id: 'palatino', label: 'Palatino', css: '"Palatino Linotype", Palatino, "Book Antiqua", serif' },
+  { id: 'garamond', label: 'Garamond', css: 'Garamond, "Times New Roman", serif' },
+  { id: 'courier', label: 'Courier', css: '"Courier New", Courier, monospace' },
+  { id: 'mono', label: 'Consolas', css: 'Consolas, "Courier New", ui-monospace, monospace' },
+  { id: 'comic', label: 'Comic Sans', css: '"Comic Sans MS", "Comic Sans", cursive' },
+  { id: 'cjk', label: 'CJK / Noto', css: '"Noto Sans SC", "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif' },
+  { id: 'meiryo', label: 'Meiryo (JP)', css: 'Meiryo, "Yu Gothic", "MS Gothic", sans-serif' },
+  { id: 'malgun', label: 'Malgun (KR)', css: '"Malgun Gothic", "Apple SD Gothic Neo", sans-serif' },
+]
+
+const CAPTION_BG_PRESETS: { id: NonNullable<ProjectSettings['captionBgStyle']>; label: string }[] = [
+  { id: 'none', label: 'Không nền' },
+  { id: 'solid', label: 'Nền đặc' },
+  { id: 'blur', label: 'Nền mờ' },
+  { id: 'box', label: 'Hộp' },
+]
+
+function captionFontCss(family?: string): string {
+  return CAPTION_FONT_PRESETS.find((f) => f.id === family)?.css
+    ?? CAPTION_FONT_PRESETS[0].css
+}
+
+/** Nền / màu / viền phụ đề — khớp settings toàn cục */
+function captionChromeStyle(settings: ProjectSettings): React.CSSProperties {
+  const color = settings.captionTextColor || '#ffffff'
+  // Mặc định bật viền khi không nền — chữ trắng vẫn đọc được trên video sáng
+  const bg = settings.captionBgStyle || 'none'
+  const stroke = settings.captionStroke !== false || bg === 'none'
+  const bgColor = settings.captionBgColor || '#000000'
+  const op = Math.max(0, Math.min(100, settings.captionBgOpacity ?? 55)) / 100
+  const [r, g, b] = parseHexColor(bgColor)
+  const style: React.CSSProperties = {
+    color,
+    fontFamily: captionFontCss(settings.subtitleFontFamily),
+    textShadow: stroke
+      ? '0 1px 2px #000, 0 2px 6px rgba(0,0,0,0.9), 0 0 2px #000, 1px 1px 0 #000, -1px -1px 0 #000'
+      : 'none',
+    WebkitTextStroke: stroke ? '0.6px rgba(0,0,0,0.55)' : undefined,
+  }
+  if (bg === 'solid') {
+    style.backgroundColor = `rgba(${r},${g},${b},${Math.max(0.2, op)})`
+    style.borderRadius = 4
+    style.padding = '0.12em 0.28em'
+  } else if (bg === 'box') {
+    style.backgroundColor = `rgba(${r},${g},${b},${Math.max(0.35, op)})`
+    style.borderRadius = 6
+    style.padding = '0.18em 0.4em'
+    style.border = '1px solid rgba(255,255,255,0.12)'
+  } else if (bg === 'blur') {
+    style.backgroundColor = `rgba(${r},${g},${b},${Math.max(0.15, op * 0.55)})`
+    style.backdropFilter = 'blur(10px) saturate(0.9)'
+    style.WebkitBackdropFilter = 'blur(10px) saturate(0.9)'
+    style.borderRadius = 6
+    style.padding = '0.14em 0.32em'
+  }
+  // none → không background
+  return style
+}
+
+/** Preset hiệu ứng kéo vào video (tab Effects) */
+const EFFECT_PRESETS: {
+  id: string
+  label: string
+  desc: string
+  maskStyle: 'blur' | 'solid' | 'mosaic'
+  maskColor: string
+  maskOpacity: number
+}[] = [
+  { id: 'blur', label: 'Làm mờ', desc: 'Kính mờ CapCut — che vùng tự do', maskStyle: 'blur', maskColor: '#4c1d95', maskOpacity: 45 },
+  { id: 'solid', label: 'Màu nền', desc: 'Phủ màu đặc lên vùng chọn', maskStyle: 'solid', maskColor: '#1e1b4b', maskOpacity: 70 },
+  { id: 'mosaic', label: 'Khối', desc: 'Làm mờ pixel / che hardsub', maskStyle: 'mosaic', maskColor: '#2a2a30', maskOpacity: 80 },
 ]
 
 type AspectPreset =
@@ -498,33 +588,9 @@ function solidMidAt(segments: Segment[], time: number, preferId?: string | null)
   return mids.reduce((a, b) => (Math.abs(time - a.start) <= Math.abs(time - b.start) ? a : b))
 }
 
-/** Mọi segment đang cháy tại t (có thể chồng mid+dọc).
- * Caption/TTS: chỉ [start,end) chặt — không kéo cover-pad (tránh câu trước đè câu sau).
- * Mask che chữ dùng segmentsAtCover (có pad).
- */
+/** Mọi segment đang cháy tại t (có thể chồng mid+dọc). */
 function segmentsAt(segments: Segment[], time: number): Segment[] {
   return segments.filter((s) => time >= s.start && time < s.end)
-}
-
-function segmentsAtCover(segments: Segment[], time: number): Segment[] {
-  const hits: Segment[] = []
-  const seen = new Set<string>()
-  for (const s of segments) {
-    const w = coverWindow(s, segments)
-    if (time >= w.start && time < w.end) {
-      hits.push(s)
-      seen.add(s.id)
-    }
-  }
-  // Clip timeline [start,end) luôn che — kể cả coverStart/coverEnd cũ lệch
-  for (const s of solidOverlaysAt(segments, time)) {
-    if (seen.has(s.id)) continue
-    hits.push(s)
-    seen.add(s.id)
-  }
-  if (hits.length) return hits
-  const one = segmentAtCover(segments, time)
-  return one ? [one] : []
 }
 
 function pickTimelineSeg(segments: Segment[], time: number, selectedId: string | null): Segment | null {
@@ -570,43 +636,54 @@ function dubPlaybackSpeed(seg: Segment): number {
   return Math.max(0.75, Math.min(1.5, seg.ttsSpeed ?? 1))
 }
 
-/** preferVideo = chậm 0.80×; đã bake vào file → rate 1. */
+/** preferVideo bake 0.80× → base rate 1; vẫn nhân videoSpeed từng câu (giãn TTS). */
 function previewVideoRate(
   matchDuration: string | undefined,
   bakedPreferVideo?: boolean,
+  segSpeed?: number,
 ): number {
-  if (bakedPreferVideo) return 1
-  return matchDuration === 'preferVideo' ? 0.8 : 1
+  const base =
+    bakedPreferVideo ? 1 : matchDuration === 'preferVideo' ? 0.8 : 1
+  const vs = typeof segSpeed === 'number' && segSpeed > 0.2 && segSpeed < 1.001
+    ? Math.max(0.35, Math.min(1, segSpeed))
+    : 1
+  return base * vs
 }
 
 /**
- * Hết cửa sổ TTS trên trục media.
- * Preview: tới trước câu sau (không cắt theo audioDuration — metadata hay ngắn hơn file → thiếu đuôi).
+ * Media-time cần để phát hết TTS khi video chạy `videoRate`.
+ * wall = ad/ttsSpeed; media = wall * videoRate.
  */
-function dubAudioAbsEnd(seg: Segment, segments: Segment[], _videoRate = 1): number {
-  let nextStart = Number.POSITIVE_INFINITY
-  for (const s of segments) {
-    if (s.start > seg.start + 0.02) nextStart = Math.min(nextStart, s.start)
-  }
-  if (Number.isFinite(nextStart)) return nextStart - 0.02
-  const speed = dubPlaybackSpeed(seg)
+function dubAudioAbsEnd(seg: Segment, _segments: Segment[], videoRate = 1): number {
+  const ttsSpeed = dubPlaybackSpeed(seg)
   const ad = seg.audioDuration ?? 0
-  if (ad > 0.05) return seg.start + ad / speed
+  const rate = Math.max(0.2, videoRate)
+  if (ad > 0.05) {
+    return seg.start + (ad / Math.max(0.5, ttsSpeed)) * rate + 0.04
+  }
   return Math.max(seg.end, seg.start + 0.05)
 }
 
-/** Segment đang phát TTS tại playhead (kể cả tràn khỏi end caption tới hết audio / trước câu sau). */
-function segmentForDub(segments: Segment[], time: number, videoRate = 1): Segment | null {
-  const hit = segmentAt(segments, time)
-  if (hit && segmentHasDub(hit) && hit.audioUrl && time < dubAudioAbsEnd(hit, segments, videoRate)) {
-    return hit
-  }
+/** Segment TTS dưới playhead — bỏ qua id đã đọc xong (tránh lặp). */
+function segmentForDub(
+  segments: Segment[],
+  time: number,
+  videoRate = 1,
+  finishedIds?: Set<string>,
+): Segment | null {
   let best: Segment | null = null
   for (const s of segments) {
     if (!segmentHasDub(s) || !s.audioUrl) continue
-    if (time < s.start) continue
-    if (time < dubAudioAbsEnd(s, segments, videoRate)) {
-      if (!best || s.start > best.start) best = s
+    if (finishedIds?.has(s.id)) continue
+    if (time + 0.03 < s.start) continue
+    if (time >= dubAudioAbsEnd(s, segments, videoRate)) continue
+    // Ưu tiên câu bắt đầu gần playhead nhất (không nhảy lung tung)
+    if (
+      !best
+      || Math.abs(s.start - time) < Math.abs(best.start - time)
+      || (Math.abs(s.start - time) === Math.abs(best.start - time) && s.start > best.start)
+    ) {
+      best = s
     }
   }
   return best
@@ -617,7 +694,7 @@ function dubClipSeconds(seg: Segment, segments: Segment[], videoRate = 1): numbe
   return Math.max(0.05, dubAudioAbsEnd(seg, segments, videoRate) - seg.start)
 }
 
-/** Filmstrip timeline từ MP4 — ponytail: tối đa 48 khung, seek tuần tự */
+/** Filmstrip timeline — ít khung + URL ổn định (bỏ ?v=) để không storm Range → WinError 10055. */
 function TimelineFilmstrip({
   videoUrl,
   duration,
@@ -632,20 +709,28 @@ function TimelineFilmstrip({
   className?: string
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  // Bỏ query cache-bust — cùng file MP4 không tải lại 48 lần mỗi poll
+  const stableUrl = useMemo(() => (videoUrl || '').split('?')[0], [videoUrl])
+  // Làm tròn width để zoom mượt không re-seek liên tục
+  const stripW = Math.max(1, Math.round(widthPx / 64) * 64)
 
   useEffect(() => {
-    if (!videoUrl || duration <= 0 || widthPx <= 0) return
+    if (!stableUrl || duration <= 0 || stripW <= 0) return
     let cancelled = false
     const video = document.createElement('video')
-    video.src = videoUrl
+    video.src = stableUrl
     video.muted = true
     video.playsInline = true
-    video.preload = 'auto'
+    video.preload = 'metadata'
 
     const seekTo = (t: number) => new Promise<void>((resolve) => {
       const done = () => { video.removeEventListener('seeked', done); resolve() }
       video.addEventListener('seeked', done)
-      video.currentTime = Math.max(0, Math.min(duration - 0.04, t))
+      try {
+        video.currentTime = Math.max(0, Math.min(duration - 0.04, t))
+      } catch {
+        resolve()
+      }
     })
 
     void (async () => {
@@ -662,7 +747,8 @@ function TimelineFilmstrip({
         const h = Math.max(1, Math.round(heightPx))
         canvas.width = w
         canvas.height = h
-        const n = Math.max(1, Math.min(48, Math.ceil(w / 52)))
+        // Tối đa 16 khung — đủ filmstrip, tránh 48× Range request
+        const n = Math.max(1, Math.min(16, Math.ceil(w / 80)))
         const tw = w / n
         const vW = video.videoWidth || 16
         const vH = video.videoHeight || 9
@@ -672,6 +758,7 @@ function TimelineFilmstrip({
         for (let i = 0; i < n; i++) {
           if (cancelled) return
           await seekTo(((i + 0.5) / n) * duration)
+          if (cancelled) return
           const dx = i * tw + (tw - dw) / 2
           const dy = (h - dh) / 2
           ctx.drawImage(video, dx, dy, dw, dh)
@@ -685,10 +772,13 @@ function TimelineFilmstrip({
 
     return () => {
       cancelled = true
-      video.removeAttribute('src')
-      video.load()
+      try {
+        video.pause()
+        video.removeAttribute('src')
+        video.load()
+      } catch { /* ignore */ }
     }
-  }, [videoUrl, duration, widthPx, heightPx])
+  }, [stableUrl, duration, stripW, widthPx, heightPx])
 
   return (
     <canvas
@@ -1320,11 +1410,11 @@ function buildExportSegments(
       const fontPx = layout.fontPx ?? resolveCaptionFontSize(seg, settings, frameW, frameH)
       return segmentWithLayout(seg, layout, fontPx)
     }
-    // Caption ngang chế độ chèn dưới/trên — khớp activeCaptionBox trên preview
+    // Chèn dưới/trên: bake mid + horizontal (không dọc/nhãn) — khớp preview emerald box
     if (
       (place === 'below' || place === 'above')
-      && !isOcrOverlayLayout(seg.layout)
-      && !effectiveOverlayLayout(seg, frameH)
+      && seg.layout !== 'vertical'
+      && seg.layout !== 'label'
     ) {
       const baked = resolveBelowAboveLayout(seg, settings, frameW, frameH, place)
       if (baked) {
@@ -1804,6 +1894,9 @@ export default function LivePreviewEditor({
   settings,
   voices,
   busy,
+  jobStep = '',
+  jobProgress = 0,
+  jobMessage = '',
   onDub,
   onBack,
   onChange,
@@ -1821,6 +1914,8 @@ export default function LivePreviewEditor({
   const dubAudioRef = useRef<HTMLAudioElement | null>(null)
   const bgAudioRef = useRef<HTMLAudioElement | null>(null)
   const dubTokenRef = useRef('')
+  /** id đoạn đã đọc xong (audio.ended) — không restart đến khi tua ra khỏi cửa sổ */
+  const dubFinishedIdsRef = useRef<Set<string>>(new Set())
   /** Tua video / đổi đoạn → hard sync TTS; còn lại để audio free-run (tránh ngắt vì seek mỗi timeupdate). */
   const dubHardSyncRef = useRef(false)
   const videoMutedForDubRef = useRef(false)
@@ -1834,6 +1929,8 @@ export default function LivePreviewEditor({
   const syncingYRef = useRef(false)
   const bboxDraftRef = useRef<{ x: number; y: number; w: number; h: number } | null>(null)
   const draftRef = useRef<{ id: string; start: number; end: number } | null>(null)
+  /** draft multi-move: id → {start,end} */
+  const groupDraftRef = useRef<Record<string, { start: number; end: number }> | null>(null)
 
   const [time, setTime] = useState(0)
   const [duration, setDuration] = useState(() =>
@@ -1845,10 +1942,20 @@ export default function LivePreviewEditor({
       setDuration(mediaDurationProp!)
     }
   }, [mediaDurationProp])
+
+  useEffect(() => {
+    if (settings.defaultVoice) setGlobalVoice((v) => v || settings.defaultVoice)
+  }, [settings.defaultVoice])
   const [videoSize, setVideoSize] = useState({ width: 1080, height: 1920 })
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  /** Multi-select caption (Ctrl/Shift) — kéo nhóm / gộp */
+  const [selectedIds, setSelectedIds] = useState<string[]>([])
   const [ttsBusy, setTtsBusy] = useState(false)
   const [ttsError, setTtsError] = useState<string | null>(null)
+  /** Draft TTS toàn cục khi không chọn đoạn — Áp dụng cho tất cả */
+  const [globalTtsVolume, setGlobalTtsVolume] = useState(100)
+  const [globalTtsSpeed, setGlobalTtsSpeed] = useState(1)
+  const [globalVoice, setGlobalVoice] = useState(() => settings.defaultVoice || '')
   const [speedDraft, setSpeedDraft] = useState(() =>
     bakedSpeed > 0 ? bakedSpeed : bakedPreferVideo ? 0.8 : 1,
   )
@@ -1863,6 +1970,7 @@ export default function LivePreviewEditor({
   const [trackLocked, setTrackLocked] = useState(emptyTrackFlags)
   const [ctxMenu, setCtxMenu] = useState<CtxMenu | null>(null)
   const [draft, setDraft] = useState<{ id: string; start: number; end: number } | null>(null)
+  const [groupDraft, setGroupDraft] = useState<Record<string, { start: number; end: number }> | null>(null)
   const [bboxDraft, setBboxDraft] = useState<{ x: number; y: number; w: number; h: number } | null>(null)
   const [draggingBox, setDraggingBox] = useState(false)
   const [snapGuides, setSnapGuides] = useState<SnapGuides>({ h: false, v: false })
@@ -1950,6 +2058,7 @@ export default function LivePreviewEditor({
     onSettings(snap.settings)
     setBookmarks(snap.bookmarks)
     setSelectedId(snap.selectedId)
+    setSelectedIds(snap.selectedId ? [snap.selectedId] : [])
     setSelectedOverlayId(snap.selectedOverlayId)
     setTrackFocus(snap.trackFocus)
     setVideoClips(snap.videoClips)
@@ -2205,14 +2314,21 @@ export default function LivePreviewEditor({
     bboxSeg && bboxDraft && bboxSeg.id === selected?.id
       ? bboxDraft
       : undefined
+  // Che mask: cover mode = mọi hardsub; below/above = chỉ watermark dọc/nhãn (không che mid)
   const maskBoxes =
     settings.burnSubs
       ? coverSegs
-          .filter((s) =>
-            isOcrOverlayLayout(s.layout)
-            || Boolean(effectiveOverlayLayout(s, sourceHeight))
-            || (overCoverMode && s.translation.trim()),
-          )
+          .filter((s) => {
+            if (overCoverMode) {
+              return (
+                isOcrOverlayLayout(s.layout)
+                || Boolean(effectiveOverlayLayout(s, sourceHeight))
+                || Boolean(s.translation.trim())
+              )
+            }
+            // below/above: không che chữ hardsub mid/ngang — chỉ dọc/nhãn
+            return s.layout === 'vertical' || s.layout === 'label'
+          })
           .map((s) => {
             const override = s.id === selected?.id ? activeCoverDraft : undefined
             if (s.translation.trim()) {
@@ -2229,11 +2345,19 @@ export default function LivePreviewEditor({
           })
           .filter((b): b is PixelBox => !!b)
       : []
+  // Caption "over" layers: cover mode; hoặc dọc/nhãn. Mid/horizontal ở below/above → activeCaptionBox.
   const captionLayers =
     overlayBurnOn
       ? timelineSegs.map((s) => {
-          // Mid/dọc/nhãn: luôn neo OCR. Caption đáy horizontal: chỉ khi cover mode.
-          if (!overCoverMode && !isOcrOverlayLayout(s.layout) && !effectiveOverlayLayout(s, sourceHeight)) {
+          const isVertLabel = s.layout === 'vertical' || s.layout === 'label'
+          if (!overCoverMode) {
+            // below/above: không vẽ mid/horizontal kiểu cover (đè OCR)
+            if (!isVertLabel) return null
+          } else if (
+            !isOcrOverlayLayout(s.layout)
+            && !effectiveOverlayLayout(s, sourceHeight)
+            && !s.translation.trim()
+          ) {
             return null
           }
           const layout = resolvePreviewOverLayout(
@@ -2298,6 +2422,14 @@ export default function LivePreviewEditor({
     bgAudioRef.current?.pause()
   }, [])
 
+  // Đang lồng tiếng / job: dừng preview TTS cũ (tránh nghe cache lệch)
+  useEffect(() => {
+    if (!busy) return
+    dubAudioRef.current?.pause()
+    dubTokenRef.current = ''
+    dubFinishedIdsRef.current.clear()
+  }, [busy])
+
   const wantNoVocals =
     settings.processOriginalAudio && settings.originalAudioMode === 'no_vocals'
   const muteOriginal =
@@ -2323,7 +2455,7 @@ export default function LivePreviewEditor({
         if (dead) return
         setStemProgress(Math.max(1, Math.min(99, Math.round(p.progress || 0))))
       }).catch(() => { /* ignore poll errors while POSTing */ })
-    }, 700)
+    }, 1500)
     void api
       .prepareNoVocals(projectId)
       .then((res) => {
@@ -2411,104 +2543,141 @@ export default function LivePreviewEditor({
     bgAudioRef.current?.pause()
     const video = videoRef.current
     const t = video?.currentTime ?? 0
-    const playRate = (() => {
-      const prefer = previewVideoRate(settings.matchDuration, bakedPreferVideo)
-      if (prefer < 1) return prefer
-      if (bakedPreferVideo) return 1
-      return Math.max(0.5, Math.min(2, segmentAt(segments, t)?.videoSpeed ?? 1))
-    })()
+    const at = segmentAt(segments, t)
+    const playRate = previewVideoRate(
+      settings.matchDuration,
+      bakedPreferVideo,
+      at?.videoSpeed,
+    )
     syncOriginalBg(t, false, Boolean(dubTokenRef.current), playRate, false)
   }
 
-  /** Đồng bộ clip TTS (+ nền). Preview: free-run TTS — không seek/cắt theo audioDuration (gây giật/thiếu). */
+  /** Đồng bộ clip TTS (+ nền). Free-run 1 lần / câu; không restart khi ended. */
   function syncDubAudio(videoTime: number, isPlaying: boolean) {
     const video = videoRef.current
     if (!video || !isPlaying) {
       pauseDubAudio()
       return
     }
-    const playRate = (() => {
-      const prefer = previewVideoRate(settings.matchDuration, bakedPreferVideo)
-      if (prefer < 1) return prefer
-      if (bakedPreferVideo) return 1
-      return Math.max(0.5, Math.min(2, segmentAt(segments, videoTime)?.videoSpeed ?? 1))
-    })()
-    if (Math.abs(video.playbackRate - playRate) > 0.01) {
-      video.playbackRate = playRate
+
+    // Tua ngược / ra khỏi cửa sổ → cho phép đọc lại
+    const finished = dubFinishedIdsRef.current
+    for (const s of segments) {
+      if (!finished.has(s.id)) continue
+      if (videoTime < s.start - 0.15) finished.delete(s.id)
     }
 
     const hardSync = dubHardSyncRef.current
     dubHardSyncRef.current = false
 
-    let seg = segmentForDub(segments, videoTime, playRate)
-
-    // Giữ clip đang đọc tới hết file / tới câu sau (kể cả khi absEnd metadata ngắn)
-    if (dubTokenRef.current) {
-      const id = dubTokenRef.current.split('|')[0]
-      const held = segments.find((s) => s.id === id)
-      const aHold = dubAudioRef.current
-      if (held?.audioUrl && aHold && !aHold.ended && videoTime >= held.start - 0.02) {
-        let nextStart = Number.POSITIVE_INFINITY
-        for (const s of segments) {
-          if (s.start > held.start + 0.02) nextStart = Math.min(nextStart, s.start)
-        }
-        if (videoTime < nextStart - 0.02) seg = held
-      }
-    }
-
-    if (trackMute.dub || !seg?.audioUrl) {
-      if (dubTokenRef.current) {
-        dubAudioRef.current?.pause()
-        dubTokenRef.current = ''
-      }
-      syncOriginalBg(videoTime, true, false, playRate, hardSync)
-      return
-    }
-
-    const speed = dubPlaybackSpeed(seg)
-    const vol = Math.min(1, Math.max(0, (seg.ttsVolume ?? 100) / 100))
-    const wantTime = Math.max(0, ((videoTime - seg.start) / playRate) * speed)
-    const token = `${seg.id}|${seg.audioUrl}`
-
-    syncOriginalBg(videoTime, true, true, playRate, hardSync)
-
     let a = dubAudioRef.current
     if (!a) {
       a = new Audio()
       a.preload = 'auto'
+      a.loop = false
       dubAudioRef.current = a
     }
 
-    const ttsRate = speed
-
-    if (dubTokenRef.current !== token) {
-      dubTokenRef.current = token
-      a.pause()
-      a.src = seg.audioUrl
-      a.playbackRate = ttsRate
-      a.volume = vol
-      const startAt = () => {
-        // Đổi đoạn: luôn đọc từ đầu; scrub (hardSync) mới nhảy theo playhead
+    // Đang phát dở → giữ nguyên câu (không nhảy / không lặp)
+    const holdId = dubTokenRef.current.split('|')[0]
+    const held = holdId ? segments.find((s) => s.id === holdId) : undefined
+    if (held?.audioUrl && !a.ended && a.currentTime > 0.02 && videoTime >= held.start - 0.08) {
+      const playRate = previewVideoRate(
+        settings.matchDuration,
+        bakedPreferVideo,
+        held.videoSpeed,
+      )
+      if (Math.abs(video.playbackRate - playRate) > 0.01) video.playbackRate = playRate
+      const speed = dubPlaybackSpeed(held)
+      a.playbackRate = speed
+      a.volume = Math.min(1, Math.max(0, (held.ttsVolume ?? 100) / 100))
+      if (hardSync) {
+        const wantTime = Math.max(0, ((videoTime - held.start) / Math.max(0.2, playRate)) * speed)
         try {
-          a.currentTime = hardSync ? wantTime : 0
+          if (Math.abs(a.currentTime - wantTime) > 0.2) a.currentTime = wantTime
         } catch { /* ignore */ }
-        void a.play().catch(() => { /* autoplay */ })
       }
-      if (a.readyState >= 1) startAt()
-      else a.addEventListener('loadedmetadata', startAt, { once: true })
+      if (a.paused) void a.play().catch(() => { /* autoplay */ })
+      syncOriginalBg(videoTime, true, true, playRate, hardSync)
       return
     }
 
-    a.playbackRate = ttsRate
-    a.volume = vol
-    // Chỉ hard-sync khi scrub timeline — không kéo currentTime theo timeupdate
-    if (hardSync && !a.ended) {
-      try {
-        a.currentTime = wantTime
-      } catch { /* ignore */ }
+    // Vừa xong câu → đánh dấu, không play lại
+    if (held && a.ended) {
+      finished.add(held.id)
+      dubTokenRef.current = ''
     }
-    if (a.ended) return
-    if (a.paused) void a.play().catch(() => { /* autoplay */ })
+
+    const at = segmentAt(segments, videoTime)
+    const playRateProbe = previewVideoRate(
+      settings.matchDuration,
+      bakedPreferVideo,
+      at?.videoSpeed,
+    )
+    const seg = trackMute.dub
+      ? null
+      : segmentForDub(segments, videoTime, playRateProbe, finished)
+
+    if (!seg?.audioUrl) {
+      if (dubTokenRef.current) {
+        a.pause()
+        dubTokenRef.current = ''
+      }
+      const idleRate = previewVideoRate(settings.matchDuration, bakedPreferVideo, at?.videoSpeed)
+      if (Math.abs(video.playbackRate - idleRate) > 0.01) video.playbackRate = idleRate
+      syncOriginalBg(videoTime, true, false, idleRate, hardSync)
+      return
+    }
+
+    const playRate = previewVideoRate(
+      settings.matchDuration,
+      bakedPreferVideo,
+      seg.videoSpeed,
+    )
+    if (Math.abs(video.playbackRate - playRate) > 0.01) video.playbackRate = playRate
+
+    const speed = dubPlaybackSpeed(seg)
+    const vol = Math.min(1, Math.max(0, (seg.ttsVolume ?? 100) / 100))
+    const wantTime = Math.max(0, ((videoTime - seg.start) / Math.max(0.2, playRate)) * speed)
+    const token = `${seg.id}|${seg.audioUrl}`
+
+    syncOriginalBg(videoTime, true, true, playRate, hardSync)
+
+    // Cùng token + chưa ended → chỉ resume, không gán src lại (tránh lặp đầu câu)
+    if (dubTokenRef.current === token && !a.ended) {
+      a.playbackRate = speed
+      a.volume = vol
+      if (hardSync) {
+        try {
+          if (Math.abs(a.currentTime - wantTime) > 0.2) a.currentTime = wantTime
+        } catch { /* ignore */ }
+      }
+      if (a.paused) void a.play().catch(() => { /* autoplay */ })
+      return
+    }
+
+    // Đã finished id này → bỏ
+    if (finished.has(seg.id) && !hardSync) {
+      syncOriginalBg(videoTime, true, false, playRate, hardSync)
+      return
+    }
+
+    // Đổi câu mới — play 1 lần từ đầu (hoặc scrub offset)
+    if (hardSync) finished.delete(seg.id)
+    dubTokenRef.current = token
+    a.pause()
+    a.loop = false
+    a.src = seg.audioUrl
+    a.playbackRate = speed
+    a.volume = vol
+    const startAt = () => {
+      try {
+        a.currentTime = hardSync ? wantTime : 0
+      } catch { /* ignore */ }
+      void a.play().catch(() => { /* autoplay */ })
+    }
+    if (a.readyState >= 1) startAt()
+    else a.addEventListener('loadedmetadata', startAt, { once: true })
   }
 
   useEffect(() => {
@@ -2549,20 +2718,95 @@ export default function LivePreviewEditor({
     if (busy || trackLocked.caption) return
     event.preventDefault()
     event.stopPropagation()
-    focusCaption(segment)
+    // Kéo clip ngoài selection → chọn 1; trong selection → kéo cả nhóm
+    const multi =
+      mode === 'move'
+      && selectedIds.length > 1
+      && selectedIds.includes(segment.id)
+    if (!multi) {
+      if (!selectedIds.includes(segment.id) || selectedIds.length <= 1) {
+        focusCaption(segment)
+      } else {
+        setSelectedId(segment.id)
+        setTrackFocus('caption')
+      }
+    } else {
+      setSelectedId(segment.id)
+      setTrackFocus('caption')
+      setPropTab('caption')
+    }
     pushHistory()
     const original = { start: segment.start, end: segment.end }
-    // Chỉ kẹp theo cùng lane — vertical dài (0→cuối) không đè mid khi kéo
     const lane = captionLaneOf(segment)
     const laneSegs = segments
       .filter((s) => captionLaneOf(s) === lane)
       .slice()
       .sort((a, b) => a.start - b.start)
+    const gap = 0.04
+    const minDuration = 0.15
+
+    // ── Group move ──
+    if (multi) {
+      const group = laneSegs.filter((s) => selectedIds.includes(s.id))
+      if (group.length < 2) {
+        /* fall through single */
+      } else {
+        const origins = Object.fromEntries(
+          group.map((s) => [s.id, { start: s.start, end: s.end }]),
+        )
+        const gStart = Math.min(...group.map((s) => s.start))
+        const gEnd = Math.max(...group.map((s) => s.end))
+        const outsiders = laneSegs.filter((s) => !selectedIds.includes(s.id))
+        const before = [...outsiders].reverse().find((s) => s.end <= gStart + 0.001)
+        const after = outsiders.find((s) => s.start >= gEnd - 0.001)
+
+        const update = (move: PointerEvent) => {
+          let delta = (move.clientX - event.clientX) / pxPerSec
+          const lower = (before?.end ?? 0) + gap
+          const upper = (after?.start ?? timelineDuration) - gap
+          const span = gEnd - gStart
+          let ns = gStart + delta
+          ns = Math.max(lower, Math.min(upper - span, ns))
+          delta = ns - gStart
+          const next: Record<string, { start: number; end: number }> = {}
+          for (const s of group) {
+            const o = origins[s.id]
+            next[s.id] = {
+              start: Math.max(0, o.start + delta),
+              end: Math.min(timelineDuration, o.end + delta),
+            }
+          }
+          groupDraftRef.current = next
+          setGroupDraft(next)
+        }
+        const commit = () => {
+          window.removeEventListener('pointermove', update)
+          window.removeEventListener('pointerup', commit)
+          const cur = groupDraftRef.current
+          groupDraftRef.current = null
+          setGroupDraft(null)
+          if (!cur) return
+          const changed = Object.keys(cur).some((id) => {
+            const o = origins[id]
+            return Math.abs(cur[id].start - o.start) > 0.001
+          })
+          if (!changed) return
+          const nextSegs = segments.map((s) => {
+            const d = cur[s.id]
+            return d ? { ...s, start: d.start, end: d.end } : s
+          })
+          void onSegmentsReplace(reindexSegments(nextSegs))
+        }
+        window.addEventListener('pointermove', update)
+        window.addEventListener('pointerup', commit, { once: true })
+        return
+      }
+    }
+
+    // ── Single clip ──
     const index = laneSegs.findIndex((s) => s.id === segment.id)
     const before = index > 0 ? laneSegs[index - 1] : undefined
     const after = index >= 0 && index < laneSegs.length - 1 ? laneSegs[index + 1] : undefined
-    const gap = 0.04
-    const minDuration = 0.15
 
     const update = (move: PointerEvent) => {
       const delta = (move.clientX - event.clientX) / pxPerSec
@@ -2597,7 +2841,6 @@ export default function LivePreviewEditor({
         (Math.abs(current.start - original.start) > 0.001 || Math.abs(current.end - original.end) > 0.001)
       ) {
         onChange({ ...segment, start: current.start, end: current.end })
-        // Giữ playhead nếu còn trong clip; đừng tua về đầu / cuối lệch
         const t = videoRef.current?.currentTime ?? time
         if (t < current.start || t >= current.end) {
           const mid = current.start + Math.max(0.05, (current.end - current.start) / 2)
@@ -2608,6 +2851,53 @@ export default function LivePreviewEditor({
     }
     window.addEventListener('pointermove', update)
     window.addEventListener('pointerup', commit, { once: true })
+  }
+
+  /** Gộp các caption đang chọn (cùng lane) → 1 đoạn: min start, max end, nối text. */
+  function mergeSelectedCaptions() {
+    if (busy || selectedIds.length < 2) return
+    const picked = segments.filter((s) => selectedIds.includes(s.id))
+    if (picked.length < 2) return
+    const lanes = new Set(picked.map((s) => captionLaneOf(s)))
+    if (lanes.size > 1) return // chỉ gộp cùng lane
+    pushHistory()
+    const ordered = [...picked].sort((a, b) => a.start - b.start || a.end - b.end)
+    const first = ordered[0]
+    const last = ordered[ordered.length - 1]
+    const source = ordered.map((s) => (s.source || '').trim()).filter(Boolean).join(' ')
+    const translation = ordered.map((s) => (s.translation || '').trim()).filter(Boolean).join(' ')
+    const merged: Segment = {
+      ...first,
+      start: first.start,
+      end: Math.max(last.end, first.start + 0.15),
+      source: source || first.source,
+      translation: translation || first.translation,
+      coverStart: Math.min(
+        ...ordered.map((s) => {
+          const v = s.coverStart
+          return typeof v === 'number' && Number.isFinite(v) ? v : s.start
+        }),
+      ),
+      coverEnd: Math.max(
+        ...ordered.map((s) => {
+          const v = s.coverEnd
+          return typeof v === 'number' && Number.isFinite(v) ? v : s.end
+        }),
+      ),
+      audioFile: undefined,
+      audioUrl: undefined,
+      audioDuration: undefined,
+      captionLayout: null,
+      videoSpeed: undefined,
+    }
+    const drop = new Set(ordered.map((s) => s.id))
+    const next = reindexSegments([
+      ...segments.filter((s) => !drop.has(s.id)),
+      merged,
+    ])
+    void onSegmentsReplace(next)
+    setSelectedId(merged.id)
+    setSelectedIds([merged.id])
   }
 
   function beginScrub(event: ReactPointerEvent<HTMLElement>) {
@@ -2629,6 +2919,8 @@ export default function LivePreviewEditor({
         if (current) setSelectedId(current.id)
       }
     }
+    dubHardSyncRef.current = true
+    dubFinishedIdsRef.current.clear()
     update(event.clientX)
     const move = (pointer: PointerEvent) => update(pointer.clientX)
     const commit = () => {
@@ -2819,13 +3111,17 @@ export default function LivePreviewEditor({
     const size = sizeOverride !== undefined ? sizeOverride : fontSizeDraft
     setFontSizeDraft(size)
     const relayout = (seg: Segment): Segment => {
-      if (!seg.translation.trim() || !(settings.coverHardsubs && settings.burnSubs)) {
+      if (!seg.translation.trim()) {
+        return { ...seg, fontSize: size, captionLayout: null }
+      }
+      // cover mode: nới khung theo chữ; below/above: chỉ font + xóa bake layout cũ
+      if (!(settings.coverHardsubs && settings.burnSubs)) {
         return { ...seg, fontSize: size, captionLayout: null }
       }
       if (isOcrOverlayLayout(seg.layout)) {
         const preferred = size > 0 ? size : 0
         const seed = overlayCoverSeed({ ...seg, fontSize: preferred }, sourceWidth, sourceHeight)
-        if (!seed) return { ...seg, fontSize: preferred }
+        if (!seed) return { ...seg, fontSize: preferred, captionLayout: null }
         const laid = layoutOcrOverlay(seg.layout, seed, seg.translation, preferred, sourceWidth, sourceHeight)
         return segmentWithLayout({ ...seg, fontSize: preferred, captionLayout: null }, {
           cover: laid.cover,
@@ -2847,7 +3143,36 @@ export default function LivePreviewEditor({
       if (selected) onChange(relayout(selected))
       return
     }
-    for (const seg of segments) onChange(relayout(seg))
+    pushHistory()
+    void onSegmentsReplace(segments.map(relayout))
+    if (size > 0) {
+      onSettings({ ...settings, subtitleFontSize: size })
+    }
+  }
+
+  function applyCaptionModeAll(mode: 'cover' | 'below' | 'above' | 'none') {
+    pushHistory()
+    if (mode === 'cover') {
+      onSettings({ ...settings, coverHardsubs: true, burnSubs: true })
+      return
+    }
+    if (mode === 'none') {
+      onSettings({ ...settings, coverHardsubs: false, burnSubs: false })
+      void onSegmentsReplace(
+        segments.map((s) => ({ ...s, captionLayout: null })),
+      )
+      return
+    }
+    // below/above: tắt che, xóa layout bake cover (đỡ đè OCR như mode cover)
+    onSettings({
+      ...settings,
+      coverHardsubs: false,
+      burnSubs: true,
+      captionPlacement: mode,
+    })
+    void onSegmentsReplace(
+      segments.map((s) => ({ ...s, captionLayout: null })),
+    )
   }
 
   /** Tốc độ video: draft + Áp dụng bake lại toàn bộ preview. */
@@ -2918,6 +3243,7 @@ export default function LivePreviewEditor({
       x: Math.round(x), y: Math.round(y),
       w: Math.round(sourceWidth * 0.5), h: Math.round(sourceHeight * 0.12),
       fontSize: 42, color: '#ffffff',
+      kind: 'text',
     }
     setSelectedOverlayId(overlay.id)
     setTrackFocus('text')
@@ -2927,18 +3253,141 @@ export default function LivePreviewEditor({
     onOverlayChange(overlay, true)
   }
 
-  function focusCaption(seg: Segment) {
+  /** Thêm vùng hiệu ứng (làm mờ / màu / khối) — khung tự do, kéo + resize. */
+  function addEffectOverlay(
+    preset: (typeof EFFECT_PRESETS)[number],
+    clientX?: number,
+    clientY?: number,
+  ) {
+    const rect = canvasRef.current?.getBoundingClientRect()
+    const fw = Math.max(1, sourceWidth)
+    const fh = Math.max(1, sourceHeight)
+    const defaultW = Math.round(fw * 0.42)
+    const defaultH = Math.round(fh * 0.12)
+    let x = Math.round(crop.x + crop.w * 0.29)
+    let y = Math.round(crop.y + crop.h * 0.72)
+    if (rect && clientX !== undefined && clientY !== undefined) {
+      x = Math.round(
+        crop.x + Math.max(0, Math.min(crop.w - defaultW, ((clientX - rect.left) / rect.width) * crop.w - defaultW / 2)),
+      )
+      y = Math.round(
+        crop.y + Math.max(0, Math.min(crop.h - defaultH, ((clientY - rect.top) / rect.height) * crop.h - defaultH / 2)),
+      )
+    }
+    const overlay: TextOverlay = {
+      id: crypto.randomUUID(),
+      start: time,
+      end: Math.min(timelineDuration || time + 4, time + 4),
+      text: preset.label,
+      x,
+      y,
+      w: defaultW,
+      h: defaultH,
+      fontSize: 0,
+      color: '#ffffff',
+      kind: 'effect',
+      maskStyle: preset.maskStyle,
+      maskColor: preset.maskColor,
+      maskOpacity: preset.maskOpacity,
+    }
+    setSelectedOverlayId(overlay.id)
+    setTrackFocus('text')
+    setTool('select')
+    setPropTab('overlay')
+    setAssetsTab('effects')
+    pushHistory()
+    onOverlayChange(overlay, true)
+  }
+
+  function beginOverlayResize(
+    event: ReactPointerEvent,
+    overlay: TextOverlay,
+    edge: 'nw' | 'ne' | 'sw' | 'se' | 'e' | 's' | 'w' | 'n',
+  ) {
+    if (busy || trackLocked.text) return
+    const canvas = canvasRef.current
+    if (!canvas) return
+    event.preventDefault()
+    event.stopPropagation()
+    const rect = canvas.getBoundingClientRect()
+    const orig = { x: overlay.x, y: overlay.y, w: overlay.w, h: overlay.h }
+    setSelectedOverlayId(overlay.id)
+
+    const update = (move: PointerEvent) => {
+      const dx = ((move.clientX - event.clientX) / rect.width) * crop.w
+      const dy = ((move.clientY - event.clientY) / rect.height) * crop.h
+      let { x, y, w, h } = orig
+      const minW = 24
+      const minH = 16
+      if (edge.includes('e')) w = Math.max(minW, orig.w + dx)
+      if (edge.includes('s')) h = Math.max(minH, orig.h + dy)
+      if (edge.includes('w')) {
+        const nw = Math.max(minW, orig.w - dx)
+        x = orig.x + (orig.w - nw)
+        w = nw
+      }
+      if (edge.includes('n')) {
+        const nh = Math.max(minH, orig.h - dy)
+        y = orig.y + (orig.h - nh)
+        h = nh
+      }
+      x = Math.max(0, Math.min(sourceWidth - w, Math.round(x)))
+      y = Math.max(0, Math.min(sourceHeight - h, Math.round(y)))
+      w = Math.round(Math.min(w, sourceWidth - x))
+      h = Math.round(Math.min(h, sourceHeight - y))
+      onOverlayChange({ ...overlay, x, y, w, h })
+    }
+    const commit = () => {
+      window.removeEventListener('pointermove', update)
+      window.removeEventListener('pointerup', commit)
+    }
+    window.addEventListener('pointermove', update)
+    window.addEventListener('pointerup', commit, { once: true })
+  }
+
+  function focusCaption(seg: Segment, opts?: { additive?: boolean; range?: boolean }) {
     setSelectedOverlayId(null)
     setSelectedMediaId(null)
-    setSelectedId(seg.id)
     setTrackFocus('caption')
     setPropTab('caption')
+    if (opts?.range && selectedId) {
+      const lane = captionLaneOf(seg)
+      const laneSegs = segments
+        .filter((s) => captionLaneOf(s) === lane)
+        .slice()
+        .sort((a, b) => a.start - b.start)
+      const a = laneSegs.findIndex((s) => s.id === selectedId)
+      const b = laneSegs.findIndex((s) => s.id === seg.id)
+      if (a >= 0 && b >= 0) {
+        const lo = Math.min(a, b)
+        const hi = Math.max(a, b)
+        const ids = laneSegs.slice(lo, hi + 1).map((s) => s.id)
+        setSelectedIds(ids)
+        setSelectedId(seg.id)
+        return
+      }
+    }
+    if (opts?.additive) {
+      setSelectedIds((prev) => {
+        if (prev.includes(seg.id)) {
+          const next = prev.filter((id) => id !== seg.id)
+          setSelectedId(next[next.length - 1] ?? null)
+          return next
+        }
+        setSelectedId(seg.id)
+        return [...prev, seg.id]
+      })
+      return
+    }
+    setSelectedId(seg.id)
+    setSelectedIds([seg.id])
   }
 
   function focusDub(seg: Segment) {
     setSelectedOverlayId(null)
     setSelectedMediaId(null)
     setSelectedId(seg.id)
+    setSelectedIds([])
     setTrackFocus('dub')
     setPropTab('audio')
   }
@@ -2956,6 +3405,7 @@ export default function LivePreviewEditor({
   function focusVideo(clipId?: string) {
     setSelectedOverlayId(null)
     setSelectedId(null)
+    setSelectedIds([])
     setTrackFocus('video')
     setPropTab('video')
     if (tool === 'cover') setTool('select')
@@ -3331,13 +3781,40 @@ export default function LivePreviewEditor({
           if (!event.ctrlKey && !event.metaKey) { event.preventDefault(); toggleFullscreen() }
           break
         case 'Escape':
-          setSelectedOverlayId(null); setTool('select')
+          setSelectedOverlayId(null)
+          setTool('select')
+          setSelectedIds(selectedId ? [selectedId] : [])
+          break
+        case 'KeyG':
+          if ((event.ctrlKey || event.metaKey) && !event.shiftKey) {
+            event.preventDefault()
+            mergeSelectedCaptions()
+          }
+          break
+        case 'KeyA':
+          if ((event.ctrlKey || event.metaKey) && trackFocus === 'caption') {
+            const anchor = segments.find((s) => s.id === selectedId) ?? segments[0]
+            if (anchor) {
+              event.preventDefault()
+              const lane = captionLaneOf(anchor)
+              setSelectedIds(segments.filter((s) => captionLaneOf(s) === lane).map((s) => s.id))
+              if (!selectedId) setSelectedId(anchor.id)
+            }
+          }
           break
         case 'Delete':
         case 'Backspace':
           if (canDeleteClip) {
             event.preventDefault()
-            deleteSelectedClip()
+            if (trackFocus === 'caption' && selectedIds.length > 1) {
+              pushHistory()
+              const drop = new Set(selectedIds)
+              void onSegmentsReplace(reindexSegments(segments.filter((s) => !drop.has(s.id))))
+              setSelectedId(null)
+              setSelectedIds([])
+            } else {
+              deleteSelectedClip()
+            }
           }
           break
       }
@@ -3346,12 +3823,10 @@ export default function LivePreviewEditor({
     return () => window.removeEventListener('keydown', shortcut)
   })
 
-  /* Effective properties tab: overlay tab only valid while an overlay is selected */
+  /* Effective properties tab: overlay chỉ khi có overlay; caption/audio/video luôn mở được (mode «Tất cả»). */
   const effectivePropTab: PropTab = (() => {
-    let t: PropTab = propTab === 'overlay' && !selectedOverlay ? 'caption' : propTab
-    // Caption/overlay cần đoạn chọn; mask + video + audio luôn dùng được (kiểu mặt nạ project)
-    if (!selected && (t === 'caption' || t === 'overlay')) t = 'video'
-    return t
+    if (propTab === 'overlay' && !selectedOverlay) return selected ? 'caption' : 'video'
+    return propTab
   })()
   const isOverlaySeg = isOcrOverlayLayout(selected?.layout)
   const dubOn = selected?.layout === 'vertical' || selected?.layout === 'label'
@@ -3377,26 +3852,33 @@ export default function LivePreviewEditor({
       ? autoFontFromBbox(activeOcrBox, focusCaptionSeg.translation, activeCaptionBasePx)
       : activeCaptionBasePx
   const placement = captionPlacement(settings)
-  // below/above: chỉ caption ngang — không đụng mid/dọc (tránh chữ đáy trong khi OCR ở giữa)
-  const activeCaptionBox =
-    overlayBurnOn
-    && timelineSeg?.translation.trim()
-    && placement !== 'over'
-    && !isOcrOverlayLayout(timelineSeg.layout)
-    && !effectiveOverlayLayout(timelineSeg, sourceHeight)
-    // CJK chưa OCR bbox → không đoán chỗ chữ (tránh emerald bay lệch)
-    && !(isCjkHardsubSource(timelineSeg.source) && !timelineSeg.bbox)
-    && activeOcrBox
-      ? estimatePreviewCaptionBox(
-          activeOcrBox,
-          timelineSeg.translation,
-          activeCaptionPx,
-          sourceWidth,
-          sourceHeight,
-          crop,
-          placement,
-        )
-      : null
+  // below/above: mid + horizontal — neo phía trên/dưới OCR (không mask, không nền bắt buộc)
+  const activeCaptionBox = (() => {
+    if (!overlayBurnOn || !timelineSeg?.translation.trim() || placement === 'over') return null
+    // dọc/nhãn watermark: vẫn over layer
+    if (timelineSeg.layout === 'vertical' || timelineSeg.layout === 'label') return null
+    const basePx = Math.max(18, activeCaptionPx || AUTO_SUBTITLE_FONT)
+    const ocr =
+      activeOcrBox
+      ?? (timelineSeg.bbox ? clampCoverBox(timelineSeg.bbox, sourceWidth, sourceHeight) : null)
+      ?? seedCoverBox(timelineSeg, sourceWidth, sourceHeight, basePx)
+      ?? fallbackCoverBox(sourceWidth, sourceHeight, basePx)
+    if (!ocr) return null
+    // Ưu tiên cỡ user/project; không ép nhỏ theo bbox OCR (tránh chữ 0px / biến mất)
+    const fontPx =
+      (timelineSeg.fontSize && timelineSeg.fontSize > 0)
+        ? timelineSeg.fontSize
+        : (settings.subtitleFontSize > 0 ? settings.subtitleFontSize : basePx)
+    return estimatePreviewCaptionBox(
+      ocr,
+      timelineSeg.translation,
+      fontPx,
+      sourceWidth,
+      sourceHeight,
+      crop,
+      placement,
+    )
+  })()
   const showCoverBlur = settings.burnSubs && maskBoxes.length > 0
   const coverMaskStyle = settings.coverMaskStyle ?? 'blur'
   const coverMaskColor = settings.coverMaskColor ?? '#4c1d95'
@@ -3668,7 +4150,69 @@ export default function LivePreviewEditor({
                       </PanelView>
                     )}
 
-                    {!['media', 'text', 'captions'].includes(assetsTab) && (
+                    {assetsTab === 'effects' && (
+                      <PanelView title="Effects">
+                        <p className="px-1 pb-2 text-[11px] text-muted-foreground leading-snug">
+                          Kéo preset vào preview hoặc bấm để thêm vùng làm mờ — chỉnh khung tự do, mặt nạ blur/màu/khối.
+                        </p>
+                        <div className="flex flex-col gap-1.5 px-0.5">
+                          {EFFECT_PRESETS.map((preset) => (
+                            <button
+                              key={preset.id}
+                              type="button"
+                              draggable
+                              title={`${preset.desc} — kéo vào video hoặc bấm thêm`}
+                              className="flex items-center gap-2 rounded-md border border-border bg-accent/50 hover:bg-accent px-2 py-2 text-left transition-colors cursor-grab active:cursor-grabbing"
+                              onDragStart={(e) => {
+                                e.dataTransfer.setData('application/x-videoclone-effect', preset.id)
+                                e.dataTransfer.effectAllowed = 'copy'
+                              }}
+                              onClick={() => addEffectOverlay(preset)}
+                            >
+                              <span
+                                className="size-10 shrink-0 rounded-md border border-border overflow-hidden"
+                                style={coverMaskPreviewStyle(preset.maskStyle, preset.maskColor, preset.maskOpacity)}
+                                aria-hidden
+                              />
+                              <span className="min-w-0 flex-1">
+                                <span className="block text-[12px] font-medium text-foreground">{preset.label}</span>
+                                <span className="block text-[10px] text-muted-foreground truncate">{preset.desc}</span>
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                        {overlays.filter((o) => o.kind === 'effect').length > 0 && (
+                          <div className="mt-3 border-t border-border pt-2 flex flex-col gap-0.5">
+                            <p className="px-1 text-[10px] text-muted-foreground uppercase tracking-wide">Trên timeline</p>
+                            {overlays.filter((o) => o.kind === 'effect').map((ov) => (
+                              <div
+                                key={ov.id}
+                                className={cn(
+                                  'flex items-center gap-1 rounded-sm px-2 py-1.5 text-[11px] cursor-pointer',
+                                  ov.id === selectedOverlayId
+                                    ? 'bg-secondary text-secondary-foreground'
+                                    : 'hover:bg-accent text-muted-foreground',
+                                )}
+                                onClick={() => {
+                                  setSelectedOverlayId(ov.id)
+                                  setTrackFocus('text')
+                                  setPropTab('overlay')
+                                  if (videoRef.current) {
+                                    videoRef.current.currentTime = ov.start
+                                    setTime(ov.start)
+                                  }
+                                }}
+                              >
+                                <span className="flex-1 truncate">{ov.text || 'Hiệu ứng'}</span>
+                                <span className="tabular-nums opacity-60">{formatTime(ov.start)}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </PanelView>
+                    )}
+
+                    {!['media', 'text', 'captions', 'effects'].includes(assetsTab) && (
                       <div className="text-muted-foreground p-4 text-sm">
                         {ASSET_TABS.find((t) => t.key === assetsTab)?.label} sắp ra mắt...
                       </div>
@@ -3730,6 +4274,19 @@ export default function LivePreviewEditor({
                       onPointerDown={(event) => {
                         if (tool === 'text') addTextOverlay(event.clientX, event.clientY)
                       }}
+                      onDragOver={(e) => {
+                        if (e.dataTransfer.types.includes('application/x-videoclone-effect')) {
+                          e.preventDefault()
+                          e.dataTransfer.dropEffect = 'copy'
+                        }
+                      }}
+                      onDrop={(e) => {
+                        const pid = e.dataTransfer.getData('application/x-videoclone-effect')
+                        if (!pid) return
+                        e.preventDefault()
+                        const preset = EFFECT_PRESETS.find((p) => p.id === pid)
+                        if (preset) addEffectOverlay(preset, e.clientX, e.clientY)
+                      }}
                     >
                       <div className="absolute inset-0 overflow-hidden bg-black">
                         <video
@@ -3784,12 +4341,12 @@ export default function LivePreviewEditor({
                                 }
                               }
                             }
-                            const playRate = previewVideoRate(settings.matchDuration, bakedPreferVideo)
-                            event.currentTarget.playbackRate = playRate < 1
-                              ? playRate
-                              : bakedPreferVideo
-                                ? 1
-                                : (pickTimelineSeg(segments, current, selectedId)?.videoSpeed ?? 1)
+                            const laneSeg = pickTimelineSeg(segments, current, selectedId)
+                            event.currentTarget.playbackRate = previewVideoRate(
+                              settings.matchDuration,
+                              bakedPreferVideo,
+                              laneSeg?.videoSpeed,
+                            )
                             syncDubAudio(current, !event.currentTarget.paused)
                           }}
                           onSeeked={(event) => {
@@ -3919,7 +4476,7 @@ export default function LivePreviewEditor({
                         >
                           {overlayLay === 'vertical' ? (
                             <div
-                              className="text-white font-bold drop-shadow-[0_2px_4px_rgba(0,0,0,0.9)]"
+                              className="font-bold"
                               style={{
                                 display: 'flex',
                                 flexDirection: 'column',
@@ -3933,6 +4490,7 @@ export default function LivePreviewEditor({
                                 padding: '0.08em 0.06em',
                                 boxSizing: 'border-box',
                                 ...overlayDisplayFontStyle('vertical', layerLayout.caption, fontPx, lines.length),
+                                ...captionChromeStyle(settings),
                               }}
                             >
                               {lines.map((unit, i) => (
@@ -3954,7 +4512,7 @@ export default function LivePreviewEditor({
                           ) : overlayLay === 'label' || overlayLay === 'mid' ? (
                             <p
                               className={cn(
-                                'w-full h-full text-center text-white font-bold drop-shadow-[0_2px_4px_rgba(0,0,0,0.9)] flex flex-col items-center justify-center',
+                                'w-full h-full text-center font-bold flex flex-col items-center justify-center',
                                 overlayLay === 'mid' ? 'overflow-visible' : 'overflow-hidden break-words',
                               )}
                               style={{
@@ -3964,6 +4522,7 @@ export default function LivePreviewEditor({
                                   fontPx,
                                   lines.length,
                                 ),
+                                ...captionChromeStyle(settings),
                                 whiteSpace: overlayLay === 'mid' ? 'normal' : 'pre-wrap',
                                 padding: overlayLay === 'mid' ? '0' : '0.04em 0.08em',
                                 boxSizing: 'border-box',
@@ -3982,7 +4541,7 @@ export default function LivePreviewEditor({
                           ) : (
                             <p
                               className={cn(
-                                'w-full text-center text-white font-bold drop-shadow-[0_2px_4px_rgba(0,0,0,0.9)]',
+                                'w-full text-center font-bold',
                                 layerLayout.lines.length === 1 && 'whitespace-nowrap',
                               )}
                               style={{
@@ -3993,6 +4552,7 @@ export default function LivePreviewEditor({
                                     : layerLayout.cover.h,
                                   layerLayout.lines.length === 1 ? 'w' : 'h',
                                 ),
+                                ...captionChromeStyle(settings),
                                 lineHeight: 1.12,
                                 margin: 0,
                               }}
@@ -4007,50 +4567,114 @@ export default function LivePreviewEditor({
                         </div>
                         )
                       })}
-                      {activeCaptionBox && timelineSeg && !isOcrOverlayLayout(timelineSeg.layout) && (
+                      {/* below/above: chữ dịch neo trên/dưới OCR — gồm mid + horizontal (không cần nền) */}
+                      {activeCaptionBox && timelineSeg?.translation.trim() && (
                         <div
-                          className="@container [container-type:size] absolute z-20 pointer-events-none flex items-center justify-center border border-dashed border-emerald-400/70 bg-black/35"
+                          className="absolute z-[22] pointer-events-none flex items-center justify-center overflow-visible"
                           style={sourceToDisplayStyle(activeCaptionBox, crop)}
                         >
                           <p
-                            className="w-full text-center text-white font-bold leading-none drop-shadow-[0_2px_4px_rgba(0,0,0,0.9)]"
-                            style={captionFontStyle(activeCaptionPx, activeCaptionBox.h)}
+                            className="w-full max-w-full text-center font-bold leading-tight whitespace-pre-wrap"
+                            style={{
+                              // cỡ theo box; fallback px để không mất chữ khi cqh=0
+                              fontSize: Math.max(14, Math.round(activeCaptionPx * 0.92)),
+                              ...captionChromeStyle(settings),
+                              // Không nền mặc định — chỉ viền chữ cho đọc được
+                              backgroundColor: (settings.captionBgStyle || 'none') === 'none'
+                                ? 'transparent'
+                                : undefined,
+                              padding: (settings.captionBgStyle || 'none') === 'none' ? 0 : undefined,
+                            }}
                           >
                             {timelineSeg.translation}
                           </p>
                         </div>
                       )}
 
-                      {/* Text overlays */}
-                      {activeOverlays.map((overlay) => (
-                        <div
-                          key={overlay.id}
-                          className={cn(
-                            '@container [container-type:size] absolute cursor-move overflow-visible',
-                            overlay.id === selectedOverlayId && 'ring-1 ring-yellow-300',
-                          )}
-                          style={sourceToDisplayStyle(overlay, crop)}
-                          onPointerDown={(e) => beginOverlayDrag(e, overlay)}
-                        >
-                          {overlay.id === selectedOverlayId && (
-                            <span className="absolute -top-5 left-0 bg-violet-600 text-white text-[10px] px-1 rounded">⠿ drag</span>
-                          )}
-                          <textarea
-                            className="block w-full h-full bg-transparent outline-none resize-none text-center font-extrabold cursor-move"
-                            style={{
-                              ...captionFontStyle(overlay.fontSize, overlay.h),
-                              color: overlay.color,
-                              textShadow: '0 2px 4px #000',
-                              lineHeight: 1.25,
-                              border: overlay.id === selectedOverlayId ? '1px dashed #ffd166' : '1px dashed transparent',
-                            }}
-                            value={overlay.text}
+                      {/* Text + effect overlays */}
+                      {activeOverlays.map((overlay) => {
+                        const isFx = overlay.kind === 'effect'
+                        const sel = overlay.id === selectedOverlayId
+                        if (isFx) {
+                          const style = overlay.maskStyle ?? 'blur'
+                          const color = overlay.maskColor ?? '#4c1d95'
+                          const opacity = overlay.maskOpacity ?? 45
+                          return (
+                            <div
+                              key={overlay.id}
+                              className={cn(
+                                'absolute z-[15] cursor-move overflow-visible',
+                                sel && 'ring-2 ring-fuchsia-400',
+                              )}
+                              style={sourceToDisplayStyle(overlay, crop)}
+                              onPointerDown={(e) => {
+                                e.stopPropagation()
+                                beginOverlayDrag(e, overlay)
+                              }}
+                            >
+                              <div
+                                className="absolute inset-0 overflow-hidden rounded-sm border border-dashed border-white/40"
+                                style={coverMaskPreviewStyle(style, color, opacity)}
+                              />
+                              {sel && (
+                                <>
+                                  <span className="absolute -top-5 left-0 bg-fuchsia-600 text-white text-[10px] px-1 rounded z-20">
+                                    {overlay.text || 'Hiệu ứng'} · kéo / resize
+                                  </span>
+                                  {(['nw', 'ne', 'sw', 'se', 'n', 's', 'e', 'w'] as const).map((edge) => {
+                                    const pos: Record<string, string> = {
+                                      nw: 'left-0 top-0 -translate-x-1/2 -translate-y-1/2 cursor-nwse-resize',
+                                      ne: 'right-0 top-0 translate-x-1/2 -translate-y-1/2 cursor-nesw-resize',
+                                      sw: 'left-0 bottom-0 -translate-x-1/2 translate-y-1/2 cursor-nesw-resize',
+                                      se: 'right-0 bottom-0 translate-x-1/2 translate-y-1/2 cursor-nwse-resize',
+                                      n: 'left-1/2 top-0 -translate-x-1/2 -translate-y-1/2 cursor-ns-resize',
+                                      s: 'left-1/2 bottom-0 -translate-x-1/2 translate-y-1/2 cursor-ns-resize',
+                                      e: 'right-0 top-1/2 translate-x-1/2 -translate-y-1/2 cursor-ew-resize',
+                                      w: 'left-0 top-1/2 -translate-x-1/2 -translate-y-1/2 cursor-ew-resize',
+                                    }
+                                    return (
+                                      <span
+                                        key={edge}
+                                        className={cn('absolute z-20 size-2.5 rounded-sm bg-fuchsia-400 border border-white', pos[edge])}
+                                        onPointerDown={(e) => beginOverlayResize(e, overlay, edge)}
+                                      />
+                                    )
+                                  })}
+                                </>
+                              )}
+                            </div>
+                          )
+                        }
+                        return (
+                          <div
+                            key={overlay.id}
+                            className={cn(
+                              '@container [container-type:size] absolute cursor-move overflow-visible z-[15]',
+                              sel && 'ring-1 ring-yellow-300',
+                            )}
+                            style={sourceToDisplayStyle(overlay, crop)}
                             onPointerDown={(e) => beginOverlayDrag(e, overlay)}
-                            onFocus={() => setSelectedOverlayId(overlay.id)}
-                            onChange={(e) => onOverlayChange({ ...overlay, text: e.target.value })}
-                          />
-                        </div>
-                      ))}
+                          >
+                            {sel && (
+                              <span className="absolute -top-5 left-0 bg-violet-600 text-white text-[10px] px-1 rounded">⠿ drag</span>
+                            )}
+                            <textarea
+                              className="block w-full h-full bg-transparent outline-none resize-none text-center font-extrabold cursor-move"
+                              style={{
+                                ...captionFontStyle(overlay.fontSize, overlay.h),
+                                color: overlay.color,
+                                textShadow: '0 2px 4px #000',
+                                lineHeight: 1.25,
+                                border: sel ? '1px dashed #ffd166' : '1px dashed transparent',
+                              }}
+                              value={overlay.text}
+                              onPointerDown={(e) => beginOverlayDrag(e, overlay)}
+                              onFocus={() => setSelectedOverlayId(overlay.id)}
+                              onChange={(e) => onOverlayChange({ ...overlay, text: e.target.value })}
+                            />
+                          </div>
+                        )
+                      })}
 
                       </div>
                     </div>
@@ -4434,10 +5058,8 @@ export default function LivePreviewEditor({
                                   }
                                   disabled={busy || settings.targetLang === 'none'}
                                   onChange={(e) => {
-                                    const mode = e.target.value
-                                    if (mode === 'cover') onSettings({ ...settings, coverHardsubs: true, burnSubs: true })
-                                    else if (mode === 'none') onSettings({ ...settings, coverHardsubs: false, burnSubs: false })
-                                    else onSettings({ ...settings, coverHardsubs: false, burnSubs: true, captionPlacement: mode as 'below' | 'above' })
+                                    const mode = e.target.value as 'cover' | 'below' | 'above' | 'none'
+                                    applyCaptionModeAll(mode)
                                   }}
                                 >
                                   <option value="cover">Che chữ cũ + chèn dịch</option>
@@ -4452,6 +5074,260 @@ export default function LivePreviewEditor({
                                   Chữ dịch căn giữa khung tím. Chi tiết ở tab <strong>Vùng che chữ</strong>.
                                 </p>
                               )}
+                            </div>
+                          </>
+                        )}
+
+                        {/* Phụ đề — Tất cả (CapCut-style) */}
+                        {effectivePropTab === 'caption' && !selected && (
+                          <>
+                            <p className="text-[11px] text-muted-foreground leading-relaxed">
+                              Style phụ đề toàn dự án — phông, màu, nền, bbox che, hiệu ứng. Áp dụng ngay khi đổi.
+                            </p>
+
+                            <PropLabel label="Chèn phụ đề">
+                              <select
+                                className="w-full rounded-md border border-border bg-input px-2 py-1 text-xs outline-none focus:border-ring"
+                                value={
+                                  settings.coverHardsubs && settings.burnSubs ? 'cover'
+                                    : !settings.burnSubs ? 'none'
+                                    : settings.captionPlacement === 'above' ? 'above' : 'below'
+                                }
+                                disabled={busy || settings.targetLang === 'none'}
+                                onChange={(e) => {
+                                  applyCaptionModeAll(e.target.value as 'cover' | 'below' | 'above' | 'none')
+                                }}
+                              >
+                                <option value="cover">Che chữ cũ + chèn dịch</option>
+                                <option value="below">Chèn dịch phía dưới</option>
+                                <option value="above">Chèn dịch phía trên</option>
+                                <option value="none">Không chèn chữ</option>
+                              </select>
+                            </PropLabel>
+
+                            <div className="border-t border-border pt-2 space-y-2">
+                              <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">Chữ</p>
+                              <div className="grid grid-cols-2 gap-1.5">
+                                <PropLabel label="Phông chữ">
+                                  <select
+                                    className="w-full rounded-md border border-border bg-input px-2 py-1 text-xs outline-none focus:border-ring"
+                                    value={settings.subtitleFontFamily || 'system'}
+                                    disabled={busy}
+                                    onChange={(e) => onSettings({ ...settings, subtitleFontFamily: e.target.value })}
+                                  >
+                                    {CAPTION_FONT_PRESETS.map((f) => (
+                                      <option key={f.id} value={f.id} style={{ fontFamily: f.css }}>{f.label}</option>
+                                    ))}
+                                  </select>
+                                </PropLabel>
+                                <PropLabel label="Cỡ chữ">
+                                  <select
+                                    className="w-full rounded-md border border-border bg-input px-2 py-1 text-xs outline-none focus:border-ring"
+                                    value={String(fontSizeDraft)}
+                                    disabled={busy}
+                                    onChange={(e) => {
+                                      const v = Number(e.target.value)
+                                      setFontSizeDraft(v)
+                                      if (!busy && segments.length > 0) applyFontSize('all', v)
+                                    }}
+                                  >
+                                    <option value="0">Tự động</option>
+                                    {fontSizeOptions.map((px) => (
+                                      <option key={px} value={px}>{px} px</option>
+                                    ))}
+                                  </select>
+                                </PropLabel>
+                              </div>
+                              <PropLabel label="Màu chữ">
+                                <div className="flex items-center gap-2">
+                                  <input
+                                    type="color"
+                                    className="h-8 w-10 cursor-pointer rounded border border-border bg-transparent"
+                                    value={settings.captionTextColor || '#ffffff'}
+                                    disabled={busy}
+                                    onChange={(e) => onSettings({ ...settings, captionTextColor: e.target.value })}
+                                  />
+                                  {['#ffffff', '#ffd166', '#06d6a0', '#ef476f', '#118ab2', '#f8fafc'].map((c) => (
+                                    <button
+                                      key={c}
+                                      type="button"
+                                      className={cn(
+                                        'size-5 rounded-full border',
+                                        (settings.captionTextColor || '#ffffff') === c
+                                          ? 'border-primary ring-1 ring-primary'
+                                          : 'border-border',
+                                      )}
+                                      style={{ background: c }}
+                                      disabled={busy}
+                                      onClick={() => onSettings({ ...settings, captionTextColor: c })}
+                                    />
+                                  ))}
+                                </div>
+                              </PropLabel>
+                              <label className="flex items-center justify-between gap-2 text-xs cursor-pointer">
+                                <span>Viền / bóng chữ</span>
+                                <input
+                                  type="checkbox"
+                                  className="accent-primary"
+                                  checked={settings.captionStroke !== false}
+                                  disabled={busy}
+                                  onChange={(e) => onSettings({ ...settings, captionStroke: e.target.checked })}
+                                />
+                              </label>
+                            </div>
+
+                            <div className="border-t border-border pt-2 space-y-2">
+                              <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">Nền chữ</p>
+                              <div className="flex flex-wrap gap-1">
+                                {CAPTION_BG_PRESETS.map(({ id, label }) => (
+                                  <button
+                                    key={id}
+                                    type="button"
+                                    className={cn(
+                                      'min-w-0 flex-1 rounded-sm border px-1 py-1.5 text-[10px] whitespace-nowrap transition-colors',
+                                      (settings.captionBgStyle || 'none') === id
+                                        ? 'border-primary text-primary bg-primary/10'
+                                        : 'border-border text-muted-foreground hover:bg-accent',
+                                    )}
+                                    disabled={busy}
+                                    onClick={() => onSettings({ ...settings, captionBgStyle: id })}
+                                  >
+                                    {label}
+                                  </button>
+                                ))}
+                              </div>
+                              {(settings.captionBgStyle || 'none') !== 'none' && (
+                                <>
+                                  <PropLabel label="Màu nền">
+                                    <input
+                                      type="color"
+                                      className="h-8 w-full cursor-pointer rounded border border-border bg-transparent"
+                                      value={settings.captionBgColor || '#000000'}
+                                      disabled={busy}
+                                      onChange={(e) => onSettings({ ...settings, captionBgColor: e.target.value })}
+                                    />
+                                  </PropLabel>
+                                  <PropLabel label={`Độ đậm nền: ${settings.captionBgOpacity ?? 55}%`}>
+                                    <input
+                                      type="range"
+                                      min={0}
+                                      max={100}
+                                      className="w-full accent-primary"
+                                      value={settings.captionBgOpacity ?? 55}
+                                      disabled={busy}
+                                      onChange={(e) => onSettings({ ...settings, captionBgOpacity: Number(e.target.value) })}
+                                    />
+                                  </PropLabel>
+                                </>
+                              )}
+                              {/* Preview swatch */}
+                              <div
+                                className="rounded-md border border-border px-3 py-2 text-center text-[13px] font-bold"
+                                style={captionChromeStyle(settings)}
+                              >
+                                Xem trước phụ đề
+                              </div>
+                            </div>
+
+                            <div className="border-t border-border pt-2 space-y-2">
+                              <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">Bbox · che chữ gốc</p>
+                              <PropLabel label="Kiểu mặt nạ (cover)">
+                                <div className="flex gap-1">
+                                  {COVER_MASK_STYLES.map(({ id, label }) => (
+                                    <button
+                                      key={id}
+                                      type="button"
+                                      className={cn(
+                                        'flex-1 rounded-sm border px-1 py-1.5 text-[10px] transition-colors',
+                                        (settings.coverMaskStyle ?? 'blur') === id
+                                          ? 'border-primary text-primary bg-primary/10'
+                                          : 'border-border text-muted-foreground hover:bg-accent',
+                                      )}
+                                      disabled={busy}
+                                      onClick={() => onSettings({ ...settings, coverMaskStyle: id })}
+                                    >
+                                      {label}
+                                    </button>
+                                  ))}
+                                </div>
+                              </PropLabel>
+                              <div className="flex items-center gap-2">
+                                {(settings.coverMaskStyle ?? 'blur') !== 'mosaic' && (
+                                  <input
+                                    type="color"
+                                    title="Màu mask"
+                                    className="h-8 w-10 shrink-0 cursor-pointer rounded border border-border bg-transparent"
+                                    value={settings.coverMaskColor || '#4c1d95'}
+                                    disabled={busy}
+                                    onChange={(e) => onSettings({ ...settings, coverMaskColor: e.target.value })}
+                                  />
+                                )}
+                                <div className="min-w-0 flex-1 flex items-center gap-2">
+                                  <input
+                                    type="range"
+                                    min={0}
+                                    max={100}
+                                    className="min-w-0 flex-1 accent-violet-500"
+                                    value={settings.coverMaskOpacity ?? 40}
+                                    disabled={busy}
+                                    onChange={(e) => onSettings({ ...settings, coverMaskOpacity: Number(e.target.value) })}
+                                  />
+                                  <span className="shrink-0 tabular-nums text-[10px] text-muted-foreground w-8 text-right">
+                                    {settings.coverMaskOpacity ?? 40}%
+                                  </span>
+                                </div>
+                                <div
+                                  className="h-8 w-10 shrink-0 rounded border border-border overflow-hidden"
+                                  style={coverMaskPreviewStyle(
+                                    settings.coverMaskStyle ?? 'blur',
+                                    settings.coverMaskColor || '#4c1d95',
+                                    settings.coverMaskOpacity ?? 40,
+                                  )}
+                                  title="Xem trước mask"
+                                />
+                              </div>
+                              <p className="text-[10px] text-muted-foreground leading-snug">
+                                Che chữ: bật mode «Che chữ cũ». Kéo bbox trên preview / tab Vùng che chữ.
+                              </p>
+                              <button
+                                type="button"
+                                className="w-full rounded-md border border-border bg-accent hover:bg-muted px-2 py-1.5 text-[11px] disabled:opacity-50"
+                                disabled={busy}
+                                onClick={() => {
+                                  setPropTab('mask')
+                                  setTool('cover')
+                                }}
+                              >
+                                Mở tab Vùng che chữ (bbox)
+                              </button>
+                            </div>
+
+                            <div className="border-t border-border pt-2 space-y-2">
+                              <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">Hiệu ứng vùng</p>
+                              <p className="text-[10px] text-muted-foreground leading-snug">
+                                Làm mờ tự do (kéo khung) — tab Effects bên trái, hoặc thêm nhanh:
+                              </p>
+                              <div className="grid grid-cols-3 gap-1">
+                                {EFFECT_PRESETS.map((preset) => (
+                                  <button
+                                    key={preset.id}
+                                    type="button"
+                                    className="rounded-md border border-border bg-accent/50 hover:bg-accent px-1 py-2 text-[10px] transition-colors"
+                                    disabled={busy}
+                                    title={preset.desc}
+                                    onClick={() => addEffectOverlay(preset)}
+                                  >
+                                    {preset.label}
+                                  </button>
+                                ))}
+                              </div>
+                              <button
+                                type="button"
+                                className="w-full rounded-md border border-border bg-accent hover:bg-muted px-2 py-1.5 text-[11px]"
+                                onClick={() => setAssetsTab('effects')}
+                              >
+                                Mở panel Effects
+                              </button>
                             </div>
                           </>
                         )}
@@ -4635,28 +5511,84 @@ export default function LivePreviewEditor({
                               )}
                             </div>
 
-                            {selected && (
-                              <>
-                            {!segmentHasDub(selected) ? (
-                              <p className="text-[11px] text-muted-foreground leading-relaxed">
-                                Đoạn này đang tắt lồng tiếng. Bật <strong className="text-foreground font-medium">Lồng tiếng</strong> ở tab Phụ đề.
-                              </p>
-                            ) : !selected.audioUrl ? (
-                              <p className="text-[11px] text-muted-foreground leading-relaxed">
-                                Chưa có audio. Bấm <strong className="text-foreground font-medium">Lồng tiếng</strong> trên toolbar hoặc <strong className="text-foreground font-medium">Nghe TTS</strong> để tạo clip.
-                              </p>
-                            ) : (
-                              <>
-                                <PropLabel label="Clip lồng tiếng">
-                                  <span className="text-xs tabular-nums text-foreground">
-                                    {(selected.audioDuration ?? 0).toFixed(2)}s · slot {(selected.end - selected.start).toFixed(2)}s
-                                  </span>
-                                </PropLabel>
+                            {/* Clip lồng tiếng + giọng — 1 đoạn hoặc tất cả */}
+                            <div className="space-y-2 pb-2 border-b border-border">
+                              <PropLabel label="Clip lồng tiếng">
+                                <span className="text-xs text-muted-foreground">
+                                  {selected
+                                    ? `#${String(selected.index).padStart(2, '0')} · ${(selected.audioDuration ?? 0).toFixed(2)}s · slot ${(selected.end - selected.start).toFixed(2)}s`
+                                    : `Tất cả · ${segments.filter((s) => segmentHasDub(s)).length} đoạn bật TTS`}
+                                </span>
+                              </PropLabel>
+                              <PropLabel label="Giọng đọc">
+                                <div className="flex gap-1.5 items-stretch">
+                                  <select
+                                    className="min-w-0 flex-1 rounded-md border border-border bg-background px-2 py-1.5 text-xs"
+                                    value={
+                                      selected
+                                        ? (selected.voice || settings.defaultVoice || globalVoice)
+                                        : (globalVoice || settings.defaultVoice || '')
+                                    }
+                                    disabled={busy}
+                                    onChange={(e) => {
+                                      const v = e.target.value
+                                      setGlobalVoice(v)
+                                      if (selected) {
+                                        onChange({
+                                          ...selected,
+                                          voice: v,
+                                          ...(isOcrOverlayLayout(selected.layout) ? { dub: true } : {}),
+                                        })
+                                      }
+                                    }}
+                                  >
+                                    {voices.map((v) => (
+                                      <option key={v.id} value={v.id}>{v.name}</option>
+                                    ))}
+                                  </select>
+                                  {!selected && (
+                                    <button
+                                      type="button"
+                                      className="shrink-0 rounded-md border border-primary/40 bg-primary/10 text-primary hover:bg-primary/20 px-2.5 py-1.5 text-[11px] font-medium transition-colors disabled:opacity-50 whitespace-nowrap"
+                                      disabled={busy || !onDub || segments.length === 0}
+                                      title="Gán giọng + volume/tốc độ rồi lồng tiếng toàn bộ"
+                                      onClick={() => {
+                                        pushHistory()
+                                        const vol = Math.max(0, Math.min(200, globalTtsVolume))
+                                        const sp = Math.max(0.75, Math.min(1.5, globalTtsSpeed))
+                                        const voice = globalVoice || settings.defaultVoice
+                                        const applied = segments.map((s) => {
+                                          if ((s.layout === 'vertical' || s.layout === 'label') && s.dub !== true) {
+                                            return s
+                                          }
+                                          return {
+                                            ...s,
+                                            ttsVolume: vol,
+                                            ttsSpeed: sp,
+                                            voice,
+                                            audioFile: undefined,
+                                            audioUrl: undefined,
+                                            audioDuration: undefined,
+                                          }
+                                        })
+                                        void onSegmentsReplace(applied)
+                                        if (voice) onSettings({ ...settings, defaultVoice: voice })
+                                        window.setTimeout(() => onDub?.(), 150)
+                                      }}
+                                    >
+                                      {busy && jobStep === 'dub'
+                                        ? `${Math.round(jobProgress || 0)}%`
+                                        : 'Tạo TTS tất cả'}
+                                    </button>
+                                  )}
+                                </div>
+                              </PropLabel>
+                              {selected && segmentHasDub(selected) && (
                                 <div className="flex gap-1">
                                   <button
                                     type="button"
-                                    className="flex-1 rounded-md border border-border bg-accent hover:bg-muted px-2 py-1.5 text-xs transition-colors"
-                                    disabled={busy}
+                                    className="flex-1 rounded-md border border-border bg-accent hover:bg-muted px-2 py-1.5 text-xs transition-colors disabled:opacity-50"
+                                    disabled={busy || !selected.audioUrl}
                                     onClick={() => playSegmentDub(selected)}
                                   >
                                     Phát với timeline
@@ -4670,9 +5602,16 @@ export default function LivePreviewEditor({
                                     {ttsBusy ? 'Đang tạo…' : 'Tạo lại TTS'}
                                   </button>
                                 </div>
-                              </>
-                            )}
+                              )}
+                              {selected && !segmentHasDub(selected) && (
+                                <p className="text-[11px] text-muted-foreground leading-relaxed">
+                                  Đoạn tắt lồng tiếng — bật ở tab Phụ đề.
+                                </p>
+                              )}
+                            </div>
 
+                            {selected ? (
+                              <>
                             <PropLabel label={`Âm lượng TTS: ${selected.ttsVolume ?? 100}%`}>
                               <input type="range" min={0} max={200}
                                 className="w-full accent-primary"
@@ -4730,6 +5669,108 @@ export default function LivePreviewEditor({
                             >
                               Reset âm thanh mặc định
                             </button>
+                              </>
+                            ) : (
+                              <>
+                                <p className="text-[11px] text-muted-foreground leading-relaxed">
+                                  Chọn giọng (nút <strong className="text-foreground font-medium">Tạo TTS tất cả</strong> bên phải) · chỉnh volume/tốc độ rồi <strong className="text-foreground font-medium">Áp dụng</strong> nếu cần.
+                                </p>
+                                <PropLabel label={`Âm lượng TTS: ${globalTtsVolume}% · tất cả`}>
+                                  <input
+                                    type="range"
+                                    min={0}
+                                    max={200}
+                                    className="w-full accent-primary"
+                                    value={globalTtsVolume}
+                                    disabled={busy}
+                                    onChange={(e) => setGlobalTtsVolume(Number(e.target.value))}
+                                  />
+                                </PropLabel>
+                                <div className="flex gap-1">
+                                  {[0, 50, 100, 150, 200].map((v) => (
+                                    <button
+                                      key={v}
+                                      type="button"
+                                      className={cn(
+                                        'flex-1 rounded-sm border px-1 py-1 text-[10px] transition-colors',
+                                        globalTtsVolume === v
+                                          ? 'border-primary text-primary bg-primary/10'
+                                          : 'border-border text-muted-foreground hover:text-foreground hover:bg-accent',
+                                      )}
+                                      disabled={busy}
+                                      onClick={() => setGlobalTtsVolume(v)}
+                                    >
+                                      {v === 0 ? 'Tắt' : `${v}%`}
+                                    </button>
+                                  ))}
+                                </div>
+
+                                <PropLabel label={`Tốc độ TTS: ${globalTtsSpeed.toFixed(2)}× · tất cả`}>
+                                  <input
+                                    type="range"
+                                    min={0.75}
+                                    max={1.5}
+                                    step={0.05}
+                                    className="w-full accent-primary"
+                                    value={globalTtsSpeed}
+                                    disabled={busy}
+                                    onChange={(e) => setGlobalTtsSpeed(Number(e.target.value))}
+                                  />
+                                </PropLabel>
+                                <div className="flex gap-1">
+                                  {[0.75, 0.9, 1, 1.15, 1.3, 1.5].map((v) => (
+                                    <button
+                                      key={v}
+                                      type="button"
+                                      className={cn(
+                                        'flex-1 rounded-sm border px-1 py-1 text-[10px] transition-colors',
+                                        Math.abs(globalTtsSpeed - v) < 0.001
+                                          ? 'border-primary text-primary bg-primary/10'
+                                          : 'border-border text-muted-foreground hover:text-foreground hover:bg-accent',
+                                      )}
+                                      disabled={busy}
+                                      onClick={() => setGlobalTtsSpeed(v)}
+                                    >
+                                      {v}×
+                                    </button>
+                                  ))}
+                                </div>
+
+                                <button
+                                  type="button"
+                                  className="w-full rounded-md border border-border bg-accent hover:bg-muted px-3 py-1.5 text-xs transition-colors disabled:opacity-50"
+                                  disabled={busy || segments.length === 0}
+                                  onClick={() => {
+                                    pushHistory()
+                                    const vol = Math.max(0, Math.min(200, globalTtsVolume))
+                                    const sp = Math.max(0.75, Math.min(1.5, globalTtsSpeed))
+                                    const voice = globalVoice || settings.defaultVoice
+                                    const applied = segments.map((s) => {
+                                      if ((s.layout === 'vertical' || s.layout === 'label') && s.dub !== true) {
+                                        return s
+                                      }
+                                      return { ...s, ttsVolume: vol, ttsSpeed: sp, voice }
+                                    })
+                                    void onSegmentsReplace(applied)
+                                    if (voice && voice !== settings.defaultVoice) {
+                                      onSettings({ ...settings, defaultVoice: voice })
+                                    }
+                                  }}
+                                >
+                                  Áp dụng giọng + âm thanh cho tất cả
+                                </button>
+                                <button
+                                  type="button"
+                                  className="w-full rounded-md border border-border bg-accent hover:bg-muted px-3 py-1.5 text-xs transition-colors"
+                                  disabled={busy}
+                                  onClick={() => {
+                                    setGlobalTtsVolume(100)
+                                    setGlobalTtsSpeed(1)
+                                    setGlobalVoice(settings.defaultVoice || '')
+                                  }}
+                                >
+                                  Reset về 100% · 1× · giọng mặc định
+                                </button>
                               </>
                             )}
                           </>
@@ -4991,6 +6032,21 @@ export default function LivePreviewEditor({
                   <TlButton title="Nhân đôi clip" disabled={!canDuplicate} onClick={duplicateClip}>
                     <TabSvg><rect x="8" y="8" width="12" height="12" rx="1" /><path d="M4 16V5a1 1 0 0 1 1-1h11" /></TabSvg>
                   </TlButton>
+                  <TlButton
+                    title={
+                      selectedIds.length >= 2
+                        ? `Gộp ${selectedIds.length} caption (cùng lane)`
+                        : 'Gộp caption — chọn ≥2 (Ctrl/Shift+click)'
+                    }
+                    disabled={busy || selectedIds.length < 2 || trackFocus !== 'caption'}
+                    onClick={mergeSelectedCaptions}
+                  >
+                    <TabSvg>
+                      <rect x="3" y="8" width="7" height="8" rx="1" />
+                      <rect x="14" y="8" width="7" height="8" rx="1" />
+                      <path d="M10 12h4" />
+                    </TabSvg>
+                  </TlButton>
                   <TlButton title="Tách âm thanh → Xóa lời" disabled={busy} onClick={extractAudioFromVideo}>
                     <TabSvg>
                       <path d="M9 18V5l12-2v13" /><circle cx="6" cy="18" r="3" /><circle cx="18" cy="16" r="3" />
@@ -5009,7 +6065,7 @@ export default function LivePreviewEditor({
                     <TabSvg><path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" /></TabSvg>
                   </TlButton>
                   <TlButton
-                    title={'Phím tắt:\nCtrl+Z — Hoàn tác\nCtrl+Shift+Z / Ctrl+Y — Làm lại\nSpace / K — Phát / dừng\nJ / L — Tua −5s / +5s\n← / → — Lùi / tiến 1 frame (Shift = 1s)\n↑ / ↓ — Đoạn trước / sau\nHome / End — Về đầu / cuối\nT — Thêm text overlay\nS — Split\nB — Bookmark\nF — Toàn màn hình\nDelete — Xóa clip đang chọn\nEsc — Bỏ chọn'}
+                    title={'Phím tắt:\nCtrl+Z — Hoàn tác\nCtrl+Shift+Z / Ctrl+Y — Làm lại\nSpace / K — Phát / dừng\nJ / L — Tua −5s / +5s\n← / → — Lùi / tiến 1 frame (Shift = 1s)\n↑ / ↓ — Đoạn trước / sau\nHome / End — Về đầu / cuối\nT — Thêm text overlay\nS — Split\nB — Bookmark\nF — Toàn màn hình\nCtrl/Shift+click — Chọn nhiều caption\nCtrl+A — Chọn cả lane\nCtrl+G — Gộp caption\nDelete — Xóa clip / nhóm\nEsc — Bỏ chọn nhóm'}
                   >
                     <TabSvg><circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><line x1="12" y1="17" x2="12.01" y2="17" /></TabSvg>
                   </TlButton>
@@ -5076,7 +6132,10 @@ export default function LivePreviewEditor({
                       {
                         id: 'dub' as const,
                         h: 'h-10',
-                        label: 'Lồng tiếng',
+                        label:
+                          busy && jobStep === 'dub'
+                            ? `Lồng tiếng ${Math.max(0, Math.min(100, Math.round(jobProgress || 0)))}%`
+                            : 'Lồng tiếng',
                         icon: <IconHeadphones size={13} className="shrink-0" />,
                         mute: true,
                         hide: true,
@@ -5134,7 +6193,13 @@ export default function LivePreviewEditor({
                             if (hit) focusCaption(hit)
                             else setTrackFocus('caption')
                           }
-                          else if (row.id === 'dub' && selected) focusDub(selected)
+                          else if (row.id === 'dub') {
+                            // Click nhãn «Lồng tiếng» = chạy TTS (popup + nền), giống bật Xóa lời
+                            setTrackFocus('dub')
+                            setPropTab('audio')
+                            if (!busy && onDub) onDub()
+                            else if (selected) focusDub(selected)
+                          }
                           else if (row.id === 'text' && selectedOverlay) focusText(selectedOverlay.id)
                           else setTrackFocus(row.focus)
                         }}
@@ -5323,18 +6388,25 @@ export default function LivePreviewEditor({
                         }}
                       >
                         {layoutSegs.filter((seg) => captionLaneOf(seg, sourceHeight || 1920) === lane.key).map((seg) => {
-                          const display = draft?.id === seg.id ? { ...seg, ...draft } : seg
-                          const isSelected = trackFocus === 'caption' && seg.id === selected?.id
-                          // Một thanh kéo [start,end) — không ghost cover 2 màu; sai thì user kéo đầu/đuôi
+                          const gd = groupDraft?.[seg.id]
+                          const display = gd
+                            ? { ...seg, ...gd }
+                            : draft?.id === seg.id
+                              ? { ...seg, ...draft }
+                              : seg
+                          const inGroup = selectedIds.includes(seg.id)
+                          const isSelected =
+                            trackFocus === 'caption' && (seg.id === selected?.id || inGroup)
                           return (
                             <button
                               key={seg.id}
                               type="button"
                               data-caption-clip=""
-                              title={`${formatTime(display.start)}–${formatTime(display.end)}`}
+                              title={`${formatTime(display.start)}–${formatTime(display.end)}${inGroup && selectedIds.length > 1 ? ` · nhóm ${selectedIds.length}` : ''}`}
                               className={cn(
                                 'absolute top-1.5 h-[calc(100%-12px)] rounded-md text-[11px] text-white whitespace-nowrap overflow-hidden px-2 flex items-center justify-center text-center cursor-pointer border-0 transition-opacity hover:opacity-90',
                                 isSelected && 'ring-[1.5px] ring-primary',
+                                inGroup && selectedIds.length > 1 && 'ring-[1.5px] ring-sky-300',
                                 trackLocked.caption && 'cursor-not-allowed',
                               )}
                               style={{
@@ -5343,24 +6415,44 @@ export default function LivePreviewEditor({
                                 boxSizing: 'border-box',
                                 background: isSelected ? lane.selected : lane.color,
                               }}
-                              onClick={() => {
-                                focusCaption(seg)
-                                selectClipKeepPlayhead(display.start, display.end)
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                if (e.shiftKey) focusCaption(seg, { range: true })
+                                else if (e.ctrlKey || e.metaKey) focusCaption(seg, { additive: true })
+                                else {
+                                  focusCaption(seg)
+                                  selectClipKeepPlayhead(display.start, display.end)
+                                }
                               }}
                               onContextMenu={(e) => {
-                                focusCaption(seg)
+                                if (!selectedIds.includes(seg.id)) focusCaption(seg)
+                                else {
+                                  setSelectedId(seg.id)
+                                  setTrackFocus('caption')
+                                }
                                 openCtxMenu({ kind: 'segment', segId: seg.id, x: e.clientX, y: e.clientY }, e)
                               }}
-                              onPointerDown={(e) => beginDrag(e, seg, 'move')}
+                              onPointerDown={(e) => {
+                                if (e.button !== 0) return
+                                // Ctrl/Shift click: chỉ chọn, không kéo ngay
+                                if (e.ctrlKey || e.metaKey || e.shiftKey) return
+                                beginDrag(e, seg, 'move')
+                              }}
                             >
                               <span
                                 className="absolute inset-y-0 left-0 w-2.5 cursor-ew-resize rounded-l-md hover:bg-white/25 transition-colors z-10"
-                                onPointerDown={(e) => beginDrag(e, seg, 'start')}
+                                onPointerDown={(e) => {
+                                  e.stopPropagation()
+                                  beginDrag(e, seg, 'start')
+                                }}
                               />
                               <span className="truncate relative z-[1] pointer-events-none">{seg.translation || lane.label}</span>
                               <span
                                 className="absolute inset-y-0 right-0 w-2.5 cursor-ew-resize rounded-r-md hover:bg-white/25 transition-colors z-10"
-                                onPointerDown={(e) => beginDrag(e, seg, 'end')}
+                                onPointerDown={(e) => {
+                                  e.stopPropagation()
+                                  beginDrag(e, seg, 'end')
+                                }}
                               />
                             </button>
                           )
@@ -5372,6 +6464,34 @@ export default function LivePreviewEditor({
                       <div className={cn('relative h-10 box-border border-b border-border/80', trackHidden.dub && 'opacity-30')} style={{ backgroundColor: 'var(--background)' }}>
                         {(() => {
                           const dubs = segments.filter((seg) => segmentHasDub(seg) && seg.audioUrl)
+                          const dubbing =
+                            busy && (jobStep === 'dub' || (!jobStep && busy && !dubs.length))
+                          const dubPct = Math.max(0, Math.min(100, Math.round(jobProgress || 0)))
+                          // Đang lồng: pill tiến độ (giống «Xóa lời… N%» trên Âm gốc)
+                          if (dubbing) {
+                            const label =
+                              dubPct > 0
+                                ? `Lồng tiếng… ${dubPct}%`
+                                : 'Lồng tiếng… đang chạy'
+                            const w = Math.max(148, Math.min(280, 120 + dubPct))
+                            return (
+                              <button
+                                type="button"
+                                title={jobMessage || label}
+                                disabled
+                                className="absolute top-1.5 h-[calc(100%-12px)] rounded-md text-[11px] text-white whitespace-nowrap overflow-hidden px-2 flex items-center cursor-wait border-0 opacity-95"
+                                style={{
+                                  left: 0,
+                                  width: w,
+                                  boxSizing: 'border-box',
+                                  background: `linear-gradient(90deg, #c2780a ${dubPct}%, #E8A045 ${dubPct}%)`,
+                                }}
+                              >
+                                <IconHeadphones size={11} className="shrink-0 mr-1 opacity-90" />
+                                {label}
+                              </button>
+                            )
+                          }
                           if (!dubs.length) {
                             return (
                               <button
@@ -5391,7 +6511,7 @@ export default function LivePreviewEditor({
                                 onClick={() => {
                                   setTrackFocus('dub')
                                   setPropTab('audio')
-                                  onDub?.()
+                                  if (!busy) onDub?.()
                                 }}
                               >
                                 <IconHeadphones size={11} className="shrink-0 mr-1 opacity-90" />
@@ -5403,7 +6523,11 @@ export default function LivePreviewEditor({
                             const clipSec = dubClipSeconds(
                               seg,
                               segments,
-                              previewVideoRate(settings.matchDuration, bakedPreferVideo),
+                              previewVideoRate(
+                                settings.matchDuration,
+                                bakedPreferVideo,
+                                seg.videoSpeed,
+                              ),
                             )
                             const isSelected = trackFocus === 'dub' && seg.id === selected?.id
                             return (
@@ -5569,9 +6693,20 @@ export default function LivePreviewEditor({
             const seg = segments.find((s) => s.id === ctxMenu.segId)
             if (!seg) return null
             const dub = segmentHasDub(seg)
+            const groupN = selectedIds.includes(seg.id) ? selectedIds.length : 1
             return (
               <>
                 <CtxItem onClick={() => { setSelectedId(seg.id); setPropTab('caption'); setCtxMenu(null) }}>Mở Phụ đề</CtxItem>
+                {groupN >= 2 && (
+                  <CtxItem
+                    onClick={() => {
+                      setCtxMenu(null)
+                      mergeSelectedCaptions()
+                    }}
+                  >
+                    Gộp {groupN} caption
+                  </CtxItem>
+                )}
                 <CtxItem onClick={() => { setSelectedId(seg.id); setPropTab('video'); setCtxMenu(null) }}>Mở Video</CtxItem>
                 <CtxItem onClick={() => { setSelectedId(seg.id); setPropTab('audio'); setCtxMenu(null) }}>Mở Âm thanh</CtxItem>
                 <CtxSep />

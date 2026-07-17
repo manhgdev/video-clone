@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import importlib.metadata
 import importlib.util
+import os
 import platform
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -40,25 +43,17 @@ def _mod_ok(name: str) -> tuple[bool, str]:
 
 
 def _ocr_cuda_check() -> tuple[bool, str]:
+    """Chỉ probe provider list — không tạo RapidOCR/session (crash native trên bản đóng gói)."""
     try:
-        # Import helper trong process con để các DLL CUDA cài bằng pip
-        # được thêm vào PATH trước khi ONNX tạo session.
-        out = subprocess.check_output(
-            [
-                sys.executable,
-                "-c",
-                (
-                    "from pipeline.asr import _rapidocr_labels; "
-                    "e=_rapidocr_labels(use_cuda=True); "
-                    "print(','.join(e.text_det.infer.session.get_providers()))"
-                ),
-            ],
-            text=True,
-            stderr=subprocess.STDOUT,
-            timeout=15,
-        ).strip()
-        return "CUDAExecutionProvider" in out, out
-    except (subprocess.SubprocessError, OSError) as e:
+        from pipeline.ocr.extract import prepare_cuda_dlls
+
+        prepare_cuda_dlls()
+        import onnxruntime as ort
+
+        providers = list(ort.get_available_providers())
+        detail = ",".join(providers) if providers else "no providers"
+        return "CUDAExecutionProvider" in providers, detail
+    except Exception as e:
         return False, str(e)[:160]
 
 
@@ -67,6 +62,42 @@ def install_ocr_cuda() -> dict[str, Any]:
     ok, detail = _ocr_cuda_check()
     if ok:
         return {"ok": True, "message": "GPU tăng tốc đã được cài", "detail": detail}
+    if getattr(sys, "frozen", False):
+        home = Path(os.environ["VIDEO_CLONE_HOME"])
+        venv = home / ".venv-ocr"
+        py = venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+        uv = shutil.which("uv")
+        if not uv:
+            raise RuntimeError("Bản ứng dụng thiếu uv để cài OCR GPU")
+        if not py.is_file():
+            subprocess.run(
+                [uv, "venv", "--python", "3.12", "--seed", str(venv)],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=900,
+            )
+        proc = subprocess.run(
+            [
+                uv,
+                "pip",
+                "install",
+                "--python",
+                str(py),
+                "--upgrade",
+                "onnxruntime-gpu[cuda,cudnn]>=1.23,<1.24",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=1200,
+        )
+        if proc.returncode:
+            raise RuntimeError((proc.stderr or proc.stdout)[-2000:])
+        return {
+            "ok": True,
+            "message": "Đã cài OCR GPU — hãy đóng và mở lại ứng dụng",
+            "detail": str(venv),
+        }
     pip = [sys.executable, "-m", "pip"]
     subprocess.run(
         pip + ["uninstall", "-y", "onnxruntime", "onnxruntime-gpu"],
@@ -117,18 +148,46 @@ def install_ocr_cuda() -> dict[str, Any]:
 
 
 def _demucs_venv_python() -> Path | None:
-    server_root = Path(__file__).resolve().parents[2]
-    py = server_root / ".venv-demucs" / (
-        "Scripts/python.exe" if sys.platform == "win32" else "bin/python"
-    )
-    return py if py.is_file() else None
+    """Tìm python .venv-demucs — ưu tiên venv đã import được demucs."""
+    from pipeline.export.mux import _demucs_py_in, _demucs_root_candidates
+
+    candidates: list[Path] = []
+    for root in _demucs_root_candidates():
+        py = _demucs_py_in(root)
+        if py.is_file():
+            candidates.append(py)
+    if not candidates:
+        return None
+
+    def _import_ok(exe: Path) -> bool:
+        try:
+            r = subprocess.run(
+                [str(exe), "-c", "import demucs, soundfile"],
+                capture_output=True,
+                timeout=90,
+            )
+            if r.returncode == 0:
+                return True
+            r2 = subprocess.run(
+                [str(exe), "-c", "import demucs_mlx, soundfile"],
+                capture_output=True,
+                timeout=90,
+            )
+            return r2.returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            return False
+
+    for py in candidates:
+        if _import_ok(py):
+            return py
+    return candidates[0]
 
 
 def _apple_silicon() -> bool:
     return sys.platform == "darwin" and platform.machine().lower() in ("arm64", "aarch64")
 
 
-def _demucs_check() -> tuple[bool, str]:
+def _demucs_check_uncached() -> tuple[bool, str]:
     """Demucs sẵn sàng.
 
     - Apple Silicon → demucs-mlx (Metal)
@@ -185,8 +244,13 @@ def _demucs_check() -> tuple[bool, str]:
     except (OSError, subprocess.SubprocessError) as e:
         return False, str(e)[:160]
     if r.returncode != 0:
-        err = (r.stderr or r.stdout or "import fail").strip()[-160:]
-        return False, err or "import demucs/torch thất bại"
+        err = (r.stderr or r.stdout or "").strip()
+        if "No module named 'demucs'" in err or "No module named \"demucs\"" in err:
+            return False, "chưa cài demucs trong .venv-demucs (bấm Cài đặt)"
+        if "No module named 'torch'" in err:
+            return False, "chưa cài torch trong .venv-demucs (bấm Cài đặt)"
+        short = err.splitlines()[-1][:160] if err else "import demucs/torch thất bại"
+        return False, short
     parts = (r.stdout or "").strip().split("|")
     device = parts[0] if parts else "?"
     name = parts[1] if len(parts) > 1 else "?"
@@ -197,6 +261,22 @@ def _demucs_check() -> tuple[bool, str]:
     return True, detail
 
 
+_DEMUCS_CACHE_TTL = 60.0
+_demucs_cache: tuple[float, tuple[bool, str]] | None = None
+_demucs_cache_lock = threading.Lock()
+
+
+def _demucs_check(*, refresh: bool = False) -> tuple[bool, str]:
+    global _demucs_cache
+    with _demucs_cache_lock:
+        now = time.monotonic()
+        if not refresh and _demucs_cache and now - _demucs_cache[0] < _DEMUCS_CACHE_TTL:
+            return _demucs_cache[1]
+        result = _demucs_check_uncached()
+        _demucs_cache = (now, result)
+        return result
+
+
 def install_demucs_cuda() -> dict[str, Any]:
     """Cài Demucs tối ưu: NVIDIA CUDA / Apple demucs-mlx / CPU."""
     ok, detail = _demucs_check()
@@ -205,7 +285,7 @@ def install_demucs_cuda() -> dict[str, Any]:
     from pipeline.export.mux import _demucs_python
 
     py = Path(_demucs_python(None, report=False))
-    ok, detail = _demucs_check()
+    ok, detail = _demucs_check(refresh=True)
     if not ok:
         raise RuntimeError(f"Demucs chưa sẵn sàng sau khi cài: {detail} · python={py}")
     label = "Apple GPU" if _apple_silicon() else ("NVIDIA GPU" if _which("nvidia-smi") else "CPU")

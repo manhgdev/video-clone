@@ -366,6 +366,69 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
         clear_job(project_id, job_gen)
 
 
+def _assign_tts_fit_speeds(
+    segments: list[dict[str, Any]],
+    *,
+    match: str,
+) -> int:
+    """TTS dài hơn khe timeline → videoSpeed < 1: kéo dài span câu, đẩy trước/sau.
+
+    retime: out_span = (end-start)/speed; gap sau end giữ 1×; câu sau map_time muộn hơn.
+    stretch mode: không gán (khớp bằng atempo TTS).
+    """
+    if match == "stretch":
+        for seg in segments:
+            seg.pop("videoSpeed", None)
+        return 0
+
+    soft = 1.03
+    min_speed = 0.35  # chậm tối đa ~2.86×
+    ordered = sorted(segments, key=lambda s: float(s.get("start") or 0))
+    n = 0
+    for i, seg in enumerate(ordered):
+        ad = float(seg.get("audioDuration") or 0)
+        if ad <= 0.08:
+            seg.pop("videoSpeed", None)
+            continue
+        start = float(seg.get("start") or 0)
+        end = float(seg.get("end") or start)
+        window = max(0.12, end - start)
+        next_start = None
+        for j in range(i + 1, len(ordered)):
+            ns = float(ordered[j].get("start") or 0)
+            if ns > start + 0.02:
+                next_start = ns
+                break
+        # Câu cuối: không có khe sau → gap_after=0 (trước gán 1e9 → không bao giờ giãn)
+        gap_after = max(0.0, next_start - end) if next_start is not None else 0.0
+        need_speech = max(0.12, ad - gap_after + 0.05)
+        if need_speech <= window * soft:
+            seg.pop("videoSpeed", None)
+            continue
+        speed = max(min_speed, min(1.0, window / need_speech))
+        speed = round(speed, 3)
+        if speed >= 0.995:
+            seg.pop("videoSpeed", None)
+            continue
+        if next_start is not None and window / speed + gap_after < ad * 0.98:
+            extra = min(gap_after * 0.85, max(0.0, ad - window / min_speed))
+            if extra > 0.05:
+                new_end = min(next_start - 0.02, end + extra)
+                if new_end > end + 0.04:
+                    seg["end"] = round(new_end, 3)
+                    window = max(0.12, new_end - start)
+                    gap_after = max(0.0, next_start - new_end)
+                    need_speech = max(0.12, ad - gap_after + 0.05)
+                    speed = max(min_speed, min(1.0, window / need_speech))
+                    speed = round(speed, 3)
+        if speed >= 0.995:
+            seg.pop("videoSpeed", None)
+            continue
+        seg["videoSpeed"] = speed
+        n += 1
+    return n
+
+
 def run_dub(project_id: str, *, finalize: bool = True, nested: bool = False) -> None:
     meta = load_meta(project_id)
     segments = meta.get("segments") or []
@@ -377,7 +440,14 @@ def run_dub(project_id: str, *, finalize: bool = True, nested: bool = False) -> 
     if not nested:
         job_gen = begin_job(project_id)
     try:
-        set_status(project_id, step="dub", progress=5, message="TTS…", running=True)
+        force_tts = bool(meta.pop("forceTts", False) or settings.get("forceTts"))
+        set_status(
+            project_id,
+            step="dub",
+            progress=5,
+            message="TTS… (bỏ cache, gen lại)" if force_tts else "TTS…",
+            running=True,
+        )
         default_voice = settings.get("defaultVoice", "system")
         # Một cache key có thể được nhiều segment dùng chung; chỉ synthesize 1 lần.
         jobs: dict[str, dict[str, Any]] = {}
@@ -385,11 +455,30 @@ def run_dub(project_id: str, *, finalize: bool = True, nested: bool = False) -> 
         # preferVideo/none: không ép atempo theo slot
         soft_match = match in ("none", "preferVideo")
         ordered = sorted(segments, key=lambda s: float(s.get("start") or 0))
+        if force_tts:
+            # Xóa file wav/mp3 TTS cũ — tránh preview lệch timeline mới
+            tts_dir = root / "tts"
+            if tts_dir.is_dir():
+                for f in tts_dir.glob("*"):
+                    if f.suffix.lower() in (".wav", ".mp3", ".aiff"):
+                        try:
+                            f.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+            for seg in ordered:
+                seg.pop("audioFile", None)
+                seg.pop("audioUrl", None)
+                seg.pop("audioDuration", None)
+                seg.pop("videoSpeed", None)
         for i, seg in enumerate(ordered):
             # Title dọc / nhãn: mặc định không TTS; bật lại qua seg.dub=True
+            # dub=null / thiếu key → theo layout (không coi null là False)
             lay = str(seg.get("layout") or "")
-            if "dub" in seg:
-                want_dub = bool(seg.get("dub"))
+            dub_flag = seg.get("dub")
+            if dub_flag is True:
+                want_dub = True
+            elif dub_flag is False:
+                want_dub = False
             else:
                 want_dub = lay not in ("vertical", "label")
             if not want_dub:
@@ -473,6 +562,30 @@ def run_dub(project_id: str, *, finalize: bool = True, nested: bool = False) -> 
             raise RuntimeError(f"TTS thất bại sau 3 lần: {last}") from last
 
         pending = list(jobs.values())
+        if not pending:
+            spoken = sum(
+                1
+                for s in segments
+                if str(s.get("layout") or "") not in ("vertical", "label")
+                and (s.get("translation") or s.get("source") or "").strip()
+            )
+            msg = (
+                "Không có đoạn nào bật lồng tiếng — kiểm tra track Dub / layout"
+                if spoken
+                else "Không có đoạn để lồng tiếng"
+            )
+            meta["segments"] = segments
+            save_meta(project_id, meta)
+            if finalize:
+                set_status(
+                    project_id,
+                    step="dub",
+                    progress=100,
+                    message=msg,
+                    running=False,
+                )
+            return
+
         cached = [j for j in pending if j["wav"].exists() and j["wav"].stat().st_size > 128]
         req = int(settings.get("workers") or 0)
         workers = adaptive_workers(
@@ -500,23 +613,30 @@ def run_dub(project_id: str, *, finalize: bool = True, nested: bool = False) -> 
                     ),
                     running=True,
                 )
+        # TTS dài hơn cửa sổ câu → videoSpeed < 1 (kéo dài span, đẩy câu sau).
+        # Export gọi retime_video_segments — không cascade cắt audio.
+        n_stretch = _assign_tts_fit_speeds(segments, match=match)
         meta["segments"] = segments
-        # preferVideo đã bake 0.80× vào workVideo — không stamp videoSpeed tay (tránh chậm 2 lần)
         if match == "preferVideo":
             from .export.mux import PREFER_VIDEO_FACTOR
 
             if meta.get("bakedPreferVideo"):
+                # bake 0.80× toàn cục đã xong; chỉ còn stretch từng câu (videoSpeed)
                 meta.pop("videoSlowFactor", None)
-                for seg in segments:
-                    seg.pop("videoSpeed", None)
             else:
-                # project cũ chưa bake — vẫn báo factor cho mux
                 meta["videoSlowFactor"] = round(PREFER_VIDEO_FACTOR, 4)
         elif "videoSlowFactor" in meta:
             meta.pop("videoSlowFactor", None)
         save_meta(project_id, meta)
         if finalize:
-            set_status(project_id, step="dub", progress=100, message="Lồng tiếng xong", running=False)
+            extra = f" · giãn {n_stretch} câu" if n_stretch else ""
+            set_status(
+                project_id,
+                step="dub",
+                progress=100,
+                message=f"Lồng tiếng xong · {len(pending)} đoạn{extra}",
+                running=False,
+            )
     except Cancelled:
         set_status(
             project_id,
@@ -576,25 +696,51 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
     for s in segments:
         if float(s.get("end") or 0) > vid_dur:
             s["end"] = vid_dur
-    # Free text: cùng hệ tọa độ pixel; bake captionLayout + màu/cỡ = preview.
+    # Free text + effect regions (làm mờ tự do): cùng hệ tọa độ pixel.
     text_overlays: list[dict[str, Any]] = []
     for item in meta.get("overlays") or []:
         if float(item.get("start") or 0) >= vid_dur:
             continue
-        text = str(item.get("text") or "").strip()
-        if not text:
-            continue
+        kind = str(item.get("kind") or "text").lower()
         x = float(item.get("x") or 0)
         y = float(item.get("y") or 0)
         w = float(item.get("w") or 0)
         h = float(item.get("h") or 0)
+        if w < 4 or h < 4:
+            continue
+        st = float(item.get("start") or 0)
+        en = float(item.get("end") or 0)
+        if kind == "effect":
+            # Vùng hiệu ứng: chỉ mask, không chữ
+            text_overlays.append(
+                {
+                    "id": f"fx-{item.get('id', '')}",
+                    "start": st,
+                    "end": en,
+                    "coverStart": st,
+                    "coverEnd": en,
+                    "translation": "",
+                    "source": "",
+                    "layout": "horizontal",
+                    "bbox": {"x": x, "y": y, "w": w, "h": h},
+                    "maskOnly": True,
+                    "skipCoverMask": False,
+                    "coverMaskStyle": str(item.get("maskStyle") or "blur"),
+                    "coverMaskColor": str(item.get("maskColor") or "#4c1d95"),
+                    "coverMaskOpacity": int(item.get("maskOpacity") if item.get("maskOpacity") is not None else 40),
+                }
+            )
+            continue
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
         fs = int(item.get("fontSize") or 42)
         lines = [ln if ln.strip() else " " for ln in text.splitlines()] or [text]
         text_overlays.append(
             {
                 "id": f"overlay-{item.get('id', '')}",
-                "start": float(item.get("start") or 0),
-                "end": float(item.get("end") or 0),
+                "start": st,
+                "end": en,
                 "translation": text,
                 "source": "",
                 "layout": "horizontal",
@@ -638,18 +784,22 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
 
     try:
         hint = f"preview {preview_sec}s — " if preview_sec > 0 else ""
-        # preferVideo bake sẵn: không retime từng đoạn. Manual speed chỉ khi stretch/natural tùy.
-        if manual_video_speed and match_mode not in ("preferVideo", "none") and not baked_prefer:
+        # TTS dài hơn slot → videoSpeed < 1: kéo dài span câu + đẩy timeline sau
+        # (preferVideo bake 0.80× vẫn retime thêm từng câu khi cần)
+        if manual_video_speed and match_mode != "stretch":
             set_status(
                 project_id,
                 step="export",
                 progress=10,
-                message=f"{hint}Điều tốc từng đoạn…",
+                message=f"{hint}Giãn timeline khớp lồng tiếng…",
                 running=True,
             )
             video, segments = retime_video_segments(
                 video, segments, root / "cache", project_id
             )
+            # timeline đã map — mux chỉ đặt TTS full, không cascade cắt
+            meta["segments"] = segments
+            save_meta(project_id, meta)
         place = str(settings.get("captionPlacement") or "below").lower()
         if cover and burn:
             msg = f"{hint}Che chữ cũ + chèn bản dịch…"
@@ -686,6 +836,11 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
                 cover_mask_style=str(settings.get("coverMaskStyle") or "blur"),
                 cover_mask_color=str(settings.get("coverMaskColor") or "#4c1d95"),
                 cover_mask_opacity=int(settings.get("coverMaskOpacity", 40)),
+                caption_text_color=str(settings.get("captionTextColor") or "#ffffff"),
+                caption_bg_style=str(settings.get("captionBgStyle") or "none"),
+                caption_bg_color=str(settings.get("captionBgColor") or "#000000"),
+                caption_bg_opacity=int(settings.get("captionBgOpacity", 55)),
+                caption_stroke=bool(settings.get("captionStroke", True)),
             )
         else:
             # Không burn/cover — remux bỏ metadata (không copy2 nguyên file nguồn)
@@ -732,8 +887,8 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
             # Stem từ videoPath gốc (không phải clip preview) — cùng cache với xem trước.
             source_audio = separate_no_vocals(
                 project_id,
-                # bake 0.80×: tách trên workVideo đã chậm — cùng timeline TTS
-                Path(video) if baked_prefer else Path(meta["videoPath"]),
+                # Dùng đúng clip export (work bake / retime TTS-fit) — cùng timeline TTS
+                Path(video),
             )
         if has_tts:
             set_status(

@@ -29,21 +29,14 @@ function Svg({
 
 export function IconLogo({ size = 28 }: Props) {
   return (
-    <svg width={size} height={size} viewBox="0 0 32 32" aria-hidden className="icon-logo">
-      <rect width="32" height="32" rx="8" fill="currentColor" />
-      <text
-        x="16"
-        y="21.5"
-        textAnchor="middle"
-        fill="#fff"
-        fontFamily="system-ui, -apple-system, sans-serif"
-        fontSize="11"
-        fontWeight="800"
-        letterSpacing="-0.5"
-      >
-        ZM
-      </text>
-    </svg>
+    <img
+      src="/zm-logo.png"
+      width={size}
+      height={size}
+      alt="ZM"
+      className="icon-logo"
+      draggable={false}
+    />
   )
 }
 
