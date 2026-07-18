@@ -181,21 +181,52 @@ if (!py) {
   console.log(`Web  → http://127.0.0.1:5173  (${webCmd} run dev)`)
   console.log('Ctrl+C để dừng. API crash sẽ tự restart — terminal không đóng.\n')
 
-  spawnOne('api', py, ['-m', 'uvicorn', 'main:app', '--reload', '--host', '127.0.0.1', '--port', '8787'], backendDir)
+  // Reload làm chậm boot (2 process) + hay miss worker trên Windows.
+  // Bật lại: set VIDEO_CLONE_RELOAD=1
+  const wantReload = /^(1|true|yes)$/i.test(String(process.env.VIDEO_CLONE_RELOAD || ''))
+  const apiArgs = wantReload
+    ? [
+        '-m',
+        'uvicorn',
+        'main:app',
+        '--reload',
+        '--reload-dir',
+        backendDir,
+        '--reload-exclude',
+        '.venv/*',
+        '--reload-exclude',
+        'data/*',
+        '--reload-exclude',
+        'public/*',
+        '--host',
+        '127.0.0.1',
+        '--port',
+        '8787',
+      ]
+    : ['-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', '8787']
 
-  // Đợi API listen trước khi Vite proxy — tránh ECONNREFUSED ồ ạt lúc boot
-  const API_READY_URL = 'http://127.0.0.1:8787/api/tts/status'
-  const API_WAIT_MS = 60_000
-  const API_POLL_MS = 400
+  spawnOne('api', py, apiArgs, backendDir)
+  if (!wantReload) {
+    console.log('API reload tắt (nhanh hơn). VIDEO_CLONE_RELOAD=1 để bật.\n')
+  }
+
+  // /api/health — không import torch / engines (tránh đợi warm)
+  const API_READY_URL = 'http://127.0.0.1:8787/api/health'
+  const API_WAIT_MS = 30_000
+  const API_POLL_MS = 200
 
   async function waitForApi() {
-    const deadline = Date.now() + API_WAIT_MS
+    const t0 = Date.now()
+    const deadline = t0 + API_WAIT_MS
     let warned = false
     while (Date.now() < deadline) {
       if (shuttingDown) return false
       try {
-        const res = await fetch(API_READY_URL, { signal: AbortSignal.timeout(1500) })
-        if (res.ok || res.status < 500) return true
+        const res = await fetch(API_READY_URL, { signal: AbortSignal.timeout(800) })
+        if (res.ok || res.status < 500) {
+          console.log(`API sẵn sàng sau ${((Date.now() - t0) / 1000).toFixed(1)}s`)
+          return true
+        }
       } catch {
         if (!warned) {
           console.log('Đang chờ API sẵn sàng…')
@@ -204,13 +235,13 @@ if (!py) {
       }
       await new Promise((r) => setTimeout(r, API_POLL_MS))
     }
-    console.error('API chưa sẵn sàng sau 60s — vẫn mở Vite (proxy có thể lỗi tạm).')
+    console.error('API chưa sẵn sàng sau 30s — vẫn mở Vite (proxy có thể lỗi tạm).')
     return false
   }
 
   void waitForApi().then((ok) => {
     if (shuttingDown) return
-    if (ok) console.log('API sẵn sàng — mở Vite.\n')
+    if (ok) console.log('Mở Vite.\n')
     spawnOne('web', webCmd, webArgs, root)
   })
 

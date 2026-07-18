@@ -1,5 +1,17 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
 import type { ProjectSettings } from '@/features/project/project.types'
+
+type AnalysisRegion = { x: number; y: number; w: number; h: number }
+
+const DEFAULT_ANALYSIS_REGION: AnalysisRegion = { x: 0.05, y: 0.55, w: 0.9, h: 0.28 }
+
+function clampRegion(r: AnalysisRegion): AnalysisRegion {
+  const x = Math.max(0, Math.min(0.95, r.x))
+  const y = Math.max(0, Math.min(0.95, r.y))
+  const w = Math.max(0.08, Math.min(1 - x, r.w))
+  const h = Math.max(0.06, Math.min(1 - y, r.h))
+  return { x, y, w, h }
+}
 import {
   IconArrowRight,
   IconClock,
@@ -61,11 +73,101 @@ export default function Sidebar({
   onCancel,
 }: Props) {
   const inputRef = useRef<HTMLInputElement>(null)
+  const previewShellRef = useRef<HTMLDivElement>(null)
   const [portrait, setPortrait] = useState(false)
   const [showCancel, setShowCancel] = useState(false)
   const [previewDraft, setPreviewDraft] = useState(
     String(settings.previewSec > 0 ? settings.previewSec : 20),
   )
+  const regionDragRef = useRef<{
+    mode: 'move' | 'nw' | 'ne' | 'sw' | 'se' | 'n' | 's' | 'e' | 'w'
+    startX: number
+    startY: number
+    origin: AnalysisRegion
+    boxW: number
+    boxH: number
+  } | null>(null)
+
+  const showAnalysisRoi =
+    Boolean(settings.stableCaptionLocate)
+    && Boolean(videoUrl)
+    && !busy
+
+  const analysisRegion = clampRegion(
+    settings.analysisRegion && typeof settings.analysisRegion === 'object'
+      ? {
+          x: Number(settings.analysisRegion.x) || DEFAULT_ANALYSIS_REGION.x,
+          y: Number(settings.analysisRegion.y) || DEFAULT_ANALYSIS_REGION.y,
+          w: Number(settings.analysisRegion.w) || DEFAULT_ANALYSIS_REGION.w,
+          h: Number(settings.analysisRegion.h) || DEFAULT_ANALYSIS_REGION.h,
+        }
+      : DEFAULT_ANALYSIS_REGION,
+  )
+
+  useEffect(() => {
+    if (!settings.stableCaptionLocate) return
+    if (settings.analysisRegion) return
+    // Lần đầu bật: gán vùng mặc định (dải hardsub giữa-dưới)
+    onSettings({ ...settings, analysisRegion: { ...DEFAULT_ANALYSIS_REGION } })
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only seed once when toggled on
+  }, [settings.stableCaptionLocate])
+
+  function beginRegionDrag(
+    mode: NonNullable<typeof regionDragRef.current>['mode'],
+    e: ReactPointerEvent,
+  ) {
+    e.preventDefault()
+    e.stopPropagation()
+    const shell = previewShellRef.current
+    if (!shell || busy) return
+    const rect = shell.getBoundingClientRect()
+    regionDragRef.current = {
+      mode,
+      startX: e.clientX,
+      startY: e.clientY,
+      origin: { ...analysisRegion },
+      boxW: Math.max(1, rect.width),
+      boxH: Math.max(1, rect.height),
+    }
+    ;(e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId)
+  }
+
+  useEffect(() => {
+    const onMove = (e: PointerEvent) => {
+      const drag = regionDragRef.current
+      if (!drag) return
+      const dx = (e.clientX - drag.startX) / drag.boxW
+      const dy = (e.clientY - drag.startY) / drag.boxH
+      let { x, y, w, h } = drag.origin
+      if (drag.mode === 'move') {
+        x += dx
+        y += dy
+      } else {
+        if (drag.mode.includes('e')) w = drag.origin.w + dx
+        if (drag.mode.includes('s')) h = drag.origin.h + dy
+        if (drag.mode.includes('w')) {
+          x = drag.origin.x + dx
+          w = drag.origin.w - dx
+        }
+        if (drag.mode.includes('n')) {
+          y = drag.origin.y + dy
+          h = drag.origin.h - dy
+        }
+      }
+      onSettings({ ...settings, analysisRegion: clampRegion({ x, y, w, h }) })
+    }
+    const onUp = () => {
+      regionDragRef.current = null
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+    window.addEventListener('pointercancel', onUp)
+    return () => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      window.removeEventListener('pointercancel', onUp)
+    }
+  }, [onSettings, settings])
 
   useEffect(() => {
     setPreviewDraft(String(settings.previewSec > 0 ? settings.previewSec : 20))
@@ -104,12 +206,14 @@ export default function Sidebar({
   return (
     <aside className={`sidebar${busy ? ' is-busy' : ''}`}>
       <div
-        className={`preview${portrait ? ' portrait' : ''}${busy ? ' locked' : ''}`}
+        ref={previewShellRef}
+        className={`preview${portrait ? ' portrait' : ''}${busy ? ' locked' : ''}${showAnalysisRoi ? ' has-roi' : ''}`}
         onClick={(e) => {
           // Busy: chỉ xem video, không chọn file mới
           if (busy) return
           // click vào controls video — đừng mở file picker
           if ((e.target as HTMLElement).tagName === 'VIDEO') return
+          if ((e.target as HTMLElement).closest('.analysis-roi')) return
           if (videoUrl) return
           inputRef.current?.click()
         }}
@@ -135,6 +239,28 @@ export default function Sidebar({
           <div className="preview-empty">
             <strong>Chọn video</strong>
             <span>MP4 9:16 hoặc 16:9</span>
+          </div>
+        )}
+        {showAnalysisRoi && (
+          <div
+            className="analysis-roi"
+            style={{
+              left: `${analysisRegion.x * 100}%`,
+              top: `${analysisRegion.y * 100}%`,
+              width: `${analysisRegion.w * 100}%`,
+              height: `${analysisRegion.h * 100}%`,
+            }}
+            onPointerDown={(e) => beginRegionDrag('move', e)}
+            title="Kéo di chuyển — góc/cạnh để resize. OCR chỉ quét trong khung này."
+          >
+            <span className="analysis-roi-label">Vùng định vị chữ</span>
+            {(['nw', 'ne', 'sw', 'se', 'n', 's', 'e', 'w'] as const).map((h) => (
+              <i
+                key={h}
+                className={`analysis-roi-handle analysis-roi-handle-${h}`}
+                onPointerDown={(e) => beginRegionDrag(h, e)}
+              />
+            ))}
           </div>
         )}
       </div>
@@ -163,24 +289,59 @@ export default function Sidebar({
         </button>
       )}
 
-      <Field
-        label="Nhận dạng"
-        icon={<IconMic size={14} />}
-        hint={
-          settings.engine === 'paddleocr'
-            ? 'Đọc chữ phụ đề trên khung hình (OCR).'
-            : 'Nhận dạng lời nói (Faster-Whisper).'
-        }
-      >
-        <select
-          value={settings.engine}
-          disabled={busy}
-          onChange={(e) => set('engine', e.target.value as ProjectSettings['engine'])}
+      <div className="field-row">
+        <Field
+          label="Nhận dạng"
+          icon={<IconMic size={14} />}
+          hint={
+            settings.engine === 'paddleocr'
+              ? 'Đọc chữ phụ đề trên khung hình'
+              : 'Faster-Whisper'
+          }
         >
-          <option value="whisper">Giọng nói (Whisper)</option>
-          <option value="paddleocr">Chữ trên màn (OCR)</option>
-        </select>
-      </Field>
+          <select
+            value={settings.engine}
+            disabled={busy}
+            onChange={(e) => set('engine', e.target.value as ProjectSettings['engine'])}
+          >
+            <option value="whisper">Giọng nói (Whisper)</option>
+            <option value="paddleocr">Chữ trên màn (OCR)</option>
+          </select>
+        </Field>
+        <Field
+          label="Công cụ dịch"
+          icon={<IconTranslate size={14} />}
+          hint={
+            settings.translator === 'google'
+              ? 'Google free — nhanh.'
+              : settings.translator === 'mymemory'
+                ? 'Free — không key (có quota IP)'
+                : settings.translator === 'tiktok'
+                  ? 'TikTok translate free — không key.'
+                  : settings.translator === 'ollama'
+                    ? 'Cấu hình model trên máy'
+                    : 'Cấu hình API key tại Cấu hình'
+          }
+        >
+          <select
+            value={settings.translator}
+            disabled={busy || settings.targetLang === 'none'}
+            onChange={(e) =>
+              set('translator', e.target.value as ProjectSettings['translator'])
+            }
+          >
+            <option value="google">Google Translate</option>
+            <option value="mymemory">MyMemory</option>
+            <option value="tiktok">TikTok Translate</option>
+            <option value="ollama">Ollama (local)</option>
+            <option value="openai">OpenAI</option>
+            <option value="gemini">Gemini</option>
+            <option value="deepseek">DeepSeek</option>
+            <option value="openrouter">OpenRouter</option>
+            <option value="grok">Grok (xAI)</option>
+          </select>
+        </Field>
+      </div>
 
       <div className="field-row">
         <Field label="Ngôn ngữ gốc" icon={<IconGlobe size={14} />}>
@@ -216,40 +377,6 @@ export default function Sidebar({
         </Field>
       </div>
 
-      <Field
-        label="Công cụ dịch"
-        icon={<IconTranslate size={14} />}
-        hint={
-          settings.translator === 'google'
-            ? 'Google free — nhanh.'
-            : settings.translator === 'mymemory'
-              ? 'MyMemory free — không key (có quota IP).'
-              : settings.translator === 'tiktok'
-                ? 'TikTok translate free — không key.'
-                : settings.translator === 'ollama'
-                  ? 'Ollama local — cấu hình model trên máy.'
-                  : 'Cấu hình API key tại Cấu hình → API dịch cloud.'
-        }
-      >
-        <select
-          value={settings.translator}
-          disabled={busy || settings.targetLang === 'none'}
-          onChange={(e) =>
-            set('translator', e.target.value as ProjectSettings['translator'])
-          }
-        >
-          <option value="google">Google Translate</option>
-          <option value="mymemory">MyMemory</option>
-          <option value="tiktok">TikTok Translate</option>
-          <option value="ollama">Ollama (local)</option>
-          <option value="openai">OpenAI</option>
-          <option value="gemini">Gemini</option>
-          <option value="deepseek">DeepSeek</option>
-          <option value="openrouter">OpenRouter</option>
-          <option value="grok">Grok (xAI)</option>
-        </select>
-      </Field>
-
       <div className="field-row">
         <Field label="Khớp thời lượng" icon={<IconClock size={14} />}>
           <select
@@ -257,9 +384,9 @@ export default function Sidebar({
             disabled={busy}
             title={
               settings.matchDuration === 'preferVideo'
-                ? 'Render chậm video 0.80× trước, rồi mới ASR/dịch/TTS — timeline khớp file thật'
+                ? 'Lần đầu giữ 1×. Muốn chậm/nhanh: editor → Tốc độ video → Áp dụng tốc độ'
                 : settings.matchDuration === 'none'
-                  ? 'Giữ TTS nguyên; xuất vẫn có thể chậm video'
+                  ? 'Giữ TTS nguyên tốc độ'
                   : settings.matchDuration === 'stretch'
                     ? 'Ép TTS đúng khung gốc (nhanh/chậm)'
                     : 'TTS dài hơn khung → tăng tốc nhẹ (≤1.25×)'
@@ -268,7 +395,7 @@ export default function Sidebar({
               set('matchDuration', e.target.value as ProjectSettings['matchDuration'])
             }
           >
-            <option value="preferVideo">Ưu tiên chậm video 0.80× (trước ASR)</option>
+            <option value="preferVideo">Giữ 1× (tốc độ chỉnh sau trong editor)</option>
             <option value="none">Giữ nguyên TTS</option>
             <option value="natural">Tự nhiên, rút gọn nhẹ</option>
             <option value="stretch">Kéo giãn khớp đoạn</option>
@@ -354,6 +481,34 @@ export default function Sidebar({
             ))}
           </select>
         </Field>
+      </div>
+
+      <div className="audio-filter">
+        <label
+          className="audio-filter-toggle"
+          title="Bật: OCR 3 frame/mốc (đầu•giữa•cuối) + majority — ổn định hơn, chậm hơn. Tắt: 1 frame — nhanh, dễ nhảy vị trí."
+        >
+          <span className="field-label">
+            <IconLayers size={14} />
+            Định vị chữ ổn định
+          </span>
+          <input
+            type="checkbox"
+            checked={Boolean(settings.stableCaptionLocate)}
+            disabled={busy}
+            onChange={(e) => {
+              if (busy) return
+              const on = e.target.checked
+              onSettings({
+                ...settings,
+                stableCaptionLocate: on,
+                analysisRegion: on
+                  ? (settings.analysisRegion || { ...DEFAULT_ANALYSIS_REGION })
+                  : settings.analysisRegion,
+              })
+            }}
+          />
+        </label>
       </div>
 
       <div className="audio-filter">

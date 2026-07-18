@@ -40,6 +40,11 @@ export type Segment = {
    * Hardsub: mặc định true (undefined = bật).
    */
   dub?: boolean
+  /** OpenCut-style: id nhóm clip (kéo/chọn cùng nhau); undefined = không group. */
+  groupId?: string
+  /** CapCut Alt+G compound shell — children giữ caption+TTS gốc. */
+  isCompound?: boolean
+  compoundChildren?: Segment[]
 }
 
 export type OverlayMaskStyle = 'blur' | 'solid' | 'mosaic'
@@ -84,6 +89,16 @@ export type ProjectSettings = {
   defaultVoice: string
   /** true khi bấm Lồng tiếng — server xóa cache TTS và gen lại */
   forceTts?: boolean
+  /**
+   * Định vị hardsub ổn định (OCR đầu•giữa•cuối + majority).
+   * Tắt = nhanh hơn (1 frame/mốc, dễ nhảy vị trí).
+   */
+  stableCaptionLocate: boolean
+  /**
+   * Vùng phân tích OCR (0–1, theo khung video).
+   * Chỉ dùng khi stableCaptionLocate bật — thu hẹp ROI, nhanh + ít nhiễu.
+   */
+  analysisRegion?: { x: number; y: number; w: number; h: number } | null
   /** Che hardsub cũ (blur). Tắt = giữ chữ OCR trên khung */
   coverHardsubs: boolean
   /** Kiểu mặt nạ che chữ gốc khi cover: blur | solid | mosaic */

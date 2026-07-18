@@ -11,6 +11,7 @@ import DownloadPage from '@/pages/DownloadPage'
 import FilmPage from '@/pages/FilmPage'
 import BatchPage from '@/pages/BatchPage'
 import { api } from '@/features/project/project.api'
+import { expandSegmentsForList, patchSegmentInTree } from '@/features/project/expandCompound'
 import type { HardwareInfo, JobStatus, ProjectSettings, Segment, Step, TextOverlay } from '@/features/project/project.types'
 import { loadAppMode, persistAppMode } from '@/app/appMode'
 import './App.css'
@@ -66,6 +67,8 @@ const defaultSettings: ProjectSettings = {
   translator: 'google',
   matchDuration: ENGINE_DEFAULTS.whisper.matchDuration,
   defaultVoice: 'cc:BV075_streaming:7102355803792740865',
+  stableCaptionLocate: false,
+  analysisRegion: null,
   coverHardsubs: true,
   coverMaskStyle: 'blur',
   coverMaskColor: '#4c1d95',
@@ -377,7 +380,7 @@ export default function App() {
         bakedPreferVideoRef.current = baked
         setBakedPreferVideo(baked)
         if (typeof st.bakedSpeed === 'number' && st.bakedSpeed > 0) setBakedSpeed(st.bakedSpeed)
-        else setBakedSpeed(baked ? 0.8 : 1)
+        else setBakedSpeed(1)
         const extra = st as JobStatus & { settings?: Partial<ProjectSettings> }
         const mergedVoice =
           (extra.settings && typeof extra.settings === 'object' && extra.settings.defaultVoice) ||
@@ -826,27 +829,63 @@ export default function App() {
   }
 
   async function onSegmentChange(seg: Segment) {
-    setSegments((prev) => (Array.isArray(prev) ? prev : []).map((s) => (s.id === seg.id ? seg : s)))
+    // Câu có thể nằm trong compoundChildren (Alt+G) — patch cây
+    let nextTree: Segment[] = []
+    let wasTop = false
+    setSegments((prev) => {
+      const list = Array.isArray(prev) ? prev : []
+      wasTop = list.some((s) => s.id === seg.id)
+      nextTree = wasTop
+        ? list.map((s) => (s.id === seg.id ? seg : s))
+        : patchSegmentInTree(list, seg)
+      return nextTree
+    })
     if (!projectId) return
     try {
-      await api.updateSegment(projectId, seg)
+      if (wasTop) await api.updateSegment(projectId, seg)
+      else await api.replaceSegments(projectId, nextTree)
     } catch {
       /* keep local edit */
     }
   }
 
-  async function onSegmentsReplace(next: Segment[]) {
+  async function onSegmentsReplace(next: Segment[], opts?: { persist?: boolean }) {
+    // UI cập nhật ngay — không đợi network (tránh đơ khi merge group lớn)
     const ordered = [...next]
       .sort((a, b) => a.start - b.start || a.end - b.end)
       .map((s, i) => ({ ...s, index: i }))
     setSegments(ordered)
-    if (!projectId) return
-    try {
-      const saved = await api.replaceSegments(projectId, ordered)
-      if (Array.isArray(saved)) setSegments(applyDefaultVoice(asSegmentList(saved), settings.defaultVoice))
-    } catch {
-      /* keep local */
-    }
+    if (!projectId || opts?.persist === false) return
+    // Persist nền; không ghi đè local nếu user đã edit tiếp
+    const snap = ordered
+    void api.replaceSegments(projectId, snap).then((saved) => {
+      if (!Array.isArray(saved)) return
+      // Chỉ sync nếu list id vẫn khớp snapshot (tránh race)
+      setSegments((cur) => {
+        if (cur.length !== snap.length) return cur
+        const same =
+          cur.length === snap.length
+          && cur.every((s, i) => s.id === snap[i]?.id)
+        if (!same) return cur
+        const nextSaved = applyDefaultVoice(asSegmentList(saved), settings.defaultVoice)
+        // Giữ compoundChildren local nếu server strip (schema cũ / race)
+        return nextSaved.map((s, i) => {
+          const loc = snap[i]
+          if (
+            loc?.isCompound
+            && loc.compoundChildren?.length
+            && (!s.compoundChildren?.length || s.compoundChildren.length < loc.compoundChildren.length)
+          ) {
+            return {
+              ...s,
+              isCompound: true,
+              compoundChildren: loc.compoundChildren,
+            }
+          }
+          return s
+        })
+      })
+    }).catch(() => { /* keep local */ })
   }
 
   function onPreviewRebaked(res: {
@@ -857,9 +896,27 @@ export default function App() {
     bakedPreferVideo: boolean
     bakedSpeed: number
     videoUrl: string
+    timeScale?: number
+    prevBakedSpeed?: number
   }) {
+    // Segments/overlays đã remap từ baseline 1× — đồng bộ toàn project
     setSegments(applyDefaultVoice(asSegmentList(res.segments), settings.defaultVoice))
     if (Array.isArray(res.overlays)) setOverlays(res.overlays)
+    const wc = Math.max(0, res.workClipSec)
+    workClipSecRef.current = wc
+    setWorkClipSec(wc)
+    // duration = độ dài timeline display (workDuration khi bake)
+    if (res.duration > 0) setDuration(res.duration)
+    bakedPreferVideoRef.current = res.bakedPreferVideo
+    setBakedPreferVideo(res.bakedPreferVideo)
+    setBakedSpeed(res.bakedSpeed > 0 ? res.bakedSpeed : res.bakedPreferVideo ? 0.8 : 1)
+    setVideoUrl(freshVideoUrl(res.videoUrl))
+  }
+
+  /** Undo bake: chỉ đổi workVideo — segments giữ từ history snapshot */
+  async function onRestoreBakedSpeed(speed: number) {
+    if (!projectId) return
+    const res = await api.rebakeSpeed(projectId, speed, { skipRemap: true })
     const wc = Math.max(0, res.workClipSec)
     workClipSecRef.current = wc
     setWorkClipSec(wc)
@@ -867,7 +924,7 @@ export default function App() {
     bakedPreferVideoRef.current = res.bakedPreferVideo
     setBakedPreferVideo(res.bakedPreferVideo)
     setBakedSpeed(res.bakedSpeed > 0 ? res.bakedSpeed : res.bakedPreferVideo ? 0.8 : 1)
-    setVideoUrl(freshVideoUrl(res.videoUrl))
+    setVideoUrl(freshVideoUrl(res.videoUrl || `/api/projects/${projectId}/video`))
   }
 
   useEffect(() => {
@@ -1034,6 +1091,7 @@ export default function App() {
           onChange={onSegmentChange}
           onSegmentsReplace={onSegmentsReplace}
           onPreviewRebaked={onPreviewRebaked}
+          onRestoreBakedSpeed={onRestoreBakedSpeed}
           onExport={onExport}
           onSettings={onSettings}
           overlays={overlays}
@@ -1078,13 +1136,19 @@ export default function App() {
               setPreviewEditorOpen(true)
             }}
             onExport={onExport}
-            canDub={segments.length > 0 && !status.running}
-            canExport={
-              segments.length > 0 &&
-              !status.running &&
-              (settings.targetLang === 'none' ||
-                segments.some((s) => s.translation.trim()))
+            canDub={
+              (segments.length > 0 || expandSegmentsForList(segments).length > 0)
+              && !status.running
             }
+            canExport={(() => {
+              if (status.running) return false
+              // Alt+G: shell rỗng chữ — check children đã bung
+              const flat = expandSegmentsForList(segments)
+              if (!flat.length && !segments.length) return false
+              if (settings.targetLang === 'none') return true
+              return flat.some((s) => (s.translation || '').trim())
+                || segments.some((s) => (s.translation || '').trim())
+            })()}
           />
           <div className="main-head">
             <div>
@@ -1096,7 +1160,9 @@ export default function App() {
               </p>
             </div>
             <div className="meta">
-              <span className="seg-count">{segments.length} đoạn thoại</span>
+              <span className="seg-count">
+                {expandSegmentsForList(segments).length || segments.length} đoạn thoại
+              </span>
               {duration > 0 && <span>{fmtDuration(duration)}</span>}
             </div>
           </div>

@@ -11,11 +11,11 @@ from typing import Any
 from .asr import asr_paddleocr, asr_whisper
 from .export.burn import cover_and_burn
 from .core.config import PUBLIC_DATA
-from .core.jobs import Cancelled, begin_job, check_cancel, clear_job
+from .core.jobs import Cancelled, begin_job, check_cancel, clear_job, short_cmd_error
 from .core.media import (
     crop_export_aspect,
     encode_export_1080,
-    ensure_playback_speed,
+
     ensure_preview_clip,
     extract_audio,
     ffprobe_duration,
@@ -76,33 +76,22 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
         else:
             video = source
 
-        # preferVideo: bake chậm 0.80× TRƯỚC ASR — timeline/chữ/TTS cùng nhịp file thật
+        # Lần đầu dịch/lồng tiếng: luôn 1× (không bake 0.80).
+        # Chậm/nhanh chỉ khi user bấm «Áp dụng tốc độ» trong editor (rebake-speed).
         match_mode = str(settings.get("matchDuration") or "preferVideo")
-        if match_mode == "preferVideo":
-            from .export.mux import PREFER_VIDEO_SPEED
-
-            set_status(
-                project_id,
-                step="asr",
-                progress=5,
-                message="Khớp thời lượng: chậm video 0.80×…",
-                running=True,
-            )
-            cache_dir = ensure_layout(project_id) / "cache"
-            if preview_sec > 0:
-                slow_dest = cache_dir / f"preview_{preview_sec}_s080.mp4"
-            else:
-                slow_dest = cache_dir / "source_s080.mp4"
-            video = ensure_playback_speed(
-                video, slow_dest, PREFER_VIDEO_SPEED, project_id=project_id
-            )
-            meta["bakedPreferVideo"] = True
-            meta["bakedSpeed"] = float(PREFER_VIDEO_SPEED)
-            meta["workDuration"] = float(ffprobe_duration(video) or 0)
+        # Giữ bake nếu user đã Áp dụng tốc độ trước đó (workVideo + bakedSpeed)
+        user_baked = abs(float(meta.get("bakedSpeed") or 1.0) - 1.0) > 0.02
+        if user_baked and meta.get("workVideo"):
+            work = Path(str(meta["workVideo"]))
+            if work.is_file():
+                video = work
+            # else fall through 1×
         else:
             meta.pop("bakedPreferVideo", None)
             meta["bakedSpeed"] = 1.0
             meta.pop("workDuration", None)
+            # workVideo trỏ file 1× hiện tại (preview clip hoặc source)
+            meta["workVideo"] = str(video.resolve())
 
         # —— ASR (reuse segments if same engine+lang+video+preview) ——
         if cache.get("asrKey") == a_key and meta.get("segments"):
@@ -303,7 +292,12 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                 running=True,
             )
             n_box = attach_speech_hardsub_boxes(
-                video, segments, only_missing=True, project_id=project_id
+                video,
+                segments,
+                only_missing=True,
+                project_id=project_id,
+                stable=bool(settings.get("stableCaptionLocate", False)),
+                analysis_region=settings.get("analysisRegion"),
             )
             if n_box:
                 set_status(
@@ -357,9 +351,9 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
             project_id,
             step="translate",
             progress=0,
-            message=str(e),
+            message=short_cmd_error(e),
             running=False,
-            error=str(e),
+            error=short_cmd_error(e),
         )
         raise
     finally:
@@ -617,15 +611,8 @@ def run_dub(project_id: str, *, finalize: bool = True, nested: bool = False) -> 
         # Export gọi retime_video_segments — không cascade cắt audio.
         n_stretch = _assign_tts_fit_speeds(segments, match=match)
         meta["segments"] = segments
-        if match == "preferVideo":
-            from .export.mux import PREFER_VIDEO_FACTOR
-
-            if meta.get("bakedPreferVideo"):
-                # bake 0.80× toàn cục đã xong; chỉ còn stretch từng câu (videoSpeed)
-                meta.pop("videoSlowFactor", None)
-            else:
-                meta["videoSlowFactor"] = round(PREFER_VIDEO_FACTOR, 4)
-        elif "videoSlowFactor" in meta:
+        # Không ép chậm 0.80× lúc dub — chỉ stretch từng câu (videoSpeed) nếu cần
+        if "videoSlowFactor" in meta:
             meta.pop("videoSlowFactor", None)
         save_meta(project_id, meta)
         if finalize:
@@ -648,7 +635,8 @@ def run_dub(project_id: str, *, finalize: bool = True, nested: bool = False) -> 
         )
         raise
     except Exception as e:
-        set_status(project_id, step="dub", progress=0, message=str(e), running=False, error=str(e))
+        err = short_cmd_error(e)
+        set_status(project_id, step="dub", progress=0, message=err, running=False, error=err)
         raise
     finally:
         if not nested and job_gen is not None:
@@ -683,6 +671,48 @@ def export_source_video(project_id: str, meta: dict[str, Any]) -> tuple[Path, in
     return source, 0
 
 
+
+def expand_compound_segments(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Bung compound shell → children absolute time (export/burn/mux)."""
+    out: list[dict[str, Any]] = []
+    for s in segments:
+        if not isinstance(s, dict):
+            continue
+        if not s.get("isCompound"):
+            out.append(dict(s))
+            continue
+        t0 = float(s.get("start") or 0)
+        children = s.get("compoundChildren") or []
+        if not isinstance(children, list) or not children:
+            # shell không children — bỏ (tránh burn text "Compound · N")
+            continue
+        for ch in children:
+            if not isinstance(ch, dict):
+                continue
+            item = dict(ch)
+            st = float(item.get("start") or 0)
+            en = float(item.get("end") or st)
+            item["start"] = t0 + st
+            item["end"] = t0 + en
+            if item.get("coverStart") is not None:
+                try:
+                    item["coverStart"] = t0 + float(item["coverStart"])
+                except (TypeError, ValueError):
+                    pass
+            if item.get("coverEnd") is not None:
+                try:
+                    item["coverEnd"] = t0 + float(item["coverEnd"])
+                except (TypeError, ValueError):
+                    pass
+            item.pop("isCompound", None)
+            item.pop("compoundChildren", None)
+            out.append(item)
+    out.sort(key=lambda x: (float(x.get("start") or 0), float(x.get("end") or 0)))
+    for i, s in enumerate(out):
+        s["index"] = i
+    return out
+
+
 def run_export(project_id: str, *, nested: bool = False) -> Path:
     meta = load_meta(project_id)
     video, preview_sec = export_source_video(project_id, meta)
@@ -693,6 +723,7 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
         for s in (meta.get("segments") or [])
         if float(s.get("start") or 0) < vid_dur - 0.05
     ]
+    segments = expand_compound_segments(segments)
     for s in segments:
         if float(s.get("end") or 0) > vid_dur:
             s["end"] = vid_dur
@@ -884,12 +915,16 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
                 running=True,
             )
             check_cancel(project_id)
-            # Stem từ videoPath gốc (không phải clip preview) — cùng cache với xem trước.
-            source_audio = separate_no_vocals(
-                project_id,
-                # Dùng đúng clip export (work bake / retime TTS-fit) — cùng timeline TTS
-                Path(video),
-            )
+            # Stem cache theo videoPath gốc — đã tách lúc xem trước thì không Demucs lại
+            source_audio = separate_no_vocals(project_id, report=True)
+            if source_audio and source_audio.is_file():
+                set_status(
+                    project_id,
+                    step="export",
+                    progress=68,
+                    message=f"{hint}Dùng stem xóa lời đã cache…",
+                    running=True,
+                )
         if has_tts:
             set_status(
                 project_id,
@@ -900,6 +935,8 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
             )
             check_cancel(project_id)
             bg_vol = max(0, min(100, int(settings.get("originalAudioVolume") or 100))) / 100.0
+            from pipeline.core.media import meta_baked_speed
+
             mux_dub(
                 project_id,
                 burned,
@@ -911,6 +948,8 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
                     (prefer_global_slow or not manual_video_speed) and not baked_prefer
                 ),
                 match=match_mode,
+                # Wav TTS 1× → atempo theo bake (0.8 / 1.23 / 2…) khớp timeline
+                bake_speed=meta_baked_speed(meta),
             )
         elif audio_mode != "auto":
             audio_labels = {
@@ -1005,12 +1044,13 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
         raise
     except Exception as e:
         # Giữ progress hiện tại — UI thấy dừng ở đâu, không nhảy 0 rồi biến mất
+        err = short_cmd_error(e)
         set_status(
             project_id,
             step="export",
-            message=f"Xuất lỗi: {e}",
+            message=f"Xuất lỗi: {err}",
             running=False,
-            error=str(e),
+            error=err,
         )
         raise
     finally:

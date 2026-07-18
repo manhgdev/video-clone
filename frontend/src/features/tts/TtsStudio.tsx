@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '@/features/project/project.api'
 import ProgressPopup from '@/shared/components/ProgressPopup'
-import { IconHeadphones, IconMic, IconSpeaker } from '@/shared/components/Icons'
+import { IconHeadphones, IconHeart, IconMic, IconSpeaker } from '@/shared/components/Icons'
 import {
   type TtsEngine,
   type TtsOutputFormat,
@@ -40,7 +40,10 @@ type Voice = {
   style?: string
   category?: string
   tags?: string[]
+  favorite?: boolean
 }
+
+const FAVORITE_LS_KEY = 'video-clone:tts-voice-favorites'
 type EngineStatus = {
   id?: string
   name?: string
@@ -438,6 +441,16 @@ export default function TtsStudio({ voices, onRefreshVoices }: Props) {
   const [voiceQuery, setVoiceQuery] = useState('')
   const [voiceTag, setVoiceTag] = useState('')
   const [editingVoice, setEditingVoice] = useState<Voice | null>(null)
+  const [localFavorites, setLocalFavorites] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem(FAVORITE_LS_KEY)
+      if (!raw) return new Set()
+      const arr = JSON.parse(raw) as unknown
+      return new Set(Array.isArray(arr) ? arr.map(String) : [])
+    } catch {
+      return new Set()
+    }
+  })
   const [dashLayout, setDashLayout] = useState<DashLayout>(() => loadDashLayout())
   const [dashActive, setDashActive] = useState<DashId | null>(null)
   const dashRef = useRef<HTMLDivElement>(null)
@@ -446,9 +459,48 @@ export default function TtsStudio({ voices, onRefreshVoices }: Props) {
   const audioRef = useRef<HTMLAudioElement>(null)
   const voicePreviewRef = useRef<HTMLAudioElement | null>(null)
 
+  function isVoiceFavorite(v: Voice) {
+    if (v.favorite) return true
+    return localFavorites.has(v.id)
+  }
+
+  function persistLocalFavorites(next: Set<string>) {
+    setLocalFavorites(next)
+    try {
+      localStorage.setItem(FAVORITE_LS_KEY, JSON.stringify([...next]))
+    } catch {
+      /* ignore */
+    }
+  }
+
+  async function onToggleFavorite(v: Voice) {
+    const next = !isVoiceFavorite(v)
+    const bucket = voiceEngineBucket(v)
+    if (bucket === 'zmai' || bucket === 'clone') {
+      setBusyKind('clone')
+      setBusy(true)
+      setError('')
+      try {
+        await api.ttsStudioVoicePatch(v.id, { favorite: next })
+        onRefreshVoices?.(lang)
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Không lưu yêu thích')
+      } finally {
+        setBusy(false)
+        setBusyKind(null)
+      }
+      return
+    }
+    const set = new Set(localFavorites)
+    if (next) set.add(v.id)
+    else set.delete(v.id)
+    persistLocalFavorites(set)
+  }
+
   const sortedVoices = useMemo(() => {
     const pref = [...voices]
     pref.sort((a, b) => {
+      const fav = (v: Voice) => (v.favorite || localFavorites.has(v.id) ? 0 : 1)
       const score = (v: Voice) => {
         const bkt = voiceEngineBucket(v)
         if (bkt === 'zmai' || bkt === 'vieneu' || bkt === 'clone') return 0
@@ -456,10 +508,10 @@ export default function TtsStudio({ voices, onRefreshVoices }: Props) {
         if (bkt === 'eleven') return 2
         return 3
       }
-      return score(a) - score(b) || a.name.localeCompare(b.name, 'vi')
+      return fav(a) - fav(b) || score(a) - score(b) || a.name.localeCompare(b.name, 'vi')
     })
     return pref
-  }, [voices])
+  }, [voices, localFavorites])
 
   /** Chỉ giọng thuộc Engine đang chọn */
   const engineVoices = useMemo(
@@ -1130,6 +1182,17 @@ export default function TtsStudio({ voices, onRefreshVoices }: Props) {
               </span>
             </button>
             <div className="tts-clone-actions">
+              <button
+                type="button"
+                className={`tts-btn-sm tts-btn-icon tts-btn-heart${isVoiceFavorite(v) ? ' is-fav' : ''}`}
+                title={isVoiceFavorite(v) ? 'Bỏ yêu thích' : 'Thêm yêu thích'}
+                aria-label={isVoiceFavorite(v) ? 'Bỏ yêu thích' : 'Thêm yêu thích'}
+                aria-pressed={isVoiceFavorite(v)}
+                disabled={busy}
+                onClick={() => void onToggleFavorite(v)}
+              >
+                <IconHeart size={14} filled={isVoiceFavorite(v)} />
+              </button>
               {v.previewUrl && (
                 <button
                   type="button"

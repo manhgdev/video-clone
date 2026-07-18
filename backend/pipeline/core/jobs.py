@@ -113,6 +113,44 @@ def is_cancelled(project_id: str | None) -> bool:
         return bool(ev and ev.is_set())
 
 
+def short_cmd_error(exc: BaseException, *, limit: int = 280) -> str:
+    """Rút gọn CalledProcessError — không dump cả argv ffmpeg vào UI."""
+    if isinstance(exc, subprocess.CalledProcessError):
+        code = exc.returncode
+        cmd = exc.cmd
+        head = ""
+        if isinstance(cmd, (list, tuple)) and cmd:
+            # Chỉ binary + vài flag đầu
+            parts = [str(x) for x in cmd[:4]]
+            head = " ".join(parts)
+            if len(cmd) > 4:
+                head += " …"
+        elif cmd:
+            head = str(cmd)[:120]
+        msg = f"Lệnh thất bại (exit {code})"
+        if head:
+            msg += f": {head}"
+        # WinError 206 / path dài
+        err = getattr(exc, "strerror", None) or ""
+        if "206" in str(code) or "too long" in str(exc).lower():
+            msg = "Đường dẫn/lệnh quá dài (WinError 206) — đã rút filter; restart backend rồi xuất lại."
+        return msg[:limit]
+    text = str(exc).strip() or type(exc).__name__
+    # Cắt khối Command '[ffmpeg'… khổng lồ
+    if "Command '" in text or "Command \"" in text:
+        if "206" in text or "too long" in text.lower():
+            return "Đường dẫn/lệnh quá dài (WinError 206) — restart backend rồi xuất lại."
+        if "ffmpeg" in text.lower():
+            # Lấy exit status nếu có
+            import re
+
+            m = re.search(r"exit status (-?\d+)", text, re.I)
+            code = m.group(1) if m else "?"
+            return f"ffmpeg thất bại (exit {code}). Xem log backend."
+        return text[:limit]
+    return text[:limit]
+
+
 def run_cmd(project_id: str | None, cmd: list[str], **kwargs: Any) -> None:
     """subprocess có thể kill khi huỷ."""
     check_cancel(project_id)

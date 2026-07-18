@@ -32,6 +32,8 @@ export const defaultSettings: ProjectSettings = {
   translator: 'google',
   matchDuration: ENGINE_DEFAULTS.whisper.matchDuration,
   defaultVoice: 'cc:BV075_streaming:7102355803792740865',
+  stableCaptionLocate: false,
+  analysisRegion: null,
   coverHardsubs: true,
   coverMaskStyle: 'blur',
   coverMaskColor: '#4c1d95',
@@ -118,6 +120,17 @@ export function loadSettings(): ProjectSettings {
     const raw = localStorage.getItem(SETTINGS_LS)
     if (!raw) return defaultSettings
     const s = { ...defaultSettings, ...JSON.parse(raw) } as ProjectSettings
+    if (typeof s.stableCaptionLocate !== 'boolean') s.stableCaptionLocate = false
+    if (s.analysisRegion != null && typeof s.analysisRegion === 'object') {
+      const r = s.analysisRegion as { x?: number; y?: number; w?: number; h?: number }
+      const x = Math.max(0, Math.min(1, Number(r.x) || 0))
+      const y = Math.max(0, Math.min(1, Number(r.y) || 0))
+      const w = Math.max(0.05, Math.min(1 - x, Number(r.w) || 0.9))
+      const h = Math.max(0.05, Math.min(1 - y, Number(r.h) || 0.4))
+      s.analysisRegion = { x, y, w, h }
+    } else {
+      s.analysisRegion = null
+    }
     if (typeof s.workers !== 'number' || Number.isNaN(s.workers) || s.workers < 0) s.workers = 0
     if (typeof s.originalAudioVolume !== 'number' || Number.isNaN(s.originalAudioVolume)) {
       s.originalAudioVolume = 100

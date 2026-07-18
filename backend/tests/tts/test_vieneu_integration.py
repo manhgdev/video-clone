@@ -83,7 +83,7 @@ def test_preset_assets_without_model_load():
     assert isinstance(presets, list)
     if presets:
         assert presets[0]["name"] and presets[0]["id"]
-        assert presets[0]["language"] == "vi-VN"
+        assert presets[0]["language"] == "vi"
 
 
 def test_list_voices_keeps_clones_out_of_presets(monkeypatch):
@@ -121,7 +121,7 @@ def test_capcut_metadata_uses_provider_fields_only():
             "display_name": "Review Phim",
         }
     )
-    assert metadata == {"language": "vi-VN", "gender": "female", "category": "review"}
+    assert metadata == {"language": "vi", "gender": "female", "category": "review"}
 
 
 def test_lazy_status_does_not_force_ready_loaded():

@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 
 from ..core.config import EL_ADAM, _EL_PRESET
+from .voice_store import normalize_voice_language
 
 _el_key_i = 0
 _el_voices_cache: list[dict[str, Any]] | None = None
@@ -166,7 +167,7 @@ def _el_voice_options() -> list[dict[str, Any]]:
                             "accent": labels.get("accent") or "",
                             "age": labels.get("age") or "",
                             "category": labels.get("use_case") or v.get("category") or "",
-                            "language": labels.get("language") or "",
+                            "language": normalize_voice_language(labels.get("language") or ""),
                         }
                     )
             if fetched:

@@ -19,6 +19,8 @@ class Settings(BaseModel):
     translator: str = "google"
     matchDuration: str = "preferVideo"
     defaultVoice: str = "cc:BV075_streaming:7102355803792740865"
+    stableCaptionLocate: bool = False
+    analysisRegion: dict[str, float] | None = None
     coverHardsubs: bool = True
     coverMaskStyle: str = "blur"
     coverMaskColor: str = "#4c1d95"

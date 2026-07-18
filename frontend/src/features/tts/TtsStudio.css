@@ -677,7 +677,9 @@ body.tts-dash-resizing iframe {
 }
 
 .tts-field select,
-.tts-field input[type='text'] {
+.tts-field input[type='text'],
+.tts-field input:not([type]),
+.tts-voice-metadata-modal input {
   width: 100%;
   border: 1px solid var(--tts-line);
   border-radius: 8px;
@@ -692,7 +694,9 @@ body.tts-dash-resizing iframe {
 }
 
 .tts-field select:focus,
-.tts-field input[type='text']:focus {
+.tts-field input[type='text']:focus,
+.tts-field input:not([type]):focus,
+.tts-voice-metadata-modal input:focus {
   border-color: var(--tts-blue-border);
 }
 
@@ -739,6 +743,19 @@ body.tts-dash-resizing iframe {
   display: block;
   width: 14px;
   height: 14px;
+}
+
+.tts-btn-heart {
+  color: #94a3b8;
+}
+
+.tts-btn-heart:hover {
+  color: #f43f5e;
+  background: rgba(244, 63, 94, 0.08);
+}
+
+.tts-btn-heart.is-fav {
+  color: #e11d48;
 }
 
 .tts-btn-list {

@@ -41,8 +41,9 @@ def _windows_voices() -> list[dict[str, str]]:
         if not name or name in seen:
             continue
         seen.add(name)
-        locale = culture.replace("-", "_") if culture else ""
         gender_key = "female" if "female" in gender else "male" if "male" in gender else ""
+        # short code only (en, vi) — same as zmAI / CapCut list
+        lang_code = (culture or "").replace("_", "-").split("-", 1)[0].lower()
         out.append(
             {
                 "id": f"{PREFIX_WIN}{name}",
@@ -50,7 +51,7 @@ def _windows_voices() -> list[dict[str, str]]:
                 "engine": "system",
                 "type": "system",
                 "description": f"Giọng hệ thống Windows · {culture or 'local'}",
-                "language": locale or culture,
+                "language": lang_code,
                 "gender": gender_key,
             }
         )
@@ -108,6 +109,7 @@ def list_voices(lang: str | None = None) -> list[dict[str, str]]:
         rows.sort(key=lambda x: (0 if x[1].lower().startswith(prefer) else 1, x[0]))
         for say_id, locale, label in rows:
             if locale.startswith(("vi", "en", "zh", "ja", "ko")):
+                lang_code = locale.replace("_", "-").split("-", 1)[0].lower()
                 voices.append(
                     {
                         "id": say_id,
@@ -115,7 +117,7 @@ def list_voices(lang: str | None = None) -> list[dict[str, str]]:
                         "engine": "system",
                         "type": "system",
                         "description": f"Giọng hệ thống macOS · {locale}",
-                        "language": locale,
+                        "language": lang_code,
                     }
                 )
         return voices

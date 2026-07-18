@@ -13,20 +13,15 @@ from pipeline.core.config import PUBLIC_DATA
 
 
 def create_app() -> FastAPI:
-    # Windows: hide subprocess console windows
+    # Windows: hide subprocess console windows (cheap)
     try:
         from pipeline.core.winproc import apply_subprocess_no_window
 
         apply_subprocess_no_window()
     except Exception:
         pass
-    # Windows: torch cuDNN trước ctranslate2 — tránh crash cudnnGetLibConfig
-    try:
-        from pipeline.core.cuda_dll import prefer_torch_cudnn
-
-        prefer_torch_cudnn()
-    except Exception:
-        pass
+    # ponytail: do NOT import torch here — blocks worker 10–40s on Windows;
+    # cuDNN path fix runs in warm-models thread after listen.
 
     app = FastAPI(title="Video-Clone Local")
     app.add_middleware(
@@ -35,6 +30,12 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.get("/api/health")
+    def api_health() -> dict[str, str]:
+        """Cheap readiness — dev.mjs / proxies; no torch / model load."""
+        return {"ok": "1", "status": "up"}
+
     app.include_router(router)
     app.mount("/data", StaticFiles(directory=str(PUBLIC_DATA)), name="public-data")
 

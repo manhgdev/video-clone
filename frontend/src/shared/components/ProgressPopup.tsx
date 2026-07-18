@@ -27,6 +27,37 @@ function clampPct(n: number) {
   return Math.max(0, Math.min(100, Math.round(n)))
 }
 
+/** Không dump cả argv ffmpeg / filter_complex vào popup. */
+export function sanitizeJobMessage(raw?: string | null, limit = 220): string {
+  if (!raw) return ''
+  let t = String(raw).trim()
+  if (!t) return ''
+  const lower = t.toLowerCase()
+  if (
+    lower.includes('winerror 206')
+    || lower.includes('filename or extension is too long')
+    || (lower.includes('too long') && lower.includes('ffmpeg'))
+  ) {
+    return 'Lệnh/đường dẫn quá dài (WinError 206). Restart backend rồi xuất lại.'
+  }
+  if (
+    t.includes("Command '[")
+    || t.includes('Command "[')
+    || t.includes('-filter_complex')
+    || t.includes('between(t')
+    || t.includes('between(t\\')
+  ) {
+    const m = t.match(/exit status (-?\d+)/i) || t.match(/exit (\d+)/i)
+    const code = m?.[1] ?? '?'
+    if (lower.includes('ffmpeg')) {
+      return `ffmpeg thất bại (exit ${code}). Xem log backend — không hiện đủ lệnh.`
+    }
+    return `Lệnh thất bại (exit ${code}).`
+  }
+  if (t.length > limit) t = `${t.slice(0, limit - 1)}…`
+  return t
+}
+
 function fmtElapsed(sec: number) {
   if (sec < 60) return `${sec}s`
   const m = Math.floor(sec / 60)
@@ -53,6 +84,7 @@ export default function ProgressPopup({
   className,
 }: ProgressPopupProps) {
   const [elapsed, setElapsed] = useState(0)
+  const [copied, setCopied] = useState(false)
 
   useEffect(() => {
     if (!active || !running) {
@@ -70,12 +102,26 @@ export default function ProgressPopup({
 
   const pct = clampPct(progress)
   const failed = Boolean(error && error !== 'cancelled')
-  const base = error && error !== 'cancelled' ? error : message || title
+  const rawBase = error && error !== 'cancelled' ? error : message || title
+  const base = sanitizeJobMessage(rawBase)
   const compactLine =
     running && !failed
       ? ` · đã chạy ${fmtElapsed(elapsed)} · vẫn đang xử lý`
       : ''
   const line = base
+
+  async function copyError() {
+    const text = [title, base, rawBase && rawBase !== base ? rawBase : '']
+      .filter(Boolean)
+      .join('\n')
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1500)
+    } catch {
+      /* ignore */
+    }
+  }
 
   if (minimized) {
     return (
@@ -152,22 +198,43 @@ export default function ProgressPopup({
         </div>
 
         <div className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
-          <button
-            type="button"
-            className="rounded-md border border-border bg-accent/40 px-3 py-1.5 text-xs hover:bg-accent"
-            onClick={onMinimize}
-          >
-            Chạy nền
-          </button>
-          {onCancel ? (
-            <button
-              type="button"
-              className="rounded-md border border-border px-3 py-1.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
-              onClick={onCancel}
-            >
-              Huỷ
-            </button>
-          ) : null}
+          {failed ? (
+            <>
+              <button
+                type="button"
+                className="rounded-md border border-border px-3 py-1.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
+                onClick={() => void copyError()}
+              >
+                {copied ? 'Đã chép' : 'Copy'}
+              </button>
+              <button
+                type="button"
+                className="rounded-md border border-border bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90"
+                onClick={onCancel ?? onMinimize}
+              >
+                OK
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                type="button"
+                className="rounded-md border border-border bg-accent/40 px-3 py-1.5 text-xs hover:bg-accent"
+                onClick={onMinimize}
+              >
+                Chạy nền
+              </button>
+              {onCancel ? (
+                <button
+                  type="button"
+                  className="rounded-md border border-border px-3 py-1.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
+                  onClick={onCancel}
+                >
+                  Huỷ
+                </button>
+              ) : null}
+            </>
+          )}
         </div>
       </div>
     </div>

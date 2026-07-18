@@ -44,8 +44,10 @@ def _capcut_voice_metadata(voice: dict[str, Any]) -> dict[str, str]:
         ("giọng bé", "tre_em"),
     )
     category = next((value for marker, value in categories if marker in display_name), "")
+    from .voice_store import normalize_voice_language
+
     return {
-        "language": str(voice.get("lang") or voice.get("lan") or ""),
+        "language": normalize_voice_language(voice.get("lang") or voice.get("lan") or ""),
         "gender": gender,
         "category": category,
     }

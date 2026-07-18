@@ -37,6 +37,7 @@
 }
 
 .preview {
+  position: relative;
   width: 100%;
   aspect-ratio: 16 / 9;
   max-height: 220px;
@@ -45,6 +46,55 @@
   background: #0f172a;
   border: 1px solid var(--line);
   flex-shrink: 0;
+}
+
+/* Vùng ROI kéo trên preview — hiện khi bật Định vị chữ ổn định */
+.analysis-roi {
+  position: absolute;
+  z-index: 4;
+  box-sizing: border-box;
+  border: 2px solid #38bdf8;
+  background: rgba(56, 189, 248, 0.12);
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.35);
+  cursor: move;
+  touch-action: none;
+  border-radius: 4px;
+}
+
+.analysis-roi-label {
+  position: absolute;
+  left: 4px;
+  top: 2px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #e0f2fe;
+  text-shadow: 0 1px 2px #000;
+  pointer-events: none;
+  user-select: none;
+}
+
+.analysis-roi-handle {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  background: #38bdf8;
+  border: 1px solid #0c4a6e;
+  border-radius: 2px;
+  z-index: 5;
+}
+
+.analysis-roi-handle-nw { left: -5px; top: -5px; cursor: nwse-resize; }
+.analysis-roi-handle-ne { right: -5px; top: -5px; cursor: nesw-resize; }
+.analysis-roi-handle-sw { left: -5px; bottom: -5px; cursor: nesw-resize; }
+.analysis-roi-handle-se { right: -5px; bottom: -5px; cursor: nwse-resize; }
+.analysis-roi-handle-n { left: 50%; top: -5px; margin-left: -5px; cursor: ns-resize; }
+.analysis-roi-handle-s { left: 50%; bottom: -5px; margin-left: -5px; cursor: ns-resize; }
+.analysis-roi-handle-e { right: -5px; top: 50%; margin-top: -5px; cursor: ew-resize; }
+.analysis-roi-handle-w { left: -5px; top: 50%; margin-top: -5px; cursor: ew-resize; }
+
+.preview.has-roi video {
+  /* controls vẫn dùng được; ROI nằm trên phần hình */
+  pointer-events: auto;
 }
 
 .preview.portrait {

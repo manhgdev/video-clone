@@ -129,7 +129,7 @@ def list_preset_from_assets() -> list[dict[str, str]]:
                 "gender": str(meta.get("gender") or ""),
                 "style": str(meta.get("style") or ""),
                 "accent": accent,
-                "language": "vi-VN",
+                "language": "vi",
             }
         )
     return out
@@ -357,6 +357,7 @@ def list_voices(lang: str | None = None) -> list[dict[str, Any]]:
                 "available": ref_path.is_file(),
                 "tags": voice_store.normalize_voice_tags(item.get("tags")),
                 "language": voice_store.normalize_voice_language(item.get("language")),
+                "favorite": bool(item.get("favorite")),
                 "previewUrl": f"/api/tts/voices/{voice_id}/preview" if ref_path.is_file() else None,
             }
         )
@@ -386,6 +387,7 @@ def list_voices(lang: str | None = None) -> list[dict[str, Any]]:
                 "type": "clone",
                 "tags": voice_store.normalize_voice_tags(item.get("tags")),
                 "language": voice_store.normalize_voice_language(item.get("language")),
+                "favorite": bool(item.get("favorite")),
                 "previewUrl": f"/api/tts/voices/{PREFIX_VIENEU}clone:{cid}/preview",
             }
         )

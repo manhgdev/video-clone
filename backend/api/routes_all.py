@@ -118,6 +118,10 @@ class Settings(BaseModel):
     translator: str = "google"
     matchDuration: str = "preferVideo"
     defaultVoice: str = "cc:BV075_streaming:7102355803792740865"
+    # False = 1 frame/mốc (nhanh); True = đầu•giữa•cuối + majority (chậm, ổn định)
+    stableCaptionLocate: bool = False
+    # Vùng OCR 0–1 {x,y,w,h} — chỉ khi stableCaptionLocate
+    analysisRegion: dict[str, float] | None = None
     coverHardsubs: bool = True
     coverMaskStyle: str = "blur"  # blur | solid | mosaic
     coverMaskColor: str = "#4c1d95"
@@ -175,6 +179,11 @@ class SegmentIn(BaseModel):
     fontSize: int | None = None
     # Layout caption từ preview editor — export burn y nguyên.
     captionLayout: dict[str, Any] | None = None
+    # OpenCut-style clip group id
+    groupId: str | None = None
+    # CapCut Alt+G compound — shell + children (giữ caption/TTS/layout)
+    isCompound: bool | None = None
+    compoundChildren: list[dict[str, Any]] | None = None
 
 
 class ExportPayload(Settings):
@@ -503,6 +512,7 @@ class VoicePatchIn(BaseModel):
     name: str | None = None
     tags: list[str] | None = None
     language: str | None = None
+    favorite: bool | None = None
     # zmai | clone — chuyển bucket (chỉ local VieNeu ref)
     engine: str | None = None
 
@@ -518,6 +528,7 @@ def _studio_voice_payload(entry: dict) -> dict:
     eng = str(entry.get("engine") or "")
     tags = voice_store.normalize_voice_tags(entry.get("tags"))
     language = voice_store.normalize_voice_language(entry.get("language"))
+    favorite = bool(entry.get("favorite"))
     if eng == "clone" or eid.startswith("vn:clone:"):
         cid = eid.removeprefix("vn:clone:")
         return {
@@ -526,6 +537,7 @@ def _studio_voice_payload(entry: dict) -> dict:
             "engine": "clone",
             "tags": tags,
             "language": language,
+            "favorite": favorite,
         }
     return {
         "id": eid,
@@ -534,6 +546,7 @@ def _studio_voice_payload(entry: dict) -> dict:
         "type": "zmAI",
         "tags": tags,
         "language": language,
+        "favorite": favorite,
     }
 
 
@@ -607,6 +620,8 @@ def api_tts_studio_voice_patch(voice_id: str, body: VoicePatchIn):
     engine = (body.engine or "").strip().lower() if body.engine is not None else None
     tags_supplied = "tags" in body.model_fields_set
     language_supplied = "language" in body.model_fields_set
+    favorite_supplied = "favorite" in body.model_fields_set
+    favorite = bool(body.favorite) if favorite_supplied else None
     try:
         tags = voice_store.normalize_voice_tags(body.tags, strict=True) if tags_supplied else None
         language = (
@@ -616,8 +631,14 @@ def api_tts_studio_voice_patch(voice_id: str, body: VoicePatchIn):
         )
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
-    if name is None and not engine and not tags_supplied and not language_supplied:
-        raise HTTPException(400, "Cần name, tags, language và/hoặc engine")
+    if (
+        name is None
+        and not engine
+        and not tags_supplied
+        and not language_supplied
+        and not favorite_supplied
+    ):
+        raise HTTPException(400, "Cần name, tags, language, favorite và/hoặc engine")
     if body.name is not None and not name:
         raise HTTPException(400, "Tên giọng không được trống")
 
@@ -626,19 +647,24 @@ def api_tts_studio_voice_patch(voice_id: str, body: VoicePatchIn):
             entry = voice_store.move_voice_engine(vid, engine)
             # Metadata update after moving because the id may change.
             new_id = str(entry["id"])
-            if name is not None or tags_supplied or language_supplied:
+            if name is not None or tags_supplied or language_supplied or favorite_supplied:
                 if new_id.startswith("vn:clone:") or entry.get("engine") == "clone":
                     updated = voice_store.update_cloned(
                         new_id.removeprefix("vn:clone:"),
                         name=name,
                         tags=tags,
                         language=language,
+                        favorite=favorite,
                     )
                     if updated:
                         entry = {**updated, "id": f"vn:clone:{updated['id']}", "engine": "clone"}
                 else:
                     updated = voice_store.update_reference(
-                        new_id, name=name, tags=tags, language=language
+                        new_id,
+                        name=name,
+                        tags=tags,
+                        language=language,
+                        favorite=favorite,
                     )
                     if updated:
                         entry = {**updated, "engine": "zmai", "type": "zmAI"}
@@ -647,16 +673,22 @@ def api_tts_studio_voice_patch(voice_id: str, body: VoicePatchIn):
         # metadata only
         if vid.startswith("vn:clone:"):
             cid = vid.removeprefix("vn:clone:").strip()
-            entry = voice_store.update_cloned(cid, name=name, tags=tags, language=language)
+            entry = voice_store.update_cloned(
+                cid, name=name, tags=tags, language=language, favorite=favorite
+            )
             if not entry:
                 raise HTTPException(404, "Không tìm thấy giọng clone")
             return _studio_voice_payload({**entry, "id": f"vn:clone:{entry['id']}", "engine": "clone"})
 
-        entry = voice_store.update_reference(vid, name=name, tags=tags, language=language)
+        entry = voice_store.update_reference(
+            vid, name=name, tags=tags, language=language, favorite=favorite
+        )
         if entry:
             return _studio_voice_payload({**entry, "engine": "zmai"})
         # fallback: bare clone id
-        entry = voice_store.update_cloned(vid, name=name, tags=tags, language=language)
+        entry = voice_store.update_cloned(
+            vid, name=name, tags=tags, language=language, favorite=favorite
+        )
         if not entry:
             raise HTTPException(404, "Không tìm thấy giọng")
         return _studio_voice_payload({**entry, "id": f"vn:clone:{entry['id']}", "engine": "clone"})
@@ -696,6 +728,8 @@ class PreviewTtsIn(BaseModel):
 
 class RebakeSpeedIn(BaseModel):
     speed: float = 1.0
+    # Undo/redo: chỉ đổi file bake, không remap timeline (client đã có snapshot)
+    skipRemap: bool = False
 
 
 @router.post("/api/upload")
@@ -792,7 +826,10 @@ def api_rebake_speed(project_id: str, body: RebakeSpeedIn):
 
     speed = clamp_playback_speed(body.speed)
     old = meta_baked_speed(meta)
-    remap_timeline_for_speed_change(meta, old, speed)
+    # Baseline 1× + scale toàn bộ segment/compound/overlay (không nhân chồng)
+    # skipRemap: Undo — timeline đã đúng từ history snapshot
+    if not body.skipRemap:
+        remap_timeline_for_speed_change(meta, old, speed)
 
     base = preview_1x_path(project_id, meta)
     if not base.is_file():
@@ -821,10 +858,19 @@ def api_rebake_speed(project_id: str, body: RebakeSpeedIn):
                 if preview_sec > 0
                 else cache / f"source_{tag}.mp4"
             )
+            # Luôn bake từ file 1× (base) — không bake chồng file đã slow
             work = ensure_playback_speed(base, dest, speed, project_id=project_id)
             meta["bakedPreferVideo"] = True
             meta["bakedSpeed"] = speed
-            meta["workDuration"] = float(ffprobe_duration(work) or 0)
+            probed = float(ffprobe_duration(work) or 0)
+            # Ưu tiên workDuration từ baseline; probe xác nhận
+            if probed > 0.05:
+                meta["workDuration"] = probed
+            elif meta.get("workDuration") is None:
+                bl = meta.get("timelineBaseline") or {}
+                d1 = float(bl.get("duration1x") or meta.get("duration") or 0)
+                if d1 > 0:
+                    meta["workDuration"] = d1 / speed
         meta["workVideo"] = str(work.resolve())
         save_meta(project_id, meta)
     except Exception as e:
@@ -839,7 +885,9 @@ def api_rebake_speed(project_id: str, body: RebakeSpeedIn):
         raise HTTPException(500, f"Bake tốc độ thất bại: {e}") from e
 
     speed_baked = abs(speed - 1.0) > 0.001
-    work_clip = float(meta["workDuration"]) if speed_baked else float(preview_sec)
+    work_clip = float(meta.get("workDuration") or 0) if speed_baked else float(preview_sec)
+    if speed_baked and work_clip <= 0:
+        work_clip = float(ffprobe_duration(work) or meta.get("duration") or 0)
     duration = float(meta.get("workDuration") or ffprobe_duration(work) or meta.get("duration") or 0)
     set_status(
         project_id,
@@ -849,12 +897,16 @@ def api_rebake_speed(project_id: str, body: RebakeSpeedIn):
         running=False,
         error=None,
     )
+    # Tỷ lệ scale UI media clips (Video/Âm gốc local) — t_new = t_old * (old/new)
+    time_scale = old / speed if abs(speed) > 1e-9 else 1.0
     return {
         "ok": True,
         "bakedSpeed": speed,
         "bakedPreferVideo": speed_baked,
         "workClipSec": work_clip,
         "duration": duration,
+        "timeScale": time_scale,
+        "prevBakedSpeed": old,
         "segments": meta.get("segments") or [],
         "overlays": meta.get("overlays") or [],
         "videoUrl": f"/api/projects/{project_id}/video",
@@ -1339,39 +1391,352 @@ def api_tts(project_id: str, name: str):
     )
 
 
+class CompoundClipIn(BaseModel):
+    """CapCut Alt+G: ghép clip thành compound — giữ children, không gộp text."""
+    segmentIds: list[str]
+
+
+@router.post("/api/projects/{project_id}/segments/compound")
+def api_create_compound(project_id: str, body: CompoundClipIn):
+    """Tạo compound clip (CapCut Alt+G).
+
+    - Giữ từng câu + TTS trong children (relative time)
+    - 1 shell trên timeline [t0,t1]; optional 1 WAV mix cho preview
+    - Đổi tốc độ bake scale shell — children scale theo, không lệch
+    """
+    from pipeline.core.jobs import run_cmd
+
+    meta = load_meta(project_id)
+    if not meta:
+        raise HTTPException(404)
+    ids = [str(x).strip() for x in (body.segmentIds or []) if str(x).strip()]
+    if len(ids) < 2:
+        raise HTTPException(400, "Cần chọn ≥2 clip để ghép (Alt+G)")
+    segs: list[dict] = list(meta.get("segments") or [])
+    by_id = {str(s.get("id")): s for s in segs if isinstance(s, dict) and s.get("id")}
+    picked = [dict(by_id[i]) for i in ids if i in by_id]
+    if len(picked) < 2:
+        raise HTTPException(400, "Không tìm thấy đủ clip đã chọn")
+
+    ordered = sorted(picked, key=lambda s: (float(s.get("start") or 0), float(s.get("end") or 0)))
+    t0 = float(ordered[0].get("start") or 0)
+    t1 = max(float(s.get("end") or 0) for s in ordered)
+    if t1 <= t0:
+        t1 = t0 + 0.15
+    span = t1 - t0
+
+    # Children: thời gian tương đối trong compound (0 = đầu shell)
+    children: list[dict] = []
+    for s in ordered:
+        ch = dict(s)
+        st = float(ch.get("start") or 0)
+        en = float(ch.get("end") or st)
+        ch["start"] = max(0.0, st - t0)
+        ch["end"] = max(ch["start"] + 0.05, en - t0)
+        if ch.get("coverStart") is not None:
+            try:
+                ch["coverStart"] = max(0.0, float(ch["coverStart"]) - t0)
+            except (TypeError, ValueError):
+                pass
+        if ch.get("coverEnd") is not None:
+            try:
+                ch["coverEnd"] = max(0.0, float(ch["coverEnd"]) - t0)
+            except (TypeError, ValueError):
+                pass
+        ch.pop("groupId", None)
+        children.append(ch)
+
+    root = ensure_layout(project_id)
+    tts_dir = root / "tts"
+    tts_dir.mkdir(parents=True, exist_ok=True)
+
+    # Mix TTS theo timeline compound (delay = start relative) — 1 file preview/export
+    clips: list[tuple[Path, float]] = []
+    for ch in children:
+        name = str(ch.get("audioFile") or f"{ch.get('id')}.wav")
+        p = tts_dir / name
+        if p.is_file() and p.stat().st_size > 64:
+            clips.append((p, float(ch.get("start") or 0)))
+
+    shell_id = f"cmp_{uuid.uuid4().hex[:12]}"
+    mixed_name = f"{shell_id}.wav"
+    mixed_path = tts_dir / mixed_name
+    audio_dur = span
+    has_mix = False
+    if clips:
+        inputs: list[str] = []
+        filters: list[str] = []
+        labels: list[str] = []
+        for i, (wav, st) in enumerate(clips):
+            inputs += ["-i", str(wav)]
+            delay_ms = max(0, int(round(st * 1000)))
+            filters.append(
+                f"[{i}:a]aformat=sample_rates=44100:channel_layouts=mono,"
+                f"adelay={delay_ms}|{delay_ms},apad[a{i}]"
+            )
+            labels.append(f"[a{i}]")
+        n = len(labels)
+        filters.append(
+            "".join(labels)
+            + f"amix=inputs={n}:duration=longest:dropout_transition=0:normalize=0,"
+            f"atrim=0:{span:.3f},asetpts=PTS-STARTPTS[aout]"
+        )
+        fc = root / "cache" / f"cmp_{shell_id}_fc.txt"
+        fc.parent.mkdir(parents=True, exist_ok=True)
+        fc.write_text(";\n".join(filters) + "\n", encoding="utf-8")
+        try:
+            run_cmd(
+                project_id,
+                [
+                    "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                    *inputs,
+                    "-filter_complex_script", str(fc.resolve()),
+                    "-map", "[aout]", "-c:a", "pcm_s16le", str(mixed_path),
+                ],
+            )
+            has_mix = mixed_path.is_file() and mixed_path.stat().st_size > 64
+            if has_mix:
+                audio_dur = float(ffprobe_duration(mixed_path) or span)
+        except Exception:
+            has_mix = False
+        finally:
+            try:
+                fc.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    # Shell meta only — timeline UI ẩn caption/TTS (CapCut Alt+G: chỉ còn video)
+    n_ch = len(children)
+    shell: dict[str, Any] = {
+        "id": shell_id,
+        "index": 0,
+        "start": t0,
+        "end": t1,
+        "source": f"[Compound ×{n_ch}]",
+        "translation": "",
+        "voice": str(ordered[0].get("voice") or ""),
+        "layout": str(ordered[0].get("layout") or "horizontal"),
+        "dub": True if has_mix else bool(ordered[0].get("dub")),
+        "isCompound": True,
+        "compoundChildren": children,
+        "coverStart": t0,
+        "coverEnd": t1,
+        "captionLayout": None,
+        "videoSpeed": 1.0,
+        "groupId": None,
+    }
+    if has_mix:
+        shell["audioFile"] = mixed_name
+        shell["audioUrl"] = f"/api/projects/{project_id}/tts/{mixed_name}?t={int(audio_dur * 1000)}"
+        shell["audioDuration"] = audio_dur
+
+    drop_ids = {str(s.get("id")) for s in ordered}
+    next_segs: list[dict] = []
+    for s in segs:
+        if not isinstance(s, dict):
+            continue
+        if str(s.get("id") or "") in drop_ids:
+            continue
+        next_segs.append(s)
+    next_segs.append(shell)
+    next_segs.sort(key=lambda s: (float(s.get("start") or 0), float(s.get("end") or 0)))
+    for i, s in enumerate(next_segs):
+        s["index"] = i
+
+    meta["segments"] = next_segs
+    save_meta(project_id, meta)
+    return {
+        "ok": True,
+        "mode": "compound",
+        "compoundId": shell_id,
+        "mergedId": shell_id,
+        "start": t0,
+        "end": t1,
+        "childCount": n_ch,
+        "audioFile": shell.get("audioFile"),
+        "audioUrl": shell.get("audioUrl"),
+        "audioDuration": shell.get("audioDuration"),
+        "segments": next_segs,
+    }
+
+
+@router.post("/api/projects/{project_id}/segments/{seg_id}/uncompound")
+def api_uncompound(project_id: str, seg_id: str):
+    """Tháo compound (CapCut ungroup compound) — restore children ra timeline."""
+    meta = load_meta(project_id)
+    if not meta:
+        raise HTTPException(404)
+    segs: list[dict] = list(meta.get("segments") or [])
+    shell = next((s for s in segs if isinstance(s, dict) and str(s.get("id")) == seg_id), None)
+    if not shell or not shell.get("isCompound"):
+        raise HTTPException(400, "Không phải compound clip")
+    children = shell.get("compoundChildren") or []
+    if not isinstance(children, list) or not children:
+        raise HTTPException(400, "Compound không có children")
+    t0 = float(shell.get("start") or 0)
+    restored: list[dict] = []
+    for ch in children:
+        if not isinstance(ch, dict):
+            continue
+        item = dict(ch)
+        st = float(item.get("start") or 0)
+        en = float(item.get("end") or st)
+        item["start"] = t0 + st
+        item["end"] = t0 + en
+        if item.get("coverStart") is not None:
+            try:
+                item["coverStart"] = t0 + float(item["coverStart"])
+            except (TypeError, ValueError):
+                pass
+        if item.get("coverEnd") is not None:
+            try:
+                item["coverEnd"] = t0 + float(item["coverEnd"])
+            except (TypeError, ValueError):
+                pass
+        item.pop("isCompound", None)
+        item.pop("compoundChildren", None)
+        restored.append(item)
+
+    next_segs = [s for s in segs if str(s.get("id")) != seg_id]
+    next_segs.extend(restored)
+    next_segs.sort(key=lambda s: (float(s.get("start") or 0), float(s.get("end") or 0)))
+    for i, s in enumerate(next_segs):
+        if isinstance(s, dict):
+            s["index"] = i
+    meta["segments"] = next_segs
+    save_meta(project_id, meta)
+    return {"ok": True, "segments": next_segs, "restored": len(restored)}
+
+
+@router.get("/api/projects/{project_id}/audio/no-vocals/status")
+def api_no_vocals_status(project_id: str):
+    """Cache hit nhanh — UI không hiện 1% nếu đã có stem."""
+    from pipeline.export.mux import find_cached_no_vocals, read_stem_progress
+
+    if not load_meta(project_id):
+        raise HTTPException(404)
+    cached = find_cached_no_vocals(project_id)
+    prog = read_stem_progress(project_id)
+    if cached is not None:
+        return {
+            "ready": True,
+            "cached": True,
+            "running": False,
+            "progress": 100,
+            "message": "Đã có stem xóa lời (cache)",
+            "audioUrl": f"/api/projects/{project_id}/cache/{cached.name}",
+            "file": cached.name,
+        }
+    return {
+        "ready": False,
+        "cached": False,
+        "running": bool(prog.get("running")),
+        "progress": int(prog.get("progress") or 0),
+        "message": str(prog.get("message") or ""),
+        "audioUrl": None,
+        "file": None,
+    }
+
+
 @router.post("/api/projects/{project_id}/audio/no-vocals")
 def api_prepare_no_vocals(project_id: str):
     """Tách stem xóa lời (Demucs) — cache dùng chung preview + export."""
+    from pipeline.export.mux import find_cached_no_vocals
+
     meta = load_meta(project_id)
     if not meta:
         raise HTTPException(404)
     video = Path(meta["videoPath"])
     if not video.is_file():
         raise HTTPException(404, "Thiếu video nguồn")
+    had_cache = find_cached_no_vocals(project_id) is not None
     try:
+        # Luôn theo videoPath gốc (ignore work bake) — export tái dùng cùng file
         path = separate_no_vocals(project_id, video, report=False)
     except Exception as e:
-        raise HTTPException(500, str(e)) from e
+        from pipeline.core.jobs import short_cmd_error
+
+        raise HTTPException(500, short_cmd_error(e)) from e
     name = path.name
-    return {"audioUrl": f"/api/projects/{project_id}/cache/{name}", "file": name}
+    return {
+        "audioUrl": f"/api/projects/{project_id}/cache/{name}",
+        "file": name,
+        "cached": had_cache or True,
+    }
 
 
 @router.get("/api/projects/{project_id}/audio/no-vocals/progress")
 def api_no_vocals_progress(project_id: str):
     """Tiến độ tách stem — poll song song lúc POST /audio/no-vocals đang chạy."""
+    from pipeline.export.mux import find_cached_no_vocals, read_stem_progress
+
     if not load_meta(project_id):
         raise HTTPException(404)
-    return read_stem_progress(project_id)
+    cached = find_cached_no_vocals(project_id)
+    if cached is not None:
+        return {
+            "progress": 100,
+            "message": "Đã có stem xóa lời (cache)",
+            "running": False,
+            "ready": True,
+            "file": cached.name,
+            "audioUrl": f"/api/projects/{project_id}/cache/{cached.name}",
+        }
+    prog = read_stem_progress(project_id)
+    return {**prog, "ready": False, "file": None, "audioUrl": None}
+
+
+@router.get("/api/projects/{project_id}/audio/download")
+def api_project_audio_download(project_id: str, kind: str = "original"):
+    """Tải WAV theo chế độ: original | no_vocals | vocals."""
+    from pipeline.export.mux import export_project_audio
+
+    meta = load_meta(project_id)
+    if not meta:
+        raise HTTPException(404)
+    video = Path(meta["videoPath"])
+    if not video.is_file():
+        raise HTTPException(404, "Thiếu video nguồn")
+    k = (kind or "original").strip().lower()
+    try:
+        path = export_project_audio(project_id, video, k, report=False)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    except Exception as e:
+        raise HTTPException(500, str(e)) from e
+    label = {
+        "original": "original",
+        "source": "original",
+        "full": "original",
+        "no_vocals": "no_vocals",
+        "novocals": "no_vocals",
+        "bg": "no_vocals",
+        "instrumental": "no_vocals",
+        "vocals": "vocals",
+        "voice": "vocals",
+        "speech": "vocals",
+    }.get(k, k)
+    return FileResponse(
+        path,
+        media_type="audio/wav",
+        filename=f"{project_id}_{label}.wav",
+        content_disposition_type="attachment",
+    )
 
 
 @router.get("/api/projects/{project_id}/cache/{name}")
-def api_cache_file(project_id: str, name: str):
-    if not re.fullmatch(r"no_vocals_[a-f0-9]+\.wav", name):
+def api_cache_file(project_id: str, name: str, download: int = 0):
+    if not re.fullmatch(r"(?:no_vocals|vocals|original)_[a-f0-9]+\.wav", name):
         raise HTTPException(400, "Tên file không hợp lệ")
     path = ensure_layout(project_id) / "cache" / name
     if not path.is_file():
         raise HTTPException(404)
-    return FileResponse(path, media_type="audio/wav")
+    return FileResponse(
+        path,
+        media_type="audio/wav",
+        filename=name if download else None,
+        content_disposition_type="attachment" if download else "inline",
+    )
 
 
 @router.get("/api/health")

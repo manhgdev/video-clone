@@ -209,15 +209,44 @@ def ocr_mid_hardsub_boxes(
     return [box], text
 
 
+def _normalize_analysis_region(
+    raw: Any,
+) -> tuple[float, float, float, float] | None:
+    """Parse {x,y,w,h} 0–1 → clamp. None nếu không hợp lệ."""
+    if not isinstance(raw, dict):
+        return None
+    try:
+        x = float(raw.get("x", 0))
+        y = float(raw.get("y", 0))
+        w = float(raw.get("w", 0))
+        h = float(raw.get("h", 0))
+    except (TypeError, ValueError):
+        return None
+    x = max(0.0, min(0.95, x))
+    y = max(0.0, min(0.95, y))
+    w = max(0.05, min(1.0 - x, w))
+    h = max(0.05, min(1.0 - y, h))
+    return (x, y, w, h)
+
+
 def _probe_mid_hardsub(
     frame_bgr: Any,
     ocr: Any,
     source: str = "",
+    analysis_region: Any = None,
 ) -> tuple[float, tuple[int, int, int, int], str] | None:
     """Trả (score, xyxy, text) — score cao = khớp source + đủ bề ngang."""
     h, w = frame_bgr.shape[:2]
-    y0, y1 = int(h * 0.12), int(h * 0.92)
-    x0, x1 = int(w * 0.04), int(w * 0.96)
+    reg = _normalize_analysis_region(analysis_region)
+    if reg:
+        rx, ry, rw, rh = reg
+        x0, y0 = int(w * rx), int(h * ry)
+        x1, y1 = int(w * (rx + rw)), int(h * (ry + rh))
+        x0, y0 = max(0, x0), max(0, y0)
+        x1, y1 = min(w, max(x0 + 8, x1)), min(h, max(y0 + 8, y1))
+    else:
+        y0, y1 = int(h * 0.12), int(h * 0.92)
+        x0, x1 = int(w * 0.04), int(w * 0.96)
     roi = frame_bgr[y0:y1, x0:x1]
     if roi.size == 0:
         return None
@@ -498,14 +527,120 @@ def _ensure_cover_times(
 def _three_point_segments(
     segments: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Chọn tối đa ba cue đại diện: đầu, giữa và cuối video.
-
-    Whisper đã cung cấp timecode. OCR ở đây chỉ dùng để tìm vùng hardsub
-    chung, nên không được chạy ba lần cho từng câu.
-    """
+    """Chọn tối đa ba cue đại diện: đầu, giữa và cuối video."""
     if len(segments) <= 3:
         return list(segments)
     return [segments[i] for i in (0, len(segments) // 2, len(segments) - 1)]
+
+
+def _sample_times_in_cue(s0: float, e0: float) -> list[float]:
+    """Đầu / giữa / cuối cửa sổ cue (tránh sát biên fade)."""
+    dur = max(0.05, e0 - s0)
+    if dur < 0.35:
+        return [s0 + dur * 0.5]
+    return [
+        s0 + dur * 0.12,
+        s0 + dur * 0.50,
+        s0 + dur * 0.88,
+    ]
+
+
+def _stable_box_from_hits(
+    hits: list[tuple[float, float, tuple[int, int, int, int], str]],
+    *,
+    fw: int,
+    fh: int,
+) -> tuple[int, int, int, int] | None:
+    """Majority cluster theo cy (+cx), median box — chống OCR nhảy lung tung.
+
+    hits: (t, score, xyxy, text)
+    """
+    if not hits:
+        return None
+    if len(hits) == 1:
+        return hits[0][2]
+
+    # Cluster theo cy (dải hardsub), tol ~3% chiều cao
+    tol_y = max(8.0, fh * 0.03)
+    tol_x = max(12.0, fw * 0.04)
+    clusters: list[list[tuple[float, float, tuple[int, int, int, int], str]]] = []
+    for h in hits:
+        box = h[2]
+        cx = (box[0] + box[2]) * 0.5
+        cy = (box[1] + box[3]) * 0.5
+        placed = False
+        for cl in clusters:
+            b0 = cl[0][2]
+            cx0 = (b0[0] + b0[2]) * 0.5
+            cy0 = (b0[1] + b0[3]) * 0.5
+            if abs(cy - cy0) <= tol_y and abs(cx - cx0) <= tol_x * 2:
+                cl.append(h)
+                placed = True
+                break
+        if not placed:
+            clusters.append([h])
+
+    def cl_key(cl: list[tuple[float, float, tuple[int, int, int, int], str]]) -> tuple:
+        # Ưu tiên cụm đông + điểm OCR cao
+        return (len(cl), sum(x[1] for x in cl) / len(cl))
+
+    best = max(clusters, key=cl_key)
+    # Median từng cạnh trong cụm thắng
+    xs0 = sorted(h[2][0] for h in best)
+    ys0 = sorted(h[2][1] for h in best)
+    xs1 = sorted(h[2][2] for h in best)
+    ys1 = sorted(h[2][3] for h in best)
+    mid = len(best) // 2
+    return (xs0[mid], ys0[mid], xs1[mid], ys1[mid])
+
+
+def _global_cy_band(
+    boxes: list[tuple[int, int, int, int]],
+    fh: int,
+) -> float | None:
+    """cy đa số của các probe — dùng neo inheritance ổn định."""
+    if not boxes or fh <= 0:
+        return None
+    cys = sorted((b[1] + b[3]) * 0.5 for b in boxes)
+    return cys[len(cys) // 2]
+
+
+def _snap_inherited_y(
+    segments: list[dict[str, Any]],
+    anchor_cy: float | None,
+    fh: int,
+) -> None:
+    """Kéo mọi hardsub horizontal/mid về cùng dải Y (median probe) nếu lệch > 6%."""
+    if anchor_cy is None or fh <= 0:
+        return
+    tol = fh * 0.06
+    for seg in segments:
+        lay = str(seg.get("layout") or "")
+        if lay in ("vertical", "label"):
+            continue
+        bb = seg.get("bbox")
+        if not isinstance(bb, dict):
+            continue
+        # Không đụng bbox kéo tay (inherited=False và user có thể đã chỉnh)
+        if seg.get("bboxInherited") is False and not seg.get("_probeAnchored"):
+            # probe thật — giữ nguyên
+            continue
+        try:
+            y = float(bb["y"])
+            h = float(bb["h"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        cy = y + h * 0.5
+        if abs(cy - anchor_cy) <= tol:
+            continue
+        new_y = max(0, min(fh - h, round(anchor_cy - h * 0.5)))
+        bb["y"] = int(new_y)
+        seg["bbox"] = bb
+        seg["layout"] = (
+            "horizontal"
+            if float(bb.get("w") or 0) >= max(1.0, h) * 8
+            else _layout_from_cy(anchor_cy, fh)
+        )
 
 
 def attach_speech_hardsub_boxes(
@@ -514,8 +649,15 @@ def attach_speech_hardsub_boxes(
     *,
     only_missing: bool = True,
     project_id: str | None = None,
+    stable: bool = False,
+    analysis_region: Any = None,
 ) -> int:
-    """Whisper giữ timecode; OCR chỉ đo bbox tại đầu / giữa / cuối cửa sổ."""
+    """Whisper giữ timecode; OCR đo bbox.
+
+    stable=False (mặc định, nhanh): 1 frame giữa mỗi mốc.
+    stable=True: đầu•giữa•cuối + majority + neo Y (chậm hơn ~3×).
+    analysis_region: {x,y,w,h} 0–1 — thu hẹp ROI OCR (nhanh + ít nhiễu).
+    """
     import cv2
 
     path = Path(video)
@@ -532,6 +674,7 @@ def attach_speech_hardsub_boxes(
     fps = float(cap.get(cv2.CAP_PROP_FPS) or 0) or 25.0
     frame_total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     video_end = (frame_total / fps) if frame_total > 0 else None
+    roi = _normalize_analysis_region(analysis_region)
 
     # Migration cho project cũ: trước đây bbox của ba mốc bị copy cho gần như
     # toàn bộ câu và chưa có cờ provenance. Xóa một lần để tạo lại đúng anchor
@@ -585,7 +728,14 @@ def attach_speech_hardsub_boxes(
         ok, frame = cap.read()
         if not ok:
             return None
-        hit = _probe_mid_hardsub(frame, ocr, source=src)
+        hit = _probe_mid_hardsub(
+            frame,
+            ocr,
+            source=src,
+            analysis_region=(
+                {"x": roi[0], "y": roi[1], "w": roi[2], "h": roi[3]} if roi else None
+            ),
+        )
         if not hit:
             return None
         score, box, text = hit
@@ -604,21 +754,21 @@ def attach_speech_hardsub_boxes(
         pct = 95 + min(3, int(3 * done / total))
         from ..core.project import set_status
 
+        mode_lab = "ổn định đầu•giữa•cuối" if stable else "nhanh 1 frame"
         set_status(
             project_id,
             step="translate",
             progress=pct,
-            message=f"Định vị OCR {done}/{total} mốc (đầu • giữa • cuối) — vẫn chạy…",
+            message=f"Định vị OCR {done}/{total} mốc ({mode_lab})…",
             running=True,
         )
 
     from .cover_timing import attach_cover_times
 
     attached = 0
-    # Chỉ định vị ba vùng đại diện của video, rồi nội suy bbox cho các cue
-    # Whisper còn lại ở _inherit_caption_bboxes bên dưới.
     probes = _three_point_segments(filtered)
     total = len(probes)
+    anchor_boxes: list[tuple[int, int, int, int]] = []
     try:
         for si, seg in enumerate(probes):
             _report(si + 1, total)
@@ -628,30 +778,51 @@ def attach_speech_hardsub_boxes(
                 e0 = s0 + 0.4
             src = str(seg.get("source") or "").strip()
             dur = max(0.2, e0 - s0)
-            # Mỗi cue đại diện chỉ đọc một frame. Tổng cộng tối đa ba lần OCR:
-            # cue đầu, cue giữa và cue cuối của video.
-            hit = _read_probe(s0 + dur * 0.5, src)
-            hits = [hit] if hit else []
-            if not hits:
+            if stable:
+                # 3 frame × majority — chậm hơn, ít nhảy
+                hits: list[tuple[float, float, tuple[int, int, int, int], str]] = []
+                for t in _sample_times_in_cue(s0, e0):
+                    hit = _read_probe(t, src)
+                    if not hit:
+                        continue
+                    box = hit[2]
+                    probe_bb = {"w": box[2] - box[0], "h": box[3] - box[1]}
+                    if _bbox_fits_source(probe_bb, src, fw):
+                        hits.append(hit)
+                if not hits:
+                    for t in _sample_times_in_cue(s0, e0):
+                        hit = _read_probe(t, src)
+                        if hit:
+                            hits.append(hit)
+                stable_box = _stable_box_from_hits(hits, fw=fw, fh=fh)
+            else:
+                # Nhanh: 1 frame giữa cue
+                hit = _read_probe(s0 + dur * 0.5, src)
+                stable_box = None
+                if hit:
+                    box = hit[2]
+                    probe_bb = {"w": box[2] - box[0], "h": box[3] - box[1]}
+                    if _bbox_fits_source(probe_bb, src, fw):
+                        stable_box = box
+                    else:
+                        stable_box = box  # vẫn dùng nếu OCR có hit
+            if stable_box is None:
                 continue
-            chosen = None
-            for h in sorted(hits, key=lambda x: -x[1]):
-                box = h[2]
-                probe_bb = {"w": box[2] - box[0], "h": box[3] - box[1]}
-                if _bbox_fits_source(probe_bb, src, fw):
-                    chosen = h
-                    break
-            if chosen is None:
-                continue
-            _apply_caption_box(seg, chosen[2], fw, fh)
+            _apply_caption_box(seg, stable_box, fw, fh)
+            seg["_probeAnchored"] = True
             seg.pop("captionLayout", None)
             attach_cover_times(seg, video_end=video_end)
+            anchor_boxes.append(stable_box)
             attached += 1
         _report(total, total)
     finally:
         cap.release()
     attached += _inherit_caption_bboxes(segments, fh, fw)
+    if stable:
+        # Neo Y chỉ khi bật ổn định — tránh kéo nhầm khi 1 frame lệch
+        _snap_inherited_y(segments, _global_cy_band(anchor_boxes, fh), fh)
     _ensure_cover_times(segments, video_end)
     for seg in segments:
+        seg.pop("_probeAnchored", None)
         _retag_layout_from_bbox(seg, fh)
     return attached

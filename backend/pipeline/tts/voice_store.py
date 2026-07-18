@@ -111,6 +111,21 @@ def ensure_vieneu_dirs() -> Path:
     return VIENEU_ROOT
 
 
+def _canonicalize_language_field(item: dict[str, Any]) -> bool:
+    """Normalize language → short code (vi, en). Return True if changed."""
+    if "language" not in item:
+        return False
+    raw = item.get("language")
+    clean = normalize_voice_language(raw)
+    if clean == (raw if isinstance(raw, str) else ""):
+        return False
+    if clean:
+        item["language"] = clean
+    else:
+        item.pop("language", None)
+    return True
+
+
 def _read_cloned_raw() -> list[dict[str, Any]]:
     ensure_vieneu_dirs()
     try:
@@ -121,10 +136,18 @@ def _read_cloned_raw() -> list[dict[str, Any]]:
     if "cloned" not in data and "presets" in data:
         return []
     out: list[dict[str, Any]] = []
+    dirty = False
     for item in data.get("cloned") or []:
         if isinstance(item, dict) and item.get("id") and item.get("ref"):
             item["tags"] = normalize_voice_tags(item.get("tags"))
+            if _canonicalize_language_field(item):
+                dirty = True
             out.append(item)
+    if dirty:
+        try:
+            save_cloned(out)
+        except Exception:
+            pass
     return out
 
 
@@ -204,8 +227,16 @@ def _read_reference_raw() -> list[dict[str, Any]]:
     if not isinstance(data, list):
         return []
     out = [item for item in data if isinstance(item, dict) and item.get("id")]
+    dirty = False
     for item in out:
         item["tags"] = normalize_voice_tags(item.get("tags"))
+        if _canonicalize_language_field(item):
+            dirty = True
+    if dirty:
+        try:
+            save_reference_voices(out)
+        except Exception:
+            pass
     return out
 
 
@@ -246,6 +277,7 @@ def update_reference(
     name: str | None = None,
     tags: list[str] | None = None,
     language: str | None = None,
+    favorite: bool | None = None,
 ) -> dict[str, Any] | None:
     clean_name = (name or "").strip() if name is not None else None
     if name is not None and not clean_name:
@@ -265,6 +297,8 @@ def update_reference(
                 x["tags"] = clean_tags
             if clean_language is not None:
                 x["language"] = clean_language
+            if favorite is not None:
+                x["favorite"] = bool(favorite)
             hit = x
             break
     if not hit:
@@ -459,6 +493,7 @@ def update_cloned(
     name: str | None = None,
     tags: list[str] | None = None,
     language: str | None = None,
+    favorite: bool | None = None,
 ) -> dict[str, Any] | None:
     clean_name = clean_display_name(name or "", fallback="") if name is not None else None
     if name is not None and not clean_name:
@@ -477,6 +512,8 @@ def update_cloned(
                 x["tags"] = clean_tags
             if clean_language is not None:
                 x["language"] = clean_language
+            if favorite is not None:
+                x["favorite"] = bool(favorite)
             hit = x
             break
     if not hit:

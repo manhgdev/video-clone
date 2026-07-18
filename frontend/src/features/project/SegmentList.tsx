@@ -1,5 +1,7 @@
+import { useMemo } from 'react'
 import type { ProjectSettings, Segment } from '@/features/project/project.types'
 import SegmentCard from './SegmentCard'
+import { expandSegmentsForList } from './expandCompound'
 import './SegmentList.css'
 
 type Props = {
@@ -25,7 +27,11 @@ export default function SegmentList({
   projectId,
   onChange,
 }: Props) {
-  const list = Array.isArray(segments) ? segments : []
+  // Alt+G: list vẫn hiện từng câu (không hiện shell [Compound ×N])
+  const list = useMemo(
+    () => expandSegmentsForList(Array.isArray(segments) ? segments : []),
+    [segments],
+  )
 
   if (list.length === 0) {
     return (

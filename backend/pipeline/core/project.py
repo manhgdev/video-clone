@@ -116,9 +116,10 @@ def preview_tag(preview_sec: int) -> str:
 
 
 def audio_cache_tag(preview_sec: int, match_duration: str) -> str:
-    """Tag wav theo preview + speed bake — tránh reuse audio_full khi đổi preferVideo."""
-    slow = "s080" if str(match_duration or "") == "preferVideo" else "s1"
-    return f"{preview_tag(preview_sec)}_{slow}"
+    """Tag wav theo preview. Pipeline luôn ASR/TTS ở 1×; bake tốc độ chỉ sau editor."""
+    # match_duration giữ tham số (tương thích caller) — không còn s080 auto
+    _ = match_duration
+    return f"{preview_tag(preview_sec)}_s1"
 
 
 def resolve_project_video(meta: dict[str, Any], project_id: str) -> Path:
@@ -177,10 +178,8 @@ def asr_cache_key(settings: dict[str, Any], source_fp: str) -> str:
     # o20: quét cả nhãn ngang ở 10–22% phía trên khung.
     # a15: Whisper siết biên theo words, KHÔNG tách 1 câu thành nhiều mảnh.
     ver = "o20" if engine in ("paddleocr", "screen") else "a15"
-    # preferVideo bake 0.80× trước ASR → timeline khác bản 1×
-    match = str(settings.get("matchDuration") or "")
-    slow = "s080" if match == "preferVideo" else "s1"
-    return f"{engine}|{src}|{source_fp}|p{prev}|{ver}|{slow}"
+    # Pipeline luôn 1×; bake tốc độ chỉ qua rebake-speed trong editor
+    return f"{engine}|{src}|{source_fp}|p{prev}|{ver}|s1"
 
 
 def trans_cache_key(settings: dict[str, Any]) -> str:
@@ -257,6 +256,32 @@ def mutate_meta(project_id: str, fn: Callable[[dict[str, Any]], T]) -> T:
         return out
 
 
+def _sanitize_status_text(raw: Any, *, limit: int = 280) -> str:
+    """Không lưu argv ffmpeg / filter_complex dài vào meta (phình popup UI)."""
+    if raw is None:
+        return ""
+    t = str(raw).strip()
+    if not t:
+        return ""
+    low = t.lower()
+    if "winerror 206" in low or "filename or extension is too long" in low:
+        return "Lệnh/đường dẫn quá dài (WinError 206). Restart backend rồi xuất lại."
+    if (
+        "Command '[" in t
+        or 'Command "[' in t
+        or "-filter_complex" in t
+        or "between(t" in t
+    ):
+        import re
+
+        m = re.search(r"exit status (-?\d+)", t, re.I) or re.search(r"exit (\d+)", t, re.I)
+        code = m.group(1) if m else "?"
+        if "ffmpeg" in low:
+            return f"ffmpeg thất bại (exit {code}). Xem log backend."
+        return f"Lệnh thất bại (exit {code})."
+    return t if len(t) <= limit else t[: limit - 1] + "…"
+
+
 def set_status(project_id: str, **kwargs: Any) -> None:
     def apply(meta: dict[str, Any]) -> None:
         status = meta.get("status") or {
@@ -265,9 +290,19 @@ def set_status(project_id: str, **kwargs: Any) -> None:
             "message": "",
             "running": False,
         }
-        status.update(kwargs)
+        clean = dict(kwargs)
+        if "message" in clean and clean["message"] is not None:
+            clean["message"] = _sanitize_status_text(clean["message"])
+        if "error" in clean and clean["error"] is not None:
+            clean["error"] = _sanitize_status_text(clean["error"])
+        status.update(clean)
         if "error" in kwargs and kwargs["error"] is None:
             status.pop("error", None)
+        # Sửa lỗi cũ đã lưu trong meta (popup vẫn dài sau F5)
+        if status.get("error"):
+            status["error"] = _sanitize_status_text(status["error"])
+        if status.get("message"):
+            status["message"] = _sanitize_status_text(status["message"])
         meta["status"] = status
 
     mutate_meta(project_id, apply)

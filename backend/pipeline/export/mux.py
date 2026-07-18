@@ -29,6 +29,23 @@ def _num(v: Any, default: float) -> float:
         return float(default)
 
 
+# Khóa in-process: cùng project không chạy Demucs 2 lần song song / re-entry
+_stem_locks: dict[str, threading.Lock] = {}
+_stem_locks_guard = threading.Lock()
+# project_id đang tách (kể cả thread khác đang giữ lock)
+_stem_running: set[str] = set()
+_STEM_STALE_SEC = 45 * 60  # progress «running» quá lâu → coi là crash, cho chạy lại
+
+
+def _stem_lock(project_id: str) -> threading.Lock:
+    with _stem_locks_guard:
+        lock = _stem_locks.get(project_id)
+        if lock is None:
+            lock = threading.Lock()
+            _stem_locks[project_id] = lock
+        return lock
+
+
 def set_stem_progress(
     project_id: str | None,
     progress: int,
@@ -58,10 +75,21 @@ def read_stem_progress(project_id: str) -> dict[str, Any]:
         data = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
             return {"progress": 0, "message": "", "running": False}
+        running = bool(data.get("running"))
+        # Process đang tách (cùng worker) luôn true; file có thể stale nếu crash
+        if project_id in _stem_running:
+            running = True
+        else:
+            try:
+                ts = float(data.get("ts") or 0)
+                if running and ts > 0 and (time.time() - ts) > _STEM_STALE_SEC:
+                    running = False
+            except (TypeError, ValueError):
+                pass
         return {
             "progress": max(0, min(100, int(data.get("progress") or 0))),
             "message": str(data.get("message") or ""),
-            "running": bool(data.get("running")),
+            "running": running,
         }
     except (OSError, TypeError, ValueError, json.JSONDecodeError):
         return {"progress": 0, "message": "", "running": False}
@@ -654,90 +682,273 @@ def _run_demucs_progress(
     return code, err_tail
 
 
+def _audio_cache_key(video: Path) -> str:
+    stat = video.stat()
+    # v5: bắt buộc Demucs thật; invalidate cache stereotools (v4 trở xuống)
+    return hashlib.sha1(
+        f"{video.resolve()}|{stat.st_size}|{stat.st_mtime_ns}|v5".encode()
+    ).hexdigest()[:12]
+
+
+def find_cached_no_vocals(project_id: str) -> Path | None:
+    """Stem no_vocals đã tách trong cache project (bất kỳ key nào)."""
+    root = ensure_layout(project_id)
+    cache_dir = root / "cache"
+    if not cache_dir.is_dir():
+        return None
+    best: Path | None = None
+    best_mtime = -1.0
+    for p in cache_dir.glob("no_vocals_*.wav"):
+        try:
+            if p.stat().st_size <= 1024:
+                continue
+            mt = p.stat().st_mtime
+            if mt > best_mtime:
+                best = p
+                best_mtime = mt
+        except OSError:
+            continue
+    return best
+
+
+def resolve_stem_source_video(project_id: str, video: Path | None = None) -> Path:
+    """Video dùng để tách/cache stem = file nguồn gốc (meta.videoPath).
+
+    Preview và export phải cùng key — không dùng work bake / retime
+    (mtime/path khác → Demucs chạy lại).
+    """
+    try:
+        from ..core.project import load_meta
+
+        meta = load_meta(project_id) or {}
+        src = Path(str(meta.get("videoPath") or ""))
+        if src.is_file():
+            return src.resolve()
+    except Exception:
+        pass
+    if video is not None and Path(video).is_file():
+        return Path(video).resolve()
+    raise FileNotFoundError("Thiếu video nguồn để tách xóa lời")
+
+
+def extract_original_audio(project_id: str, video: Path) -> Path:
+    """Trích WAV mono-stereo từ video gốc (cache)."""
+    root = ensure_layout(project_id)
+    key = _audio_cache_key(video)
+    cache = root / "cache" / f"original_{key}.wav"
+    if cache.is_file() and cache.stat().st_size > 1024:
+        return cache
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    run_cmd(
+        project_id,
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(video),
+            "-vn",
+            "-ac",
+            "2",
+            "-ar",
+            "44100",
+            "-c:a",
+            "pcm_s16le",
+            str(cache),
+        ],
+    )
+    if not cache.is_file() or cache.stat().st_size < 64:
+        raise RuntimeError("Không trích được âm thanh gốc từ video")
+    return cache
+
+
+def separate_vocals(project_id: str, video: Path, *, report: bool = True) -> Path:
+    """Stem chỉ lời (Demucs vocals). Chạy no_vocals nếu chưa tách."""
+    root = ensure_layout(project_id)
+    key = _audio_cache_key(video)
+    cache = root / "cache" / f"vocals_{key}.wav"
+    if cache.is_file() and cache.stat().st_size > 1024:
+        return cache
+    # Tách no_vocals cũng ghi vocals_* nếu Demucs có file
+    separate_no_vocals(project_id, video, report=report)
+    if cache.is_file() and cache.stat().st_size > 1024:
+        return cache
+    # Fallback: demucs work dir còn lại
+    work = root / "cache" / f"demucs_{key}"
+    source_wav = work / "source.wav"
+    vocals_src = work / "separated" / "htdemucs" / source_wav.stem / "vocals.wav"
+    if vocals_src.is_file() and vocals_src.stat().st_size > 1024:
+        run_cmd(
+            project_id,
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(vocals_src),
+                "-c:a",
+                "pcm_s16le",
+                str(cache),
+            ],
+        )
+        if cache.is_file() and cache.stat().st_size > 64:
+            return cache
+    raise RuntimeError(
+        "Chưa có stem giữ lời — chạy tách âm (Xóa lời) trước hoặc Demucs không xuất vocals.wav"
+    )
+
+
+def export_project_audio(
+    project_id: str,
+    video: Path,
+    kind: str,
+    *,
+    report: bool = False,
+) -> Path:
+    """kind: original | no_vocals | vocals → Path WAV cache."""
+    k = (kind or "original").strip().lower()
+    if k in ("original", "source", "full"):
+        return extract_original_audio(project_id, video)
+    if k in ("no_vocals", "novocals", "bg", "instrumental"):
+        return separate_no_vocals(project_id, video, report=report)
+    if k in ("vocals", "voice", "speech"):
+        return separate_vocals(project_id, video, report=report)
+    raise ValueError(f"kind không hợp lệ: {kind}")
+
+
 def separate_no_vocals(
-    project_id: str, video: Path, *, report: bool = True
+    project_id: str, video: Path | None = None, *, report: bool = True
 ) -> Path:
     """Demucs: bỏ stem vocals, giữ nhạc/SFX.
 
     Không dùng stereotools làm «xóa lời» — filter đó vẫn để lại lời, cache sai.
     Demucs lỗi → nền im (đúng hơn còn lời).
     report=False: gọi từ preview, không ghi đè status job xuất.
+
+    Cache theo videoPath gốc — preview + export dùng chung, không tách lại.
     """
     root = ensure_layout(project_id)
-    stat = video.stat()
-    # v5: bắt buộc Demucs thật; invalidate cache stereotools (v4 trở xuống)
-    key = hashlib.sha1(
-        f"{video.resolve()}|{stat.st_size}|{stat.st_mtime_ns}|v5".encode()
-    ).hexdigest()[:12]
+    # 1) Bất kỳ stem đã có trong cache project → dùng ngay (không Demucs lại)
+    existing = find_cached_no_vocals(project_id)
+    if existing is not None:
+        set_stem_progress(project_id, 100, "Đã có stem xóa lời (cache)", running=False)
+        return existing
+
+    try:
+        stem_video = resolve_stem_source_video(project_id, video)
+    except FileNotFoundError:
+        if video is None or not Path(video).is_file():
+            raise
+        stem_video = Path(video).resolve()
+
+    key = _audio_cache_key(stem_video)
     cache = root / "cache" / f"no_vocals_{key}.wav"
     if cache.exists() and cache.stat().st_size > 1024:
         set_stem_progress(project_id, 100, "Đã có stem xóa lời", running=False)
         return cache
 
-    set_stem_progress(project_id, 2, "Chuẩn bị tách xóa lời…")
-    python = _demucs_python(project_id, report=report)
-    work = root / "cache" / f"demucs_{key}"
-    work.mkdir(parents=True, exist_ok=True)
-    source_wav = work / "source.wav"
-    set_stem_progress(project_id, 12, "Trích âm thanh từ video…")
-    run_cmd(
-        project_id,
-        [
-            "ffmpeg", "-y", "-i", str(video), "-vn", "-ac", "2", "-ar", "44100",
-            str(source_wav),
-        ],
-    )
-
-    demucs_ok = False
-    result: Path | None = None
-    separated = work / "separated"
-    demucs_err = ""
+    lock = _stem_lock(project_id)
+    # Đang tách: đợi job kia xong (không spawn Demucs thứ 2)
+    acquired = lock.acquire(blocking=False)
+    if not acquired:
+        set_stem_progress(project_id, max(2, read_stem_progress(project_id)["progress"]), "Đang tách xóa lời…", running=True)
+        lock.acquire(blocking=True)
+        acquired = True
     try:
-        if report:
-            set_status(
-                project_id,
-                step="export",
-                progress=66,
-                message="Demucs đang xóa lời (giữ nhạc/SFX)…",
-                running=True,
-            )
-        code, demucs_err = _run_demucs_progress(
-            project_id, python, source_wav, separated
-        )
-        if code != 0 and not demucs_err:
-            demucs_err = f"exit {code}"
-        result = separated / "htdemucs" / source_wav.stem / "no_vocals.wav"
-        demucs_ok = result.exists() and result.stat().st_size > 1024
-        if not demucs_ok and not demucs_err:
-            demucs_err = "không thấy file no_vocals.wav sau Demucs"
-    except Exception as e:
-        demucs_ok = False
-        demucs_err = str(e)[:600]
+        # Double-check sau lock
+        existing = find_cached_no_vocals(project_id)
+        if existing is not None:
+            set_stem_progress(project_id, 100, "Đã có stem xóa lời (cache)", running=False)
+            return existing
+        if cache.exists() and cache.stat().st_size > 1024:
+            set_stem_progress(project_id, 100, "Đã có stem xóa lời", running=False)
+            return cache
 
-    if demucs_ok and result is not None:
-        set_stem_progress(project_id, 92, "Chỉnh mức âm stem…")
-        # Video thoại mono: stem gần im — boost nhẹ, KHÔNG trộn lại gốc.
-        src_rms = max(_wav_rms(source_wav), 1e-6)
-        stem_rms = _wav_rms(result)
-        ratio = stem_rms / src_rms
-        if ratio >= 0.12:
-            gain = min(2.6, max(1.25, 0.72 / max(ratio, 0.12)))
-        elif ratio >= 0.02:
-            gain = min(3.5, max(1.5, 0.15 / max(ratio, 0.001)))
-        else:
-            # Gần như không còn nhạc/SFX — giữ gần im (đúng với clip chỉ lời)
-            gain = 1.0
+        _stem_running.add(project_id)
+        set_stem_progress(project_id, 2, "Chuẩn bị tách xóa lời…")
+        python = _demucs_python(project_id, report=report)
+        work = root / "cache" / f"demucs_{key}"
+        work.mkdir(parents=True, exist_ok=True)
+        source_wav = work / "source.wav"
+        set_stem_progress(project_id, 12, "Trích âm thanh từ video…")
         run_cmd(
             project_id,
             [
-                "ffmpeg", "-y", "-i", str(result),
-                "-af",
-                f"volume={gain:.3f},alimiter=limit=0.95:level=disabled",
-                "-c:a", "pcm_s16le", str(cache),
+                "ffmpeg", "-y", "-i", str(stem_video), "-vn", "-ac", "2", "-ar", "44100",
+                str(source_wav),
             ],
         )
-        set_stem_progress(project_id, 100, "Xong xóa lời", running=False)
-    else:
+
+        demucs_ok = False
+        result: Path | None = None
+        separated = work / "separated"
+        demucs_err = ""
+        try:
+            if report:
+                set_status(
+                    project_id,
+                    step="export",
+                    progress=66,
+                    message="Demucs đang xóa lời (giữ nhạc/SFX)…",
+                    running=True,
+                )
+            code, demucs_err = _run_demucs_progress(
+                project_id, python, source_wav, separated
+            )
+            if code != 0 and not demucs_err:
+                demucs_err = f"exit {code}"
+            result = separated / "htdemucs" / source_wav.stem / "no_vocals.wav"
+            demucs_ok = result.exists() and result.stat().st_size > 1024
+            if not demucs_ok and not demucs_err:
+                demucs_err = "không thấy file no_vocals.wav sau Demucs"
+        except Exception as e:
+            demucs_ok = False
+            demucs_err = str(e)[:600]
+
+        if demucs_ok and result is not None:
+            set_stem_progress(project_id, 92, "Chỉnh mức âm stem…")
+            # Video thoại mono: stem gần im — boost nhẹ, KHÔNG trộn lại gốc.
+            src_rms = max(_wav_rms(source_wav), 1e-6)
+            stem_rms = _wav_rms(result)
+            ratio = stem_rms / src_rms
+            if ratio >= 0.12:
+                gain = min(2.6, max(1.25, 0.72 / max(ratio, 0.12)))
+            elif ratio >= 0.02:
+                gain = min(3.5, max(1.5, 0.15 / max(ratio, 0.001)))
+            else:
+                # Gần như không còn nhạc/SFX — giữ gần im (đúng với clip chỉ lời)
+                gain = 1.0
+            run_cmd(
+                project_id,
+                [
+                    "ffmpeg", "-y", "-i", str(result),
+                    "-af",
+                    f"volume={gain:.3f},alimiter=limit=0.95:level=disabled",
+                    "-c:a", "pcm_s16le", str(cache),
+                ],
+            )
+            # Cache vocals stem cùng lúc (nếu Demucs có file) — dùng cho tải «giữ lời»
+            vocals_src = result.parent / "vocals.wav"
+            vocals_cache = root / "cache" / f"vocals_{key}.wav"
+            if vocals_src.is_file() and vocals_src.stat().st_size > 1024:
+                try:
+                    if not vocals_cache.is_file() or vocals_cache.stat().st_size < 1024:
+                        run_cmd(
+                            project_id,
+                            [
+                                "ffmpeg",
+                                "-y",
+                                "-i",
+                                str(vocals_src),
+                                "-c:a",
+                                "pcm_s16le",
+                                str(vocals_cache),
+                            ],
+                        )
+                except Exception:
+                    pass
+            set_stem_progress(project_id, 100, "Xong xóa lời", running=False)
+            shutil.rmtree(work, ignore_errors=True)
+            return cache
+
         # Demucs thất bại: nền im — stereotools cũ để lại lời → lệch setting «Xóa lời».
         if report and project_id:
             set_status(
@@ -769,18 +980,35 @@ def separate_no_vocals(
             ],
         )
 
-    shutil.rmtree(work, ignore_errors=True)
-    if not cache.exists():
-        raise RuntimeError(
-            "Không tạo được track xóa lời (Demucs)."
-            + (f" {demucs_err}" if demucs_err else "")
-        )
+        shutil.rmtree(work, ignore_errors=True)
+        if not cache.exists():
+            raise RuntimeError(
+                "Không tạo được track xóa lời (Demucs)."
+                + (f" {demucs_err}" if demucs_err else "")
+            )
+        return cache
+    finally:
+        _stem_running.discard(project_id)
+        if acquired:
+            lock.release()
     return cache
 
 def _bg_duck_expr(
-    segments: list[dict[str, Any]], keep: float = 0.35, duck: float = 0.12
+    segments: list[dict[str, Any]],
+    keep: float = 0.35,
+    duck: float = 0.12,
+    *,
+    force_flat: bool = False,
 ) -> str:
-    """ffmpeg volume= expr: duck during speech windows, else keep BGM."""
+    """ffmpeg volume= expr: duck during speech windows, else keep BGM.
+
+    force_flat / >12 cửa sổ / video dài → volume hằng (tránh expr hàng trăm between).
+    """
+    keep_s = f"{float(keep):.4f}"
+    duck_s = f"{float(duck):.4f}"
+    if force_flat:
+        # stem no_vocals: không cần duck theo từng câu
+        return keep_s
     ranges: list[tuple[float, float]] = []
     for seg in segments:
         try:
@@ -793,14 +1021,22 @@ def _bg_duck_expr(
     ranges.sort()
     merged: list[list[float]] = []
     for s, e in ranges:
-        if merged and s <= merged[-1][1] + 0.05:
+        if merged and s <= merged[-1][1] + 0.5:
             merged[-1][1] = max(merged[-1][1], e)
         else:
             merged.append([s, e])
+    if not merged:
+        return keep_s
+    # Hard cap — Windows/ffmpeg gãy với if(between+…)+ dài
+    if len(merged) > 12:
+        mid = (float(keep) + float(duck)) * 0.5
+        return f"{mid:.4f}"
     windows = [f"between(t\\,{s:.3f}\\,{e:.3f})" for s, e in merged]
-    if not windows:
-        return str(keep)
-    return f"if({'+'.join(windows)}\\,{duck}\\,{keep})"
+    expr = f"if({'+'.join(windows)}\\,{duck_s}\\,{keep_s})"
+    if len(expr) > 800:
+        mid = (float(keep) + float(duck)) * 0.5
+        return f"{mid:.4f}"
+    return expr
 
 
 def _source_audio_filter(mode: str) -> str:
@@ -854,15 +1090,20 @@ def _tts_clip_plan(
     *,
     allow_video_slowdown: bool = True,
     match: str = "preferVideo",
+    bake_speed: float = 1.0,
 ) -> tuple[list[tuple[Path, float, float, float, float]], float]:
     """Trả (clips, video_factor).
 
     video_factor > 1 = chậm **toàn bộ** video để TTS gần tốc độ tự nhiên.
     clips: (wav, start_sec_scaled, play_sec, tts_speed, volume)
 
+    bake_speed: tốc độ đã bake vào video (0.5–2). Wav TTS luôn 1× →
+    atempo *= bake_speed để giọng nhanh/chậm cùng nhịp timeline đã scale.
+
     preferVideo đã bake 0.80×: **cascade** — không atrim giữa câu.
     start_i = max(seg.start, prev_end + gap); speed nhẹ ≤1.25; full audio.
     """
+    bake = max(0.5, min(2.0, float(bake_speed or 1.0)))
     ordered = sorted(
         [s for s in segments if s],
         key=lambda s: float(s.get("start") or 0),
@@ -913,6 +1154,9 @@ def _tts_clip_plan(
         else:
             # câu cuối / sau retime: đủ chỗ full TTS
             slot0 = max(0.15, ad + 0.15 if ad > 0.05 else end - start + 0.12)
+        # ttsSpeed manual × bake global (file wav 1×)
+        manual = max(0.75, min(1.5, _num(seg.get("ttsSpeed"), 1))) * bake
+        manual = max(0.5, min(2.0, manual))
         raw.append(
             (
                 wav,
@@ -920,7 +1164,7 @@ def _tts_clip_plan(
                 slot0,
                 ad,
                 max(0.0, min(2.0, _num(seg.get("ttsVolume"), 100) / 100)),
-                max(0.75, min(1.5, _num(seg.get("ttsSpeed"), 1))),
+                manual,
             )
         )
 
@@ -984,10 +1228,15 @@ def _mix_tts_track(
     video_factor: float = 1.0,
     allow_video_slowdown: bool = True,
     match: str = "preferVideo",
+    bake_speed: float = 1.0,
 ) -> Path:
-    """Trộn TTS theo timeline đã scale. TTS speed nhẹ; video chậm bù."""
+    """Trộn TTS theo timeline đã scale. TTS atempo = manual × bake_speed."""
     ordered_plan, plan_vf = _tts_clip_plan(
-        segments, root, allow_video_slowdown=allow_video_slowdown, match=match
+        segments,
+        root,
+        allow_video_slowdown=allow_video_slowdown,
+        match=match,
+        bake_speed=bake_speed,
     )
     # Dùng plan (đã tính factor); video_factor chỉ để cache key khớp mux_dub
     if abs(video_factor - plan_vf) > 0.02 and video_factor > 1.0:
@@ -1045,13 +1294,32 @@ def _mix_tts_track(
             + f"amix=inputs={len(labels)}:duration=longest:normalize=0,"
             f"alimiter=limit=0.95[aout]"
         )
-        run_cmd(
-            project_id,
-            [
-                "ffmpeg", "-y", *inputs, "-filter_complex", ";".join(filters),
-                "-map", "[aout]", "-c:a", "pcm_s16le", str(batch_out),
-            ],
-        )
+        fc = root / "cache" / f"tts_mix_{key}_part{batch_i}_fc.txt"
+        fc.write_text(";\n".join(filters) + "\n", encoding="utf-8")
+        try:
+            run_cmd(
+                project_id,
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    *inputs,
+                    "-filter_complex_script",
+                    str(fc),
+                    "-map",
+                    "[aout]",
+                    "-c:a",
+                    "pcm_s16le",
+                    str(batch_out),
+                ],
+            )
+        finally:
+            try:
+                fc.unlink(missing_ok=True)
+            except OSError:
+                pass
         batches.append(batch_out)
 
     if len(batches) == 1:
@@ -1059,16 +1327,37 @@ def _mix_tts_track(
     else:
         inputs = [arg for wav in batches for arg in ("-i", str(wav))]
         labels = "".join(f"[{i}:a]" for i in range(len(batches)))
-        run_cmd(
-            project_id,
-            [
-                "ffmpeg", "-y", *inputs, "-filter_complex",
-                labels
-                + f"amix=inputs={len(batches)}:duration=longest:normalize=0,"
-                f"alimiter=limit=0.95[aout]",
-                "-map", "[aout]", "-c:a", "pcm_s16le", str(out),
-            ],
+        fc_join = root / "cache" / f"tts_mix_{key}_join_fc.txt"
+        fc_join.write_text(
+            labels
+            + f"amix=inputs={len(batches)}:duration=longest:normalize=0,"
+            f"alimiter=limit=0.95[aout]\n",
+            encoding="utf-8",
         )
+        try:
+            run_cmd(
+                project_id,
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    *inputs,
+                    "-filter_complex_script",
+                    str(fc_join.resolve()),
+                    "-map",
+                    "[aout]",
+                    "-c:a",
+                    "pcm_s16le",
+                    str(out),
+                ],
+            )
+        finally:
+            try:
+                fc_join.unlink(missing_ok=True)
+            except OSError:
+                pass
         for wav in batches:
             wav.unlink(missing_ok=True)
     return out
@@ -1084,12 +1373,17 @@ def mux_dub(
     original_audio_volume: float = 1.0,
     allow_video_slowdown: bool = True,
     match: str = "preferVideo",
+    bake_speed: float = 1.0,
 ) -> Path:
-    """Đặt TTS theo timeline; chậm **toàn video** nếu TTS dài hơn slot."""
+    """Đặt TTS theo timeline; atempo TTS theo bake_speed (wav 1×)."""
     root = ensure_layout(project_id)
     duration = ffprobe_duration(video)
     _clips, video_factor = _tts_clip_plan(
-        segments, root, allow_video_slowdown=allow_video_slowdown, match=match
+        segments,
+        root,
+        allow_video_slowdown=allow_video_slowdown,
+        match=match,
+        bake_speed=bake_speed,
     )
     voice_track = _mix_tts_track(
         project_id,
@@ -1098,6 +1392,7 @@ def mux_dub(
         video_factor=video_factor,
         allow_video_slowdown=allow_video_slowdown,
         match=match,
+        bake_speed=bake_speed,
     )
     out_dur = duration * video_factor
     vol_mul = max(0.0, min(1.0, float(original_audio_volume)))
@@ -1139,7 +1434,13 @@ def mux_dub(
             duck_segs.append(ss)
 
     if has_bg:
-        vol = _bg_duck_expr(duck_segs, keep=keep, duck=duck)
+        # Stem no_vocals: volume hằng (đã bỏ lời) — không if(between…) dài
+        vol = _bg_duck_expr(
+            duck_segs,
+            keep=keep,
+            duck=duck,
+            force_flat=bool(use_preseparated),
+        )
         if use_preseparated:
             source_filter = "anull"
         elif original_audio_mode in ("vocals", "music", "no_vocals"):
@@ -1149,9 +1450,11 @@ def mux_dub(
             source_filter = "anull"
         # Chậm BGM cùng nhịp video (atempo < 1)
         bg_tempo = _atempo_chain(1.0 / video_factor) if video_factor > 1.001 else "anull"
+        # volume hằng không cần eval=frame
+        vol_part = f"volume={vol}" if vol.replace(".", "", 1).isdigit() else f"volume={vol}:eval=frame"
         filters.append(
             f"[{source_audio_index}:a]{source_filter},{bg_tempo},"
-            f"apad=whole_dur={out_dur:.3f},volume={vol}:eval=frame[bg]"
+            f"apad=whole_dur={out_dur:.3f},{vol_part}[bg]"
         )
         filters.append(
             "[bg][voice]amix=inputs=2:duration=longest:dropout_transition=0:"
@@ -1171,32 +1474,50 @@ def mux_dub(
         vcodec = ["-c:v", "copy"]
 
     out = out_final(project_id)
-    fc = ";".join(filters)
-    cmd = [
-        "ffmpeg",
-        "-y",
-        *inputs,
-        "-filter_complex",
-        fc,
-        "-map",
-        map_video,
-        "-map",
-        map_audio,
-        *vcodec,
-        "-c:a",
-        "aac",
-        "-b:a",
-        "192k",
-        "-map_metadata",
-        "-1",
-        "-map_chapters",
-        "-1",
-        "-shortest",
-        "-t",
-        str(out_dur),
-        str(out),
-    ]
-    run_cmd(project_id, cmd)
+    # LUÔN script file — không bao giờ nhét filter vào argv (Windows)
+    fc_path = root / "cache" / "mux_fc.txt"
+    fc_path.parent.mkdir(parents=True, exist_ok=True)
+    fc_body = ";\n".join(filters) + "\n"
+    fc_path.write_text(fc_body, encoding="utf-8")
+    try:
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            *inputs,
+            "-filter_complex_script",
+            str(fc_path.resolve()),
+            "-map",
+            map_video,
+            "-map",
+            map_audio,
+            *vcodec,
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-map_metadata",
+            "-1",
+            "-map_chapters",
+            "-1",
+            "-shortest",
+            "-t",
+            f"{float(out_dur):.3f}",
+            str(out),
+        ]
+        # Guard: argv không được chứa filter_complex dài
+        assert all(
+            not (isinstance(a, str) and a.startswith("[") and "between(t" in a)
+            for a in cmd
+        ), "filter leak into argv"
+        run_cmd(project_id, cmd)
+    finally:
+        try:
+            fc_path.unlink(missing_ok=True)
+        except OSError:
+            pass
     return out
 
 

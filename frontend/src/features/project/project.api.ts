@@ -173,13 +173,20 @@ export const api = {
   /** Đổi metadata / chuyển engine (zmAI ↔ clone) */
   ttsStudioVoicePatch: (
     voiceId: string,
-    body: { name?: string; tags?: string[]; language?: string; engine?: 'zmai' | 'clone' },
+    body: {
+      name?: string
+      tags?: string[]
+      language?: string
+      favorite?: boolean
+      engine?: 'zmai' | 'clone'
+    },
   ) =>
     fetchJson<{
       id: string
       name: string
       tags: string[]
       language?: string
+      favorite?: boolean
       engine?: string
       type?: string
     }>(
@@ -254,6 +261,34 @@ export const api = {
       body: JSON.stringify(segments),
     }),
 
+  /** CapCut Alt+G — compound clip (giữ children + mix TTS). */
+  createCompound: (projectId: string, segmentIds: string[]) =>
+    fetchJson<{
+      ok: boolean
+      mode: string
+      compoundId: string
+      mergedId: string
+      start: number
+      end: number
+      childCount: number
+      audioFile?: string
+      audioUrl?: string
+      audioDuration?: number
+      segments: Segment[]
+    }>(`${base}/projects/${projectId}/segments/compound`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ segmentIds }),
+    }, 120_000),
+
+  /** Tháo compound (restore children). */
+  uncompound: (projectId: string, segId: string) =>
+    fetchJson<{ ok: boolean; segments: Segment[]; restored: number }>(
+      `${base}/projects/${projectId}/segments/${encodeURIComponent(segId)}/uncompound`,
+      { method: 'POST' },
+      60_000,
+    ),
+
   overlays: (projectId: string) =>
     fetchJson<TextOverlay[]>(`${base}/projects/${projectId}/overlays`, undefined, 10_000),
 
@@ -320,9 +355,21 @@ export const api = {
       { method: 'POST' },
     ),
 
+  /** Cache hit nhanh — không hiện 1% nếu đã có stem. */
+  noVocalsStatus: (projectId: string) =>
+    fetchJson<{
+      ready: boolean
+      cached: boolean
+      running: boolean
+      progress: number
+      message: string
+      audioUrl: string | null
+      file: string | null
+    }>(`${base}/projects/${projectId}/audio/no-vocals/status`, undefined, 4000),
+
   /** Demucs xóa lời — lần đầu (cài torch) có thể rất lâu; tái dùng cache. */
   prepareNoVocals: (projectId: string) =>
-    fetchJson<{ audioUrl: string; file: string }>(
+    fetchJson<{ audioUrl: string; file: string; cached?: boolean }>(
       `${base}/projects/${projectId}/audio/no-vocals`,
       { method: 'POST' },
       900_000,
@@ -330,29 +377,44 @@ export const api = {
 
   /** Tiến độ tách stem (poll khi đang prepareNoVocals). */
   noVocalsProgress: (projectId: string) =>
-    fetchJson<{ progress: number; message: string; running: boolean }>(
-      `${base}/projects/${projectId}/audio/no-vocals/progress`,
-      undefined,
-      4000,
-    ),
+    fetchJson<{
+      progress: number
+      message: string
+      running: boolean
+      ready?: boolean
+      audioUrl?: string | null
+      file?: string | null
+    }>(`${base}/projects/${projectId}/audio/no-vocals/progress`, undefined, 4000),
+
+  /** URL tải WAV: original | no_vocals | vocals (theo chế độ đã xử lý). */
+  projectAudioDownloadUrl: (
+    projectId: string,
+    kind: 'original' | 'no_vocals' | 'vocals' = 'original',
+  ) => `${base}/projects/${projectId}/audio/download?kind=${encodeURIComponent(kind)}&t=${Date.now()}`,
 
   /** Bake tốc độ preview toàn bộ + remap timeline. */
-  rebakeSpeed: (projectId: string, speed: number) =>
+  rebakeSpeed: (projectId: string, speed: number, opts?: { skipRemap?: boolean }) =>
     fetchJson<{
-      ok: boolean
+      ok?: boolean
       bakedSpeed: number
       bakedPreferVideo: boolean
       workClipSec: number
       duration: number
+      /** t_new = t_old * timeScale — scale media clips Video/Âm gốc */
+      timeScale?: number
+      prevBakedSpeed?: number
       segments: Segment[]
-      overlays: TextOverlay[]
+      overlays?: TextOverlay[]
       videoUrl: string
     }>(
       `${base}/projects/${projectId}/rebake-speed`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ speed }),
+        body: JSON.stringify({
+          speed,
+          skipRemap: Boolean(opts?.skipRemap),
+        }),
       },
       600_000,
     ),

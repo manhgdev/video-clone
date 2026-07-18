@@ -427,10 +427,22 @@ def retime_video_segments(
         remapped.append(mapped)
 
     if not out.exists():
+        # Gộp span liền kề cùng speed → ít node filter (tránh WinError 206)
+        merged: list[tuple[float, float, float, float, float]] = []
+        for sp in spans:
+            if (
+                merged
+                and abs(merged[-1][2] - sp[2]) < 1e-6
+                and abs(merged[-1][1] - sp[0]) < 1e-4
+            ):
+                prev = merged[-1]
+                merged[-1] = (prev[0], sp[1], prev[2], prev[3], sp[4])
+            else:
+                merged.append(sp)
         has_audio = _has_audio_stream(video)
         filters: list[str] = []
         labels: list[str] = []
-        for i, (start, end, speed, _out_start, _out_end) in enumerate(spans):
+        for i, (start, end, speed, _out_start, _out_end) in enumerate(merged):
             filters.append(
                 f"[0:v]trim=start={start:.6f}:end={end:.6f},"
                 f"setpts=(PTS-STARTPTS)/{speed:.6f}[v{i}]"
@@ -443,20 +455,47 @@ def retime_video_segments(
                 labels.append(f"[v{i}][a{i}]")
             else:
                 labels.append(f"[v{i}]")
+        n = len(merged)
         if has_audio:
-            filters.append("".join(labels) + f"concat=n={len(spans)}:v=1:a=1[vout][aout]")
+            filters.append("".join(labels) + f"concat=n={n}:v=1:a=1[vout][aout]")
         else:
-            filters.append("".join(labels) + f"concat=n={len(spans)}:v=1:a=0[vout]")
-        cmd = [
-            "ffmpeg", "-y", "-i", str(video), "-filter_complex", ";".join(filters),
-            "-map", "[vout]",
-        ]
-        if has_audio:
-            cmd += ["-map", "[aout]", *h264_encoder_args(fast=True), "-c:a", "aac", "-b:a", "192k"]
-        else:
-            cmd += [*h264_encoder_args(fast=True), "-an"]
-        cmd += ["-map_metadata", "-1", "-map_chapters", "-1", str(out)]
-        run_cmd(project_id, cmd)
+            filters.append("".join(labels) + f"concat=n={n}:v=1:a=0[vout]")
+        # Script file — không nhét filter_complex vào argv (Windows MAX_PATH / 206)
+        fc_path = cache_dir / f"retimed_{key}_fc.txt"
+        fc_path.write_text(";\n".join(filters) + "\n", encoding="utf-8")
+        try:
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                str(video),
+                "-filter_complex_script",
+                str(fc_path),
+                "-map",
+                "[vout]",
+            ]
+            if has_audio:
+                cmd += [
+                    "-map",
+                    "[aout]",
+                    *h264_encoder_args(fast=True),
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "128k",
+                ]
+            else:
+                cmd += [*h264_encoder_args(fast=True), "-an"]
+            cmd += ["-map_metadata", "-1", "-map_chapters", "-1", str(out)]
+            run_cmd(project_id, cmd)
+        finally:
+            try:
+                fc_path.unlink(missing_ok=True)
+            except OSError:
+                pass
     return out, remapped
 
 def ensure_preview_clip(
@@ -527,6 +566,9 @@ def ensure_playback_speed(
     """Bake tốc độ phát vào file (preferVideo 0.80×) — chạy TRƯỚC ASR/OCR.
 
     speed < 1 = chậm hơn (dài hơn): setpts *= 1/speed, atempo = speed.
+
+    Encode trung gian: ultrafast/p1 + CRF cao — chỉ phục vụ ASR/timeline,
+    không phải file xuất cuối (xuất encode lại sau).
     """
     speed = max(0.5, min(2.0, float(speed)))
     if abs(speed - 1.0) < 0.001:
@@ -547,22 +589,56 @@ def ensure_playback_speed(
         pass
     pts = 1.0 / speed
     has_a = _has_audio_stream(source)
+    # Bake pipeline: ưu tiên tốc độ, chất lượng vừa đủ cho Whisper/OCR
+    if nvenc_available():
+        vcodec = [
+            "-c:v",
+            "h264_nvenc",
+            "-preset",
+            "p1",
+            "-tune",
+            "ll",
+            "-rc",
+            "vbr",
+            "-cq",
+            "28",
+            "-b:v",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+        ]
+    else:
+        vcodec = [
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-crf",
+            "28",
+            "-pix_fmt",
+            "yuv420p",
+            "-threads",
+            "0",
+        ]
     cmd = [
         "ffmpeg",
         "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
         "-i",
         str(source),
         "-filter:v",
         f"setpts={pts:.6f}*PTS",
-        *h264_encoder_args(fast=True),
+        *vcodec,
         "-map_metadata",
         "-1",
         "-map_chapters",
         "-1",
     ]
     if has_a:
-        # atempo chỉ 0.5–2.0 — speed 0.80 ok 1 bước
-        cmd += ["-filter:a", f"atempo={speed:.6f}", "-c:a", "aac", "-b:a", "192k"]
+        # atempo chỉ 0.5–2.0 — speed 0.80 ok 1 bước; AAC 128k đủ cho ASR
+        cmd += ["-filter:a", f"atempo={speed:.6f}", "-c:a", "aac", "-b:a", "128k"]
     else:
         cmd += ["-an"]
     cmd.append(str(tmp))
@@ -600,21 +676,116 @@ def scale_time_fields(obj: dict, scale: float, keys: tuple[str, ...] = ("start",
             pass
 
 
-def remap_timeline_for_speed_change(meta: dict, old_speed: float, new_speed: float) -> None:
-    """t_new = t_old * (old/new) khi đổi bake speed (timeline theo tốc độ file)."""
-    old_speed = clamp_playback_speed(old_speed)
+_SEG_TIME_KEYS = ("start", "end", "coverStart", "coverEnd")
+
+
+def _deepcopy_json(obj: Any) -> Any:
+    import copy
+
+    return copy.deepcopy(obj)
+
+
+def _scale_segment_tree(seg: dict, scale: float) -> None:
+    """Scale start/end/cover + compoundChildren (relative hoặc absolute)."""
+    if not isinstance(seg, dict) or abs(scale - 1.0) < 1e-9:
+        return
+    scale_time_fields(seg, scale, _SEG_TIME_KEYS)
+    children = seg.get("compoundChildren")
+    if not isinstance(children, list):
+        return
+    for ch in children:
+        if isinstance(ch, dict):
+            scale_time_fields(ch, scale, _SEG_TIME_KEYS)
+
+
+def _snapshot_timeline_1x(meta: dict, current_speed: float) -> dict[str, Any]:
+    """Chụp timeline về mốc 1× (t_1x = t_display * current_speed). Tránh nhân chồng khi bake nhiều lần."""
+    speed = clamp_playback_speed(current_speed)
+    to_1x = speed  # display → 1×
+    segs = _deepcopy_json(meta.get("segments") or [])
+    ovs = _deepcopy_json(meta.get("overlays") or [])
+    for seg in segs:
+        if isinstance(seg, dict):
+            _scale_segment_tree(seg, to_1x)
+            # Giữ videoSpeed từng câu (TTS fit) — không ghi đè bake global
+    for ov in ovs:
+        if isinstance(ov, dict):
+            scale_time_fields(ov, to_1x, ("start", "end"))
+    # duration meta = nguồn 1×; workDuration = file bake (display)
+    base_dur = float(meta.get("duration") or 0)
+    work_dur = float(meta.get("workDuration") or 0)
+    if base_dur <= 0 and work_dur > 0:
+        # work đang ở display → quy về 1×
+        base_dur = work_dur * speed
+    if base_dur <= 0 and segs:
+        try:
+            # segs đã scale về 1× ở trên
+            base_dur = max(float(s.get("end") or 0) for s in segs if isinstance(s, dict))
+        except ValueError:
+            base_dur = 0.0
+    preview_sec = max(0, int(meta.get("previewSec") or 0))
+    # previewSec lưu 1× (cửa sổ dịch)
+    preview_1x = float(preview_sec) * speed if preview_sec > 0 else 0.0
+    return {
+        "segments": segs,
+        "overlays": ovs,
+        "duration1x": base_dur,
+        "previewSec1x": preview_1x,
+        "previewSec": preview_sec,
+    }
+
+
+def ensure_timeline_baseline(meta: dict, current_speed: float) -> dict[str, Any]:
+    """Baseline 1× chỉ tạo một lần (hoặc khi thiếu). Mọi bake sau tính từ đây."""
+    bl = meta.get("timelineBaseline")
+    if isinstance(bl, dict) and isinstance(bl.get("segments"), list):
+        return bl
+    bl = _snapshot_timeline_1x(meta, current_speed)
+    meta["timelineBaseline"] = bl
+    return bl
+
+
+def apply_timeline_from_baseline(meta: dict, new_speed: float) -> None:
+    """t_display = t_1x / new_speed — luôn từ baseline, không cascade."""
+    import copy
+
     new_speed = clamp_playback_speed(new_speed)
-    scale = old_speed / new_speed
-    seg_keys = ("start", "end", "coverStart", "coverEnd")
-    for seg in meta.get("segments") or []:
-        if not isinstance(seg, dict):
-            continue
-        scale_time_fields(seg, scale, seg_keys)
-        seg["videoSpeed"] = new_speed
-    for ov in meta.get("overlays") or []:
+    bl = ensure_timeline_baseline(meta, meta_baked_speed(meta))
+    scale = 1.0 / new_speed
+    segs = copy.deepcopy(bl.get("segments") or [])
+    ovs = copy.deepcopy(bl.get("overlays") or [])
+    for seg in segs:
+        if isinstance(seg, dict):
+            _scale_segment_tree(seg, scale)
+    for ov in ovs:
         if isinstance(ov, dict):
             scale_time_fields(ov, scale, ("start", "end"))
+    meta["segments"] = segs
+    meta["overlays"] = ovs
+    dur1 = float(bl.get("duration1x") or meta.get("duration") or 0)
+    if dur1 > 0:
+        # duration nguồn giữ 1×; workDuration = độ dài file bake
+        meta["duration"] = dur1
+        if abs(new_speed - 1.0) > 0.001:
+            meta["workDuration"] = dur1 / new_speed
+        else:
+            meta.pop("workDuration", None)
 
+
+def remap_timeline_for_speed_change(meta: dict, old_speed: float, new_speed: float) -> None:
+    """Đổi bake speed: timeline/caption/TTS/overlay scale đồng bộ từ baseline 1×.
+
+    Không nhân chồng (0.8→1→2 luôn đúng như apply trực tiếp từ gốc).
+    Compound children, coverStart/End, overlays đều scale.
+    Không ghi đè videoSpeed từng câu (TTS fit).
+    """
+    old_speed = clamp_playback_speed(old_speed)
+    new_speed = clamp_playback_speed(new_speed)
+    if abs(old_speed - new_speed) < 1e-9:
+        return
+    # Chụp baseline nếu chưa có (từ timeline đang ở old_speed)
+    ensure_timeline_baseline(meta, old_speed)
+    apply_timeline_from_baseline(meta, new_speed)
 
 def preview_1x_path(project_id: str, meta: dict) -> Path:
     """File preview/source 1× (chưa bake tốc độ)."""

@@ -159,9 +159,12 @@ export default function VoiceMetadataModal({
           <span>Tên giọng</span>
           <input
             ref={inputRef}
+            type="text"
             value={name}
             disabled={saving}
             aria-invalid={Boolean(validation)}
+            placeholder="Nhập tên giọng"
+            autoComplete="off"
             onChange={(event) => {
               setName(event.target.value)
               if (validation) setValidation('')
