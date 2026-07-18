@@ -56,7 +56,12 @@ export default function Stepper({
         })}
       </ol>
       <div className="step-actions">
-        <button type="button" disabled={!canDub} onClick={onDub} title="Tạo giọng đọc cho từng đoạn">
+        <button
+          type="button"
+          disabled={!canDub}
+          onClick={onDub}
+          title="Lồng tiếng — dùng cache TTS nếu đã có. Đang chạy thì khóa (không bấm lại)."
+        >
           <IconHeadphones size={14} />
           Lồng tiếng
         </button>

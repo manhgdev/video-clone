@@ -339,6 +339,14 @@ export const api = {
       5000,
     ),
 
+  /** Đóng popup lỗi — clear meta.status.error (F5 không hiện lại). */
+  dismissStatus: (projectId: string) =>
+    fetchJson<{ ok: boolean; ignored?: boolean }>(
+      `${base}/projects/${projectId}/status/dismiss`,
+      { method: 'POST' },
+      5000,
+    ),
+
   export: (projectId: string, settings: ProjectSettings, segments?: Segment[]) =>
     fetchJson<{ ok: boolean; url: string; path?: string; exports?: string }>(
       `${base}/projects/${projectId}/export`,

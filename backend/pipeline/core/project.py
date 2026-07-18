@@ -123,18 +123,28 @@ def audio_cache_tag(preview_sec: int, match_duration: str) -> str:
 
 
 def resolve_project_video(meta: dict[str, Any], project_id: str) -> Path:
-    """Clip đang làm việc: workVideo (ASR/OCR timeline) trước, rồi preview cache, rồi source."""
+    """Clip đang làm việc: khớp previewSec — full không trả clip preview_Ns ngắn."""
+    source = Path(meta["videoPath"])
+    preview_sec = max(0, int(meta.get("previewSec") or 0))
     work = str(meta.get("workVideo") or "")
     if work:
         wp = Path(work)
         if wp.is_file():
-            return wp
-    preview_sec = max(0, int(meta.get("previewSec") or 0))
+            name = wp.name.lower()
+            is_preview_file = "preview_" in name
+            if preview_sec <= 0:
+                # Full: bỏ workVideo nếu là cắt preview ngắn
+                if not is_preview_file:
+                    return wp
+            else:
+                # Preview Ns: chỉ nhận file cùng Ns (preview_20… / bake cùng tag)
+                if f"preview_{preview_sec}" in name or not is_preview_file:
+                    return wp
     if preview_sec > 0:
         cached = ensure_layout(project_id) / "cache" / f"preview_{preview_sec}.mp4"
         if cached.is_file():
             return cached
-    return Path(meta["videoPath"])
+    return source
 
 def video_fingerprint(path: Path) -> str:
     """Full-file sha256 — head/tail 2MB collided when two clips share size + ends."""

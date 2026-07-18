@@ -32,14 +32,18 @@ def fit_duration(
     if ratio > 1.02 or (match == "stretch" and abs(ratio - 1.0) > 0.03):
         stretched = wav.with_name(wav.stem + "_stretch.wav")
         filters: list[str] = []
-        r = ratio
-        while r > 2.0:
+        r = float(ratio)
+        while r > 2.0 + 1e-9:
             filters.append("atempo=2.0")
             r /= 2.0
-        while r < 0.5:
+        while r < 0.5 - 1e-9:
             filters.append("atempo=0.5")
-            r /= 0.5
-        filters.append(f"atempo={r:.4f}")
+            r *= 2.0
+        r = min(100.0, max(0.5, r))
+        if abs(r - 1.0) >= 0.01:
+            filters.append(f"atempo={r:.4f}")
+        if not filters:
+            return dur
         subprocess.check_call(
             [
                 "ffmpeg",
@@ -81,23 +85,26 @@ def apply_playback(
         # undo tempo change from asetrate
         inv = 1.0 / rate
         r = inv
-        while r > 2.0:
+        while r > 2.0 + 1e-9:
             filters.append("atempo=2.0")
             r /= 2.0
-        while r < 0.5:
+        while r < 0.5 - 1e-9:
             filters.append("atempo=0.5")
-            r /= 0.5
+            r *= 2.0
+        r = min(100.0, max(0.5, r))
         if abs(r - 1.0) > 0.01:
             filters.append(f"atempo={r:.4f}")
     if abs(speed - 1.0) >= 0.02:
-        r = speed
-        while r > 2.0:
+        r = float(speed)
+        while r > 2.0 + 1e-9:
             filters.append("atempo=2.0")
             r /= 2.0
-        while r < 0.5:
+        while r < 0.5 - 1e-9:
             filters.append("atempo=0.5")
-            r /= 0.5
-        filters.append(f"atempo={r:.4f}")
+            r *= 2.0
+        r = min(100.0, max(0.5, r))
+        if abs(r - 1.0) >= 0.01:
+            filters.append(f"atempo={r:.4f}")
     if abs(volume - 1.0) >= 0.02:
         filters.append(f"volume={volume:.4f}")
 

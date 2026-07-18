@@ -1462,12 +1462,16 @@ export default function TtsStudio({ voices, onRefreshVoices }: Props) {
   function onLoadSrt(file: File) {
     const reader = new FileReader()
     reader.onload = () => {
+      // Giữ nguyên file SRT (BOM/xuống dòng/timestamp) — không strip
       const raw = String(reader.result || '')
       setSrtRaw(raw)
+      setKeepTimeline(true)
+      // text chỉ để preview/đếm — synth dùng srtRaw
       const lines = raw
         .split(/\r?\n/)
         .filter((ln) => ln.trim() && !/^\d+$/.test(ln.trim()) && !/-->/.test(ln))
       setText(lines.join('\n'))
+      go('srt')
     }
     reader.readAsText(file, 'utf-8')
   }
@@ -1648,13 +1652,15 @@ export default function TtsStudio({ voices, onRefreshVoices }: Props) {
                   style={{ minHeight: 200 }}
                   value={srtRaw}
                   onChange={(e) => {
-                    setSrtRaw(e.target.value)
-                    const lines = e.target.value
+                    const v = e.target.value
+                    setSrtRaw(v)
+                    setKeepTimeline(true)
+                    const lines = v
                       .split(/\r?\n/)
                       .filter((ln) => ln.trim() && !/^\d+$/.test(ln.trim()) && !/-->/.test(ln))
                     setText(lines.join('\n'))
                   }}
-                  placeholder={"1\n00:00:01,000 --> 00:00:04,000\nDán SRT có timestamp — giữ đúng time khi tạo giọng…"}
+                  placeholder={"1\n00:00:01,000 --> 00:00:04,000\nDán SRT chuẩn — 1 cue = 1 câu TTS, giữ timestamp gốc…"}
                   spellCheck={false}
                 />
               ) : (
@@ -1684,28 +1690,36 @@ export default function TtsStudio({ voices, onRefreshVoices }: Props) {
                   Xóa nội dung
                 </button>
               </div>
-              <div className="tts-split-row">
-                <label className="tts-split-field">
-                  Tùy chọn tách câu
-                  <select
-                    value={autoSplit ? 'auto' : 'off'}
-                    onChange={(e) => setAutoSplit(e.target.value === 'auto')}
+              {section !== 'srt' ? (
+                <div className="tts-split-row">
+                  <label className="tts-split-field">
+                    Tùy chọn tách câu
+                    <select
+                      value={autoSplit ? 'auto' : 'off'}
+                      onChange={(e) => setAutoSplit(e.target.value === 'auto')}
+                    >
+                      <option value="auto">Tự động tách câu (khuyến nghị)</option>
+                      <option value="off">Không tách</option>
+                    </select>
+                  </label>
+                  <button
+                    type="button"
+                    className={autoSplit ? 'tts-switch is-on' : 'tts-switch'}
+                    role="switch"
+                    aria-checked={autoSplit}
+                    title={autoSplit ? 'Tắt tách câu' : 'Bật tách câu'}
+                    onClick={() => setAutoSplit((v) => !v)}
                   >
-                    <option value="auto">Tự động tách câu (khuyến nghị)</option>
-                    <option value="off">Không tách</option>
-                  </select>
-                </label>
-                <button
-                  type="button"
-                  className={autoSplit ? 'tts-switch is-on' : 'tts-switch'}
-                  role="switch"
-                  aria-checked={autoSplit}
-                  title={autoSplit ? 'Tắt tách câu' : 'Bật tách câu'}
-                  onClick={() => setAutoSplit((v) => !v)}
-                >
-                  <span className="tts-switch-track" />
-                </button>
-              </div>
+                    <span className="tts-switch-track" />
+                  </button>
+                </div>
+              ) : (
+                <p style={{ margin: '10px 0 0', fontSize: '0.78rem', color: 'var(--tts-muted)' }}>
+                  SRT mode: mỗi cue = 1 câu TTS · timestamp/text giữ nguyên file gốc
+                  {keepTimeline ? ' · timeline tuyệt đối' : ' · nối tuần tự'}
+                  {matchSrt ? ' · khớp thời lượng slot' : ''}.
+                </p>
+              )}
               <div style={{ marginTop: 16, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                 <button
                   type="button"
@@ -2191,7 +2205,10 @@ export default function TtsStudio({ voices, onRefreshVoices }: Props) {
               <input type="checkbox" checked={keepTimeline} onChange={(e) => setKeepTimeline(e.target.checked)} />
               <span>
                 Giữ nguyên timeline SRT
-                <small>Giữ nguyên đúng thời điểm bắt đầu/kết thúc của phụ đề</small>
+                <small>
+                  Bật: audio đặt đúng start SRT; file SRT xuất = cue gốc (khuyến nghị).
+                  Tắt: nối tuần tự, timestamp SRT theo audio.
+                </small>
               </span>
             </label>
             <label className="tts-check">

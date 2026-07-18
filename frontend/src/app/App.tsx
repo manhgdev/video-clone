@@ -279,6 +279,7 @@ export default function App() {
   const [bakedPreferVideo, setBakedPreferVideo] = useState(false)
   const bakedPreferVideoRef = useRef(false)
   const [bakedSpeed, setBakedSpeed] = useState(1)
+  const [hasBakedSpeed, setHasBakedSpeed] = useState(false)
   const [segments, setSegments] = useState<Segment[]>([])
   const [overlays, setOverlays] = useState<TextOverlay[]>([])
   const [status, setStatus] = useState<JobStatus>(idleStatus)
@@ -300,9 +301,12 @@ export default function App() {
   const busyAt = useRef(0)
 
   const freshVideoUrl = (url: string) => {
-    // Chỉ revision (không Date.now) — giảm abort Range storm khi poll/bake
     videoRevisionRef.current += 1
     const base = url.split('?')[0]
+    if (base.includes('/video')) {
+      const projBase = base.split('/video')[0]
+      return `${projBase}/video/${videoRevisionRef.current}`
+    }
     return `${base}?v=${videoRevisionRef.current}`
   }
 
@@ -369,18 +373,24 @@ export default function App() {
         setProjectId(id)
         // ?t= bust cache — tránh <video> Range cũ → 416 sau đổi preview/full
         setVideoUrl(freshVideoUrl(`/api/projects/${id}/video`))
+        const wc =
+          typeof st.workClipSec === 'number' ? Math.max(0, st.workClipSec) : 0
+        workClipSecRef.current = wc
+        setWorkClipSec(wc)
+        // duration = cửa sổ hiển thị (status đã clamp preview/bake); không lấy full source
         const dur = Number(st.duration || 0)
-        if (dur > 0) setDuration(dur)
-        if (typeof st.workClipSec === 'number') {
-          const wc = Math.max(0, st.workClipSec)
-          workClipSecRef.current = wc
-          setWorkClipSec(wc)
-        }
-        const baked = Boolean(st.bakedPreferVideo)
+        if (wc > 0) setDuration(wc)
+        else if (dur > 0) setDuration(dur)
+        const bs =
+          typeof st.bakedSpeed === 'number' && st.bakedSpeed > 0 ? st.bakedSpeed : 1
+        const userBake = Boolean((st as { hasBakedSpeed?: boolean }).hasBakedSpeed)
+        const speedOff1 = Math.abs(bs - 1) > 0.02
+        const baked = Boolean(st.bakedPreferVideo) && speedOff1
         bakedPreferVideoRef.current = baked
         setBakedPreferVideo(baked)
-        if (typeof st.bakedSpeed === 'number' && st.bakedSpeed > 0) setBakedSpeed(st.bakedSpeed)
-        else setBakedSpeed(1)
+        setBakedSpeed(bs)
+        // hasBakedSpeed true cả khi user Áp dụng 1×
+        setHasBakedSpeed(userBake || speedOff1)
         const extra = st as JobStatus & { settings?: Partial<ProjectSettings> }
         const mergedVoice =
           (extra.settings && typeof extra.settings === 'object' && extra.settings.defaultVoice) ||
@@ -472,18 +482,31 @@ export default function App() {
           if (wc !== workClipSecRef.current) {
             workClipSecRef.current = wc
             setWorkClipSec(wc)
+            if (wc > 0) setDuration(wc)
             // Clip preview/full đổi kích thước — phải đổi URL kẻo Range cũ 416
             setVideoUrl(freshVideoUrl(`/api/projects/${projectId}/video`))
           }
         }
-        const baked = Boolean(s.bakedPreferVideo)
+        const pollDur = Number(s.duration || 0)
+        if (pollDur > 0 && !(typeof s.workClipSec === 'number' && s.workClipSec > 0)) {
+          setDuration(pollDur)
+        } else if (pollDur > 0 && typeof s.workClipSec === 'number' && s.workClipSec > 0) {
+          setDuration(Math.min(pollDur, s.workClipSec) || s.workClipSec)
+        }
+        const bs =
+          typeof s.bakedSpeed === 'number' && s.bakedSpeed > 0 ? s.bakedSpeed : 1
+        const userBake = Boolean((s as { hasBakedSpeed?: boolean }).hasBakedSpeed)
+        const speedOff1 = Math.abs(bs - 1) > 0.02
+        const baked = Boolean(s.bakedPreferVideo) && speedOff1
         if (baked !== bakedPreferVideoRef.current) {
           bakedPreferVideoRef.current = baked
           setBakedPreferVideo(baked)
           setVideoUrl(freshVideoUrl(`/api/projects/${projectId}/video`))
         }
-        if (typeof s.bakedSpeed === 'number' && s.bakedSpeed > 0) setBakedSpeed(s.bakedSpeed)
+        setBakedSpeed(bs)
+        setHasBakedSpeed(userBake || speedOff1)
         if (!s.running) {
+          releaseDubLock()
           try {
             const segs = await api.segments(projectId)
             if (activeProjectRef.current !== projectId) return
@@ -517,6 +540,7 @@ export default function App() {
         pollFailStreak.current += 1
         // ~7.5s (5×1.5s) backend down
         if (pollFailStreak.current >= 5) {
+          releaseDubLock()
           setStatus((prev) => ({
             ...prev,
             running: false,
@@ -633,17 +657,25 @@ export default function App() {
   }
 
   async function onTranslateAll(previewSec = 0) {
-    if (!projectId) return
+    if (!projectId || status.running) return
     setExportUrl(null)
     const wc = Math.max(0, previewSec)
     workClipSecRef.current = wc
     setWorkClipSec(wc)
+    // Full: xóa clip timeline local (đang kẹt độ dài preview cũ)
+    if (wc <= 0 && typeof localStorage !== 'undefined') {
+      try {
+        localStorage.removeItem(`videoclone.videoClips.${projectId}`)
+        localStorage.removeItem(`videoclone.bgClips.${projectId}`)
+      } catch { /* ignore */ }
+    }
+    // Bust video URL ngay — tránh stream preview_Ns cũ
     setVideoUrl(freshVideoUrl(`/api/projects/${projectId}/video`))
     busyAt.current = Date.now()
     setStatus({
       step: 'asr',
       progress: 0,
-      message: previewSec > 0 ? `Preview ${previewSec}s…` : 'Bắt đầu nhận dạng…',
+      message: previewSec > 0 ? `Preview ${previewSec}s…` : 'Dịch cả video (full)…',
       running: true,
       error: undefined,
     })
@@ -651,29 +683,57 @@ export default function App() {
     setStatus((s) => ({ ...s, running: true }))
   }
 
-  async function onDub() {
+  const dubLockRef = useRef(false)
+  /** Mở khóa lồng tiếng — gọi mọi đường thoát job (huỷ / lỗi / xong / disconnect). */
+  function releaseDubLock() {
+    dubLockRef.current = false
+  }
+  async function onDub(opts?: { force?: boolean }) {
     if (!projectId) return
+    // Lock đồng bộ (trước setState) — chặn double-click / spam
+    if (status.running || dubLockRef.current) return
+    dubLockRef.current = true
     busyAt.current = Date.now()
     setProgressMinimized(false)
-    // Xóa audio local cũ — tránh preview lệch khi TTS gen lại (cache file)
-    setSegments((segs) =>
-      (Array.isArray(segs) ? segs : []).map((s) => ({
-        ...s,
-        audioFile: undefined,
-        audioUrl: undefined,
-        audioDuration: undefined,
-        videoSpeed: undefined,
-      })),
-    )
+    const force = Boolean(opts?.force)
+    // Chỉ xóa audio UI khi force gen lại — lần thường giữ cache TTS trên đĩa
+    if (force) {
+      setSegments((segs) =>
+        (Array.isArray(segs) ? segs : []).map((s) => ({
+          ...s,
+          audioFile: undefined,
+          audioUrl: undefined,
+          audioDuration: undefined,
+          videoSpeed: undefined,
+        })),
+      )
+    }
     setStatus({
       step: 'dub',
       progress: 0,
-      message: 'Đang lồng tiếng…',
+      message: force ? 'Đang gen lại TTS (bỏ cache)…' : 'Đang lồng tiếng…',
       running: true,
       error: undefined,
     })
-    await api.dub(projectId, { ...settings, forceTts: true })
-    setStatus((s) => ({ ...s, running: true }))
+    try {
+      await api.dub(projectId, { ...settings, forceTts: force })
+      setStatus((s) => ({ ...s, running: true }))
+      // Safety: nếu poll không về (backend die) — mở khóa sau 2 phút
+      window.setTimeout(() => {
+        if (dubLockRef.current && Date.now() - busyAt.current > 110_000) {
+          releaseDubLock()
+        }
+      }, 120_000)
+    } catch (e) {
+      releaseDubLock()
+      setStatus({
+        step: 'dub',
+        progress: 0,
+        message: e instanceof Error ? e.message : 'Lồng tiếng thất bại',
+        running: false,
+        error: 'dub',
+      })
+    }
   }
 
   function onSettings(next: ProjectSettings) {
@@ -740,7 +800,7 @@ export default function App() {
   }
 
   async function onExport(exportSegments?: Segment[]) {
-    if (!projectId) return
+    if (!projectId || status.running) return
     setExportUrl(null)
     setExportPath(null)
     setViewExportSrc(null)
@@ -808,6 +868,8 @@ export default function App() {
     // chỉ chặn double-click cực sớm (mount Huỷ)
     if (Date.now() - busyAt.current < 400) return
     const stepNow = status.step
+    // Mở khóa lồng tiếng ngay — poll dừng khi running=false nên không clear lock được
+    releaseDubLock()
     // optimistic — đừng chờ server
     setStatus({
       step: stepNow,
@@ -825,6 +887,8 @@ export default function App() {
       await api.cancel(projectId)
     } catch {
       /* flag server có thể fail; UI đã dừng */
+    } finally {
+      releaseDubLock()
     }
   }
 
@@ -907,9 +971,12 @@ export default function App() {
     setWorkClipSec(wc)
     // duration = độ dài timeline display (workDuration khi bake)
     if (res.duration > 0) setDuration(res.duration)
-    bakedPreferVideoRef.current = res.bakedPreferVideo
-    setBakedPreferVideo(res.bakedPreferVideo)
-    setBakedSpeed(res.bakedSpeed > 0 ? res.bakedSpeed : res.bakedPreferVideo ? 0.8 : 1)
+    const bs = res.bakedSpeed > 0 ? res.bakedSpeed : res.bakedPreferVideo ? 0.8 : 1
+    bakedPreferVideoRef.current = Boolean(res.bakedPreferVideo) && Math.abs(bs - 1) > 0.02
+    setBakedPreferVideo(bakedPreferVideoRef.current)
+    setBakedSpeed(bs)
+    // rebake luôn = user lock (kể cả 1×)
+    setHasBakedSpeed(true)
     setVideoUrl(freshVideoUrl(res.videoUrl))
   }
 
@@ -921,9 +988,11 @@ export default function App() {
     workClipSecRef.current = wc
     setWorkClipSec(wc)
     if (res.duration > 0) setDuration(res.duration)
-    bakedPreferVideoRef.current = res.bakedPreferVideo
-    setBakedPreferVideo(res.bakedPreferVideo)
-    setBakedSpeed(res.bakedSpeed > 0 ? res.bakedSpeed : res.bakedPreferVideo ? 0.8 : 1)
+    const bs = res.bakedSpeed > 0 ? res.bakedSpeed : res.bakedPreferVideo ? 0.8 : 1
+    bakedPreferVideoRef.current = Boolean(res.bakedPreferVideo) && Math.abs(bs - 1) > 0.02
+    setBakedPreferVideo(bakedPreferVideoRef.current)
+    setBakedSpeed(bs)
+    setHasBakedSpeed(true)
     setVideoUrl(freshVideoUrl(res.videoUrl || `/api/projects/${projectId}/video`))
   }
 
@@ -1078,6 +1147,7 @@ export default function App() {
           workClipSec={workClipSec}
           bakedPreferVideo={bakedPreferVideo}
           bakedSpeed={bakedSpeed}
+          hasBakedSpeed={hasBakedSpeed}
           projectId={projectId}
           segments={segments}
           settings={settings}
@@ -1248,11 +1318,27 @@ export default function App() {
         progress={status.progress}
         error={status.error}
         onMinimize={() => {
-          setProgressMinimized(true)
-          // Đóng popup lỗi — tránh hiện mãi sau lần xuất fail
-          if (!status.running && status.error) {
-            setStatus((s) => ({ ...s, error: undefined, message: s.message || 'Đã đóng báo lỗi' }))
+          // Job đang chạy: chỉ thu nhỏ. Lỗi xong: dismiss hẳn (ghi meta).
+          if (status.running) {
+            setProgressMinimized(true)
+            return
           }
+          if (status.error && status.error !== 'cancelled') {
+            setStatus((s) => ({
+              ...s,
+              error: undefined,
+              message: '',
+              progress: 0,
+            }))
+            setProgressMinimized(false)
+            if (projectId) {
+              void api.dismissStatus(projectId).catch(() => {
+                /* offline — UI đã clear */
+              })
+            }
+            return
+          }
+          setProgressMinimized(true)
         }}
         onRestore={() => setProgressMinimized(false)}
         onCancel={status.running ? onCancel : undefined}

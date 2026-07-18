@@ -1,4 +1,4 @@
-﻿import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { createPortal } from 'react-dom'
 import type { ProjectSettings, Segment, TextOverlay } from '@/features/project/project.types'
 import { api } from '@/features/project/project.api'
@@ -6,8 +6,103 @@ import { IconHeadphones } from '@/shared/components/Icons'
 import { cn } from '@/shared/lib/cn'
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle, useDefaultLayout } from '@/shared/ui/resizable'
 import { ScrollArea } from '@/shared/ui/scroll-area'
-import { fitOverlayFontPx, layoutOcrOverlay, midInsideVerticalWatermark, ocrFallbackCover } from '@/features/editor/ocrOverlayLayout'
-import { resolveCoverWindow } from '@/features/editor/coverTiming'
+import { fitOverlayFontPx, layoutOcrOverlay, midInsideVerticalWatermark } from '@/features/editor/ocrOverlayLayout'
+import { expandCompoundShell } from '@/features/project/expandCompound'
+import {
+  type AssetsTab,
+  type CtxMenu,
+  type EditorSnap,
+  type MediaClip,
+  type PixelBox,
+  type PropTab,
+  type SnapGuides,
+  type TrackId,
+  ASPECT_PRESETS,
+  ASSET_TABS,
+  AUTO_SUBTITLE_FONT,
+  AspectIcon,
+  BOOKMARK_EPS,
+  CAPTION_FONT_PRESETS,
+  CAPTION_LANE_DEFS,
+  COVER_MASK_STYLES,
+  EFFECT_PRESETS,
+  FIT_WIDTH_RATIO,
+  FONT_SIZES,
+  HISTORY_MAX,
+  MIN_CLIP_SEC,
+  PX_PER_SEC_BASE,
+  SPLIT_EDGE,
+  TabSvg,
+  TimelineFilmstrip,
+  ZOOM_MAX,
+  ZOOM_MIN,
+  adaptiveCoverLayout,
+  autoFontFromBbox,
+  buildExportSegments,
+  captionChromeStyle,
+  captionFontStyle,
+  captionLaneOf,
+  captionPlacement,
+  clampCoverBox,
+  clipAtTime,
+  cloneSnap,
+  coverMaskPreviewStyle,
+  defaultTrackMute,
+  dubClipSeconds,
+  dubPlaybackSpeed,
+  effectiveOverlayLayout,
+  emptyTrackFlags,
+  estimatePreviewCaptionBox,
+  expandSegmentsForPlayback,
+  fallbackCoverBox,
+  fitTimelineZoom,
+  formatTime,
+  formatTimecode,
+  fullMediaClip,
+  isOcrOverlayLayout,
+  loadBookmarks,
+  loadMediaClips,
+  manualCoverLayout,
+  mapTimeAfterRipple,
+  mergeTimeRanges,
+  normalizeMediaClips,
+  overlayCoverSeed,
+  overlayDisplayFontStyle,
+  overlayTextEnabled,
+  persistBookmarks,
+  persistMediaClips,
+  pickTimelineSeg,
+  displaySpeedDraft,
+  fileBakedSpeed,
+  previewVideoRate,
+  reindexSegments,
+  resolveCaptionFontSize,
+  resolveCoverMaskOnly,
+  resolveCropRect,
+  resolveOverLayout,
+  resolveOverlayFontPreferred,
+  resolvePreviewOverLayout,
+  resolveSegmentCover,
+  rippleDeleteMediaClips,
+  rippleShiftOverlay,
+  rippleShiftSegment,
+  scaleMediaClips,
+  seedCoverBox,
+  segmentAt,
+  segmentAtCover,
+  segmentForDub,
+  segmentHasDub,
+  segmentWithLayout,
+  segmentsAt,
+  snapBoxToCenter,
+  solidMidAt,
+  solidOcrAt,
+  solidOverlaysAt,
+  sourceToDisplayStyle,
+  splitMediaList,
+  videoCropStyle,
+  withInferredLayout,
+} from '@/features/editor/lib'
 
 type Props = {
   videoUrl: string
@@ -19,6 +114,7 @@ type Props = {
   bakedPreferVideo?: boolean
   /** Tốc độ đã bake vào file preview */
   bakedSpeed?: number
+  hasBakedSpeed?: boolean
   projectId: string
   segments: Segment[]
   settings: ProjectSettings
@@ -59,2158 +155,6 @@ type Props = {
   onOverlaysReplace: (overlays: TextOverlay[]) => void | Promise<void>
 }
 
-function formatTime(value: number) {
-  const min = Math.floor(value / 60)
-  const sec = value % 60
-  return `${min}:${sec.toFixed(1).padStart(4, '0')}`
-}
-
-const BOOKMARK_EPS = 1 / 30
-const MIN_CLIP_SEC = 0.15
-/** Lề tối thiểu hai phía để còn cắt được (clip ngắn ~0.4s vẫn split được) */
-const SPLIT_EDGE = 0.05
-/** Zoom rất nhỏ cho video dài — không kẹp 0.05 (sẽ full ngang). */
-const ZOOM_MIN = 0.002
-const ZOOM_MAX = 40
-const PX_PER_SEC_BASE = 50
-
-/** Fit / kéo hết cỡ trái = nội dung chiếm ~50% khung, phải trống. */
-const FIT_WIDTH_RATIO = 0.5
-
-function fitTimelineZoom(durationSec: number, widthPx: number) {
-  if (durationSec <= 0 || widthPx <= 0) return 1
-  const usable = Math.max(48, (widthPx - 8) * FIT_WIDTH_RATIO)
-  const z = usable / (durationSec * PX_PER_SEC_BASE)
-  // Không kẹp ZOOM_MIN cao — video dài cần z << 0.05 để còn 50% trống
-  return Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, Math.round(z * 10000) / 10000))
-}
-
-function bookmarkKey(projectId: string) {
-  return `videoclone.bookmarks.${projectId}`
-}
-
-function loadBookmarks(projectId: string): number[] {
-  try {
-    const raw = localStorage.getItem(bookmarkKey(projectId))
-    if (!raw) return []
-    const parsed = JSON.parse(raw) as unknown
-    if (!Array.isArray(parsed)) return []
-    return parsed.filter((t): t is number => typeof t === 'number' && Number.isFinite(t)).sort((a, b) => a - b)
-  } catch {
-    return []
-  }
-}
-
-function persistBookmarks(projectId: string, marks: number[]) {
-  try {
-    localStorage.setItem(bookmarkKey(projectId), JSON.stringify(marks))
-  } catch {
-    /* ignore */
-  }
-}
-
-function reindexSegments(list: Segment[]): Segment[] {
-  return [...list]
-    .sort((a, b) => a.start - b.start || a.end - b.end)
-    .map((s, i) => ({ ...s, index: i }))
-}
-
-
-/**
- * Bung 1 compound shell → children absolute time (preview/export).
- * Children relative (0..span) hoặc absolute (đã là timeline) đều ok.
- */
-function expandCompoundShell(shell: Segment): Segment[] {
-  const children = shell.compoundChildren
-  if (!children?.length) return []
-  const t0 = Number(shell.start) || 0
-  const t1 = Number(shell.end) || t0
-  const span = Math.max(0.05, t1 - t0)
-  // max end children > span+ε → đã absolute (không + t0 lần 2)
-  let maxChildEnd = 0
-  for (const ch of children) {
-    const en = Number(ch.end) || Number(ch.start) || 0
-    if (en > maxChildEnd) maxChildEnd = en
-  }
-  const absolute = maxChildEnd > span + 0.35
-  const out: Segment[] = []
-  for (const ch of children) {
-    const st = Number(ch.start) || 0
-    const en = Number(ch.end) || st
-    if (absolute) {
-      out.push({
-        ...ch,
-        start: st,
-        end: Math.max(st + 0.05, en),
-        isCompound: undefined,
-        compoundChildren: undefined,
-        groupId: undefined,
-      })
-      continue
-    }
-    const cs = ch.coverStart
-    const ce = ch.coverEnd
-    out.push({
-      ...ch,
-      start: t0 + st,
-      end: t0 + Math.max(st + 0.05, en),
-      coverStart: typeof cs === 'number' ? t0 + cs : undefined,
-      coverEnd: typeof ce === 'number' ? t0 + ce : undefined,
-      isCompound: undefined,
-      compoundChildren: undefined,
-      groupId: undefined,
-    })
-  }
-  return out
-}
-
-/** Bung mọi compound → list caption như chưa ghép (preview chữ/mask/TTS). */
-function expandSegmentsForPlayback(list: Segment[]): Segment[] {
-  const out: Segment[] = []
-  for (const s of list) {
-    if (s.isCompound) {
-      // Shell không có chữ — chỉ children
-      out.push(...expandCompoundShell(s))
-      continue
-    }
-    out.push(s)
-  }
-  return reindexSegments(out)
-}
-
-
-/** Clip Video / Âm gốc trên timeline (tách khỏi Caption·TTS) */
-type MediaClip = { id: string; start: number; end: number }
-
-function fullMediaClip(end: number): MediaClip {
-  return { id: crypto.randomUUID(), start: 0, end: Math.max(end, MIN_CLIP_SEC) }
-}
-
-/**
- * Clamp media clips trong cửa sổ làm việc.
- * Không kéo 1 clip đã trim/xóa nửa về full span (lỗ trống giữ nguyên).
- * Chỉ stretch khi cửa sổ phình (preview N→full) và clip từng chạm mép cũ.
- */
-function normalizeMediaClips(clips: MediaClip[], durationSec: number, prevDuration = 0): MediaClip[] {
-  if (!(durationSec > 0)) return []
-  const next = clips
-    .filter((c) => c && typeof c.start === 'number' && typeof c.end === 'number' && c.end > c.start)
-    .map((c) => ({
-      id: String(c.id || crypto.randomUUID()),
-      start: Math.max(0, Math.min(c.start, durationSec - MIN_CLIP_SEC)),
-      end: Math.max(MIN_CLIP_SEC, Math.min(c.end, durationSec)),
-    }))
-    .filter((c) => c.end - c.start >= SPLIT_EDGE)
-    .sort((a, b) => a.start - b.start || a.end - b.end)
-  if (!next.length) return [fullMediaClip(durationSec)]
-  // Cửa sổ phình (15s→full): kéo đuôi clip từng chạm mép duration cũ
-  if (prevDuration > 0 && durationSec > prevDuration + 0.25) {
-    return next.map((c) =>
-      Math.abs(c.end - prevDuration) <= 0.51 ? { ...c, end: durationSec } : c,
-    )
-  }
-  return next
-}
-
-function mediaClipsKey(projectId: string, kind: 'video' | 'bg') {
-  return `videoclone.${kind}Clips.${projectId}`
-}
-
-function loadMediaClips(projectId: string, kind: 'video' | 'bg', durationSec: number): MediaClip[] {
-  try {
-    const raw = localStorage.getItem(mediaClipsKey(projectId, kind))
-    if (raw) {
-      const parsed = JSON.parse(raw) as MediaClip[]
-      if (Array.isArray(parsed) && parsed.length) {
-        return normalizeMediaClips(parsed, durationSec)
-      }
-    }
-  } catch { /* ignore */ }
-  return durationSec > 0 ? [fullMediaClip(durationSec)] : []
-}
-
-function persistMediaClips(projectId: string, kind: 'video' | 'bg', clips: MediaClip[]) {
-  // ponytail: skip [] so projectId reset không ghi đè clip đã lưu
-  if (!clips.length) return
-  try {
-    localStorage.setItem(mediaClipsKey(projectId, kind), JSON.stringify(clips))
-  } catch { /* ignore */ }
-}
-
-function splitMediaList(clips: MediaClip[], clipId: string, t: number): MediaClip[] {
-  return clips.flatMap((c) => {
-    if (c.id !== clipId) return [c]
-    if (!(t > c.start + SPLIT_EDGE && t < c.end - SPLIT_EDGE)) return [c]
-    return [
-      { ...c, end: t },
-      { id: crypto.randomUUID(), start: t, end: c.end },
-    ]
-  })
-}
-
-function clipAtTime(clips: MediaClip[], t: number): MediaClip | null {
-  return clips.find((c) => t >= c.start && t < c.end) ?? clips.find((c) => t >= c.start && t <= c.end) ?? null
-}
-
-/** Gộp khoảng [a,b) đã sort — dùng ripple delete. */
-function mergeTimeRanges(ranges: { start: number; end: number }[]): { start: number; end: number }[] {
-  const sorted = ranges
-    .filter((r) => r.end > r.start + 1e-6)
-    .slice()
-    .sort((a, b) => a.start - b.start)
-  if (!sorted.length) return []
-  const out: { start: number; end: number }[] = [{ ...sorted[0] }]
-  for (let i = 1; i < sorted.length; i++) {
-    const cur = sorted[i]
-    const last = out[out.length - 1]
-    if (cur.start <= last.end + 1e-4) last.end = Math.max(last.end, cur.end)
-    else out.push({ ...cur })
-  }
-  return out
-}
-
-/** Tổng thời lượng bị xóa trước mốc t (để shift về 0). */
-function removedBefore(t: number, removed: { start: number; end: number }[]): number {
-  let d = 0
-  for (const r of removed) {
-    if (r.end <= t) d += r.end - r.start
-    else if (r.start < t) d += t - r.start
-  }
-  return d
-}
-
-/** Map mốc thời gian sau ripple — điểm nằm trong vùng xóa → mép trái vùng đó. */
-function mapTimeAfterRipple(t: number, removed: { start: number; end: number }[]): number {
-  for (const r of removed) {
-    if (t >= r.start && t < r.end) return Math.max(0, r.start - removedBefore(r.start, removed))
-  }
-  return Math.max(0, t - removedBefore(t, removed))
-}
-
-/** Xóa clip media + đóng gap (CapCut ripple): kéo phần sau về trước. */
-function rippleDeleteMediaClips(
-  clips: MediaClip[],
-  dropIds: Set<string>,
-): { next: MediaClip[]; removed: { start: number; end: number }[] } {
-  const removed = mergeTimeRanges(
-    clips.filter((c) => dropIds.has(c.id)).map((c) => ({ start: c.start, end: c.end })),
-  )
-  if (!removed.length) {
-    return { next: clips.filter((c) => !dropIds.has(c.id)), removed: [] }
-  }
-  const kept = clips
-    .filter((c) => !dropIds.has(c.id))
-    .map((c) => {
-      const start = mapTimeAfterRipple(c.start, removed)
-      const end = mapTimeAfterRipple(c.end, removed)
-      return { ...c, start, end: Math.max(start + MIN_CLIP_SEC, end) }
-    })
-    .filter((c) => c.end - c.start >= SPLIT_EDGE)
-    .sort((a, b) => a.start - b.start)
-  return { next: kept, removed }
-}
-
-/** Shift segment/overlay theo vùng đã xóa (ripple toàn project). */
-function rippleShiftSegment(seg: Segment, removed: { start: number; end: number }[]): Segment | null {
-  const start = mapTimeAfterRipple(seg.start, removed)
-  const end = mapTimeAfterRipple(seg.end, removed)
-  if (end - start < 0.04) return null
-  const next: Segment = { ...seg, start, end }
-  if (typeof seg.coverStart === 'number') {
-    next.coverStart = mapTimeAfterRipple(seg.coverStart, removed)
-  }
-  if (typeof seg.coverEnd === 'number') {
-    next.coverEnd = mapTimeAfterRipple(seg.coverEnd, removed)
-  }
-  if (seg.isCompound && seg.compoundChildren?.length) {
-    // Children relative — chỉ scale nếu shell absolute times đổi span
-    const oldSpan = Math.max(0.05, seg.end - seg.start)
-    const newSpan = Math.max(0.05, end - start)
-    const ratio = newSpan / oldSpan
-    if (Math.abs(ratio - 1) > 1e-6) {
-      next.compoundChildren = seg.compoundChildren.map((ch) => ({
-        ...ch,
-        start: (Number(ch.start) || 0) * ratio,
-        end: (Number(ch.end) || 0) * ratio,
-        coverStart:
-          typeof ch.coverStart === 'number' ? ch.coverStart * ratio : undefined,
-        coverEnd: typeof ch.coverEnd === 'number' ? ch.coverEnd * ratio : undefined,
-      }))
-    }
-  }
-  return next
-}
-
-function rippleShiftOverlay(
-  ov: TextOverlay,
-  removed: { start: number; end: number }[],
-): TextOverlay | null {
-  const start = mapTimeAfterRipple(ov.start, removed)
-  const end = mapTimeAfterRipple(ov.end, removed)
-  if (end - start < 0.04) return null
-  return { ...ov, start, end }
-}
-
-type EditorSnap = {
-  segments: Segment[]
-  overlays: TextOverlay[]
-  settings: ProjectSettings
-  bookmarks: number[]
-  selectedId: string | null
-  selectedOverlayId: string | null
-  trackFocus: 'video' | 'caption' | 'dub' | 'bg' | 'text'
-  videoClips: MediaClip[]
-  bgClips: MediaClip[]
-  selectedMediaId: string | null
-  /** Bake tốc độ lúc snapshot — undo/redo gọi rebake nếu khác */
-  bakedSpeed: number
-  workClipSec: number
-  mediaDuration: number
-}
-
-const HISTORY_MAX = 40
-
-function cloneSnap(s: EditorSnap): EditorSnap {
-  return {
-    segments: s.segments.map((x) => ({ ...x, compoundChildren: x.compoundChildren?.map((c) => ({ ...c })) })),
-    overlays: s.overlays.map((x) => ({ ...x })),
-    settings: { ...s.settings },
-    bookmarks: [...s.bookmarks],
-    selectedId: s.selectedId,
-    selectedOverlayId: s.selectedOverlayId,
-    trackFocus: s.trackFocus,
-    videoClips: s.videoClips.map((x) => ({ ...x })),
-    bgClips: s.bgClips.map((x) => ({ ...x })),
-    selectedMediaId: s.selectedMediaId,
-    bakedSpeed: s.bakedSpeed,
-    workClipSec: s.workClipSec,
-    mediaDuration: s.mediaDuration,
-  }
-}
-
-/* OpenCut-style HH:MM:SS:FF timecode (assumes 30fps for the frame counter) */
-function formatTimecode(value: number) {
-  const h = Math.floor(value / 3600)
-  const m = Math.floor((value % 3600) / 60)
-  const s = Math.floor(value % 60)
-  const f = Math.floor((value % 1) * 30)
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${pad(h)}:${pad(m)}:${pad(s)}:${pad(f)}`
-}
-
-function parseHexColor(hex: string): [number, number, number] {
-  const h = (hex || '#4c1d95').replace('#', '')
-  if (h.length !== 6) return [76, 29, 149]
-  const n = (i: number) => parseInt(h.slice(i, i + 2), 16)
-  return [Number.isNaN(n(0)) ? 76 : n(0), Number.isNaN(n(2)) ? 29 : n(2), Number.isNaN(n(4)) ? 149 : n(4)]
-}
-
-/** Preview mask «Làm mờ» — kính CapCut (blur + tint mỏng); xuất pad-blur khớp. */
-function coverMaskPreviewStyle(
-  style: ProjectSettings['coverMaskStyle'],
-  color: string,
-  opacity: number,
-): React.CSSProperties {
-  const [r, g, b] = parseHexColor(color)
-  const pct = Math.max(0, Math.min(100, opacity))
-  const a = Math.max(0.05, Math.min(1, pct / 100))
-  if (style === 'solid') {
-    return { backgroundColor: `rgba(${r},${g},${b},${a})` }
-  }
-  if (style === 'mosaic') {
-    return {
-      backgroundColor: 'rgba(42,42,48,0.72)',
-      backdropFilter: 'blur(22px) saturate(0.4) contrast(0.92) brightness(0.92)',
-      WebkitBackdropFilter: 'blur(22px) saturate(0.4) contrast(0.92) brightness(0.92)',
-      // isolation giúp backdrop-filter không bị layer text che
-      isolation: 'isolate' as const,
-    }
-  }
-  // Làm mờ CapCut: blur phía sau + tint mỏng (bản đẹp — không đậm thêm)
-  const tintA = Math.min(0.22, Math.max(0.06, a * 0.28))
-  const blurPx = Math.round(22 + a * 20) // ~22–42px
-  return {
-    backgroundColor: `rgba(${r},${g},${b},${tintA})`,
-    backdropFilter: `blur(${blurPx}px) saturate(0.88)`,
-    WebkitBackdropFilter: `blur(${blurPx}px) saturate(0.88)`,
-    isolation: 'isolate' as const,
-  }
-}
-
-type PixelBox = { x: number; y: number; w: number; h: number }
-type CropRect = { x: number; y: number; w: number; h: number }
-
-const COVER_MASK_STYLES: { id: ProjectSettings['coverMaskStyle']; label: string }[] = [
-  { id: 'blur', label: 'Làm mờ' },
-  { id: 'solid', label: 'Màu nền' },
-  { id: 'mosaic', label: 'Khối' },
-]
-
-const CAPTION_FONT_PRESETS: { id: string; label: string; css: string }[] = [
-  { id: 'system', label: 'Hệ thống', css: 'system-ui, "Segoe UI", sans-serif' },
-  { id: 'segoe', label: 'Segoe UI', css: '"Segoe UI", system-ui, sans-serif' },
-  { id: 'arial', label: 'Arial', css: 'Arial, Helvetica, sans-serif' },
-  { id: 'bold', label: 'Arial Black', css: '"Arial Black", "Helvetica Neue", Arial, sans-serif' },
-  { id: 'helvetica', label: 'Helvetica', css: '"Helvetica Neue", Helvetica, Arial, sans-serif' },
-  { id: 'verdana', label: 'Verdana', css: 'Verdana, Geneva, sans-serif' },
-  { id: 'tahoma', label: 'Tahoma', css: 'Tahoma, Geneva, sans-serif' },
-  { id: 'trebuchet', label: 'Trebuchet', css: '"Trebuchet MS", "Segoe UI", sans-serif' },
-  { id: 'rounded', label: 'Nunito / tròn', css: 'Nunito, "Segoe UI", "Trebuchet MS", sans-serif' },
-  { id: 'impact', label: 'Impact', css: 'Impact, Haettenschweiler, "Arial Narrow Bold", sans-serif' },
-  { id: 'georgia', label: 'Georgia', css: 'Georgia, "Times New Roman", serif' },
-  { id: 'times', label: 'Times', css: '"Times New Roman", Times, serif' },
-  { id: 'palatino', label: 'Palatino', css: '"Palatino Linotype", Palatino, "Book Antiqua", serif' },
-  { id: 'garamond', label: 'Garamond', css: 'Garamond, "Times New Roman", serif' },
-  { id: 'courier', label: 'Courier', css: '"Courier New", Courier, monospace' },
-  { id: 'mono', label: 'Consolas', css: 'Consolas, "Courier New", ui-monospace, monospace' },
-  { id: 'comic', label: 'Comic Sans', css: '"Comic Sans MS", "Comic Sans", cursive' },
-  { id: 'cjk', label: 'CJK / Noto', css: '"Noto Sans SC", "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif' },
-  { id: 'meiryo', label: 'Meiryo (JP)', css: 'Meiryo, "Yu Gothic", "MS Gothic", sans-serif' },
-  { id: 'malgun', label: 'Malgun (KR)', css: '"Malgun Gothic", "Apple SD Gothic Neo", sans-serif' },
-]
-
-function captionFontCss(family?: string): string {
-  return CAPTION_FONT_PRESETS.find((f) => f.id === family)?.css
-    ?? CAPTION_FONT_PRESETS[0].css
-}
-
-/**
- * Style chữ phụ đề.
- * Mặc định = bản đẹp cũ: trắng + soft drop-shadow (không stroke dày, không nền).
- * Chỉ bật nền/viền nặng khi user chọn trong panel.
- */
-function captionChromeStyle(settings: ProjectSettings): React.CSSProperties {
-  const color = settings.captionTextColor || '#ffffff'
-  const bg = settings.captionBgStyle || 'none'
-  const customColor = color.toLowerCase() !== '#ffffff'
-  const family = settings.subtitleFontFamily || 'system'
-  const style: React.CSSProperties = {
-    color,
-    fontFamily: captionFontCss(family),
-    // Soft shadow CapCut — khớp class drop-shadow-[0_2px_4px_rgba(0,0,0,0.9)]
-    textShadow:
-      settings.captionStroke === false
-        ? 'none'
-        : '0 2px 4px rgba(0,0,0,0.9)',
-  }
-  if (bg === 'solid' || bg === 'box' || bg === 'blur') {
-    const bgColor = settings.captionBgColor || '#000000'
-    const op = Math.max(0, Math.min(100, settings.captionBgOpacity ?? 55)) / 100
-    const [r, g, b] = parseHexColor(bgColor)
-    if (bg === 'solid') {
-      style.backgroundColor = `rgba(${r},${g},${b},${Math.max(0.2, op)})`
-      style.borderRadius = 4
-      style.padding = '0.12em 0.28em'
-    } else if (bg === 'box') {
-      style.backgroundColor = `rgba(${r},${g},${b},${Math.max(0.35, op)})`
-      style.borderRadius = 6
-      style.padding = '0.18em 0.4em'
-      style.border = '1px solid rgba(255,255,255,0.12)'
-    } else {
-      style.backgroundColor = `rgba(${r},${g},${b},${Math.max(0.15, op * 0.55)})`
-      style.backdropFilter = 'blur(10px) saturate(0.9)'
-      style.WebkitBackdropFilter = 'blur(10px) saturate(0.9)'
-      style.borderRadius = 6
-      style.padding = '0.14em 0.32em'
-    }
-  }
-  // Không WebkitTextStroke — làm chữ «cứng» xấu hơn bản drop-shadow
-  void customColor
-  return style
-}
-
-/** Preset hiệu ứng kéo vào video (tab Effects) */
-const EFFECT_PRESETS: {
-  id: string
-  label: string
-  desc: string
-  maskStyle: 'blur' | 'solid' | 'mosaic'
-  maskColor: string
-  maskOpacity: number
-}[] = [
-  { id: 'blur', label: 'Làm mờ', desc: 'Kính mờ CapCut — che vùng tự do', maskStyle: 'blur', maskColor: '#4c1d95', maskOpacity: 45 },
-  { id: 'solid', label: 'Màu nền', desc: 'Phủ màu đặc lên vùng chọn', maskStyle: 'solid', maskColor: '#1e1b4b', maskOpacity: 70 },
-  { id: 'mosaic', label: 'Khối', desc: 'Làm mờ pixel / che hardsub', maskStyle: 'mosaic', maskColor: '#2a2a30', maskOpacity: 80 },
-]
-
-type AspectPreset =
-  | { id: 'original' | 'custom'; label: string; disabled?: boolean }
-  | { id: string; label: string; w: number; h: number; orient: 'landscape' | 'portrait' | 'square' }
-
-const ASPECT_PRESETS: AspectPreset[] = [
-  { id: 'original', label: 'Bản gốc' },
-  { id: 'custom', label: 'Tùy chỉnh', disabled: true },
-  { id: '16:9', label: '16:9', w: 16, h: 9, orient: 'landscape' },
-  { id: '4:3', label: '4:3', w: 4, h: 3, orient: 'landscape' },
-  { id: '2.35:1', label: '2.35:1', w: 235, h: 100, orient: 'landscape' },
-  { id: '2:1', label: '2:1', w: 2, h: 1, orient: 'landscape' },
-  { id: '1.85:1', label: '1.85:1', w: 185, h: 100, orient: 'landscape' },
-  { id: '9:16', label: '9:16', w: 9, h: 16, orient: 'portrait' },
-  { id: '3:4', label: '3:4', w: 3, h: 4, orient: 'portrait' },
-  { id: '58inch', label: '5.8-inch', w: 108, h: 234, orient: 'portrait' },
-  { id: '1:1', label: '1:1', w: 1, h: 1, orient: 'square' },
-]
-
-function resolveCropRect(sourceW: number, sourceH: number, presetId: string): CropRect {
-  if (sourceW <= 0 || sourceH <= 0) return { x: 0, y: 0, w: 1, h: 1 }
-  if (!presetId || presetId === 'original' || presetId === 'custom') {
-    return { x: 0, y: 0, w: sourceW, h: sourceH }
-  }
-  const preset = ASPECT_PRESETS.find((p) => p.id === presetId && 'w' in p) as
-    | Extract<AspectPreset, { w: number }>
-    | undefined
-  if (!preset) return { x: 0, y: 0, w: sourceW, h: sourceH }
-  const target = preset.w / preset.h
-  const source = sourceW / sourceH
-  if (source >= target) {
-    const h = sourceH
-    const w = h * target
-    return { x: (sourceW - w) / 2, y: 0, w, h }
-  }
-  const w = sourceW
-  const h = w / target
-  return { x: 0, y: (sourceH - h) / 2, w, h }
-}
-
-function sourceToDisplayStyle(
-  box: { x: number; y: number; w: number; h: number },
-  crop: CropRect,
-): React.CSSProperties {
-  return {
-    left: `${((box.x - crop.x) / crop.w) * 100}%`,
-    top: `${((box.y - crop.y) / crop.h) * 100}%`,
-    width: `${(box.w / crop.w) * 100}%`,
-    height: `${(box.h / crop.h) * 100}%`,
-  }
-}
-
-function videoCropStyle(sourceW: number, sourceH: number, crop: CropRect): React.CSSProperties {
-  return {
-    width: `${(sourceW / crop.w) * 100}%`,
-    height: `${(sourceH / crop.h) * 100}%`,
-    left: `${(-crop.x / crop.w) * 100}%`,
-    top: `${(-crop.y / crop.h) * 100}%`,
-    objectFit: 'fill',
-  }
-}
-
-function AspectIcon({ orient }: { orient: 'landscape' | 'portrait' | 'square' }) {
-  const cls = 'border border-current rounded-[2px] opacity-70'
-  if (orient === 'portrait') return <span className={cn(cls, 'inline-block h-3.5 w-2')} aria-hidden />
-  if (orient === 'square') return <span className={cn(cls, 'inline-block size-2.5')} aria-hidden />
-  return <span className={cn(cls, 'inline-block h-2 w-3.5')} aria-hidden />
-}
-
-function segmentAt(segments: Segment[], time: number) {
-  return segments.find((s) => time >= s.start && time < s.end) ?? null
-}
-
-/**
- * Cửa sổ COVER khớp export (burn.py): hardsub hay lộ trước/sau ASR.
- * Caption/TTS vẫn dùng [start,end) chặt; chỉ mask che chữ dùng cửa sổ này.
- * peers: kẹp ngang/mid/label không đè clip kế.
- * Ưu tiên coverStart/coverEnd đã lưu từ OCR.
- */
-function coverWindow(seg: Segment, peers?: Segment[]): { start: number; end: number } {
-  const base = resolveCoverWindow(seg)
-  const layout = seg.layout || 'horizontal'
-  if (layout === 'label') {
-    return clampOverlayPad(seg, base.start, base.end, peers, 'label')
-  }
-  if (layout === 'mid') {
-    return clampOverlayPad(seg, base.start, base.end, peers, 'mid')
-  }
-  if (layout === 'vertical') {
-    return base
-  }
-  // horizontal: cắt pad/tail để bbox trước không đè bbox sau
-  return clampOverlayPad(seg, base.start, base.end, peers, 'horizontal')
-}
-
-/** Cắt pad tại giữa khe với clip cùng loại — không chồng cửa sổ. */
-function clampOverlayPad(
-  seg: Segment,
-  start: number,
-  end: number,
-  peers: Segment[] | undefined,
-  lane: CaptionLaneKey,
-): { start: number; end: number } {
-  let s = start
-  let e = end
-  if (peers?.length) {
-    for (const o of peers) {
-      if (o.id === seg.id) continue
-      if (captionLaneOf(o) !== lane) continue
-      if (o.end <= seg.start + 0.02) {
-        // clip trước — không lấn vào nửa khe
-        const cut = (o.end + seg.start) * 0.5
-        s = Math.max(s, cut)
-      } else if (o.start >= seg.end - 0.02) {
-        const cut = (seg.end + o.start) * 0.5
-        e = Math.min(e, cut)
-      } else if (o.start < seg.end && o.end > seg.start) {
-        // timeline đã chồng — chia đôi vùng chồng
-        if (o.start >= seg.start) e = Math.min(e, (seg.end + o.start) * 0.5)
-        else s = Math.max(s, (o.end + seg.start) * 0.5)
-      }
-    }
-  }
-  if (e < s + 0.04) e = s + 0.04
-  // luôn phủ ít nhất [start,end) gốc
-  s = Math.min(s, seg.start)
-  e = Math.max(e, seg.end)
-  return { start: Math.max(0, s), end: e }
-}
-
-/** Segment để che chữ tại playhead (nới theo coverWindow, khớp xuất). */
-function segmentAtCover(segments: Segment[], time: number): Segment | null {
-  const hit = segmentAt(segments, time)
-  if (hit) return hit
-  let best: Segment | null = null
-  for (const s of segments) {
-    const w = coverWindow(s, segments)
-    if (time >= w.start && time < w.end) {
-      if (!best || s.start > best.start) best = s
-    }
-  }
-  // Lấp khe < 0.45s giữa 2 câu hardsub (cùng logic xuất)
-  if (!best) {
-    const ordered = [...segments].sort((a, b) => a.start - b.start)
-    for (let i = 0; i < ordered.length - 1; i++) {
-      const a = ordered[i]
-      const b = ordered[i + 1]
-      if ((a.layout || 'horizontal') !== 'horizontal') continue
-      if ((b.layout || 'horizontal') !== 'horizontal') continue
-      const wa = coverWindow(a, segments)
-      const wb = coverWindow(b, segments)
-      const gap = wb.start - wa.end
-      if (gap > 0 && gap < 0.45 && time >= wa.end && time < wb.start) {
-        return time < (wa.end + wb.start) / 2 ? a : b
-      }
-    }
-  }
-  return best
-}
-
-function segmentHasDub(seg: Segment | undefined): boolean {
-  if (!seg) return false
-  const isOverlay = seg.layout === 'vertical' || seg.layout === 'label'
-  return isOverlay ? seg.dub === true : seg.dub !== false
-}
-
-function isOcrOverlayLayout(layout: Segment['layout']): layout is 'vertical' | 'label' | 'mid' {
-  return layout === 'vertical' || layout === 'label' || layout === 'mid'
-}
-
-/** Caption ngang nhưng bbox OCR nằm giữa khung → xử lý như mid (không ép đáy). */
-function effectiveOverlayLayout(
-  seg: Segment,
-  frameH: number,
-): 'vertical' | 'label' | 'mid' | null {
-  if (isOcrOverlayLayout(seg.layout)) return seg.layout
-  if (seg.bboxInherited === false) return null
-  const b = seg.bbox
-  if (!b || frameH <= 0) return null
-  const cy = b.y + b.h / 2
-  // caption vẫn là caption — tag mid chỉ vì OCR đo được Y lệch đáy cổ điển
-  if (cy > frameH * 0.18 && cy < frameH * 0.78) return 'mid'
-  return null
-}
-
-type CaptionLaneKey = 'horizontal' | 'mid' | 'vertical' | 'label'
-
-const CAPTION_LANE_DEFS: {
-  key: CaptionLaneKey
-  label: string
-  color: string
-  selected: string
-}[] = [
-  { key: 'horizontal', label: 'Caption', color: '#5DBAA0', selected: '#3da88a' },
-  { key: 'mid', label: 'CAP-MID', color: '#D4A017', selected: '#B8860B' },
-  { key: 'vertical', label: 'Dọc', color: '#8B5CF6', selected: '#7C3AED' },
-  { key: 'label', label: 'Nhãn', color: '#38BDF8', selected: '#0EA5E9' },
-]
-
-/** Lane timeline / caption: ưu tiên layout lưu; horizontal/trống + bbox giữa → mid. */
-function captionLaneOf(seg: Segment, frameH = 1920): CaptionLaneKey {
-  const lay = seg.layout
-  if (lay === 'mid' || lay === 'vertical' || lay === 'label') return lay
-  if (seg.bboxInherited === false) return 'horizontal'
-  const b = seg.bbox
-  if (b && frameH > 0) {
-    const cy = b.y + b.h / 2
-    // khớp locate._layout_from_cy (0.18–0.78)
-    if (cy > frameH * 0.18 && cy < frameH * 0.78) return 'mid'
-  }
-  return 'horizontal'
-}
-
-/** Chuẩn hoá layout theo bbox OCR — ghi đè horizontal sai khi chữ ở giữa khung. */
-function withInferredLayout(seg: Segment, frameH: number): Segment {
-  if (seg.bboxInherited && seg.bbox && seg.bbox.w >= Math.max(1, seg.bbox.h) * 8) {
-    return { ...seg, layout: 'horizontal' }
-  }
-  if (seg.layout === 'vertical' || seg.layout === 'label') return seg
-  if (seg.bboxInherited === false) {
-    return seg.layout ? seg : { ...seg, layout: 'horizontal' }
-  }
-  const lane = captionLaneOf({ ...seg, layout: undefined }, frameH)
-  if (lane === 'mid') return seg.layout === 'mid' ? seg : { ...seg, layout: 'mid' }
-  if (seg.layout === 'horizontal' || seg.layout === 'mid') return seg
-  return { ...seg, layout: 'horizontal' }
-}
-
-/** Overlay Mid/Nhãn/Dọc đang dưới gạch theo [start,end) = đúng thanh timeline solid. */
-function solidOverlaysAt(segments: Segment[], time: number): Segment[] {
-  return segments.filter(
-    (s) => isOcrOverlayLayout(s.layout) && time >= s.start && time < s.end,
-  )
-}
-
-function solidMidAt(segments: Segment[], time: number, preferId?: string | null): Segment | null {
-  const mids = solidOverlaysAt(segments, time).filter((s) => captionLaneOf(s) === 'mid')
-  if (!mids.length) return null
-  if (preferId) {
-    const sel = mids.find((s) => s.id === preferId)
-    if (sel) return sel
-  }
-  return mids.reduce((a, b) => (Math.abs(time - a.start) <= Math.abs(time - b.start) ? a : b))
-}
-
-/** OCR overlay dưới playhead — ưu tiên selected, rồi mid → label → vertical (cùng kiểu kéo bbox). */
-function solidOcrAt(segments: Segment[], time: number, preferId?: string | null): Segment | null {
-  const hits = solidOverlaysAt(segments, time)
-  if (!hits.length) return null
-  if (preferId) {
-    const sel = hits.find((s) => s.id === preferId)
-    if (sel) return sel
-  }
-  for (const lane of ['mid', 'label', 'vertical'] as const) {
-    const list = hits.filter((s) => captionLaneOf(s) === lane)
-    if (!list.length) continue
-    return list.reduce((a, b) =>
-      (Math.abs(time - a.start) <= Math.abs(time - b.start) ? a : b))
-  }
-  return hits[0]
-}
-
-/** Mọi segment đang cháy tại t (có thể chồng mid+dọc). */
-function segmentsAt(segments: Segment[], time: number): Segment[] {
-  return segments.filter((s) => time >= s.start && time < s.end)
-}
-
-function pickTimelineSeg(segments: Segment[], time: number, selectedId: string | null): Segment | null {
-  // selectedId có thể là compound shell (không có trong list đã bung) — bỏ prefer
-  const prefer =
-    selectedId && segments.some((s) => s.id === selectedId) ? selectedId : null
-  // Quy tắc: thanh vàng Mid solid dưới gạch → chọn đúng Mid đó (không stick vertical/cover pad cũ)
-  const mid = solidMidAt(segments, time, prefer)
-  if (mid) return mid
-  const labels = solidOverlaysAt(segments, time).filter((s) => captionLaneOf(s) === 'label')
-  if (labels.length) {
-    const sel = prefer ? labels.find((s) => s.id === prefer) : null
-    return sel ?? labels[0]
-  }
-  const hits = segmentsAt(segments, time)
-  if (!hits.length) return segmentAtCover(segments, time)
-  if (prefer) {
-    const sel = hits.find((s) => s.id === prefer)
-    if (sel) {
-      // Vertical dài: đừng cướp selection khi đang chỉ pad cover — nhưng solid mid đã return trên
-      return sel
-    }
-  }
-  return (
-    hits.find((s) => captionLaneOf(s) === 'horizontal')
-    ?? hits.find((s) => captionLaneOf(s) === 'vertical')
-    ?? hits[0]
-  )
-}
-
-/** Self-check: Mid solid dưới gạch luôn được chọn — không stick vertical/cover pad. */
-export function __checkSolidMidBboxPick(): void {
-  const vert = { id: 'v', start: 0, end: 400, layout: 'vertical' as const, source: '花', translation: 'x' }
-  const midA = { id: 'a', start: 100, end: 120, layout: 'mid' as const, source: '旧', translation: 'cũ' }
-  const midB = { id: 'b', start: 190, end: 220, layout: 'mid' as const, source: '打扫', translation: 'quét' }
-  const segs = [vert, midA, midB]
-  const t = 200
-  const picked = pickTimelineSeg(segs as Segment[], t, 'v')
-  if (picked?.id !== 'b') throw new Error(`expected mid b under playhead, got ${picked?.id}`)
-  const stickPad = pickTimelineSeg(segs as Segment[], t, 'a')
-  if (stickPad?.id !== 'b') throw new Error(`must not stick mid-a cover/select over solid mid-b`)
-  if (!solidMidAt(segs as Segment[], t)) throw new Error('solidMidAt missing')
-}
-
-/** Self-check: Alt+G compound — preview bung children, chữ giữ timing tuyệt đối. */
-export function __checkCompoundExpandCaptions(): void {
-  const shell = {
-    id: 'cmp1',
-    index: 0,
-    start: 10,
-    end: 20,
-    source: '',
-    translation: '',
-    voice: '',
-    isCompound: true,
-    compoundChildren: [
-      {
-        id: 'c1',
-        index: 0,
-        start: 0,
-        end: 2,
-        source: 'a',
-        translation: 'Một',
-        voice: '',
-        layout: 'horizontal' as const,
-      },
-      {
-        id: 'c2',
-        index: 1,
-        start: 3,
-        end: 5,
-        source: 'b',
-        translation: 'Hai',
-        voice: '',
-        layout: 'mid' as const,
-      },
-    ],
-  } as Segment
-  const exp = expandSegmentsForPlayback([shell])
-  if (exp.length !== 2) throw new Error(`expected 2 children, got ${exp.length}`)
-  if (exp[0].start !== 10 || exp[0].end !== 12 || exp[0].translation !== 'Một') {
-    throw new Error(`child0 bad ${JSON.stringify(exp[0])}`)
-  }
-  if (exp[1].start !== 13 || exp[1].end !== 15 || exp[1].translation !== 'Hai') {
-    throw new Error(`child1 bad ${JSON.stringify(exp[1])}`)
-  }
-  const at = pickTimelineSeg(exp, 13.5, 'cmp1')
-  if (at?.id !== 'c2') throw new Error(`prefer shell id must not hide mid child, got ${at?.id}`)
-}
-
-/** TTS manual speed từng câu (không gồm bake global). */
-function dubManualSpeed(seg: Segment): number {
-  return Math.max(0.75, Math.min(1.5, seg.ttsSpeed ?? 1))
-}
-
-/**
- * playbackRate TTS thật khi preview.
- * File wav luôn 1×; timeline đã scale theo bake → phải * bakedSpeed
- * (0.8 bake → TTS chậm 0.8×, dài gấp 1.25; 2× bake → TTS nhanh 2×).
- */
-function dubPlaybackSpeed(seg: Segment, bakedSpeed = 1): number {
-  const bake =
-    typeof bakedSpeed === 'number' && bakedSpeed > 0.2
-      ? Math.max(0.5, Math.min(2, bakedSpeed))
-      : 1
-  return Math.max(0.5, Math.min(2, dubManualSpeed(seg) * bake))
-}
-
-/**
- * Playback rate preview.
- * Bake tốc độ (0.5–2×) đã ghi vào workVideo → rate = 1 (file đã đúng nhịp).
- * Chỉ còn nhân videoSpeed từng câu khi TTS-fit (≤1, không phải bake global 0.5–2).
- */
-function previewVideoRate(
-  matchDuration: string | undefined,
-  bakedPreferVideo?: boolean,
-  segSpeed?: number,
-  bakedSpeed?: number,
-): number {
-  // File đã bake (preferVideo 0.8 hoặc Áp dụng tốc độ) → không playbackRate thêm
-  if (bakedPreferVideo || (typeof bakedSpeed === 'number' && Math.abs(bakedSpeed - 1) > 0.02)) {
-    const vs =
-      typeof segSpeed === 'number' && segSpeed > 0.2 && segSpeed < 0.995
-        ? Math.max(0.35, Math.min(1, segSpeed))
-        : 1
-    return vs
-  }
-  const base = matchDuration === 'preferVideo' ? 0.8 : 1
-  const vs =
-    typeof segSpeed === 'number' && segSpeed > 0.2 && segSpeed < 0.995
-      ? Math.max(0.35, Math.min(1, segSpeed))
-      : 1
-  return base * vs
-}
-
-/** Scale media clip list theo bake speed (Video / Âm gốc local). */
-function scaleMediaClips(list: MediaClip[], scale: number): MediaClip[] {
-  if (!list.length || Math.abs(scale - 1) < 1e-9) return list
-  return list.map((c) => ({
-    ...c,
-    start: Math.max(0, c.start * scale),
-    end: Math.max(0.05, c.end * scale),
-  }))
-}
-
-/**
- * Media-time cần để phát hết TTS khi video chạy `videoRate`.
- * wall = ad / (ttsManual * bake); media = wall * videoRate.
- * bake≠1 → TTS thật nhanh/chậm + clip timeline co giãn khớp caption.
- */
-function dubAudioAbsEnd(
-  seg: Segment,
-  _segments: Segment[],
-  videoRate = 1,
-  bakedSpeed = 1,
-): number {
-  const ttsSpeed = dubPlaybackSpeed(seg, bakedSpeed)
-  const ad = seg.audioDuration ?? 0
-  const rate = Math.max(0.2, videoRate)
-  if (ad > 0.05) {
-    return seg.start + (ad / Math.max(0.5, ttsSpeed)) * rate + 0.04
-  }
-  return Math.max(seg.end, seg.start + 0.05)
-}
-
-/** Segment TTS dưới playhead — bỏ qua id đã đọc xong (tránh lặp). */
-function segmentForDub(
-  segments: Segment[],
-  time: number,
-  videoRate = 1,
-  finishedIds?: Set<string>,
-  bakedSpeed = 1,
-): Segment | null {
-  let best: Segment | null = null
-  for (const s of segments) {
-    if (!segmentHasDub(s) || !s.audioUrl) continue
-    if (finishedIds?.has(s.id)) continue
-    if (time + 0.03 < s.start) continue
-    if (time >= dubAudioAbsEnd(s, segments, videoRate, bakedSpeed)) continue
-    // Ưu tiên câu bắt đầu gần playhead nhất (không nhảy lung tung)
-    if (
-      !best
-      || Math.abs(s.start - time) < Math.abs(best.start - time)
-      || (Math.abs(s.start - time) === Math.abs(best.start - time) && s.start > best.start)
-    ) {
-      best = s
-    }
-  }
-  return best
-}
-
-/** Chiều rộng clip TTS trên timeline (giây media) */
-function dubClipSeconds(
-  seg: Segment,
-  segments: Segment[],
-  videoRate = 1,
-  bakedSpeed = 1,
-): number {
-  return Math.max(0.05, dubAudioAbsEnd(seg, segments, videoRate, bakedSpeed) - seg.start)
-}
-
-/** Filmstrip timeline — ít khung + URL ổn định (bỏ ?v=) để không storm Range → WinError 10055. */
-function TimelineFilmstrip({
-  videoUrl,
-  duration,
-  widthPx,
-  heightPx,
-  className,
-  startSec = 0,
-  endSec,
-}: {
-  videoUrl: string
-  duration: number
-  widthPx: number
-  heightPx: number
-  className?: string
-  /** Cửa sổ media (giây) — clip đã split/xóa chỉ vẽ đoạn này */
-  startSec?: number
-  endSec?: number
-}) {
-  const canvasRef = useRef<HTMLCanvasElement>(null)
-  // Bỏ query cache-bust — cùng file MP4 không tải lại 48 lần mỗi poll
-  const stableUrl = useMemo(() => (videoUrl || '').split('?')[0], [videoUrl])
-  // Làm tròn width để zoom mượt không re-seek liên tục
-  const stripW = Math.max(1, Math.round(widthPx / 64) * 64)
-  const t0 = Math.max(0, startSec)
-  const t1 = Math.max(t0 + 0.05, endSec ?? duration)
-
-  useEffect(() => {
-    if (!stableUrl || duration <= 0 || stripW <= 0) return
-    let cancelled = false
-    const video = document.createElement('video')
-    video.src = stableUrl
-    video.muted = true
-    video.playsInline = true
-    video.preload = 'metadata'
-    const span = Math.max(0.05, t1 - t0)
-    const mediaCap = Math.max(duration, t1)
-
-    const seekTo = (t: number) => new Promise<void>((resolve) => {
-      const done = () => { video.removeEventListener('seeked', done); resolve() }
-      video.addEventListener('seeked', done)
-      try {
-        video.currentTime = Math.max(0, Math.min(mediaCap - 0.04, t))
-      } catch {
-        resolve()
-      }
-    })
-
-    void (async () => {
-      try {
-        await new Promise<void>((resolve, reject) => {
-          video.onloadeddata = () => resolve()
-          video.onerror = () => reject(new Error('filmstrip'))
-        })
-        if (cancelled) return
-        const canvas = canvasRef.current
-        const ctx = canvas?.getContext('2d')
-        if (!canvas || !ctx) return
-        const w = Math.max(1, Math.round(widthPx))
-        const h = Math.max(1, Math.round(heightPx))
-        canvas.width = w
-        canvas.height = h
-        // Tối đa 16 khung — đủ filmstrip, tránh 48× Range request
-        const n = Math.max(1, Math.min(16, Math.ceil(w / 80)))
-        const tw = w / n
-        const vW = video.videoWidth || 16
-        const vH = video.videoHeight || 9
-        const scale = Math.max(tw / vW, h / vH)
-        const dw = vW * scale
-        const dh = vH * scale
-        for (let i = 0; i < n; i++) {
-          if (cancelled) return
-          await seekTo(t0 + ((i + 0.5) / n) * span)
-          if (cancelled) return
-          const dx = i * tw + (tw - dw) / 2
-          const dy = (h - dh) / 2
-          ctx.drawImage(video, dx, dy, dw, dh)
-          if (i < n - 1) {
-            ctx.fillStyle = 'rgba(0,0,0,0.35)'
-            ctx.fillRect(i * tw + tw - 1, 0, 1, h)
-          }
-        }
-      } catch { /* preview optional */ }
-    })()
-
-    return () => {
-      cancelled = true
-      try {
-        video.pause()
-        video.removeAttribute('src')
-        video.load()
-      } catch { /* ignore */ }
-    }
-  }, [stableUrl, duration, stripW, widthPx, heightPx, t0, t1])
-
-  return (
-    <canvas
-      ref={canvasRef}
-      className={cn('pointer-events-none select-none', className)}
-      style={{ width: widthPx, height: heightPx }}
-      aria-hidden
-    />
-  )
-}
-
-// Cỡ chuẩn dùng cho toàn video. Câu dài sẽ nới vùng cover, không thu chữ.
-const AUTO_SUBTITLE_FONT = 48
-/** Khớp burn._cover_max_h — đủ 1–3 dòng theo font */
-const COVER_MAX_H_FRAME_RATIO = 0.065
-
-const COVER_SHADOW_BOT = 4
-
-function coverPad(fontSizePx = AUTO_SUBTITLE_FONT, frameW = 1080) {
-  return {
-    x: Math.max(3, Math.round(frameW * 0.003)),
-    // Chỉ chừa đủ viền/stroke; tránh chữ lọt thỏm giữa bbox.
-    top: Math.max(2, Math.round(fontSizePx * 0.04)),
-    // Match export: leave enough room for CJK descenders, outline, and shadow.
-    bottom: Math.max(18, Math.round(fontSizePx * 0.55)),
-  }
-}
-
-/** Căn giữa khối chữ trong cover (đúng giữa khung tím). */
-function captionCenterInCover(coverY: number, coverH: number, textBlockH: number) {
-  return Math.round(coverY + Math.max(0, (coverH - textBlockH) / 2))
-}
-
-/** OCR horizontal boxes often include blank space above while missing the lower stroke. */
-function shiftAutoCoverDown(box: PixelBox, fontSizePx: number, frameW: number, frameH: number): PixelBox {
-  const pad = coverPad(fontSizePx)
-  const shift = Math.max(0, Math.round(box.h * 0.26) - pad.top)
-  if (shift < 1) return box
-  return clampCoverBox(
-    { ...box, y: box.y + shift, h: Math.max(12, box.h - shift) },
-    frameW,
-    frameH,
-  )
-}
-
-const CAP_PAD_X = 2
-
-function coverInnerWidth(coverW: number, fontSizePx: number, frameW: number) {
-  const pad = coverPad(fontSizePx, frameW)
-  return Math.max(24, coverW - pad.x * 2 - CAP_PAD_X * 2)
-}
-
-function frameMaxInnerWidth(fontSizePx: number, frameW: number) {
-  // Ưu tiên gần mép 2 bên trước khi xuống dòng
-  const maxCoverW = Math.min(frameW, Math.round(frameW * 0.96))
-  return coverInnerWidth(maxCoverW, fontSizePx, frameW)
-}
-
-function coverBleedX(contentW: number, frameW = 1080) {
-  // Bleed vừa đủ stroke CJK — không nới xa
-  return Math.max(4, Math.round(contentW * 0.012), Math.round(frameW * 0.003))
-}
-
-/** Đo bề ngang mực chữ nguồn (CJK hardsub + outline) — không theo VI. */
-function measureSourceInkWidth(sourceText: string, fontSizePx: number, anchorH: number) {
-  const trimmed = sourceText.trim()
-  if (!trimmed) return 0
-  // Hardsub on-screen thường to hơn font burn; ưu tiên H OCR
-  const sourceFontPx = Math.max(Math.round(fontSizePx * 1.12), Math.round(anchorH * 0.92), 28)
-  const raw = measureLineWidth(trimmed, sourceFontPx)
-  const cjk = [...trimmed].filter((c) => c >= '\u4e00' && c <= '\u9fff').length
-  // CJK hardsub ~1.15em/glyph + viền dày hai bên
-  const cjkFloor = cjk > 0 ? Math.ceil(cjk * sourceFontPx * 1.15) : 0
-  const outline = Math.ceil(sourceFontPx * 0.5)
-  return Math.max(Math.ceil(raw * 1.2), cjkFloor) + outline
-}
-
-/**
- * Cover ngang (chuẩn):
- * 1) Che FULL chữ cũ (OCR seed + đo source + bleed)
- * 2) Fit chữ dịch nếu dài hơn
- * Caption frame nằm trong cover — không co cover theo VI.
- */
-function fitHardsubCover(
-  seed: PixelBox,
-  autoW: number,
-  fontPx: number,
-  frameW: number,
-  frameH: number,
-  sourceText: string,
-): PixelBox {
-  const pad = coverPad(fontPx, frameW)
-  const srcInk = measureSourceInkWidth(sourceText, fontPx, Math.max(seed.h, fontPx))
-  // (1) chữ cũ: seed OCR hoặc đo source — luôn tối thiểu đủ che full
-  const oldW = Math.max(seed.w, srcInk > 0 ? coverBoxWidth(srcInk, frameW) : 0)
-  // (2) chữ dịch chỉ nới thêm khi dài hơn chữ cũ
-  const w = Math.min(frameW, Math.max(oldW, autoW))
-  const cx = seed.x + seed.w / 2
-
-  // Dọc: thu trống trên OCR (ít hơn — tránh kéo phụ đề xuống), nới đáy che stroke
-  const topSlack = Math.round(seed.h * 0.14)
-  const y = Math.max(0, seed.y + topSlack - pad.top)
-  const botExtra = Math.max(pad.bottom, Math.round(seed.h * 0.15), Math.round(fontPx * 0.22))
-  const bottom = seed.y + seed.h + botExtra
-  const h = Math.max(12, Math.min(frameH - y, bottom - y))
-
-  return clampCoverBox(
-    {
-      x: Math.round(Math.max(0, Math.min(frameW - w, cx - w / 2))),
-      y: Math.round(y),
-      w: Math.round(w),
-      h: Math.round(h),
-    },
-    frameW,
-    frameH,
-  )
-}
-
-/** Chiều ngang ink chữ cũ: max(OCR anchor, đo source, cover đã lưu). */
-function resolveInkWidth(
-  anchor: PixelBox,
-  coverBox: PixelBox | null,
-  hasSource: boolean,
-  sourceW: number,
-  frameW = 1080,
-): number {
-  let w = hasSource ? Math.max(sourceW, anchor.w) : anchor.w
-  if (coverBox) {
-    w = Math.max(w, coverBox.w - coverBleedX(coverBox.w, frameW) * 2)
-  }
-  return w
-}
-
-function coverContentWidth(origW: number, transW: number) {
-  return Math.max(origW, transW)
-}
-
-function coverBoxWidth(contentW: number, frameW: number) {
-  const bleed = coverBleedX(contentW, frameW)
-  return Math.min(frameW, Math.ceil(contentW + bleed * 2))
-}
-
-type OverLayout = { cover: PixelBox; caption: PixelBox; lines: string[]; fontPx?: number }
-
-let _measureCtx: CanvasRenderingContext2D | null = null
-function measureLineWidth(text: string, fontSizePx: number) {
-  if (typeof document !== 'undefined') {
-    if (!_measureCtx) {
-      const c = document.createElement('canvas')
-      _measureCtx = c.getContext('2d')
-    }
-    if (_measureCtx) {
-      _measureCtx.font = `700 ${fontSizePx}px system-ui, -apple-system, "Segoe UI", sans-serif`
-      return _measureCtx.measureText(text).width
-    }
-  }
-  return text.length * fontSizePx * 0.40
-}
-
-/** Xuống dòng — đổ ngang tối đa trước, rồi mới cân 2–3 dòng */
-function wrapCaptionText(text: string, maxInnerW: number, fontSizePx: number, maxLines = 3): string[] {
-  const trimmed = text.trim()
-  if (!trimmed) return ['']
-  // system-ui đo hơi rộng hơn font burn/preview — chừa ~8% tránh xuống dòng sớm
-  const fits = (s: string) => measureLineWidth(s, fontSizePx) <= maxInnerW * 1.08
-  if (fits(trimmed)) return [trimmed]
-
-  const words = trimmed.split(/\s+/).filter(Boolean)
-  if (words.length <= 1) return [trimmed]
-
-  const lineWidth = (s: string) => measureLineWidth(s, fontSizePx)
-
-  const lines: string[] = []
-  let cur = words[0]
-  for (let i = 1; i < words.length; i++) {
-    const trial = `${cur} ${words[i]}`
-    if (fits(trial)) cur = trial
-    else {
-      lines.push(cur)
-      cur = words[i]
-      if (lines.length >= maxLines - 1) {
-        lines.push([cur, ...words.slice(i + 1)].join(' '))
-        break
-      }
-    }
-  }
-  if (lines.length < maxLines || !lines.length) lines.push(cur)
-  let out = lines.slice(0, maxLines)
-
-  while (out.length > 1) {
-    const last = out[out.length - 1]
-    const prev = out[out.length - 2]
-    const merged = `${prev} ${last}`
-    if (fits(merged)) out.splice(-2, 2, merged)
-    else break
-  }
-
-  // Tránh dòng cuối mồ côi — chỉ cân 2 dòng khi bắt buộc wrap (không ép 2 dòng khi 1 dòng đủ)
-  if (out.length >= 2 && maxLines >= 2 && !fits(trimmed)) {
-    const last = out[out.length - 1]
-    const lastW = lineWidth(last)
-    const orphan = last.split(/\s+/).length <= 2 && lastW < maxInnerW * 0.28
-    if (orphan || out.length >= 3) {
-      let best: string[] | null = null
-      let bestScore = Infinity
-      for (let i = 1; i < words.length; i++) {
-        const a = words.slice(0, i).join(' ')
-        const b = words.slice(i).join(' ')
-        if (!fits(a) || !fits(b)) continue
-        const wa = lineWidth(a)
-        const wb = lineWidth(b)
-        const score = Math.abs(wa - wb) + (wb < maxInnerW * 0.22 ? 80 : 0)
-        if (score < bestScore) {
-          bestScore = score
-          best = [a, b]
-        }
-      }
-      if (best) out = best
-    }
-  }
-
-  return out
-}
-
-/** Layout over: cover sát chữ gốc; chỉ nới ngang khi bản dịch dài hơn */
-function layoutOverMode(
-  anchor: PixelBox,
-  text: string,
-  fontSizePx: number,
-  frameW: number,
-  frameH: number,
-  sourceText = '',
-  inkW?: number,
-): OverLayout {
-  const pad = coverPad(fontSizePx, frameW)
-  const cx = anchor.x + anchor.w / 2
-  const trimmed = text.trim()
-  const oneLineW = measureLineWidth(trimmed, fontSizePx)
-  const maxInnerW = frameMaxInnerWidth(fontSizePx, frameW)
-
-  const lines = oneLineW <= maxInnerW * 1.1
-    ? [trimmed]
-    : wrapCaptionText(trimmed, maxInnerW, fontSizePx, 3)
-
-  const lineH = fontSizePx * 1.12
-  const textBlockH = Math.ceil(lines.length * lineH + 4)
-  const textW = Math.max(...lines.map((l) => measureLineWidth(l, fontSizePx)), oneLineW)
-
-  const sourceTrim = sourceText.trim()
-  const sourceW = sourceTrim ? measureSourceInkWidth(sourceTrim, fontSizePx, anchor.h) : 0
-  const origW = inkW ?? (sourceTrim ? Math.max(sourceW, anchor.w) : anchor.w)
-  const contentW = coverContentWidth(origW, textW)
-  const capPadX = 2
-  const captionW = Math.ceil(textW + capPadX * 2)
-  const coverW = Math.min(frameW, Math.max(coverBoxWidth(contentW, frameW), captionW))
-  const coverX = Math.round(Math.max(0, Math.min(frameW - coverW, cx - coverW / 2)))
-  const coverY = Math.max(0, anchor.y - pad.top)
-  const coverH = Math.min(
-    frameH - coverY,
-    Math.max(anchor.h, textBlockH) + pad.top + pad.bottom + COVER_SHADOW_BOT,
-  )
-
-  const captionX = Math.round(Math.max(0, Math.min(frameW - captionW, cx - captionW / 2)))
-  const captionY = captionCenterInCover(coverY, coverH, textBlockH)
-
-  return {
-    cover: { x: Math.round(coverX), y: Math.round(coverY), w: Math.round(coverW), h: Math.round(coverH) },
-    caption: { x: captionX, y: captionY, w: captionW, h: textBlockH },
-    lines,
-  }
-}
-
-/** Thu bbox cũ bị kế thừa quá rộng; giữ nguyên tâm/Y/H của vùng OCR. */
-function tightenStoredBbox(
-  seg: Pick<Segment, 'source' | 'bboxInherited'>,
-  box: PixelBox,
-  frameW: number,
-): PixelBox {
-  // Poly OCR thật đã có đúng hai biên: tuyệt đối không thu lại.
-  if (!seg.bboxInherited) return box
-  const cjk = [...(seg.source ?? '')].filter((c) => c >= '\u4e00' && c <= '\u9fff').length
-  if (cjk < 1) return box
-  const glyphW = Math.max(18, box.h * 0.68)
-  const expectedW = Math.max(box.h * 1.15, cjk * glyphW + 12)
-  if (expectedW >= box.w * 0.94) return box
-  // Tighten conservatively: at most 10%, and never below the estimated old text.
-  const w = Math.max(48, Math.min(box.w, Math.round(Math.max(expectedW, box.w * 0.9))))
-  const cx = box.x + box.w / 2
-  const x = Math.max(0, Math.min(frameW - w, Math.round(cx - w / 2)))
-  return { ...box, x, w }
-}
-
-/** Cover hiển thị / xuất — bbox lưu trực tiếp khung này (mode over). */
-function resolveSegmentCover(
-  seg: Segment | undefined,
-  settings: ProjectSettings,
-  frameW: number,
-  frameH: number,
-): PixelBox | null {
-  if (!seg) return null
-  const fontPx = resolveCaptionFontSize(seg, settings, frameW, frameH)
-  const over = settings.coverHardsubs && settings.burnSubs && seg.translation.trim()
-  if (isOcrOverlayLayout(seg.layout)) {
-    return overlayCoverSeed(seg, frameW, frameH)
-  }
-  if (!over) {
-    const seed = seg.bbox
-      ? tightenStoredBbox(seg, clampCoverBox(seg.bbox, frameW, frameH), frameW)
-      : seedCoverBox(seg, frameW, frameH, fontPx)
-    if (!seed) return null
-    return normalizeCoverBox(seed, frameW, frameH, fontPx)
-  }
-  if (seg.bbox) {
-    return tightenStoredBbox(seg, clampCoverBox(seg.bbox, frameW, frameH), frameW)
-  }
-  const seed = seedCoverBox(seg, frameW, frameH, fontPx)
-  if (!seed) return null
-  const anchor = normalizeCoverBox(seed, frameW, frameH, fontPx)
-  return fitCoverBoxOver(anchor, seg.translation, fontPx, frameW, frameH, seg.source ?? '')
-}
-
-/** Seed khung che overlay: chỉ fallback đúng layout; không bbox CJK → null (đừng bịa cột dọc). */
-function overlayCoverSeed(seg: Segment, frameW: number, frameH: number): PixelBox | null {
-  const layout: 'vertical' | 'label' | 'mid' | 'horizontal' =
-    seg.layout === 'label'
-      ? 'label'
-      : seg.layout === 'mid'
-        ? 'mid'
-        : seg.layout === 'vertical'
-          ? 'vertical'
-          : 'horizontal'
-  if (!seg.bbox) {
-    // CJK chờ OCR thật — không đoán cột trái / giữa (gây caption “từ trên trời”)
-    if (layout === 'horizontal' || isCjkHardsubSource(seg.source)) return null
-    return clampCoverBox(ocrFallbackCover(frameW, frameH, layout), frameW, frameH)
-  }
-  const box = tightenStoredBbox(seg, clampCoverBox(seg.bbox, frameW, frameH), frameW)
-  if (layout === 'vertical' && box.w > box.h * 0.85) {
-    return clampCoverBox(ocrFallbackCover(frameW, frameH, 'vertical'), frameW, frameH)
-  }
-  // mid: chỉ bỏ khung gần full-frame (lưới đáy nhầm). 2 dòng hardsub giữa/đáy vẫn giữ.
-  if (layout === 'mid' && (box.w > frameW * 0.92 || box.h > frameH * 0.28)) {
-    return clampCoverBox(ocrFallbackCover(frameW, frameH, 'mid'), frameW, frameH)
-  }
-  if (layout === 'label' && (box.w > frameW * 0.7 || box.h > frameH * 0.35)) {
-    return clampCoverBox(ocrFallbackCover(frameW, frameH, 'label'), frameW, frameH)
-  }
-  return box
-}
-
-function isBadOverlayStoredCover(seg: Segment, cover: PixelBox, frameW = 1080, frameH = 1920): boolean {
-  if (seg.layout === 'vertical' && cover.w > cover.h * 0.85) return true
-  // ponytail: trước đây w>65%/h>12% quăng mid 2 dòng → fallback giữa → chữ đáy lộ + "bbox ẩn"
-  if (seg.layout === 'mid' && (cover.w > frameW * 0.92 || cover.h > frameH * 0.28)) return true
-  if (seg.layout === 'label' && (cover.w > frameW * 0.7 || cover.h > frameH * 0.35)) return true
-  return false
-}
-
-function toCaptionLayout(caption: PixelBox, lines: string[], fontSize: number): NonNullable<Segment['captionLayout']> {
-  return { x: caption.x, y: caption.y, w: caption.w, h: caption.h, lines, fontSize }
-}
-
-/** User đã kéo tay / lưu layout — giữ nguyên bbox (không adaptive reset). */
-function hasStoredLayout(seg: Segment | undefined, fontPx?: number): boolean {
-  const cl = seg?.captionLayout
-  const b = seg?.bbox
-  if (!(b && cl?.lines?.length && cl.w > 0 && cl.h > 0)) return false
-  if (fontPx != null && fontPx > 0 && cl.fontSize > 0 && fontPx !== cl.fontSize) return false
-  return true
-}
-
-/** Đọc đúng bbox + captionLayout đã lưu — không tính lại (preview = xuất). */
-function storedOverLayout(seg: Segment, frameW: number, frameH: number): OverLayout | null {
-  const cl = seg.captionLayout
-  const b = seg.bbox
-  if (!b || !cl?.lines?.length || cl.w <= 0 || cl.h <= 0) return null
-  return {
-    cover: tightenStoredBbox(seg, clampCoverBox(b, frameW, frameH), frameW),
-    caption: {
-      x: Math.round(cl.x),
-      y: Math.round(cl.y),
-      w: Math.max(1, Math.round(cl.w)),
-      h: Math.max(1, Math.round(cl.h)),
-    },
-    lines: cl.lines.map(String),
-  }
-}
-
-/** Chỉ gọi khi chưa có layout lưu hoặc user vừa chỉnh cover/chữ. */
-function resolveOverLayout(
-  seg: Segment | undefined,
-  settings: ProjectSettings,
-  frameW: number,
-  frameH: number,
-  coverOverride?: PixelBox,
-): OverLayout | null {
-  if (!seg?.translation.trim()) return null
-  if (!settings.burnSubs) return null
-  const fontPx = resolveCaptionFontSize(seg, settings, frameW, frameH)
-
-  // Overlay OCR mid / dọc / nhãn — hoặc horizontal có bbox giữa khung
-  // (không phụ thuộc coverHardsubs: chữ vẫn đúng chỗ; mask mới cần cover)
-  const overlayLay = effectiveOverlayLayout(seg, frameH)
-  if (overlayLay) {
-    const preferred = resolveOverlayFontPreferred(seg)
-    if (coverOverride) {
-      // Kéo tay: fit theo khung draft (preferred=0 trừ khi user khóa fontSize trên đoạn)
-      // Không khóa captionLayout.fontSize cũ — không thì thả chuột chữ tụt bé lại.
-      const lockFs = resolveOverlayFontPreferred(seg)
-      const laid = layoutOcrOverlay(overlayLay, coverOverride, seg.translation, lockFs, frameW, frameH)
-      return {
-        cover: clampCoverBox(coverOverride, frameW, frameH),
-        caption: laid.caption,
-        lines: laid.lines,
-        fontPx: laid.fontPx,
-      }
-    }
-    if (hasStoredLayout(seg, undefined)) {
-      const stored = storedOverLayout(seg, frameW, frameH)
-      if (stored && !isBadOverlayStoredCover(seg, stored.cover, frameW, frameH)) {
-        // Tin bbox/mask đã lưu; chữ xếp lại trong cover (tránh captionLayout x/y lệch → chữ sai chỗ)
-        const cover = stored.cover
-        // captionLayout.fontSize là kết quả auto cũ, không phải lựa chọn khóa
-        // của người dùng. Bỏ nó để bbox dài tự tính lại font lớn nhất có thể.
-        // 0 = auto fit bbox; preferred chỉ khi user set fontSize đoạn
-        const want = preferred > 0 ? preferred : 0
-        const laid = layoutOcrOverlay(overlayLay, cover, seg.translation, want, frameW, frameH)
-        return {
-          cover,
-          caption: laid.caption,
-          lines: laid.lines,
-          fontPx: laid.fontPx,
-        }
-      }
-    }
-    // mid/dọc/nhãn: cover = bbox OCR (không nới theo VI); chưa OCR → không bịa khung
-    const seed = overlayCoverSeed(seg, frameW, frameH)
-    if (!seed) return null
-    const want = preferred > 0 ? preferred : 0
-    const laid = layoutOcrOverlay(overlayLay, seed, seg.translation, want, frameW, frameH)
-    // cover luôn = seed/bbox đã định vị (layout không được phình)
-    return {
-      cover: clampCoverBox(seed, frameW, frameH),
-      caption: laid.caption,
-      lines: laid.lines,
-      fontPx: laid.fontPx,
-    }
-  }
-
-  // Caption đáy/over horizontal — cần chế độ che chữ
-  if (!(settings.coverHardsubs && settings.burnSubs)) return null
-
-  // Đang kéo: bám đúng draft (user chỉnh tay)
-  if (coverOverride) {
-    return manualCoverLayout(coverOverride, seg.translation, fontPx, frameW, frameH, true)
-  }
-
-  // Đã lưu từ editor (kéo tay) — giữ đúng bbox; chỉ xếp chữ trong cover (như mid)
-  if (hasStoredLayout(seg, fontPx)) {
-    const stored = storedOverLayout(seg, frameW, frameH)
-    if (!stored) return null
-    const laid = manualCoverLayout(stored.cover, seg.translation, fontPx, frameW, frameH, true)
-    return { ...laid, fontPx }
-  }
-
-  const seedRaw = seg.bbox
-    ? tightenStoredBbox(seg, clampCoverBox(seg.bbox, frameW, frameH), frameW)
-    : seedCoverBox(seg, frameW, frameH, fontPx)
-      // Whisper can provide a translated horizontal caption without an OCR bbox.
-      // In cover mode, use the same bottom fallback shown by the editor handles so
-      // the mask and translated text are rendered instead of silently disappearing.
-      ?? fallbackCoverBox(frameW, frameH, fontPx)
-  const normalizedSeed = normalizeCoverBox(seedRaw, frameW, frameH, fontPx)
-  // User-owned bbox: fixed; OCR auto: vẫn có thể shift nhẹ xuống
-  const seed = seg.bbox && seg.bboxInherited !== false
-    ? shiftAutoCoverDown(normalizedSeed, fontPx, frameW, frameH)
-    : normalizedSeed
-
-  // Bbox OCR / user: cover cố định như mid — fit chữ trong box, không phình sau drag
-  const anchor = coverToAnchor(seed, fontPx, frameW)
-  if (seg.bbox) {
-    if (seg.bboxInherited === false) {
-      const laid = manualCoverLayout(seed, seg.translation, fontPx, frameW, frameH, true)
-      return { ...laid, fontPx }
-    }
-    const autoFontPx = autoFontFromBbox(seed, seg.translation, fontPx)
-    const laid = manualCoverLayout(seed, seg.translation, autoFontPx, frameW, frameH, true)
-    return { ...laid, fontPx: autoFontPx }
-  }
-
-  const sourceTrim = (seg.source ?? '').trim()
-  const sourceW = sourceTrim ? measureSourceInkWidth(sourceTrim, fontPx, anchor.h) : 0
-  const inkW = resolveInkWidth(anchor, seed, !!sourceTrim, sourceW, frameW)
-  const auto = layoutOverMode(anchor, seg.translation, fontPx, frameW, frameH, seg.source ?? '', inkW)
-  const cover = fitHardsubCover(seed, auto.cover.w, fontPx, frameW, frameH, seg.source ?? '')
-  const laid = layoutCaptionInCover(cover, seg.translation, fontPx, frameW)
-  return { cover, ...laid, fontPx }
-}
-
-function cropCoversFull(crop: CropRect, frameW: number, frameH: number): boolean {
-  return crop.x <= 1 && crop.y <= 1 && crop.w >= frameW - 2 && crop.h >= frameH - 2
-}
-
-function intersectBox(a: PixelBox, crop: CropRect): PixelBox | null {
-  const x = Math.max(a.x, crop.x)
-  const y = Math.max(a.y, crop.y)
-  const x2 = Math.min(a.x + a.w, crop.x + crop.w)
-  const y2 = Math.min(a.y + a.h, crop.y + crop.h)
-  if (x2 - x < 4 || y2 - y < 4) return null
-  return { x: Math.round(x), y: Math.round(y), w: Math.round(x2 - x), h: Math.round(y2 - y) }
-}
-
-function unionBox(a: PixelBox, b: PixelBox): PixelBox {
-  const x = Math.min(a.x, b.x)
-  const y = Math.min(a.y, b.y)
-  const x2 = Math.max(a.x + a.w, b.x + b.w)
-  const y2 = Math.max(a.y + a.h, b.y + b.h)
-  return { x: Math.round(x), y: Math.round(y), w: Math.round(x2 - x), h: Math.round(y2 - y) }
-}
-
-type PreviewOverLayout = OverLayout & { mask: PixelBox }
-
-/** Mask che chữ gốc — không cần bản dịch (mid/label/dọc OCR). */
-function resolveCoverMaskOnly(
-  seg: Segment,
-  frameW: number,
-  frameH: number,
-  crop: CropRect,
-  coverOverride?: PixelBox,
-): PixelBox | null {
-  const seed = coverOverride ?? overlayCoverSeed(seg, frameW, frameH)
-  if (!seed) return null
-  const cover = clampCoverBox(seed, frameW, frameH)
-  if (cropCoversFull(crop, frameW, frameH)) return cover
-  const ink = intersectBox(cover, crop) ?? intersectBox(
-    seg.bbox ? clampCoverBox(seg.bbox, frameW, frameH) : cover,
-    crop,
-  )
-  return ink ? unionBox(ink, cover) : cover
-}
-
-/** Preview: dùng layout đã giãn ngang; 9:16 chỉ thêm mask che OCR trong crop. */
-function resolvePreviewOverLayout(
-  seg: Segment | undefined,
-  settings: ProjectSettings,
-  frameW: number,
-  frameH: number,
-  crop: CropRect,
-  coverOverride?: PixelBox,
-): PreviewOverLayout | null {
-  const base = resolveOverLayout(seg, settings, frameW, frameH, coverOverride)
-  if (!base) return null
-  if (cropCoversFull(crop, frameW, frameH)) {
-    return { ...base, mask: base.cover }
-  }
-  const ink = intersectBox(base.cover, crop) ?? intersectBox(
-    seg!.bbox ? clampCoverBox(seg!.bbox, frameW, frameH) : base.cover,
-    crop,
-  )
-  const mask = ink ? unionBox(ink, base.cover) : base.cover
-  return { ...base, mask }
-}
-
-function estimatePreviewCaptionBox(
-  ocr: PixelBox,
-  text: string,
-  fontSizePx: number,
-  frameW: number,
-  frameH: number,
-  crop: CropRect,
-  placement: 'over' | 'below' | 'above',
-): PixelBox {
-  if (cropCoversFull(crop, frameW, frameH)) {
-    return estimateCaptionBox(ocr, text, fontSizePx, frameW, frameH, placement)
-  }
-  const localOcr = {
-    x: Math.max(0, ocr.x - crop.x),
-    y: Math.max(0, ocr.y - crop.y),
-    w: Math.min(ocr.w, crop.w),
-    h: Math.min(ocr.h, crop.h),
-  }
-  const box = estimateCaptionBox(localOcr, text, fontSizePx, crop.w, crop.h, placement)
-  return { x: box.x + crop.x, y: box.y + crop.y, w: box.w, h: box.h }
-}
-
-function segmentWithLayout(seg: Segment, layout: OverLayout, fontPx: number): Segment {
-  return {
-    ...seg,
-    bbox: { x: layout.cover.x, y: layout.cover.y, w: layout.cover.w, h: layout.cover.h },
-    captionLayout: toCaptionLayout(layout.caption, layout.lines, layout.fontPx ?? fontPx),
-  }
-}
-
-/**
- * below/above (không cover): bake đúng khung chữ preview (`estimateCaptionBox`).
- * Không dùng resolveOverLayout — hàm đó chỉ trả layout khi cover / OCR overlay.
- */
-function resolveBelowAboveLayout(
-  seg: Segment,
-  settings: ProjectSettings,
-  frameW: number,
-  frameH: number,
-  placement: 'below' | 'above',
-): OverLayout | null {
-  if (!seg.translation.trim()) return null
-  const fontPx = resolveCaptionFontSize(seg, settings, frameW, frameH)
-  const ocr =
-    (seg.bbox ? clampCoverBox(seg.bbox, frameW, frameH) : null)
-    ?? seedCoverBox(seg, frameW, frameH, fontPx)
-    ?? fallbackCoverBox(frameW, frameH, fontPx)
-  const innerW = Math.min(frameW, Math.round(frameW * 0.88))
-  const lines = wrapCaptionText(seg.translation, innerW, fontPx, 3)
-  const caption = estimateCaptionBox(ocr, seg.translation, fontPx, frameW, frameH, placement)
-  return { cover: ocr, caption, lines, fontPx }
-}
-
-/** Bake đúng layout đang hiện ở preview vào segment — Xuất bản khóa WYSIWYG. */
-function buildExportSegments(
-  segments: Segment[],
-  settings: ProjectSettings,
-  frameW: number,
-  frameH: number,
-): Segment[] {
-  if (!settings.burnSubs || frameW <= 0) return segments
-  const place = captionPlacement(settings)
-  return segments.map((seg) => {
-    if (!seg.translation.trim()) return seg
-    const layout = resolveOverLayout(seg, settings, frameW, frameH)
-    if (layout) {
-      const fontPx = layout.fontPx ?? resolveCaptionFontSize(seg, settings, frameW, frameH)
-      return segmentWithLayout(seg, layout, fontPx)
-    }
-    // Chèn dưới/trên: bake mid + horizontal (không dọc/nhãn) — khớp preview emerald box
-    if (
-      (place === 'below' || place === 'above')
-      && seg.layout !== 'vertical'
-      && seg.layout !== 'label'
-    ) {
-      const baked = resolveBelowAboveLayout(seg, settings, frameW, frameH, place)
-      if (baked) {
-        return segmentWithLayout(seg, baked, baked.fontPx ?? resolveCaptionFontSize(seg, settings, frameW, frameH))
-      }
-    }
-    return seg
-  })
-}
-
-function isCjkHardsubSource(src: string | undefined): boolean {
-  let cjk = 0
-  for (const c of src ?? '') {
-    if (c >= '\u4e00' && c <= '\u9fff') cjk += 1
-  }
-  return cjk >= 2
-}
-
-/** Anchor OCR suy từ cover — chỉ để căn caption */
-function coverToAnchor(cover: PixelBox, fontSizePx: number, frameW = 1080): PixelBox {
-  const pad = coverPad(fontSizePx, frameW)
-  return {
-    x: Math.round(cover.x + pad.x),
-    y: Math.round(cover.y + pad.top),
-    w: Math.max(12, Math.round(cover.w - pad.x * 2)),
-    h: Math.max(12, Math.round(cover.h - pad.top - pad.bottom)),
-  }
-}
-
-function coverMaxHeight(frameH: number, fontSizePx = AUTO_SUBTITLE_FONT) {
-  const one = Math.round(fontSizePx * 1.45 + 10)
-  const cap = Math.round(fontSizePx * 3.4 + 16)
-  const byFrame = Math.round(frameH * COVER_MAX_H_FRAME_RATIO)
-  return Math.max(one, Math.min(cap, byFrame))
-}
-
-/** Giữ nguyên chiều cao OCR — chỉ kẹp trần sanity, không cắt hardsub */
-function normalizeCoverBox(box: PixelBox, frameW: number, frameH: number, _fontSizePx = AUTO_SUBTITLE_FONT): PixelBox {
-  let { x, y, w, h } = box
-  const sanityMaxH = Math.round(frameH * 0.15)
-  const sanityMaxW = Math.round(frameW * 0.85)
-  if (h > sanityMaxH) {
-    const cy = y + h / 2
-    h = sanityMaxH
-    y = Math.round(Math.max(0, Math.min(frameH - h, cy - h / 2)))
-  }
-  if (w > sanityMaxW) {
-    const cx = x + w / 2
-    w = sanityMaxW
-    x = Math.round(Math.max(0, Math.min(frameW - w, cx - w / 2)))
-  }
-  x = Math.max(0, Math.min(x, frameW - 12))
-  y = Math.max(0, Math.min(y, frameH - 12))
-  w = Math.max(12, Math.min(w, frameW - x))
-  h = Math.max(12, Math.min(h, frameH - y))
-  return { x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h) }
-}
-
-/** Kéo tay: chỉ kẹp trong khung video, không cắt theo % sanity. */
-function clampCoverBox(box: PixelBox, frameW: number, frameH: number, minSize = 12): PixelBox {
-  let { x, y, w, h } = box
-  x = Math.max(0, Math.min(x, frameW - minSize))
-  y = Math.max(0, Math.min(y, frameH - minSize))
-  w = Math.max(minSize, Math.min(w, frameW - x))
-  h = Math.max(minSize, Math.min(h, frameH - y))
-  return { x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h) }
-}
-
-/** Caption trong cover cố định. Cover đã che chữ cũ — chỉ xếp chữ + khung text bên trong. */
-function layoutCaptionInCover(
-  cover: PixelBox,
-  text: string,
-  fontSizePx: number,
-  _frameW: number,
-): Pick<OverLayout, 'caption' | 'lines'> {
-  const trimmed = text.trim()
-  // Gần full bề ngang cover (pad mỏng) — tránh trừ pad quá mạnh → wrap sớm
-  const edge = Math.max(4, Math.round(cover.w * 0.03))
-  const maxInnerW = Math.max(24, cover.w - edge * 2)
-  const oneLineW = measureLineWidth(trimmed, fontSizePx)
-  const lines = oneLineW <= maxInnerW * 1.1
-    ? [trimmed]
-    : wrapCaptionText(trimmed, maxInnerW, fontSizePx, 3)
-  const lineH = fontSizePx * 1.12
-  const textBlockH = Math.ceil(lines.length * lineH + 4)
-  const textW = Math.max(...lines.map((l) => measureLineWidth(l, fontSizePx)), oneLineW)
-  // Khung chữ = text; không co cover. 1 dòng: trải gần full cover để căn giữa đẹp
-  const captionW = Math.ceil(
-    lines.length === 1
-      ? Math.min(cover.w, Math.max(textW + CAP_PAD_X * 2, cover.w - edge * 2))
-      : Math.min(cover.w, textW + CAP_PAD_X * 2),
-  )
-  const cx = cover.x + cover.w / 2
-  const captionX = Math.round(Math.max(cover.x, Math.min(cover.x + cover.w - captionW, cx - captionW / 2)))
-  const captionY = captionCenterInCover(cover.y, cover.h, textBlockH)
-  return {
-    caption: { x: captionX, y: captionY, w: captionW, h: textBlockH },
-    lines,
-  }
-}
-
-/** Tự co/giãn cover theo chữ — ngang trước; giữ mép trên (không kéo bbox lên). */
-function adaptiveCoverLayout(
-  cover: PixelBox,
-  text: string,
-  fontSizePx: number,
-  frameW: number,
-  frameH: number,
-): OverLayout {
-  const pad = coverPad(fontSizePx, frameW)
-  const cx = cover.x + cover.w / 2
-  const topY = cover.y
-  const trimmed = text.trim()
-  const maxInnerW = frameMaxInnerWidth(fontSizePx, frameW)
-  const oneLineW = measureLineWidth(trimmed, fontSizePx)
-
-  const wrapAt = (innerW: number) =>
-    oneLineW <= innerW ? [trimmed] : wrapCaptionText(trimmed, innerW, fontSizePx, 3)
-
-  let lines = wrapAt(maxInnerW)
-
-  const sizeFromLines = (ls: string[]) => {
-    const lineH = fontSizePx * 1.12
-    const textBlockH = Math.ceil(ls.length * lineH + 4)
-    const textW = Math.max(...ls.map((l) => measureLineWidth(l, fontSizePx)), 1)
-    const captionW = Math.ceil(textW + CAP_PAD_X * 2)
-    // Giữ tối thiểu bề ngang cover cũ (OCR) — không co về sát VI
-    const coverW = Math.min(frameW, Math.max(cover.w, captionW + pad.x * 2))
-    const byText = textBlockH + pad.top + pad.bottom + COVER_SHADOW_BOT
-    const coverH = Math.min(frameH, Math.max(cover.h, byText))
-    return { lineH, textBlockH, textW, captionW, coverW, coverH }
-  }
-
-  let { textBlockH, captionW, coverW, coverH } = sizeFromLines(lines)
-  let coverX = Math.round(Math.max(0, Math.min(frameW - coverW, cx - coverW / 2)))
-  let coverY = Math.round(Math.max(0, Math.min(frameH - coverH, topY)))
-  let box = clampCoverBox({ x: coverX, y: coverY, w: coverW, h: coverH }, frameW, frameH)
-
-  const inner = coverInnerWidth(box.w, fontSizePx, frameW)
-  const finalLines = wrapAt(inner)
-  if (finalLines.join('\n') !== lines.join('\n')) {
-    lines = finalLines
-    const sized = sizeFromLines(lines)
-    textBlockH = sized.textBlockH
-    captionW = sized.captionW
-    coverW = sized.coverW
-    coverH = sized.coverH
-    coverX = Math.round(Math.max(0, Math.min(frameW - coverW, cx - coverW / 2)))
-    coverY = Math.round(Math.max(0, Math.min(frameH - coverH, topY)))
-    box = clampCoverBox({ x: coverX, y: coverY, w: coverW, h: coverH }, frameW, frameH)
-  }
-
-  const capX = Math.round(Math.max(box.x, Math.min(box.x + box.w - captionW, box.x + box.w / 2 - captionW / 2)))
-  const capY = captionCenterInCover(box.y, box.h, textBlockH)
-  return {
-    cover: box,
-    caption: { x: capX, y: capY, w: Math.min(captionW, box.w), h: textBlockH },
-    lines,
-  }
-}
-
-function manualCoverLayout(
-  cover: PixelBox,
-  text: string,
-  fontSizePx: number,
-  frameW: number,
-  frameH: number,
-  fixed = false,
-): OverLayout {
-  if (fixed) {
-    // A manually edited bbox is authoritative. Never grow or recenter it to
-    // accommodate text; doing so made the box snap back immediately on release.
-    const box = clampCoverBox(cover, frameW, frameH)
-    return { cover: box, ...layoutCaptionInCover(box, text, fontSizePx, frameW) }
-  }
-  return adaptiveCoverLayout(cover, text, fontSizePx, frameW, frameH)
-}
-
-/** Cover mặc định phụ đề đáy — chỉ khi không phải CJK chờ OCR. */
-function fallbackCoverBox(frameW: number, frameH: number, fontSizePx = AUTO_SUBTITLE_FONT): PixelBox {
-  const h = coverMaxHeight(frameH, fontSizePx)
-  const w = Math.round(frameW * 0.4)
-  return {
-    x: Math.round((frameW - w) / 2),
-    y: Math.round(frameH - h - Math.round(frameH * 0.06)),
-    w,
-    h,
-  }
-}
-
-/**
- * Seed cover: bbox OCR nếu có.
- * CJK chưa bbox → null (không đoán giữa/đáy — video khác nhau vị trí khác nhau).
- */
-function seedCoverBox(
-  seg: Pick<Segment, 'source' | 'bbox' | 'layout'> | undefined,
-  frameW: number,
-  frameH: number,
-  fontSizePx = AUTO_SUBTITLE_FONT,
-): PixelBox | null {
-  if (seg?.bbox) {
-    return tightenStoredBbox(seg, clampCoverBox(seg.bbox, frameW, frameH), frameW)
-  }
-  if (seg && isCjkHardsubSource(seg.source)) return null
-  return fallbackCoverBox(frameW, frameH, fontSizePx)
-}
-
-/** Khung chữ dịch — below/above hoặc fallback */
-function tightCaptionTextBox(
-  text: string,
-  fontSizePx: number,
-  frameW: number,
-  frameH: number,
-  wrapW?: number,
-): PixelBox {
-  const pad = coverPad(fontSizePx, frameW)
-  const innerW = wrapW ?? Math.min(frameW, Math.round(frameW * 0.88))
-  const lines = wrapCaptionText(text, innerW, fontSizePx, 3)
-  const lineH = fontSizePx * 1.12
-  const textW = Math.min(innerW, Math.max(...lines.map((l) => measureLineWidth(l, fontSizePx)), 1))
-  return {
-    x: 0,
-    y: 0,
-    w: Math.min(frameW, Math.ceil(textW + pad.x * 2)),
-    h: Math.min(frameH, Math.ceil(lines.length * lineH + pad.top + pad.bottom)),
-  }
-}
-
-function fitCoverBoxOver(
-  anchor: PixelBox,
-  text: string,
-  fontSizePx: number,
-  frameW: number,
-  frameH: number,
-  sourceText = '',
-): PixelBox {
-  return layoutOverMode(anchor, text, fontSizePx, frameW, frameH, sourceText).cover
-}
-
-/** Font preview: cqw theo chiều ngang caption (1 dòng), cqh khi nhiều dòng */
-function captionFontStyle(
-  fontPx: number,
-  boxSource: number,
-  axis: 'w' | 'h' = 'h',
-): React.CSSProperties {
-  if (boxSource <= 0) return { fontSize: fontPx }
-  const unit = axis === 'w' ? 'cqw' : 'cqh'
-  return { fontSize: `calc(100${unit} * ${fontPx / boxSource})` }
-}
-
-/**
- * Overlay mid/dọc/nhãn: scale theo fontPx nguồn / kích thước cover
- * (không dùng cqh/n — công thức cũ bỏ qua fontPx nên kéo cỡ không ăn).
- */
-function overlayDisplayFontStyle(
-  layout: 'vertical' | 'label' | 'mid',
-  cover: PixelBox,
-  fontPx: number,
-  _lineCount: number,
-): React.CSSProperties {
-  const w = Math.max(1, cover.w)
-  const h = Math.max(1, cover.h)
-  const byW = Math.min(0.98, fontPx / w)
-  const byH = Math.min(0.98, fontPx / h)
-  if (layout === 'vertical') {
-    // kẹp theo fontPx/cột — không fill full cqh (chữ to hơn bbox)
-    return {
-      fontSize: `min(calc(100cqw * ${byW}), calc(100cqh * ${byH}))`,
-      lineHeight: 1.05,
-      maxWidth: '100%',
-      width: '100%',
-      height: '100%',
-      overflow: 'hidden',
-    }
-  }
-  // mid/label: scale ≤ fontPx/box — không phình cqh (chữ to tràn bbox)
-  if (layout === 'mid' || layout === 'label') {
-    const n = Math.max(1, _lineCount)
-    const lh = layout === 'mid' ? 1.1 : 1.12
-    const fracH = Math.min(fontPx / h, 0.95 / (n * lh))
-    const fracW = Math.min(0.98, fontPx / w)
-    return {
-      fontSize: `min(calc(100cqw * ${fracW}), calc(100cqh * ${fracH}))`,
-      lineHeight: lh,
-      maxWidth: '100%',
-      width: '100%',
-      height: '100%',
-      overflow: 'hidden',
-    }
-  }
-  return {
-    fontSize: `min(calc(100cqw * ${byW}), calc(100cqh * ${byH}))`,
-    lineHeight: 1.1,
-    maxWidth: '100%',
-  }
-}
-
-type SnapGuides = { h: boolean; v: boolean }
-
-/** Snap tâm khung về giữa khung video — kiểu CapCut */
-function snapBoxToCenter(box: PixelBox, frameW: number, frameH: number): { box: PixelBox; guides: SnapGuides } {
-  const thresholdX = Math.max(8, frameW * 0.012)
-  const thresholdY = Math.max(8, frameH * 0.012)
-  const cx = frameW / 2
-  const cy = frameH / 2
-  let { x, y, w, h } = box
-  const guides: SnapGuides = { h: false, v: false }
-  const boxCx = x + w / 2
-  const boxCy = y + h / 2
-  if (Math.abs(boxCx - cx) <= thresholdX) {
-    x = cx - w / 2
-    guides.v = true
-  }
-  if (Math.abs(boxCy - cy) <= thresholdY) {
-    y = cy - h / 2
-    guides.h = true
-  }
-  return {
-    box: {
-      x: Math.max(0, Math.min(frameW - w, x)),
-      y: Math.max(0, Math.min(frameH - h, y)),
-      w,
-      h,
-    },
-    guides,
-  }
-}
-
-/**
- * Font theo bbox che chữ (OCR) — chèn trên/dưới/cover đều bám cỡ dải này.
- * Không sàn 48: chữ to tràn đè hardsub.
- */
-function autoFontFromBbox(
-  bbox: PixelBox,
-  text: string,
-  baseFontPx = 0,
-): number {
-  const compactLen = Math.max(1, text.replace(/\s+/g, '').length)
-  const byH = Math.floor(bbox.h * (compactLen <= 12 ? 0.78 : 0.65))
-  const byW = Math.floor(bbox.w / Math.max(2.5, compactLen * 0.55))
-  const auto = Math.max(10, Math.min(byH, byW, Math.floor(bbox.h * 0.92), 56))
-  if (baseFontPx > 0) {
-    // preferred user: không lớn hơn bbox che
-    return Math.max(10, Math.min(baseFontPx, Math.max(auto, Math.floor(bbox.h * 0.95))))
-  }
-  return auto
-}
-
-function resolveCaptionFontSize(
-  seg: Segment | undefined,
-  settings: ProjectSettings,
-  _width: number,
-  _height: number,
-) {
-  const segFs = seg?.fontSize ?? 0
-  if (segFs > 0) return segFs
-  if (settings.subtitleFontSize > 0) return settings.subtitleFontSize
-  return AUTO_SUBTITLE_FONT
-}
-
-/** Overlay mid/dọc/nhãn: 0 = auto fit khung; >0 = đúng cỡ user set (không lấy cỡ phụ đề đáy dự án). */
-function resolveOverlayFontPreferred(seg: Segment | undefined): number {
-  const segFs = seg?.fontSize ?? 0
-  return segFs > 0 ? segFs : 0
-}
-
-/** placement khi xuất: cover+ burn → over; không cover → below/above.
- * Mid/dọc/nhãn luôn 'over' (neo OCR) — không đẩy xuống đáy khi chọn “phía dưới”.
- */
-function captionPlacement(settings: ProjectSettings): 'over' | 'below' | 'above' {
-  if (settings.coverHardsubs && settings.burnSubs) return 'over'
-  return settings.captionPlacement === 'above' ? 'above' : 'below'
-}
-
-/** Overlay OCR vẫn neo theo bbox khi burn — coverHardsubs chỉ bật mask. */
-function overlayTextEnabled(settings: ProjectSettings): boolean {
-  return Boolean(settings.burnSubs && settings.targetLang !== 'none')
-}
-
-/** Ước lượng vị trí phụ đề — below/above: cỡ ≈ bbox che, neo sát trên/dưới dải OCR. */
-function estimateCaptionBox(
-  ocr: PixelBox,
-  text: string,
-  fontSizePx: number,
-  frameW: number,
-  frameH: number,
-  placement: 'over' | 'below' | 'above',
-): PixelBox {
-  if (placement === 'over') return layoutOverMode(ocr, text, fontSizePx, frameW, frameH, '').caption
-
-  // Font không vượt cỡ dải che (OCR)
-  const fs = autoFontFromBbox(ocr, text, fontSizePx > 0 ? fontSizePx : 0)
-  // Wrap theo bề rộng gần dải che (không full 88% frame → chữ to)
-  const wrapW = Math.max(ocr.w, Math.min(frameW * 0.92, Math.max(ocr.w * 1.15, ocr.w + fs * 2)))
-  const textBox = tightCaptionTextBox(text, fs, frameW, frameH, wrapW)
-  const gap = Math.max(3, Math.round(fs * 0.18))
-  const cx = ocr.x + ocr.w / 2
-  let y0: number
-  if (placement === 'below') {
-    y0 = Math.min(frameH - textBox.h, ocr.y + ocr.h + gap)
-  } else {
-    y0 = Math.max(0, ocr.y - gap - textBox.h)
-  }
-  const x0 = Math.max(0, Math.min(frameW - textBox.w, Math.round(cx - textBox.w / 2)))
-  return { x: x0, y: y0, w: textBox.w, h: textBox.h }
-}
-
-/* ── OpenCut assets-panel tab rail (same tabs as opencut.app) ── */
-type AssetsTab =
-  | 'media' | 'sounds' | 'text' | 'stickers' | 'effects'
-  | 'transitions' | 'captions' | 'filters' | 'adjustment' | 'settings'
-
-const ASSET_TABS: { key: AssetsTab; label: string; icon: React.ReactNode }[] = [
-  {
-    key: 'media', label: 'Media',
-    icon: <TabSvg><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" /></TabSvg>,
-  },
-  {
-    key: 'sounds', label: 'Sounds',
-    icon: <TabSvg><path d="M3 14h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a9 9 0 0 1 18 0v7a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3" /></TabSvg>,
-  },
-  {
-    key: 'text', label: 'Text',
-    icon: <TabSvg><polyline points="4 7 4 4 20 4 20 7" /><line x1="9" y1="20" x2="15" y2="20" /><line x1="12" y1="4" x2="12" y2="20" /></TabSvg>,
-  },
-  {
-    key: 'stickers', label: 'Stickers',
-    icon: <TabSvg><circle cx="12" cy="12" r="10" /><path d="M8 14s1.5 2 4 2 4-2 4-2" /><line x1="9" y1="9" x2="9.01" y2="9" /><line x1="15" y1="9" x2="15.01" y2="9" /></TabSvg>,
-  },
-  {
-    key: 'effects', label: 'Effects',
-    icon: <TabSvg><path d="m21.64 3.64-1.28-1.28a1.21 1.21 0 0 0-1.72 0L2.36 18.64a1.21 1.21 0 0 0 0 1.72l1.28 1.28a1.2 1.2 0 0 0 1.72 0L21.64 5.36a1.2 1.2 0 0 0 0-1.72Z" /><path d="m14 7 3 3" /></TabSvg>,
-  },
-  {
-    key: 'transitions', label: 'Transitions',
-    icon: <TabSvg><path d="m6 17 5-5-5-5" /><path d="m13 17 5-5-5-5" /></TabSvg>,
-  },
-  {
-    key: 'captions', label: 'Captions',
-    icon: <TabSvg><rect x="3" y="5" width="18" height="14" rx="2" /><path d="M7 15h4M15 15h2M7 11h2M13 11h4" /></TabSvg>,
-  },
-  {
-    key: 'filters', label: 'Filters',
-    icon: <TabSvg><circle cx="13.5" cy="6.5" r=".5" /><circle cx="17.5" cy="10.5" r=".5" /><circle cx="8.5" cy="7.5" r=".5" /><circle cx="6.5" cy="12.5" r=".5" /><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z" /></TabSvg>,
-  },
-  {
-    key: 'adjustment', label: 'Adjustment',
-    icon: <TabSvg><line x1="21" y1="4" x2="14" y2="4" /><line x1="10" y1="4" x2="3" y2="4" /><line x1="21" y1="12" x2="12" y2="12" /><line x1="8" y1="12" x2="3" y2="12" /><line x1="21" y1="20" x2="16" y2="20" /><line x1="12" y1="20" x2="3" y2="20" /><line x1="14" y1="2" x2="14" y2="6" /><line x1="8" y1="10" x2="8" y2="14" /><line x1="16" y1="18" x2="16" y2="22" /></TabSvg>,
-  },
-  {
-    key: 'settings', label: 'Settings',
-    icon: <TabSvg><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" /><circle cx="12" cy="12" r="3" /></TabSvg>,
-  },
-]
-
-function TabSvg({ children }: { children: React.ReactNode }) {
-  return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      {children}
-    </svg>
-  )
-}
-
-const FONT_SIZES = [16, 20, 24, 28, 32, 36, 40, 48, 56, 64, 72, 80, 96, 120]
-
-type PropTab = 'caption' | 'video' | 'audio' | 'mask' | 'overlay'
-type TrackId = 'video' | 'caption' | 'dub' | 'bg' | 'text'
-type CtxMenu =
-  | { kind: 'segment'; segId: string; ids?: string[]; x: number; y: number }
-  | { kind: 'dub'; segId: string; ids?: string[]; x: number; y: number }
-  | { kind: 'bg'; x: number; y: number }
-  | { kind: 'overlay'; overlayId: string; x: number; y: number }
-  | { kind: 'track'; track: TrackId; x: number; y: number }
-
-function emptyTrackFlags(): Record<TrackId, boolean> {
-  return { video: false, caption: false, dub: false, bg: false, text: false }
-}
-
-/** Video mặc định tắt tiếng — nghe từ Âm gốc / stem, tránh double audio */
-function defaultTrackMute(): Record<TrackId, boolean> {
-  return { ...emptyTrackFlags(), video: true }
-}
 
 export default function LivePreviewEditor({
   videoUrl,
@@ -2218,6 +162,7 @@ export default function LivePreviewEditor({
   workClipSec = 0,
   bakedPreferVideo = false,
   bakedSpeed = 1,
+  hasBakedSpeed = false,
   projectId,
   segments,
   settings,
@@ -2275,6 +220,10 @@ export default function LivePreviewEditor({
   })
 
   const [time, setTime] = useState(0)
+  const layoutCacheRef = useRef<Record<string, { key: string; val: any }>>({})
+  useEffect(() => {
+    layoutCacheRef.current = {}
+  }, [projectId])
   const [duration, setDuration] = useState(() =>
     Number.isFinite(mediaDurationProp) && (mediaDurationProp ?? 0) > 0 ? mediaDurationProp! : 0,
   )
@@ -2316,11 +265,9 @@ export default function LivePreviewEditor({
   const [globalTtsVolume, setGlobalTtsVolume] = useState(100)
   const [globalTtsSpeed, setGlobalTtsSpeed] = useState(1)
   const [globalVoice, setGlobalVoice] = useState(() => settings.defaultVoice || '')
-  // Mặc định 1× — chỉ khác khi user đã Áp dụng tốc độ (bakedSpeed)
+  // Slider: file bake (kể cả 1× lock) hoặc soft 0.8 preferVideo
   const [speedDraft, setSpeedDraft] = useState(() =>
-    typeof bakedSpeed === 'number' && bakedSpeed > 0.2 && Math.abs(bakedSpeed - 1) > 0.02
-      ? bakedSpeed
-      : 1,
+    displaySpeedDraft(settings.matchDuration, bakedSpeed, bakedPreferVideo, hasBakedSpeed),
   )
   const [speedBusy, setSpeedBusy] = useState(false)
   const [speedError, setSpeedError] = useState<string | null>(null)
@@ -2342,6 +289,8 @@ export default function LivePreviewEditor({
   const [trackFocus, setTrackFocus] = useState<'video' | 'caption' | 'dub' | 'bg' | 'text'>('video')
   const [selectedMediaId, setSelectedMediaId] = useState<string | null>(null)
   const [videoClips, setVideoClips] = useState<MediaClip[]>([])
+  void beginMediaDrag
+  void beginTimelineTextDrag
   const [bgClips, setBgClips] = useState<MediaClip[]>([])
   const [tool, setTool] = useState<'select' | 'cover' | 'text'>('select')
   const [zoom, setZoom] = useState(1)
@@ -2391,10 +340,9 @@ export default function LivePreviewEditor({
     persistMediaClips(projectId, 'bg', bgClips)
   }, [projectId, bgClips])
 
+  /** Tốc độ bake file (remap/API). Soft preferVideo 0.8 không dùng ở đây. */
   function effectiveBakedSpeed(): number {
-    // Chỉ coi là bake khi user đã Áp dụng tốc độ (≠1). Không fallback 0.8 preferVideo.
-    if (typeof bakedSpeed === 'number' && bakedSpeed > 0.2) return bakedSpeed
-    return 1
+    return fileBakedSpeed(bakedSpeed, bakedPreferVideo, hasBakedSpeed)
   }
 
   function takeSnap(): EditorSnap {
@@ -2740,6 +688,23 @@ export default function LivePreviewEditor({
     () => resolveCropRect(sourceWidth, sourceHeight, aspectId),
     [sourceWidth, sourceHeight, aspectId],
   )
+  const getCachedPreviewLayout = (s: Segment, override?: PixelBox) => {
+    const key = `${s.id}|${s.translation}|${s.layout}|${s.bbox ? `${s.bbox.x},${s.bbox.y},${s.bbox.w},${s.bbox.h}` : ''}|${settings.subtitleFontSize}|${settings.subtitleFontFamily}|${crop.x},${crop.y},${crop.w},${crop.h}|${override ? `${override.x},${override.y},${override.w},${override.h}` : ''}`
+    const cached = layoutCacheRef.current[s.id]
+    if (cached && cached.key === key) {
+      return cached.val
+    }
+    const val = resolvePreviewOverLayout(
+      s,
+      settings,
+      sourceWidth,
+      sourceHeight,
+      crop,
+      override,
+    )
+    layoutCacheRef.current[s.id] = { key, val }
+    return val
+  }
   const cropPortrait = crop.h >= crop.w
 
   // Video 9:16 gốc + preset landscape (16:9…) → khung preview bị cắt ngang rộng sai
@@ -2767,6 +732,20 @@ export default function LivePreviewEditor({
   )
   // Alt+G: ẩn Caption + Lồng tiếng + Âm gốc (gộp vào shell video) — tháo thì hiện lại
   const compoundMode = compoundShells.length > 0
+  // Track Lồng tiếng: chỉ hiện khi đã có TTS hoặc đang chạy dub
+  const hasDubClips = useMemo(
+    () =>
+      segments.some(
+        (s) =>
+          (segmentHasDub(s) && Boolean(s.audioUrl))
+          || (s.isCompound
+            && Array.isArray(s.compoundChildren)
+            && s.compoundChildren.some((c) => segmentHasDub(c) && Boolean(c.audioUrl))),
+      ),
+    [segments],
+  )
+  const showDubTrack =
+    !compoundMode && (hasDubClips || (busy && (jobStep === 'dub' || !jobStep)))
   // Preview/export: bung compound → chữ/mask/TTS y như chưa ghép
   const layoutSegs = useMemo(
     () =>
@@ -2871,14 +850,7 @@ export default function LivePreviewEditor({
           .map((s) => {
             const override = s.id === selected?.id ? activeCoverDraft : undefined
             if (s.translation.trim()) {
-              return resolvePreviewOverLayout(
-                s,
-                settings,
-                sourceWidth,
-                sourceHeight,
-                crop,
-                override,
-              )?.mask ?? resolveCoverMaskOnly(s, sourceWidth, sourceHeight, crop, override)
+              return getCachedPreviewLayout(s, override)?.mask ?? resolveCoverMaskOnly(s, sourceWidth, sourceHeight, crop, override)
             }
             return resolveCoverMaskOnly(s, sourceWidth, sourceHeight, crop, override)
           })
@@ -2899,14 +871,7 @@ export default function LivePreviewEditor({
           ) {
             return null
           }
-          const layout = resolvePreviewOverLayout(
-            s,
-            settings,
-            sourceWidth,
-            sourceHeight,
-            crop,
-            s.id === selected?.id ? activeCoverDraft : undefined,
-          )
+          const layout = getCachedPreviewLayout(s, s.id === selected?.id ? activeCoverDraft : undefined)
           return layout ? { seg: s, layout } : null
         }).filter((x): x is { seg: Segment; layout: NonNullable<ReturnType<typeof resolvePreviewOverLayout>> } => !!x)
       : []
@@ -2922,7 +887,7 @@ export default function LivePreviewEditor({
     : bboxLayoutCover
       ?? (bboxSeg
         ? (
-            resolvePreviewOverLayout(bboxSeg, settings, sourceWidth, sourceHeight, crop)?.cover
+            getCachedPreviewLayout(bboxSeg)?.cover
             ?? resolveCoverMaskOnly(bboxSeg, sourceWidth, sourceHeight, crop)
             ?? (bboxSeg.bbox ? clampCoverBox(bboxSeg.bbox, sourceWidth, sourceHeight) : null)
             ?? overlayCoverSeed(bboxSeg, sourceWidth, sourceHeight)
@@ -2949,11 +914,9 @@ export default function LivePreviewEditor({
 
   useEffect(() => {
     setSpeedDraft(
-      typeof bakedSpeed === 'number' && bakedSpeed > 0.2 && Math.abs(bakedSpeed - 1) > 0.02
-        ? bakedSpeed
-        : 1,
+      displaySpeedDraft(settings.matchDuration, bakedSpeed, bakedPreferVideo, hasBakedSpeed),
     )
-  }, [projectId, bakedSpeed, bakedPreferVideo])
+  }, [projectId, bakedSpeed, bakedPreferVideo, hasBakedSpeed, settings.matchDuration])
 
   useEffect(() => {
     setFontSizeDraft(selected?.fontSize ?? 0)
@@ -4342,9 +2305,10 @@ export default function LivePreviewEditor({
     setSpeedBusy(true)
     setSpeedError(null)
     const prevT = videoRef.current?.currentTime ?? time
+    // prev = bake FILE (không soft 0.8) — soft→0.8 bake phải gọi API
     const prevBaked = effectiveBakedSpeed()
-    // Cùng tốc độ đã bake → không gọi API
-    if (Math.abs(prevBaked - v) < 0.005) {
+    const sameFileBake = Math.abs(prevBaked - v) < 0.005 && (hasBakedSpeed || Math.abs(v - 1) > 0.02)
+    if (sameFileBake) {
       setSpeedBusy(false)
       setSpeedError(null)
       return
@@ -5423,7 +3387,11 @@ export default function LivePreviewEditor({
             title="Quy tắc khớp thời lượng từ cài đặt Sidebar (đầu vào trước khi mở xem/sửa)"
           >
             {settings.matchDuration === 'preferVideo'
-              ? (bakedPreferVideo ? 'Khớp: đã chậm video 0.80× (bake)' : 'Khớp: chậm video 0.80×')
+              ? (
+                  bakedPreferVideo || (typeof bakedSpeed === 'number' && Math.abs(bakedSpeed - 0.8) < 0.02)
+                    ? 'Khớp: đã chậm video 0.80× (bake)'
+                    : 'Khớp: chậm video 0.80× (playback)'
+                )
               : settings.matchDuration === 'stretch'
                 ? 'Khớp: kéo TTS'
                 : settings.matchDuration === 'natural'
@@ -6678,17 +4646,23 @@ export default function LivePreviewEditor({
                           const minDur = 0.15
                           return (
                             <>
-                              <PropLabel
-                                label={`Tốc độ video: ${speedDraft.toFixed(2)}×${
-                                  Math.abs(
-                                    (bakedSpeed > 0 ? bakedSpeed : bakedPreferVideo ? 0.8 : 1)
-                                    - speedDraft,
-                                  ) > 0.01
-                                    ? ` · đang bake ${(bakedSpeed > 0 ? bakedSpeed : bakedPreferVideo ? 0.8 : 1).toFixed(2)}×`
+                              {(() => {
+                                const actualBaked = effectiveBakedSpeed()
+                                const softHint =
+                                  !hasBakedSpeed
+                                  && settings.matchDuration === 'preferVideo'
+                                  && Math.abs(actualBaked - 1) < 0.02
+                                    ? ' · soft playback (chưa bake file)'
                                     : ''
-                                }`}
-                              >
-                                <input
+                                const bakeHint =
+                                  Math.abs(actualBaked - speedDraft) > 0.01 && hasBakedSpeed
+                                    ? ` · file ${actualBaked.toFixed(2)}×`
+                                    : ''
+                                return (
+                                  <PropLabel
+                                    label={`Tốc độ video: ${speedDraft.toFixed(2)}×${softHint}${bakeHint}`}
+                                  >
+                                    <input
                                   type="range"
                                   min={0.5}
                                   max={2}
@@ -6702,9 +4676,11 @@ export default function LivePreviewEditor({
                                     )
                                   }
                                 />
-                              </PropLabel>
+                                  </PropLabel>
+                                )
+                              })()}
                               <div className="flex gap-1">
-                                {[0.5, 0.75, 0.8, 1, 1.5, 2].map((v) => (
+                                {[0.5, 0.75, 0.8, 1, 1.15, 1.5].map((v) => (
                                   <button
                                     key={v}
                                     type="button"
@@ -6718,7 +4694,7 @@ export default function LivePreviewEditor({
                                     onClick={() => setSpeedDraft(v)}
                                     title="Chỉ đặt slider — bấm Áp dụng để bake"
                                   >
-                                    {v}×
+                                    {v === 0.8 ? '0.80' : v}×
                                   </button>
                                 ))}
                               </div>
@@ -7581,6 +5557,8 @@ export default function LivePreviewEditor({
                     ) {
                       return null
                     }
+                    // Chưa lồng tiếng: ẩn tab Lồng tiếng
+                    if (row.id === 'dub' && !showDubTrack) return null
                     const muted =
                       row.id === 'bg'
                         ? settings.processOriginalAudio && settings.originalAudioMode === 'mute'
@@ -7963,8 +5941,8 @@ export default function LivePreviewEditor({
                       </div>
                       ))}
 
-                      {/* Dub / TTS track — ẩn khi compound (gộp lên Video) */}
-                      {!compoundMode && (
+                      {/* Dub / TTS track — chỉ khi đã lồng hoặc đang dub */}
+                      {showDubTrack && (
                       <div className={cn('relative h-10 box-border border-b border-border/80', trackHidden.dub && 'opacity-30')} style={{ backgroundColor: 'var(--background)' }}>
                         {(() => {
                           // Không bung compound — TTS đã gói trong shell (chỉ hiện video)
@@ -7996,33 +5974,6 @@ export default function LivePreviewEditor({
                               >
                                 <IconHeadphones size={11} className="shrink-0 mr-1 opacity-90" />
                                 {label}
-                              </button>
-                            )
-                          }
-                          if (!dubs.length) {
-                            return (
-                              <button
-                                type="button"
-                                title={busy ? 'Đang xử lý…' : 'Bấm để lồng tiếng'}
-                                disabled={busy || !onDub}
-                                className={cn(
-                                  'absolute top-1.5 h-[calc(100%-12px)] rounded-md text-[11px] text-white whitespace-nowrap overflow-hidden px-2 flex items-center cursor-pointer border-0 hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed',
-                                  trackFocus === 'dub' && 'ring-[1.5px] ring-amber-200',
-                                )}
-                                style={{
-                                  left: 0,
-                                  width: 108,
-                                  boxSizing: 'border-box',
-                                  background: '#E8A045',
-                                }}
-                                onClick={() => {
-                                  setTrackFocus('dub')
-                                  setPropTab('audio')
-                                  if (!busy) onDub?.()
-                                }}
-                              >
-                                <IconHeadphones size={11} className="shrink-0 mr-1 opacity-90" />
-                                Lồng tiếng
                               </button>
                             )
                           }

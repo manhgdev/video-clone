@@ -13,6 +13,27 @@ from typing import Any
 from .jobs import run_cmd
 
 
+def atempo_chain(ratio: float) -> str:
+    """ffmpeg atempo chỉ [0.5, 100] — chain nhiều bước khi ngoài khoảng."""
+    try:
+        r = float(ratio)
+    except (TypeError, ValueError):
+        return "anull"
+    if r <= 0 or abs(r - 1.0) < 0.01:
+        return "anull"
+    parts: list[str] = []
+    while r > 2.0 + 1e-9:
+        parts.append("atempo=2.0")
+        r /= 2.0
+    while r < 0.5 - 1e-9:
+        parts.append("atempo=0.5")
+        r *= 2.0
+    r = min(100.0, max(0.5, r))
+    if abs(r - 1.0) >= 0.01:
+        parts.append(f"atempo={r:.4f}")
+    return ",".join(parts) if parts else "anull"
+
+
 @lru_cache(maxsize=1)
 def nvenc_available() -> bool:
     """Probe the encoder, not just ffmpeg's compiled encoder list."""
@@ -443,14 +464,16 @@ def retime_video_segments(
         filters: list[str] = []
         labels: list[str] = []
         for i, (start, end, speed, _out_start, _out_end) in enumerate(merged):
+            sp = max(0.25, min(4.0, float(speed) or 1.0))
             filters.append(
                 f"[0:v]trim=start={start:.6f}:end={end:.6f},"
-                f"setpts=(PTS-STARTPTS)/{speed:.6f}[v{i}]"
+                f"setpts=(PTS-STARTPTS)/{sp:.6f}[v{i}]"
             )
             if has_audio:
+                a_chain = atempo_chain(sp)
                 filters.append(
                     f"[0:a]atrim=start={start:.6f}:end={end:.6f},asetpts=PTS-STARTPTS,"
-                    f"atempo={speed:.6f}[a{i}]"
+                    f"{a_chain}[a{i}]"
                 )
                 labels.append(f"[v{i}][a{i}]")
             else:
@@ -652,12 +675,22 @@ def clamp_playback_speed(speed: float) -> float:
 
 
 def meta_baked_speed(meta: dict) -> float:
-    """Tốc độ đã bake vào workVideo (1.0 = file gốc 1×)."""
+    """Tốc độ đã bake vào workVideo.
+
+    - bakedSpeed có key (kể cả 1.0 sau «Áp dụng 1×») → dùng giá trị đó
+    - chỉ bakedPreferVideo (legacy) → 0.80
+    - không key → 1.0 (timeline 1×; soft preferVideo chỉ ở FE playbackRate)
+    """
     if meta.get("bakedSpeed") is not None:
         return clamp_playback_speed(float(meta["bakedSpeed"]))
     if meta.get("bakedPreferVideo"):
         return 0.80
     return 1.0
+
+
+def meta_has_user_bake(meta: dict) -> bool:
+    """User đã bấm Áp dụng tốc độ (kể cả 1×). Không lẫn soft preferVideo."""
+    return meta.get("bakedSpeed") is not None
 
 
 def speed_cache_tag(speed: float) -> str:

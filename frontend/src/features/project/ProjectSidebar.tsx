@@ -384,7 +384,7 @@ export default function Sidebar({
             disabled={busy}
             title={
               settings.matchDuration === 'preferVideo'
-                ? 'Lần đầu giữ 1×. Muốn chậm/nhanh: editor → Tốc độ video → Áp dụng tốc độ'
+                ? 'Chậm video 0.80× nếu TTS dài hơn'
                 : settings.matchDuration === 'none'
                   ? 'Giữ TTS nguyên tốc độ'
                   : settings.matchDuration === 'stretch'
@@ -395,7 +395,7 @@ export default function Sidebar({
               set('matchDuration', e.target.value as ProjectSettings['matchDuration'])
             }
           >
-            <option value="preferVideo">Giữ 1× (tốc độ chỉnh sau trong editor)</option>
+            <option value="preferVideo">Ưu tiên chậm video 0.80× (trước ASR)</option>
             <option value="none">Giữ nguyên TTS</option>
             <option value="natural">Tự nhiên, rút gọn nhẹ</option>
             <option value="stretch">Kéo giãn khớp đoạn</option>

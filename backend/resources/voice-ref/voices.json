@@ -243,5 +243,37 @@
     "ref_text": "",
     "hidden": false,
     "favorite": true
+  },
+  {
+    "tags": [
+      "⭐ Review"
+    ],
+    "id": "quoc_bao_triet_ly",
+    "name": "⭐Quốc Bảo Triết Lý",
+    "label": "⭐Quốc Bảo Triết Lý",
+    "type": "zmAI",
+    "engine": "vieneu",
+    "mode": "reference",
+    "language": "",
+    "ref_file": "quoc_bao_triet_ly.wav",
+    "ref_text": "",
+    "hidden": false,
+    "favorite": false
+  },
+  {
+    "tags": [
+      "👨 Nam"
+    ],
+    "id": "tao_thao",
+    "name": "Tào Tháo",
+    "label": "Tào Tháo",
+    "type": "zmAI",
+    "engine": "vieneu",
+    "mode": "reference",
+    "language": "",
+    "ref_file": "tao_thao.wav",
+    "ref_text": "",
+    "hidden": false,
+    "favorite": false
   }
 ]

@@ -1,4 +1,4 @@
-﻿"""Whisper ASR. RapidOCR sống ở pipeline.ocr.extract — re-export để tương thích."""
+"""Whisper ASR. RapidOCR sống ở pipeline.ocr.extract — re-export để tương thích."""
 from __future__ import annotations
 
 import threading

@@ -1,0 +1,1 @@
+"""Burn implementation parts."""

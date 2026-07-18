@@ -420,65 +420,94 @@ def synth_srt_job(
                 style=style,
             )
             part_paths.append(part)
-            dur = ffprobe_duration(part)
+            dur = float(ffprobe_duration(part) or 0.15)
+            # Giữ nguyên text + timestamp SRT gốc (không tách CapCut)
+            src_start = float(cue["start"])
+            src_end = max(src_start, float(cue["end"]))
             if keep_timeline:
-                start = float(cue["start"])
-                end = start + dur
+                # timeline tuyệt đối theo file SRT
+                start = src_start
+                # match duration: end = slot gốc; không match: end = start + audio
+                end = src_end if use_match != "none" else src_start + dur
             else:
                 start = cursor
                 end = start + dur
                 if gap_ms > 0:
                     end += gap_ms / 1000.0
                 cursor = end
-            out_cues.append({"start": start, "end": end, "text": text, "_dur": dur})
+            out_cues.append(
+                {
+                    "start": start,
+                    "end": end,
+                    "text": text,  # giữ xuống dòng trong cue
+                    "_dur": dur,
+                    "_srcStart": src_start,
+                    "_srcEnd": src_end,
+                }
+            )
         wav = job_dir / "audio.wav"
         if keep_timeline:
+            # Mix theo start gốc + độ dài audio thật (adelay), không cắt theo end SRT
             _mix_timeline(
                 part_paths,
-                [{"start": c["start"], "end": c["end"]} for c in out_cues],
+                [
+                    {
+                        "start": float(c["_srcStart"]),
+                        "end": float(c["_srcStart"]) + float(c["_dur"]),
+                    }
+                    for c in out_cues
+                ],
                 wav,
             )
         else:
             _concat_wavs(part_paths, wav, gap_ms=max(0, int(gap_ms)))
         for p in part_paths:
             p.unlink(missing_ok=True)
-        # Save source cues for re-segmenting with different styles later
+        # Cue xuất = đúng cấu trúc SRT đầu vào (1 cue TTS ↔ 1 cue SRT)
         source_cues = [
-            {"start": c["start"], "end": c["end"], "text": c["text"], "dur": c["_dur"]}
+            {
+                "start": float(c["_srcStart"]),
+                "end": float(c["_srcEnd"]),
+                "text": c["text"],
+                "dur": float(c["_dur"]),
+            }
             for c in out_cues
         ]
-
-        from pipeline.export.srt import split_display_cues
-
-        capcut_cues: list[dict] = []
-        for c in out_cues:
-            shorts = split_display_cues(str(c["text"]), max_chars=42, max_words=12)
-            seg_start = float(c["start"])
-            seg_dur = max(0.08, float(c.get("_dur") or (float(c["end"]) - seg_start)))
-            weights = [max(1, len(s)) for s in shorts]
-            tw = sum(weights) or 1
-            acc = 0.0
-            for j, s in enumerate(shorts):
-                share = (
-                    seg_dur * (weights[j] / tw)
-                    if j < len(shorts) - 1
-                    else max(0.06, seg_dur - acc)
-                )
-                capcut_cues.append(
-                    {
-                        "start": seg_start + acc,
-                        "end": seg_start + acc + max(0.06, share),
-                        "text": s,
-                    }
-                )
-                acc += max(0.06, share)
+        # SRT xuất: luôn bám timestamp + text gốc khi keep_timeline
+        if keep_timeline:
+            export_cues = [
+                {
+                    "start": float(c["_srcStart"]),
+                    "end": float(c["_srcEnd"]),
+                    "text": c["text"],
+                }
+                for c in out_cues
+            ]
+        else:
+            export_cues = [
+                {
+                    "start": float(c["start"]),
+                    "end": float(c["end"]),
+                    "text": c["text"],
+                }
+                for c in out_cues
+            ]
         srt_path = job_dir / "subs.srt"
-        write_srt(srt_path, capcut_cues, capcut=True)
-        out_cues = capcut_cues
+        # capcut=False: không wrap/tách text — giữ nguyên body SRT
+        write_srt(srt_path, export_cues, capcut=False)
+        # backup bản gốc (byte-for-byte parse-normalized)
+        try:
+            (job_dir / "source.srt").write_text(srt_text, encoding="utf-8-sig")
+        except OSError:
+            pass
+        out_cues = export_cues
         dur = ffprobe_duration(wav)
         meta = {
             "id": job_id,
-            "title": (title or (out_cues[0]["text"][:48] if out_cues else "SRT")).strip(),
+            "title": (
+                title
+                or (export_cues[0]["text"].replace("\n", " ")[:48] if export_cues else "SRT")
+            ).strip(),
             "voice": voice,
             "voiceName": _voice_display(voice, lang),
             "lang": lang,
@@ -487,7 +516,7 @@ def synth_srt_job(
             "createdAt": datetime.now().isoformat(timespec="seconds"),
             "audioFile": "audio.wav",
             "srtFile": "subs.srt",
-            "text": "\n".join(c["text"] for c in out_cues),
+            "text": "\n".join(c["text"] for c in export_cues),
             "sourceCues": source_cues,
             "gapMs": gap_ms,
             "status": "done",
@@ -497,7 +526,9 @@ def synth_srt_job(
             "speed": speed,
             "volume": volume,
             "pitch": pitch,
-            "cueCount": len(out_cues),
+            "cueCount": len(export_cues),
+            "keepTimeline": bool(keep_timeline),
+            "matchDuration": match,
         }
         _write_meta(job_dir, meta)
         prune_history(HISTORY_MAX)
@@ -575,8 +606,20 @@ def rebuild_srt(job_id: str, srt_style: str = "hard") -> Path:
     gap_ms = m.get("gapMs", 0)
     duration = float(m.get("duration") or 0)
 
+    if src_cues and m.get("mode") == "srt" and srt_style == "hard":
+        # Job từ SRT + style hard: trả đúng cue gốc (không tách lại)
+        cues = [
+            {
+                "start": float(c["start"]),
+                "end": float(c["end"]),
+                "text": str(c.get("text") or "").strip() or "…",
+            }
+            for c in src_cues
+        ]
+        write_srt(cached, cues, capcut=False)
+        return cached
     if src_cues:
-        # SRT job path: re-split each source cue
+        # SRT job + style CapCut khác: tách hiển thị từ source cue
         cues: list[dict] = []
         for c in src_cues:
             text = str(c.get("text") or "").strip() or "…"

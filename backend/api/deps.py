@@ -65,6 +65,9 @@ class SegmentIn(BaseModel):
     ttsSpeed: float | None = None
     fontSize: int | None = None
     captionLayout: dict[str, Any] | None = None
+    groupId: str | None = None
+    isCompound: bool | None = None
+    compoundChildren: list[dict[str, Any]] | None = None
 
 
 class ExportPayload(Settings):
@@ -115,6 +118,7 @@ class PreviewTtsIn(BaseModel):
 
 class RebakeSpeedIn(BaseModel):
     speed: float = 1.0
+    skipRemap: bool = False
 
 
 class RetranslateIn(BaseModel):
@@ -171,3 +175,68 @@ def require_meta(project_id: str) -> dict:
     if not meta:
         raise HTTPException(404, "Project not found")
     return meta
+
+
+class CompoundClipIn(BaseModel):
+    segmentIds: list[str] = Field(default_factory=list)
+
+
+class CloneRenameIn(BaseModel):
+    name: str = ""
+
+
+class VoicePatchIn(BaseModel):
+    name: str | None = None
+    tags: list[str] | None = None
+    language: str | None = None
+    favorite: bool | None = None
+    # zmai | clone — chuyển bucket (chỉ local VieNeu ref)
+    engine: str | None = None
+
+
+class VoiceBulkMoveIn(BaseModel):
+    voiceIds: list[str] = Field(default_factory=list)
+    target: str = ""
+
+
+# Field editor có thể bỏ sót khi PUT full list — giữ từ meta cũ theo id
+SEG_PRESERVE = (
+    "audioUrl",
+    "audioFile",
+    "audioDuration",
+    "bbox",
+    "bboxInherited",
+    "captionLayout",
+    "layout",
+    "dub",
+    "videoSpeed",
+    "ttsVolume",
+    "ttsSpeed",
+    "fontSize",
+    "coverStart",
+    "coverEnd",
+    "groupId",
+    "isCompound",
+    "compoundChildren",
+)
+
+
+def validate_overlay(body: TextOverlayIn, meta: dict) -> None:
+    import math
+    from pathlib import Path
+    from fastapi import HTTPException
+    from pipeline.core.media import video_size
+
+    width, height = video_size(Path(meta["videoPath"]))
+    values = (body.start, body.end, body.x, body.y, body.w, body.h)
+    if not all(math.isfinite(value) for value in values) or body.end <= body.start:
+        raise HTTPException(422, "Thời gian text không hợp lệ")
+    if (
+        body.x < 0
+        or body.y < 0
+        or body.w <= 0
+        or body.h <= 0
+        or body.x + body.w > width
+        or body.y + body.h > height
+    ):
+        raise HTTPException(422, "Text nằm ngoài khung video")
