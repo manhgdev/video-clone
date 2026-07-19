@@ -4,6 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from api.routes import audio
+from api.routes import download
 from api.routes import jobs
 from api.routes import overlays
 from api.routes import projects
@@ -15,6 +16,7 @@ from api.routes import tts_voices
 
 router = APIRouter()
 router.include_router(audio.router)
+router.include_router(download.router)
 router.include_router(jobs.router)
 router.include_router(overlays.router)
 router.include_router(projects.router)

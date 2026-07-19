@@ -15,6 +15,7 @@ from .voice_store import normalize_voice_language
 
 _el_key_i = 0
 _el_voices_cache: list[dict[str, Any]] | None = None
+_el_voices_cache_key_sig: str = ""
 
 # khớp StudioVoiceAdamAI: Adam + eleven_v3; bump khi đổi cách gọi TTS
 EL_MODEL = "eleven_v3"
@@ -47,6 +48,19 @@ def _el_keys() -> list[str]:
         pass
     raw = os.environ.get("ELEVENLABS_API_KEYS", "")
     return [k.strip() for k in raw.split(",") if k.strip()]
+
+
+def _el_keys_sig(keys: list[str] | None = None) -> str:
+    ks = keys if keys is not None else _el_keys()
+    # chỉ fingerprint độ dài + suffix — không log full key
+    return "|".join(f"{len(k)}:{k[-4:]}" for k in ks)
+
+
+def clear_el_voices_cache() -> None:
+    """Gọi sau khi lưu/đổi API key — cache rỗng cũ sẽ chặn list giọng."""
+    global _el_voices_cache, _el_voices_cache_key_sig
+    _el_voices_cache = None
+    _el_voices_cache_key_sig = ""
 
 
 def _el_voice_id(voice: str) -> str | None:
@@ -123,10 +137,16 @@ def _el_tts(text: str, voice_id: str, out_wav: Path, lang: str | None = None) ->
 
 
 def _el_voice_options() -> list[dict[str, Any]]:
-    """Preset rộng + thử API 2s (cache process). Không treo UI."""
-    global _el_voices_cache
-    if _el_voices_cache is not None:
+    """Preset + API voices (cache process theo fingerprint key)."""
+    global _el_voices_cache, _el_voices_cache_key_sig
+    keys = _el_keys()
+    sig = _el_keys_sig(keys)
+    if _el_voices_cache is not None and _el_voices_cache_key_sig == sig:
         return _el_voices_cache
+    # key đổi / chưa cache — luôn fetch lại
+    _el_voices_cache = None
+    _el_voices_cache_key_sig = sig
+
     preset = [
         {
             "id": f"el:{vid}",
@@ -137,12 +157,11 @@ def _el_voice_options() -> list[dict[str, Any]]:
         }
         for vid, name in _EL_PRESET
     ]
-    keys = _el_keys()
     if not keys:
-        _el_voices_cache = []
+        # không cache rỗng vĩnh viễn — lần sau có key sẽ fetch
         return []
     try:
-        with _el_http(timeout=5.0) as client:
+        with _el_http(timeout=12.0) as client:
             r = client.get(
                 "https://api.elevenlabs.io/v1/voices",
                 headers={"xi-api-key": keys[0]},
@@ -173,12 +192,12 @@ def _el_voice_options() -> list[dict[str, Any]]:
             if fetched:
                 _el_voices_cache = fetched
                 return fetched
-        # 401/403: key chết / thiếu voices_read → preset vẫn dùng được cho TTS nếu có quyền text_to_speech
+        # 401/403: key chết / thiếu voices_read → preset vẫn dùng được cho TTS
+        _el_voices_cache = preset
+        return preset
     except (httpx.HTTPError, OSError):
-        # mạng/proxy hỏng: đừng nhét preset giả làm UI tưởng gọi EL được
-        _el_voices_cache = []
-        return []
-    _el_voices_cache = preset
-    return preset
+        # mạng lỗi: vẫn trả preset (có key) để UI có Adam…
+        _el_voices_cache = preset
+        return preset
 
 

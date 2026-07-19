@@ -27,6 +27,8 @@ type Props = {
   /** First-run: thiếu dependency bắt buộc — không đóng bằng overlay */
   forceSetup?: boolean
   onSetupReady?: () => void
+  /** Sau lưu config (đặc biệt ElevenLabs key) — App reload /api/voices */
+  onSaved?: () => void
 }
 
 function emptyCloud(): CloudDraft {
@@ -75,6 +77,7 @@ export default function ConfigModal({
   initialSection = 'cloud',
   forceSetup = false,
   onSetupReady,
+  onSaved,
 }: Props) {
   const [section, setSection] = useState<Section>(initialSection)
   const [draft, setDraft] = useState<CloudDraft>(emptyCloud)
@@ -243,7 +246,8 @@ export default function ConfigModal({
       const n = Math.max(1, Number(el?.keyCount || 0) || (el?.apiKeySet ? 1 : 0))
       setElSavedCount(el?.apiKeySet ? n : 0)
       setElSlots(Array.from({ length: Math.max(1, n) }, () => ''))
-      setMsg('Đã lưu.')
+      setMsg(typed.length > 0 ? 'Đã lưu. Đang tải lại danh sách giọng…' : 'Đã lưu.')
+      onSaved?.()
     } catch (e) {
       setMsg(e instanceof Error ? e.message : 'Lưu thất bại')
     } finally {

@@ -12,6 +12,8 @@ from .mux_audio import (  # noqa: F401
     plan_video_slowdown_factor,
 )
 from .stem import (  # noqa: F401
+    _demucs_py_in,
+    _demucs_root_candidates,
     export_project_audio,
     extract_original_audio,
     find_cached_no_vocals,

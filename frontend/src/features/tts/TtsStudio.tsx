@@ -77,6 +77,9 @@ type HistoryItem = {
 type Props = {
   voices: Voice[]
   onRefreshVoices?: (lang?: string) => void
+  /** Mobile drawer — controlled từ Header ☰ */
+  sideOpen?: boolean
+  onSideOpenChange?: (open: boolean) => void
 }
 type SrtStyle = 'hard' | 'v916' | 'h169' | 'clause' | 'sentence'
 const SRT_STYLE_OPTIONS: { id: SrtStyle; label: string }[] = [
@@ -314,6 +317,30 @@ function IconDownload({ size = 14 }: { size?: number }) {
     </svg>
   )
 }
+function IconPaste({ size = 12 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+      <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
+      <rect x="8" y="2" width="8" height="4" rx="1" />
+    </svg>
+  )
+}
+
+/** Heuristic: nội dung clipboard/file có phải SRT không */
+function looksLikeSrt(raw: string): boolean {
+  const t = raw.trim()
+  if (!t) return false
+  if (/\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}\s*-->\s*\d{1,2}:\d{2}:\d{2}/.test(t)) return true
+  if (/^\d+\s*\r?\n\d{1,2}:\d{2}/m.test(t) && t.includes('-->')) return true
+  return false
+}
+
+function srtPreviewLines(raw: string): string {
+  return raw
+    .split(/\r?\n/)
+    .filter((ln) => ln.trim() && !/^\d+$/.test(ln.trim()) && !/-->/.test(ln))
+    .join('\n')
+}
 function IconTrash({ size = 14 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -385,11 +412,23 @@ const SECTION_LABELS: Record<string, string> = {
   advanced: 'Tùy chọn nâng cao',
 }
 
-export default function TtsStudio({ voices, onRefreshVoices }: Props) {
+export default function TtsStudio({
+  voices,
+  onRefreshVoices,
+  sideOpen: sideOpenProp,
+  onSideOpenChange,
+}: Props) {
   const savedRef = useRef(loadTtsSettings())
   const saved = savedRef.current
   /** Preferred voice across async voice-list loads — avoids wiping restored selection. */
   const preferredVoiceRef = useRef(saved.voice)
+
+  const [sideOpenLocal, setSideOpenLocal] = useState(false)
+  const sideOpen = sideOpenProp ?? sideOpenLocal
+  const setSideOpen = (open: boolean) => {
+    onSideOpenChange?.(open)
+    if (sideOpenProp === undefined) setSideOpenLocal(open)
+  }
 
   const [section, setSection] = useState('overview')
   const [text, setText] = useState('')
@@ -435,6 +474,8 @@ export default function TtsStudio({ voices, onRefreshVoices }: Props) {
   const [cloneTags, setCloneTags] = useState<VoiceTagLabel[]>([])
   const [previewSample, setPreviewSample] = useState('')
   const [srtRaw, setSrtRaw] = useState('')
+  /** Dashboard « Nhập nội dung »: text | srt — quyết định synth path */
+  const [inputMode, setInputMode] = useState<'text' | 'srt'>('text')
   const [previewingVoiceId, setPreviewingVoiceId] = useState<string | null>(null)
   const [selectedVoiceIds, setSelectedVoiceIds] = useState<Set<string>>(() => new Set())
   const [bulkMoveOpen, setBulkMoveOpen] = useState(false)
@@ -716,8 +757,14 @@ export default function TtsStudio({ voices, onRefreshVoices }: Props) {
   const vieneu = status.vieneu
 
   function go(id: string) {
+    // input/srt gộp vào dashboard Tổng quan (không còn tab sidebar riêng)
+    if (id === 'input' || id === 'srt' || id === 'make') {
+      setSection('overview')
+      setSideOpen(false)
+      return
+    }
     setSection(id)
-    // Full dashboard: không scroll; tab riêng: hiện 1 panel
+    setSideOpen(false)
   }
 
   const isFullDash = FULL_DASHBOARD.has(section)
@@ -846,25 +893,26 @@ export default function TtsStudio({ voices, onRefreshVoices }: Props) {
   }
 
   async function onSynth() {
-    if ((!text.trim() && !srtRaw.trim()) || !voice) return
+    const useSrt = inputMode === 'srt' && !!srtRaw.trim()
+    if ((!useSrt && !text.trim()) || (useSrt && !srtRaw.trim()) || !voice) return
     setBusyKind('synth')
     setBusy(true)
     setError('')
     try {
       const res = await api.ttsStudioSynth({
-        text: srtRaw.trim() ? undefined : text.trim(),
-        srtText: srtRaw.trim() || undefined,
+        text: useSrt ? undefined : text.trim(),
+        srtText: useSrt ? srtRaw : undefined,
         voice,
         lang,
         speed,
         volume,
         pitch,
         style,
-        matchDuration: matchSrt ? 'natural' : 'none',
-        keepTimeline,
-        autoSplit,
-        gapMs: gapOn ? gapMs : 0,
-        title: (text || srtRaw).trim().slice(0, 48),
+        matchDuration: useSrt && matchSrt ? 'natural' : useSrt ? 'none' : matchSrt ? 'natural' : 'none',
+        keepTimeline: useSrt ? keepTimeline : false,
+        autoSplit: useSrt ? false : autoSplit,
+        gapMs: useSrt ? 0 : gapOn ? gapMs : 0,
+        title: (useSrt ? srtRaw : text).trim().slice(0, 48),
       })
       setBusyProgress(100)
       applyJobUrls(res)
@@ -1459,48 +1507,99 @@ export default function TtsStudio({ voices, onRefreshVoices }: Props) {
     reader.readAsText(file, 'utf-8')
   }
 
+  function applySrtContent(raw: string) {
+    const body = String(raw || '')
+    if (!body.trim()) {
+      setError('SRT rỗng')
+      return
+    }
+    if (!looksLikeSrt(body)) {
+      setError('Nội dung không giống SRT (thiếu timestamp --> ). Vẫn giữ nguyên để bạn sửa.')
+    } else {
+      setError('')
+    }
+    // Giữ nguyên file SRT (BOM/xuống dòng/timestamp) — synth_srt_job parse 1 cue = 1 TTS
+    setSrtRaw(body)
+    setInputMode('srt')
+    setKeepTimeline(true) // mặc định giữ timeline khi vào mode SRT
+    setAutoSplit(false) // SRT không tách câu CapCut
+    setText(srtPreviewLines(body))
+  }
+
   function onLoadSrt(file: File) {
     const reader = new FileReader()
-    reader.onload = () => {
-      // Giữ nguyên file SRT (BOM/xuống dòng/timestamp) — không strip
-      const raw = String(reader.result || '')
-      setSrtRaw(raw)
-      setKeepTimeline(true)
-      // text chỉ để preview/đếm — synth dùng srtRaw
-      const lines = raw
-        .split(/\r?\n/)
-        .filter((ln) => ln.trim() && !/^\d+$/.test(ln.trim()) && !/-->/.test(ln))
-      setText(lines.join('\n'))
-      go('srt')
-    }
+    reader.onload = () => applySrtContent(String(reader.result || ''))
     reader.readAsText(file, 'utf-8')
   }
 
+  function switchInputMode(mode: 'text' | 'srt') {
+    setInputMode(mode)
+    setError('')
+    if (mode === 'srt') {
+      setKeepTimeline(true)
+      setAutoSplit(false)
+      if (!srtRaw.trim() && looksLikeSrt(text)) {
+        applySrtContent(text)
+      }
+    }
+  }
+
+  async function onPasteClipboard() {
+    try {
+      const t = await navigator.clipboard.readText()
+      if (!t?.trim()) {
+        setError('Clipboard trống')
+        return
+      }
+      if (looksLikeSrt(t) || inputMode === 'srt') {
+        applySrtContent(t)
+      } else {
+        setSrtRaw('')
+        setInputMode('text')
+        setText(t)
+        setError('')
+      }
+    } catch {
+      setError('Không đọc được clipboard — cho phép quyền dán hoặc Ctrl+V vào ô')
+    }
+  }
+
   return (
-    <div className="tts-studio">
-      {/* ── Left sidebar ── */}
-      <aside className="tts-side">
+    <div className={`tts-studio${sideOpen ? ' tts-studio--side-open' : ''}`}>
+      {sideOpen && (
+        <button
+          type="button"
+          className="tts-side-backdrop"
+          aria-label="Đóng menu"
+          onClick={() => setSideOpen(false)}
+        />
+      )}
+      {/* ── Left sidebar (desktop cố định / mobile drawer) ── */}
+      <aside className={`tts-side${sideOpen ? ' is-open' : ''}`} aria-hidden={false}>
+        <div className="tts-side-head">
+          <strong>Menu TTS</strong>
+          <button
+            type="button"
+            className="tts-side-close"
+            aria-label="Đóng"
+            onClick={() => setSideOpen(false)}
+          >
+            ×
+          </button>
+        </div>
         <div className="tts-side-body">
           <select
             className="tts-side-select"
-            value={section === 'overview' ? 'overview' : section}
+            value={section === 'overview' || section === 'make' || section === 'input' || section === 'srt' ? 'overview' : section}
             onChange={(e) => go(e.target.value)}
           >
             <option value="overview">Tổng quan</option>
-            <option value="input">Nhập văn bản</option>
-            <option value="make">Tạo giọng nói</option>
             <option value="history">Lịch sử tạo</option>
             <option value="clone">Clone giọng nói</option>
           </select>
 
           <div className="tts-sec">Tạo giọng nói</div>
-          <button type="button" className={`tts-nav${section === 'input' ? ' active' : ''}`} onClick={() => go('input')}>
-            <IconFile /> Nhập văn bản
-          </button>
-          <button type="button" className={`tts-nav${section === 'srt' ? ' active' : ''}`} onClick={() => go('srt')}>
-            <IconList /> Nhập SRT / Phụ đề
-          </button>
-          <button type="button" className={`tts-nav${section === 'make' || section === 'overview' ? ' active' : ''}`} onClick={() => go('overview')}>
+          <button type="button" className={`tts-nav${section === 'make' || section === 'overview' || section === 'input' || section === 'srt' ? ' active' : ''}`} onClick={() => go('overview')}>
             <IconMic size={14} /> Tạo giọng nói
           </button>
           <button type="button" className={`tts-nav${section === 'history' ? ' active' : ''}`} onClick={() => go('history')}>
@@ -1956,64 +2055,137 @@ export default function TtsStudio({ voices, onRefreshVoices }: Props) {
           <section className="tts-card" id="tts-input">
             <h3 className="tts-card-title"><span className="tts-step">1</span> Nhập nội dung</h3>
             <div className="tts-tabs">
-              <button type="button" className="active"><IconFile size={12} /> Nhập văn bản</button>
-              <button type="button" onClick={() => srtRef.current?.click()}>
+              <button
+                type="button"
+                className={inputMode === 'text' ? 'active' : undefined}
+                onClick={() => switchInputMode('text')}
+              >
+                <IconFile size={12} /> Nhập văn bản
+              </button>
+              <button
+                type="button"
+                className={inputMode === 'srt' ? 'active' : undefined}
+                title="Mở mode SRT — chọn file hoặc dán nội dung .srt"
+                onClick={() => {
+                  switchInputMode('srt')
+                  if (!srtRaw.trim()) srtRef.current?.click()
+                }}
+              >
                 <IconList size={12} /> Nhập SRT
               </button>
               <button type="button" onClick={() => fileRef.current?.click()}>
                 <IconFile size={12} /> Nhập TXT
               </button>
-              <button
-                type="button"
-                onClick={async () => {
-                  try {
-                    const t = await navigator.clipboard.readText()
-                    if (t) setText(t)
-                  } catch {
-                    setError('Không đọc được clipboard')
-                  }
-                }}
-              >
-                Dán clipboard
+              <button type="button" onClick={() => void onPasteClipboard()}>
+                <IconPaste size={12} /> Dán clipboard
               </button>
             </div>
-            <input ref={fileRef} type="file" accept=".txt,text/plain" hidden onChange={(e) => { const f = e.target.files?.[0]; if (f) onLoadTxt(f) }} />
-            <input ref={srtRef} type="file" accept=".srt,text/plain" hidden onChange={(e) => { const f = e.target.files?.[0]; if (f) onLoadSrt(f) }} />
-            <textarea
-              className="tts-textarea"
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              placeholder="Nhập hoặc dán văn bản của bạn ở đây…"
+            <input
+              ref={fileRef}
+              type="file"
+              accept=".txt,text/plain"
+              hidden
+              onChange={(e) => {
+                const f = e.target.files?.[0]
+                if (f) {
+                  setInputMode('text')
+                  setSrtRaw('')
+                  onLoadTxt(f)
+                }
+                e.target.value = ''
+              }}
             />
-            <div className="tts-foot-row">
-              <span>{text.length} ký tự</span>
-              <button type="button" onClick={() => setText('')}>Xóa nội dung</button>
-            </div>
-            <div className="tts-split-row">
-              <label className="tts-split-field">
-                Tùy chọn tách câu
-                <select
-                  value={autoSplit ? 'auto' : 'off'}
-                  onChange={(e) => setAutoSplit(e.target.value === 'auto')}
-                >
-                  <option value="auto">Tự động tách câu (khuyến nghị)</option>
-                  <option value="off">Không tách</option>
-                </select>
-              </label>
-              <button
-                type="button"
-                className={autoSplit ? 'tts-switch is-on' : 'tts-switch'}
-                role="switch"
-                aria-checked={autoSplit}
-                title={autoSplit ? 'Tắt tách câu' : 'Bật tách câu'}
-                onClick={() => setAutoSplit((v) => !v)}
-              >
-                <span className="tts-switch-track" />
-              </button>
-            </div>
-            <p style={{ margin: '6px 0 0', fontSize: '0.72rem', color: 'var(--tts-muted)' }}>
-              Hệ thống tự động tách văn bản thành các câu hợp lý.
-            </p>
+            <input
+              ref={srtRef}
+              type="file"
+              accept=".srt,text/plain,.vtt"
+              hidden
+              onChange={(e) => {
+                const f = e.target.files?.[0]
+                if (f) onLoadSrt(f)
+                e.target.value = ''
+              }}
+            />
+            {inputMode === 'srt' ? (
+              <>
+                <textarea
+                  className="tts-textarea"
+                  value={srtRaw}
+                  onChange={(e) => {
+                    const v = e.target.value
+                    setSrtRaw(v)
+                    setText(srtPreviewLines(v))
+                  }}
+                  spellCheck={false}
+                  placeholder={
+                    '1\n00:00:01,000 --> 00:00:04,000\nXin chào…\n\n(dán SRT đầy đủ — 1 cue = 1 câu TTS, giữ timestamp)'
+                  }
+                />
+                <div className="tts-foot-row">
+                  <span>
+                    {srtRaw.length} ký tự
+                    {srtRaw.trim() ? ' · mode SRT' : ''}
+                    {keepTimeline ? ' · giữ timeline' : ''}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSrtRaw('')
+                      setText('')
+                    }}
+                  >
+                    Xóa nội dung
+                  </button>
+                </div>
+                <p style={{ margin: '6px 0 0', fontSize: '0.72rem', color: 'var(--tts-muted)' }}>
+                  SRT: 1 cue = 1 dòng TTS; xuất phụ đề giữ start/end gốc khi bật « Giữ nguyên timeline SRT ».
+                  Không tách câu CapCut.
+                </p>
+              </>
+            ) : (
+              <>
+                <textarea
+                  className="tts-textarea"
+                  value={text}
+                  onChange={(e) => {
+                    setText(e.target.value)
+                    if (srtRaw) setSrtRaw('')
+                  }}
+                  placeholder="Nhập hoặc dán văn bản của bạn ở đây…"
+                />
+                <div className="tts-foot-row">
+                  <span>{text.length} ký tự</span>
+                  <button type="button" onClick={() => setText('')}>
+                    Xóa nội dung
+                  </button>
+                </div>
+                <div className="tts-split-row">
+                  <label className="tts-split-field">
+                    Tùy chọn tách câu
+                    <select
+                      value={autoSplit ? 'auto' : 'off'}
+                      onChange={(e) => setAutoSplit(e.target.value === 'auto')}
+                    >
+                      <option value="auto">Tự động tách câu (khuyến nghị)</option>
+                      <option value="off">Không tách</option>
+                    </select>
+                  </label>
+                  <button
+                    type="button"
+                    className={autoSplit ? 'tts-switch is-on' : 'tts-switch'}
+                    role="switch"
+                    aria-checked={autoSplit}
+                    title={autoSplit ? 'Tắt tách câu' : 'Bật tách câu'}
+                    onClick={() => setAutoSplit((v) => !v)}
+                  >
+                    <span className="tts-switch-track" />
+                  </button>
+                </div>
+                <p style={{ margin: '6px 0 0', fontSize: '0.72rem', color: 'var(--tts-muted)' }}>
+                  Hệ thống tự động tách văn bản thành các câu hợp lý.
+                </p>
+              </>
+            )}
           </section>
           </DashPanel>
 
@@ -2477,10 +2649,19 @@ export default function TtsStudio({ voices, onRefreshVoices }: Props) {
                 <button
                   type="button"
                   className="tts-btn tts-btn-blue"
-                  disabled={busy || !text.trim() || !voice}
+                  disabled={
+                    busy ||
+                    !voice ||
+                    (inputMode === 'srt' ? !srtRaw.trim() : !text.trim())
+                  }
                   onClick={() => void onSynth()}
                 >
-                  <IconMic size={15} /> {busy ? 'Đang tạo…' : 'Tạo giọng nói'}
+                  <IconMic size={15} />{' '}
+                  {busy
+                    ? 'Đang tạo…'
+                    : inputMode === 'srt'
+                      ? 'Tạo giọng từ SRT'
+                      : 'Tạo giọng nói'}
                 </button>
                 <button
                   type="button"

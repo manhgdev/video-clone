@@ -288,6 +288,7 @@ export default function App() {
   const [viewExportSrc, setViewExportSrc] = useState<string | null>(null)
   const [previewEditorOpen, setPreviewEditorOpen] = useState(false)
   const [progressMinimized, setProgressMinimized] = useState(false)
+  const [ttsSideOpen, setTtsSideOpen] = useState(false)
   const pollRef = useRef<number | null>(null)
   const pollInFlight = useRef(false)
   const pollFailStreak = useRef(0)
@@ -1100,8 +1101,13 @@ export default function App() {
         hardware={hw}
         dark={dark}
         mode={appMode}
+        menuOpen={ttsSideOpen}
+        onMenuClick={
+          appMode === 'tts' ? () => setTtsSideOpen((o) => !o) : undefined
+        }
         onModeChange={(m) => {
           setAppMode(m)
+          setTtsSideOpen(false)
           if (m === 'clone') return
           setPreviewEditorOpen(false)
         }}
@@ -1120,21 +1126,60 @@ export default function App() {
           setSetupReady(true)
           setForceSetup(false)
         }}
+        onSaved={() => {
+          const l = settings.targetLang === 'none' ? 'vi' : settings.targetLang
+          void api.voices(l).then(setVoices).catch(() => {})
+        }}
         onClose={() => {
           if (forceSetup && !setupReady) return
           setConfigOpen(false)
+          // đóng config cũng refresh voices (user có thể vừa lưu key)
+          const l = settings.targetLang === 'none' ? 'vi' : settings.targetLang
+          void api.voices(l).then(setVoices).catch(() => {})
         }}
       />
       {appMode === 'tts' ? (
         <TtsPage
           voices={voices}
+          sideOpen={ttsSideOpen}
+          onSideOpenChange={setTtsSideOpen}
           onRefreshVoices={(lang) => {
             const l = lang || (settings.targetLang === 'none' ? 'vi' : settings.targetLang)
             void api.voices(l).then(setVoices).catch(() => {})
           }}
         />
       ) : appMode === 'download' ? (
-        <DownloadPage />
+        <DownloadPage
+          onUseInClone={(pid, meta) => {
+            const switchVersion = ++projectSwitchRef.current
+            activeProjectRef.current = pid
+            persistSession(pid)
+            setProjectId(pid)
+            setVideoUrl(freshVideoUrl(meta.videoUrl || `/api/projects/${pid}/video`))
+            setDuration(meta.duration || 0)
+            setExportUrl(null)
+            setExportPath(null)
+            setSegments([])
+            setOverlays([])
+            setWorkClipSec(0)
+            workClipSecRef.current = 0
+            setBakedPreferVideo(false)
+            bakedPreferVideoRef.current = false
+            setBakedSpeed(1)
+            setHasBakedSpeed(false)
+            setViewExportSrc(null)
+            setPreviewEditorOpen(false)
+            setStatus({
+              step: 'video',
+              progress: 100,
+              message: 'Video sẵn sàng (từ Download)',
+              running: false,
+            })
+            if (projectSwitchRef.current === switchVersion) {
+              setAppMode('clone')
+            }
+          }}
+        />
       ) : appMode === 'film' ? (
         <FilmPage />
       ) : appMode === 'batch' ? (
@@ -1210,6 +1255,7 @@ export default function App() {
               (segments.length > 0 || expandSegmentsForList(segments).length > 0)
               && !status.running
             }
+            canPreviewEditor={Boolean(projectId && videoUrl)}
             canExport={(() => {
               if (status.running) return false
               // Alt+G: shell rỗng chữ — check children đã bung

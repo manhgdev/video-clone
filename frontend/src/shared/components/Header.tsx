@@ -47,6 +47,14 @@ const NAV: {
 
 const SHORT: Record<string, string> = { cpu: 'CPU', cuda: 'GPU', metal: 'GPU' }
 
+function IconMenu({ size = 22 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" aria-hidden>
+      <path d="M4 7h16M4 12h16M4 17h16" />
+    </svg>
+  )
+}
+
 type Props = {
   hardware: HardwareInfo
   dark: boolean
@@ -54,6 +62,9 @@ type Props = {
   onModeChange?: (mode: AppMode) => void
   onToggleTheme: () => void
   onOpenConfig?: () => void
+  /** TTS mobile: ☰ thay logo — mở sidebar trái */
+  onMenuClick?: () => void
+  menuOpen?: boolean
 }
 
 export default function Header({
@@ -63,13 +74,30 @@ export default function Header({
   onModeChange,
   onToggleTheme,
   onOpenConfig,
+  onMenuClick,
+  menuOpen = false,
 }: Props) {
   const display = SHORT[hardware.accel] ?? hardware.accel.toUpperCase()
+  const showTtsMenu = mode === 'tts' && typeof onMenuClick === 'function'
 
   return (
-    <header className="header">
+    <header className={`header${showTtsMenu ? ' header--tts' : ''}`}>
       <div className="brand">
-        <IconLogo />
+        {showTtsMenu && (
+          <button
+            type="button"
+            className={`header-menu-btn${menuOpen ? ' is-open' : ''}`}
+            onClick={onMenuClick}
+            aria-label={menuOpen ? 'Đóng menu TTS' : 'Mở menu TTS'}
+            aria-expanded={menuOpen}
+            title="Menu Text to Speech"
+          >
+            <IconMenu size={22} />
+          </button>
+        )}
+        <span className="header-logo-wrap" aria-hidden={showTtsMenu ? undefined : undefined}>
+          <IconLogo />
+        </span>
         <div className="brand-text">
           <strong>VideoClone</strong>
           <span>Studio Dịch Thuật & Lồng Tiếng AI</span>

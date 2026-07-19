@@ -129,7 +129,51 @@
   border-color: var(--border);
 }
 
+.header-menu-btn {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--ink);
+  padding: 0;
+  cursor: pointer;
+}
+
+.header-menu-btn:hover,
+.header-menu-btn.is-open {
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
+  border-color: color-mix(in srgb, var(--primary) 35%, var(--line));
+  color: var(--primary);
+}
+
+.header-logo-wrap {
+  display: flex;
+  flex-shrink: 0;
+  line-height: 0;
+}
+
+/* Desktop TTS: logo; ☰ ẩn */
+.header--tts .header-menu-btn {
+  display: none;
+}
+
 @media (max-width: 900px) {
   .nav button span { display: none; }
   .nav button { padding: 0 10px; }
+
+  /* TTS hẹp: ☰ thay logo — sidebar drawer, không nửa trên */
+  .header--tts .header-menu-btn {
+    display: inline-flex;
+  }
+  .header--tts .header-logo-wrap {
+    display: none;
+  }
+  .header--tts .brand-text span {
+    display: none;
+  }
 }

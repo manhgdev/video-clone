@@ -41,6 +41,13 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     def _warm_models() -> None:
+        try:
+            from pipeline.download import ensure_download_dirs
+
+            ensure_download_dirs()
+        except Exception:
+            pass
+
         threading.Thread(
             target=run_public_cleanup_periodically,
             name="cleanup-public",

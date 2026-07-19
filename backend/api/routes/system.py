@@ -120,6 +120,13 @@ def api_save_config(body: AppConfigIn):
             }
         }
     save_app_config(patch)
+    # key ElevenLabs đổi → xóa cache list giọng (tránh kẹt [] từ lần trước chưa có key)
+    try:
+        from pipeline.tts.eleven import clear_el_voices_cache
+
+        clear_el_voices_cache()
+    except Exception:
+        pass
     return public_app_config()
 
 

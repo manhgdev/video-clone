@@ -149,7 +149,7 @@ def install_ocr_cuda() -> dict[str, Any]:
 
 def _demucs_venv_python() -> Path | None:
     """Tìm python .venv-demucs — ưu tiên venv đã import được demucs."""
-    from pipeline.export.mux import _demucs_py_in, _demucs_root_candidates
+    from pipeline.export.stem import _demucs_py_in, _demucs_root_candidates
 
     candidates: list[Path] = []
     for root in _demucs_root_candidates():

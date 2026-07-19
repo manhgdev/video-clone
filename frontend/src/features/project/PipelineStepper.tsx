@@ -13,6 +13,8 @@ type Props = {
   step: Step
   canDub: boolean
   canExport: boolean
+  /** Xem trước & sửa — mặc định luôn bật nếu có video */
+  canPreviewEditor?: boolean
   onDub: () => void
   onPreviewEditor: () => void
   onExport: () => void
@@ -22,6 +24,7 @@ export default function Stepper({
   step,
   canDub,
   canExport,
+  canPreviewEditor = true,
   onDub,
   onPreviewEditor,
   onExport,
@@ -67,8 +70,14 @@ export default function Stepper({
         </button>
         <button
           type="button"
-          className={canExport && (step === 'translate' || step === 'dub') ? 'solid pulse' : undefined}
-          disabled={!canExport}
+          className={
+            canPreviewEditor && (step === 'translate' || step === 'dub' || step === 'video')
+              ? 'solid pulse'
+              : canPreviewEditor
+                ? 'solid'
+                : undefined
+          }
+          disabled={!canPreviewEditor}
           onClick={onPreviewEditor}
           title="Xem video nguồn với bản dịch theo timeline và sửa trực tiếp — xuất bản từ đây"
         >

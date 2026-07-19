@@ -44,6 +44,43 @@ html.dark .tts-studio {
   flex-direction: column;
   padding: 0;
   overflow-y: auto;
+  z-index: 40;
+}
+
+.tts-side-head {
+  display: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--tts-line);
+  flex-shrink: 0;
+}
+
+.tts-side-head strong {
+  font-size: 0.88rem;
+  font-weight: 750;
+}
+
+.tts-side-close {
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--tts-muted);
+  font-size: 1.35rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.tts-side-close:hover {
+  background: var(--tts-blue-soft);
+  color: var(--tts-blue);
+}
+
+.tts-side-backdrop {
+  display: none;
 }
 
 .tts-side-brand {
@@ -1988,9 +2025,39 @@ html.dark .tts-wave-box {
   .tts-studio {
     grid-template-columns: 1fr;
   }
+
+  /* Không xếp sidebar nửa trên — ẩn, mở bằng ☰ header */
   .tts-side {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: min(280px, 86vw);
     max-height: none;
+    transform: translateX(-105%);
+    transition: transform 0.22s ease;
+    box-shadow: none;
+    border-right: 1px solid var(--tts-line);
   }
+  .tts-side.is-open {
+    transform: translateX(0);
+    box-shadow: 8px 0 28px rgba(15, 23, 42, 0.18);
+  }
+  .tts-side-head {
+    display: flex;
+  }
+  .tts-side-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 35;
+    border: 0;
+    padding: 0;
+    margin: 0;
+    background: rgba(15, 23, 42, 0.42);
+    cursor: pointer;
+  }
+
   .tts-dash {
     grid-template-columns: 1fr;
     grid-template-rows: none;
