@@ -13,6 +13,11 @@ const versionFilePath = path.join(root, 'build_app', 'VERSION')
 // onedir = nhanh (Windows mặc định). ONEFILE=1 để gói 1 file (chậm vì bước PKG).
 const oneFile = process.env.ONEFILE === '1' || process.env.ONEFILE === 'true'
 const clean = process.env.CLEAN === '1' || process.env.CLEAN === 'true'
+const npmCommand = isWin ? process.env.ComSpec || 'cmd.exe' : 'npm'
+
+function npmArgs(...args) {
+  return isWin ? ['/d', '/s', '/c', `npm ${args.join(' ')}`] : args
+}
 
 function run(command, args) {
   const result = spawnSync(command, args, { cwd: root, stdio: 'inherit', shell: false })
@@ -64,7 +69,11 @@ const appVersion = formatSemver(parseSemver(pkg.version || '1.0.0'))
 writeFileSync(versionFilePath, `${appVersion}\n`, 'utf8')
 console.log(`Building VideoClone v${appVersion} (${oneFile ? 'onefile' : 'onedir'}${clean ? ', clean' : ''})`)
 
-run(isWin ? process.env.ComSpec || 'cmd.exe' : 'npm', isWin ? ['/d', '/s', '/c', 'npm run build'] : ['run', 'build'])
+if (!existsSync(path.join(root, 'node_modules', '.bin', isWin ? 'tsc.cmd' : 'tsc'))) {
+  console.log('Thiếu dependency frontend — đang cài đặt...')
+  run(npmCommand, npmArgs('install', '--no-package-lock'))
+}
+run(npmCommand, npmArgs('run', 'build'))
 
 // Chỉ cài khi thiếu — không reinstall mỗi lần
 ensurePip(['pyinstaller', 'uv', 'pywebview'])

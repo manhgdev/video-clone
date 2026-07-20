@@ -53,16 +53,13 @@ jobs:
           $zip = Join-Path (Split-Path $package.FullName) "$($package.Name)-windows-x64.zip"
           Compress-Archive -Path "$($package.FullName)\*" -DestinationPath $zip -CompressionLevel Optimal
           "directory=$($package.FullName)" >> $env:GITHUB_OUTPUT
-          "exe=$exe" >> $env:GITHUB_OUTPUT
           "zip=$zip" >> $env:GITHUB_OUTPUT
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ github.event.repository.name }}-windows-x64
-          path: |
-            ${{ steps.package.outputs.exe }}
-            ${{ steps.package.outputs.zip }}
+          path: ${{ steps.package.outputs.zip }}
           if-no-files-found: error
           retention-days: 14
 
@@ -71,13 +68,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
-          EXE: ${{ steps.package.outputs.exe }}
           ZIP: ${{ steps.package.outputs.zip }}
         shell: pwsh
         run: |
           gh release view $env:TAG 2>$null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $env:TAG $env:EXE $env:ZIP --clobber
+            gh release upload $env:TAG $env:ZIP --clobber
           } else {
-            gh release create $env:TAG $env:EXE $env:ZIP --generate-notes --title "VideoClone $env:TAG"
+            gh release create $env:TAG $env:ZIP --generate-notes --title "VideoClone $env:TAG"
           }
