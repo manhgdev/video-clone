@@ -1,0 +1,85 @@
+name: Build macOS app
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install build tools
+        run: |
+          npm install
+          python -m venv backend/.venv
+          backend/.venv/bin/python -m pip install --upgrade pip
+          backend/.venv/bin/python -m pip install -r backend/requirements-app.txt pyinstaller pywebview uv
+          brew list ffmpeg >/dev/null 2>&1 || brew install ffmpeg
+
+      - name: Build macOS app
+        env:
+          ONEFILE: '1'
+          CLEAN: '1'
+        run: npm run build:app
+
+      - name: Create APP and PKG packages
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="$(find build_app/release -maxdepth 1 -type d -name 'VideoClone_v*.app' -print -quit)"
+          test -n "$app" || { echo 'Không tìm thấy VideoClone.app'; exit 1; }
+          version="$(basename "$app" | sed -E 's/^VideoClone_v|\.app$//g')"
+          arch="$(uname -m)"
+          codesign --force --deep --sign - "$app"
+          zip="build_app/release/VideoClone_v${version}-macos-${arch}.zip"
+          pkg="build_app/release/VideoClone_v${version}-macos-${arch}.pkg"
+          ditto -c -k --sequesterRsrc --keepParent "$app" "$zip"
+          pkgbuild --component "$app" --install-location /Applications "$pkg"
+          echo "app=$app" >> "$GITHUB_OUTPUT"
+          echo "zip=$zip" >> "$GITHUB_OUTPUT"
+          echo "pkg=$pkg" >> "$GITHUB_OUTPUT"
+          echo "arch=$arch" >> "$GITHUB_OUTPUT"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.repository.name }}-macos-${{ steps.package.outputs.arch }}
+          path: |
+            ${{ steps.package.outputs.zip }}
+            ${{ steps.package.outputs.pkg }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          ZIP: ${{ steps.package.outputs.zip }}
+          PKG: ${{ steps.package.outputs.pkg }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$ZIP" "$PKG" --clobber
+          elif ! gh release create "$TAG" "$ZIP" "$PKG" --generate-notes --title "VideoClone $TAG"; then
+            sleep 5
+            gh release upload "$TAG" "$ZIP" "$PKG" --clobber
+          fi

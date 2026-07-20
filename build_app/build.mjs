@@ -70,7 +70,7 @@ run(isWin ? process.env.ComSpec || 'cmd.exe' : 'npm', isWin ? ['/d', '/s', '/c',
 ensurePip(['pyinstaller', 'uv', 'pywebview'])
 
 const iconIco = path.join(root, 'build_app', 'app.ico')
-const iconPng = path.join(root, 'frontend', 'public', 'zm-logo.png')
+const iconIcns = path.join(root, 'build_app', 'app.icns')
 
 const args = [
   '-m', 'PyInstaller',
@@ -101,7 +101,7 @@ for (const mod of [
 ]) args.push('--exclude-module', mod)
 
 if (isWin && existsSync(iconIco)) args.push('--icon', iconIco)
-else if (isMac && existsSync(iconPng)) args.push('--icon', iconPng)
+else if (isMac && existsSync(iconIcns)) args.push('--icon', iconIcns)
 
 if (isWin || isMac) args.push('--windowed')
 if (isWin) {
