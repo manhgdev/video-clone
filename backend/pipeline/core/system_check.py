@@ -42,6 +42,69 @@ def _mod_ok(name: str) -> tuple[bool, str]:
         return False, str(e)[:80]
 
 
+_AI_RUNTIME_PACKAGES = (
+    "faster-whisper>=1.1.0",
+    "rapidocr-onnxruntime>=1.2.0",
+    "pillow",
+    "opencv-python-headless",
+    "huggingface-hub",
+    "perth",
+    "pyyaml",
+    "sea-g2p",
+    "soundfile",
+    "soxr",
+    "tokenizers",
+)
+_VIENEU_PACKAGE = "vieneu>=3.2.0"
+
+
+def install_ai_runtime() -> dict[str, Any]:
+    """Cài nhóm ASR/OCR nặng vào venv riêng của bản desktop."""
+    modules = ("faster_whisper", "rapidocr_onnxruntime", "PIL", "cv2", "vieneu")
+    missing = [name for name in modules if not _mod_ok(name)[0]]
+    if not missing:
+        return {
+            "ok": True,
+            "message": "Gói AI đã sẵn sàng",
+            "detail": "Whisper · OCR · zmAI · VieNeu Local",
+        }
+
+    if getattr(sys, "frozen", False):
+        home = Path(os.environ["VIDEO_CLONE_HOME"])
+        venv = home / ".venv-runtime"
+        py = venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+        uv = shutil.which("uv")
+        if not uv:
+            raise RuntimeError("Bản ứng dụng thiếu uv để cài gói AI")
+        if not py.is_file():
+            subprocess.run(
+                [uv, "venv", "--python", f"{sys.version_info.major}.{sys.version_info.minor}", "--seed", str(venv)],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=900,
+            )
+        cmd = [uv, "pip", "install", "--python", str(py), "--upgrade", *_AI_RUNTIME_PACKAGES]
+        vieneu_cmd = [
+            uv, "pip", "install", "--python", str(py), "--upgrade", "--no-deps", _VIENEU_PACKAGE
+        ]
+    else:
+        cmd = [sys.executable, "-m", "pip", "install", "--upgrade", *_AI_RUNTIME_PACKAGES]
+        vieneu_cmd = [
+            sys.executable, "-m", "pip", "install", "--upgrade", "--no-deps", _VIENEU_PACKAGE
+        ]
+
+    for install_cmd in (cmd, vieneu_cmd):
+        proc = subprocess.run(install_cmd, capture_output=True, text=True, timeout=1800)
+        if proc.returncode:
+            raise RuntimeError((proc.stderr or proc.stdout)[-3000:])
+    return {
+        "ok": True,
+        "message": "Đã cài gói AI — đang khởi động lại",
+        "detail": "Whisper · RapidOCR · zmAI · VieNeu Local",
+    }
+
+
 def _ocr_cuda_check() -> tuple[bool, str]:
     """Chỉ probe provider list — không tạo RapidOCR/session (crash native trên bản đóng gói)."""
     try:
@@ -435,14 +498,23 @@ def system_checks() -> dict[str, Any]:
         )
     )
 
-    # Python packages
-    for mid, title, req in (
-        ("faster_whisper", "faster-whisper", True),
-        ("rapidocr_onnxruntime", "RapidOCR", True),
-        ("httpx", "httpx", True),
-        ("PIL", "Pillow", True),
-        ("cv2", "OpenCV", False),
-    ):
+    # Runtime AI được cài sau để bản desktop tải nhanh và nhẹ.
+    runtime_modules = ("faster_whisper", "rapidocr_onnxruntime", "PIL", "cv2", "vieneu")
+    runtime_missing = [mid for mid in runtime_modules if not _mod_ok(mid)[0]]
+    items.append(
+        _item(
+            id="ai_runtime",
+            name="Gói AI · Whisper + OCR + VieNeu",
+            ok=not runtime_missing,
+            required=True,
+            detail=("đã cài" if not runtime_missing else f"thiếu: {', '.join(runtime_missing)}"),
+            hint="Cài một lần để dùng Whisper, OCR, zmAI và VieNeu Local. Có thể mất vài phút.",
+            install="ai_runtime",
+            installLabel="Cài gói AI",
+        )
+    )
+
+    for mid, title, req in (("httpx", "httpx", True),):
         ok, detail = _mod_ok(mid)
         inst, lab, hint = _install_from_plan(plan, mid)
         items.append(

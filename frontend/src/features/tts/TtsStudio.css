@@ -831,11 +831,22 @@ body.tts-dash-resizing iframe {
   height: 4px;
 }
 
+.tts-slider-control {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.tts-slider-range {
+  flex: 1;
+  min-width: 0;
+}
+
 .tts-slider-number {
   flex: 0 0 62px;
   width: 62px;
   height: 25px;
-  margin: -4px 0 -2px;
+  margin: 0;
   border: 1px solid var(--tts-line);
   border-radius: 6px;
   padding: 0 5px;
@@ -860,6 +871,17 @@ body.tts-dash-resizing iframe {
   color: #94a3b8;
   margin-top: 1px;
 }
+
+.tts-slider-marks-speed {
+  position: relative;
+  display: block;
+  height: 0.8rem;
+}
+
+.tts-slider-marks-speed span { position: absolute; }
+.tts-slider-marks-speed span:first-child { left: 0; }
+.tts-slider-marks-speed span:nth-child(2) { left: 33.333%; transform: translateX(-50%); }
+.tts-slider-marks-speed span:last-child { right: 0; }
 
 /* Advanced checks — thoáng, dễ đọc */
 .tts-check {

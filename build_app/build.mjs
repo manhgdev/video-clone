@@ -68,9 +68,6 @@ run(isWin ? process.env.ComSpec || 'cmd.exe' : 'npm', isWin ? ['/d', '/s', '/c',
 
 // Chỉ cài khi thiếu — không reinstall mỗi lần
 ensurePip(['pyinstaller', 'uv', 'pywebview'])
-if (isWin && !pyOk('import onnxruntime')) {
-  run(python, ['-m', 'pip', 'install', '--upgrade', 'onnxruntime>=1.23'])
-}
 
 const iconIco = path.join(root, 'build_app', 'app.ico')
 const iconPng = path.join(root, 'frontend', 'public', 'zm-logo.png')
@@ -87,13 +84,21 @@ const args = [
   '--paths', path.join(root, 'backend'),
   '--add-data', `${path.join(root, 'dist')}${dataSep}dist`,
   '--add-data', `${path.join(root, 'backend', 'pipeline', 'tts', 'voices_capcut.json')}${dataSep}pipeline/tts`,
+  '--add-data', `${path.join(root, 'backend', 'resources', 'voice-ref')}${dataSep}resources/voice-ref`,
   '--add-data', `${versionFilePath}${dataSep}.`,
   ...(existsSync(iconIco) ? ['--add-data', `${iconIco}${dataSep}.`] : []),
-  '--collect-all', 'faster_whisper',
-  '--collect-all', 'rapidocr_onnxruntime',
-  '--collect-all', 'onnxruntime',
   '--collect-all', 'webview',
 ]
+
+// Các gói AI được cài vào %LOCALAPPDATA%/VideoClone/.venv-runtime ở lần mở đầu tiên.
+for (const mod of [
+  'faster_whisper', 'ctranslate2', 'tokenizers', 'huggingface_hub',
+  'rapidocr_onnxruntime', 'onnxruntime', 'cv2', 'PIL', 'numpy',
+  'torch', 'torchaudio', 'transformers', 'datasets', 'accelerate',
+  'pandas', 'scipy', 'sklearn', 'tensorflow', 'soundfile', 'librosa',
+  'pytest', 'lxml', 'pyarrow', 'matplotlib', 'sympy', 'numba', 'llvmlite',
+  'vieneu', 'perth', 'sea_g2p', 'soxr',
+]) args.push('--exclude-module', mod)
 
 if (isWin && existsSync(iconIco)) args.push('--icon', iconIco)
 else if (isMac && existsSync(iconPng)) args.push('--icon', iconPng)

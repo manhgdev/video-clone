@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { AppConfig, CloudProviderId, SystemChecks } from '@/features/project/project.types'
 import { api } from '@/features/project/project.api'
+import ProgressPopup from '@/shared/components/ProgressPopup'
 import './ConfigModal.css'
 
 const PROVIDERS: CloudProviderId[] = [
@@ -92,6 +93,8 @@ export default function ConfigModal({
   const [checksLoading, setChecksLoading] = useState(false)
   const [checksErr, setChecksErr] = useState('')
   const [installing, setInstalling] = useState<string | null>(null)
+  const [installProgressMinimized, setInstallProgressMinimized] = useState(false)
+  const [installPopupError, setInstallPopupError] = useState('')
 
   const loadChecks = useCallback(() => {
     setChecksLoading(true)
@@ -154,22 +157,29 @@ export default function ConfigModal({
   const cur = draft[tab]
   const canClose = !forceSetup || !!checks?.ok
 
-  async function installAction(kind: 'ocr_cuda' | 'demucs_cuda') {
+  async function installAction(kind: 'ai_runtime' | 'ocr_cuda' | 'demucs_cuda') {
     setInstalling(kind)
+    setInstallProgressMinimized(false)
+    setInstallPopupError('')
     setChecksErr('')
     try {
-      const result =
-        kind === 'ocr_cuda' ? await api.installOcrCuda() : await api.installDemucsCuda()
+      const result = kind === 'ai_runtime'
+        ? await api.installAiRuntime()
+        : kind === 'ocr_cuda'
+          ? await api.installOcrCuda()
+          : await api.installDemucsCuda()
       setMsg(result.message + (result.detail ? ` · ${result.detail}` : ''))
       loadChecks()
     } catch (e) {
-      setChecksErr(
-        e instanceof Error
+      const message = e instanceof Error
           ? e.message
-          : kind === 'ocr_cuda'
+          : kind === 'ai_runtime'
+            ? 'Cài gói AI thất bại'
+            : kind === 'ocr_cuda'
             ? 'Cài GPU OCR thất bại'
-            : 'Cài Demucs thất bại',
-      )
+            : 'Cài Demucs thất bại'
+      setChecksErr(message)
+      setInstallPopupError(message)
     } finally {
       setInstalling(null)
     }
@@ -440,22 +450,24 @@ export default function ConfigModal({
                       {!it.ok ? <div className="cfg-check-hint">{it.hint}</div> : null}
                     </div>
                     {it.ok ? (
-                      it.install === 'ocr_cuda' || it.install === 'demucs_cuda' ? (
+                      ['ai_runtime', 'ocr_cuda', 'demucs_cuda'].includes(it.install) ? (
                         <span className="cfg-check-installed">Đã cài</span>
                       ) : null
-                    ) : it.install === 'ocr_cuda' || it.install === 'demucs_cuda' ? (
+                    ) : ['ai_runtime', 'ocr_cuda', 'demucs_cuda'].includes(it.install) ? (
                       <button
                         type="button"
                         className="cfg-check-install"
                         disabled={!!installing}
                         onClick={() =>
-                          void installAction(it.install as 'ocr_cuda' | 'demucs_cuda')
+                          void installAction(it.install as 'ai_runtime' | 'ocr_cuda' | 'demucs_cuda')
                         }
                       >
                         {installing === it.install
                           ? 'Đang cài…'
                           : it.installLabel ||
-                            (it.install === 'demucs_cuda'
+                            (it.install === 'ai_runtime'
+                              ? 'Cài gói AI'
+                              : it.install === 'demucs_cuda'
                               ? checks?.device?.install.demucsLabel || 'Cài Demucs GPU'
                               : checks?.device?.install.ocrLabel || 'Cài OCR CUDA')}
                       </button>
@@ -621,6 +633,36 @@ export default function ConfigModal({
             </>
           )}
         </footer>
+      </div>
+      <div onClick={(e) => e.stopPropagation()}>
+        <ProgressPopup
+          active={Boolean(installing || installPopupError)}
+          minimized={installProgressMinimized}
+          running={Boolean(installing)}
+          title={
+            installPopupError
+              ? 'Cài đặt thất bại'
+              : installing === 'ai_runtime'
+                ? 'Đang cài gói AI'
+                : installing === 'ocr_cuda'
+                  ? 'Đang cài GPU OCR'
+                  : 'Đang cài Demucs'
+          }
+          message={
+            installing === 'ai_runtime'
+              ? 'Đang tải Whisper, OCR, zmAI và VieNeu Local. Vui lòng không tắt ứng dụng.'
+              : installing
+                ? 'Đang tải và cài các thành phần cần thiết. Vui lòng chờ.'
+                : installPopupError
+          }
+          progress={installing ? 35 : 0}
+          error={installPopupError || null}
+          onMinimize={() => {
+            if (installing) setInstallProgressMinimized(true)
+            else setInstallPopupError('')
+          }}
+          onRestore={() => setInstallProgressMinimized(false)}
+        />
       </div>
     </div>
   )

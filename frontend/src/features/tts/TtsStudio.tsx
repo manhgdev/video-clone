@@ -2375,19 +2375,16 @@ export default function TtsStudio({
               </div>
             </label>
             <div className="tts-slider-row">
-              <div className="lab"><span>Tốc độ (Speed)</span><SliderNumber value={Number(speed.toFixed(2))} min={0.5} max={2} step={0.05} label="Nhập tốc độ" onChange={setSpeed} /></div>
-              <input type="range" min={0.5} max={2} step={0.05} value={speed} onChange={(e) => setSpeed(Number(e.target.value))} />
-              <div className="tts-slider-marks"><span>0.5x</span><span>1.0x</span><span>2.0x</span></div>
+              <div className="lab"><span>Tốc độ (Speed)</span></div>
+              <div className="tts-slider-control"><div className="tts-slider-range"><input type="range" min={0.5} max={2} step={0.05} value={speed} onChange={(e) => setSpeed(Number(e.target.value))} /><div className="tts-slider-marks tts-slider-marks-speed"><span>0.5x</span><span>1.0x</span><span>2.0x</span></div></div><SliderNumber value={Number(speed.toFixed(2))} min={0.5} max={2} step={0.05} label="Nhập tốc độ" onChange={setSpeed} /></div>
             </div>
             <div className="tts-slider-row">
-              <div className="lab"><span>Âm lượng (Volume)</span><SliderNumber value={Math.round(volume * 100)} min={50} max={200} step={5} label="Nhập âm lượng phần trăm" onChange={(value) => setVolume(value / 100)} /></div>
-              <input type="range" min={0.5} max={2} step={0.05} value={volume} onChange={(e) => setVolume(Number(e.target.value))} />
-              <div className="tts-slider-marks"><span>50%</span><span>100%</span><span>150%</span><span>200%</span></div>
+              <div className="lab"><span>Âm lượng (Volume)</span></div>
+              <div className="tts-slider-control"><div className="tts-slider-range"><input type="range" min={0.5} max={2} step={0.05} value={volume} onChange={(e) => setVolume(Number(e.target.value))} /><div className="tts-slider-marks"><span>50%</span><span>100%</span><span>150%</span><span>200%</span></div></div><SliderNumber value={Math.round(volume * 100)} min={50} max={200} step={5} label="Nhập âm lượng phần trăm" onChange={(value) => setVolume(value / 100)} /></div>
             </div>
             <div className="tts-slider-row">
-              <div className="lab"><span>Cao độ (Pitch)</span><SliderNumber value={pitch} min={-12} max={12} step={1} label="Nhập cao độ" onChange={setPitch} /></div>
-              <input type="range" min={-12} max={12} step={1} value={pitch} onChange={(e) => setPitch(Number(e.target.value))} />
-              <div className="tts-slider-marks"><span>-12</span><span>0</span><span>+12</span></div>
+              <div className="lab"><span>Cao độ (Pitch)</span></div>
+              <div className="tts-slider-control"><div className="tts-slider-range"><input type="range" min={-12} max={12} step={1} value={pitch} onChange={(e) => setPitch(Number(e.target.value))} /><div className="tts-slider-marks"><span>-12</span><span>0</span><span>+12</span></div></div><SliderNumber value={pitch} min={-12} max={12} step={1} label="Nhập cao độ" onChange={setPitch} /></div>
             </div>
             {isVieneuVoice && (
               <label className="tts-field">

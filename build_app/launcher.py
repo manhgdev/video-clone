@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import multiprocessing
 import os
+import shutil
 import sys
 import threading
 import time
@@ -30,6 +31,16 @@ os.environ.setdefault("VIDEO_CLONE_HOME", str(home))
 os.environ.setdefault("VIDEO_CLONE_DATA", str(home / "data"))
 os.environ.setdefault("VIDEO_CLONE_PUBLIC_DATA", str(home / "public_data"))
 os.environ.setdefault("CAPCUT_DEVICE_JSON", str(home / "capcut_device.json"))
+
+# Các gói AI nặng được cài ở lần chạy đầu, ngoài thư mục app để nâng cấp không cần build lại EXE.
+runtime_venv = home / ".venv-runtime"
+runtime_site = (
+    runtime_venv / "Lib" / "site-packages"
+    if sys.platform == "win32"
+    else runtime_venv / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
+)
+if runtime_site.is_dir():
+    sys.path.insert(0, str(runtime_site))
 
 if getattr(sys, "frozen", False) and sys.stdout is None:
     runtime_log = (home / "app.log").open("a", encoding="utf-8", buffering=1)
@@ -69,6 +80,16 @@ if ocr_site.is_dir():
 
 bundle = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
 os.environ["PATH"] = os.pathsep.join((str(bundle), os.environ.get("PATH", "")))
+
+# Seed giọng zmAI đi kèm; không ghi đè giọng hoặc metadata người dùng đã sửa.
+bundled_voice_refs = bundle / "resources" / "voice-ref"
+user_voice_refs = home / "resources" / "voice-ref"
+if bundled_voice_refs.is_dir():
+    user_voice_refs.mkdir(parents=True, exist_ok=True)
+    for source in bundled_voice_refs.iterdir():
+        target = user_voice_refs / source.name
+        if source.is_file() and not target.exists():
+            shutil.copy2(source, target)
 
 # Ẩn cửa sổ console đen khi app GUI spawn ffmpeg / demucs / nvidia-smi
 if sys.platform == "win32":

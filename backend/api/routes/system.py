@@ -150,6 +150,20 @@ def api_system_checks():
         raise HTTPException(500, f"system checks failed: {e}") from e
 
 
+@router.post("/api/system/install/ai_runtime")
+def api_install_ai_runtime():
+    from pipeline.core.system_check import install_ai_runtime
+
+    try:
+        result = install_ai_runtime()
+        if os.environ.get("VIDEO_CLONE_DESKTOP") == "1":
+            subprocess.Popen([sys.executable, "--restart-after", str(os.getpid())])
+            threading.Timer(1.0, lambda: os._exit(0)).start()
+        return result
+    except Exception as e:
+        raise HTTPException(500, str(e)) from e
+
+
 @router.post("/api/system/install/ocr_cuda")
 def api_install_ocr_cuda():
     """Install ONNX Runtime GPU into the backend's Python environment."""

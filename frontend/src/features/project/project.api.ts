@@ -30,6 +30,13 @@ export const api = {
   systemChecks: () =>
     fetchJson<SystemChecks>(`${base}/system/checks`, undefined, 20_000),
 
+  installAiRuntime: () =>
+    fetchJson<{ ok: boolean; message: string; detail: string }>(
+      `${base}/system/install/ai_runtime`,
+      { method: 'POST' },
+      35 * 60_000,
+    ),
+
   installOcrCuda: () =>
     fetchJson<{ ok: boolean; message: string; detail: string }>(
       `${base}/system/install/ocr_cuda`,
