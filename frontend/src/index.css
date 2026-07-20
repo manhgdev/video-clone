@@ -1,5 +1,37 @@
 @import "tailwindcss";
 
+/* Logo editor follows the panel width, not the browser viewport. */
+.logo-editor-panel {
+  display: grid;
+  /* Tối đa 2 cột; tự còn 1 cột theo chiều rộng panel, không theo viewport. */
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, max(150px, calc((100% - 0.5rem) / 2))), 1fr));
+  gap: 0.5rem;
+}
+
+.logo-editor-panel > .logo-editor-full:first-child {
+  display: none;
+}
+
+.logo-editor-panel > .col-span-2,
+.logo-editor-full {
+  grid-column: 1 / -1;
+}
+
+.logo-editor-panel details > div,
+.logo-editor-panel .grid-cols-4 {
+  grid-template-columns: repeat(auto-fit, minmax(64px, 1fr));
+}
+
+.logo-editor-panel [class*="grid-cols-[auto_1fr_2fr]"] {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  align-items: end;
+}
+
+.logo-editor-panel [class*="grid-cols-[auto_1fr_2fr]"] > :first-child,
+.logo-editor-panel [class*="grid-cols-[auto_1fr_2fr]"] > :last-child {
+  grid-column: 1 / -1;
+}
+
 /* ── Light mode (default) ── */
 :root {
   --background: hsl(0, 0%, 97%);

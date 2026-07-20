@@ -17,7 +17,7 @@ from typing import Any
 
 from pipeline.ocr.extract import _rapidocr_gpu_kwargs
 from pipeline.core.jobs import _job_procs, check_cancel
-from pipeline.core.media import h264_encoder_args, video_size
+from pipeline.core.media import ffprobe_duration, h264_encoder_args, nvdec_available, video_size
 from pipeline.core.project import ensure_layout, set_status
 from pipeline.core.resources import adaptive_workers
 from pipeline.ocr.extract import _ocr_join_lines, _rapidocr_labels
@@ -231,8 +231,6 @@ def cover_and_burn(
         seg = segments_by_id.get(sid, {})
         mb = _segment_bbox_override(seg, w, h)
         # Bbox đáy bake sẵn + source CJK → bỏ, OCR lại vị trí thật (giữa/đáy)
-        if mb is not None and _stored_cover_should_relocate(seg, mb, h):
-            mb = None
         manual_by_idx.append(mb)
     cue_boxes: list[list[tuple[int, int, int, int]]] = [[] for _ in cues]
     for i, mb in enumerate(manual_by_idx):
@@ -260,12 +258,21 @@ def cover_and_burn(
                     running=True,
                 )
             if len(need_ocr_idx) == len(cues):
+                from pipeline.core.resources import adaptive_workers, gpu_job_cap
+
+                cuda = bool(_rapidocr_gpu_kwargs()["det_use_cuda"])
+                ocr_w = adaptive_workers(
+                    workers,
+                    kind="gpu" if cuda else "cpu",
+                    cap=gpu_job_cap() if cuda else max(1, workers or 8),
+                    tasks=len(cues),
+                )
                 cue_boxes = _precompute_cue_boxes(
                     video,
                     cues,
                     ocr,
                     project_id=project_id,
-                    workers=1 if _rapidocr_gpu_kwargs()["det_use_cuda"] else workers,
+                    workers=ocr_w,
                 )
             else:
                 import cv2 as _cv2
@@ -276,7 +283,15 @@ def cover_and_burn(
                     fw = int(probe.get(_cv2.CAP_PROP_FRAME_WIDTH) or w)
                 finally:
                     probe.release()
-                ocr_workers = _resolve_workers(workers, n=len(need_ocr_idx))
+                from pipeline.core.resources import adaptive_workers, gpu_job_cap
+
+                cuda = bool(_rapidocr_gpu_kwargs()["det_use_cuda"])
+                ocr_workers = adaptive_workers(
+                    workers,
+                    kind="gpu" if cuda else "cpu",
+                    cap=gpu_job_cap() if cuda else 16,
+                    tasks=len(need_ocr_idx),
+                )
                 with ThreadPoolExecutor(
                     max_workers=ocr_workers, thread_name_prefix="ocr"
                 ) as pool:
@@ -292,6 +307,15 @@ def cover_and_burn(
             step="export",
             progress=15,
             message=f"Dùng vùng che đã chỉnh trong preview ({manual_n} câu)",
+            running=True,
+        )
+
+    if project_id and (cover or burn) and cues:
+        set_status(
+            project_id,
+            step="export",
+            progress=16,
+            message=f"Chuẩn bị caption / mask ({len(cues)} câu)…",
             running=True,
         )
 
@@ -438,16 +462,31 @@ def cover_and_burn(
         used_preview_layout = False
         if burn and text:
             seg_meta = segments_by_id.get(segment_id, {})
+            cue_font_getter = _font_for_size
+            cue_font_family = str(seg_meta.get("fontFamily") or "").strip()
+            if cue_font_family:
+                cue_font_cache: dict[int, Any] = {}
+
+                def cue_font_getter(size: int):
+                    fs = max(8, min(120, int(size)))
+                    cached = cue_font_cache.get(fs)
+                    if cached is None:
+                        try:
+                            cached = ImageFont.truetype(_font_for_preset(cue_font_family), fs)
+                        except OSError:
+                            cached = _font_for_size(fs)
+                        cue_font_cache[fs] = cached
+                    return cached
             cue_fs = _resolve_segment_font_size(
                 seg_meta, w, h,
                 project_font_size=subtitle_font_size,
                 default_font_size=fontsize,
                 auto_fontsize=auto_fontsize,
             )
-            cue_font = _font_for_size(cue_fs)
+            cue_font = cue_font_getter(cue_fs)
             # WYSIWYG: captionLayout từ editor (đã bake giống preview lúc Xuất)
             preview_lay = _preview_caption_layout(
-                seg_meta, cue_fs, _font_for_size, layout_mode=lay_mode,
+                seg_meta, cue_fs, cue_font_getter, layout_mode=lay_mode,
             )
             editor_locked = _editor_layout_locked(seg_meta)
             lay: dict[str, Any] | None = None
@@ -468,7 +507,7 @@ def cover_and_burn(
                     )
                     lay = _layout_mid_caption(
                         text,
-                        _font_for_size,
+                        cue_font_getter,
                         paint,
                         w,
                         h,
@@ -517,7 +556,7 @@ def cover_and_burn(
                 mid_pref = int(seg_meta.get("fontSize") or 0)
                 lay = _layout_mid_caption(
                     text,
-                    _font_for_size,
+                    cue_font_getter,
                     paint,
                     w,
                     h,
@@ -563,7 +602,7 @@ def cover_and_burn(
                     )
                 elif has_manual_bbox:
                     lay = _layout_caption_in_cover(
-                        text, cue_fs, paint, w, _font_for_size,
+                        text, cue_fs, paint, w, cue_font_getter,
                     )
                     cover_box = paint
                 else:
@@ -585,7 +624,11 @@ def cover_and_burn(
                 "bg_opacity": cap_bg_op,
                 "stroke": cap_stroke,
             }
-        cue_overlays.append(_caption_overlay(lay) if lay else None)
+        logo_asset = str(seg_meta.get("logoAssetPath") or "")
+        cue_overlays.append(
+            _image_overlay(logo_asset, tuple(map(int, lay["box"])))
+            if logo_asset and lay else (_caption_overlay(lay) if lay else None)
+        )
         # cover=True: che hardsub; below/above: chỉ dọc/nhãn (không che mid)
         # is_mid khi cover=False không được bật mask (tránh giống «che chữ + chèn»)
         need_mask = _should_paint_cover_mask(
@@ -677,13 +720,23 @@ def cover_and_burn(
         else:
             cue_fits.append([])
 
-    cap = cv2.VideoCapture(str(video))
-    if not cap.isOpened():
+    if project_id:
+        set_status(
+            project_id,
+            step="export",
+            progress=18,
+            message="Mở video / khởi tạo encode…",
+            running=True,
+        )
+
+    probe = cv2.VideoCapture(str(video))
+    if not probe.isOpened():
         raise RuntimeError(f"Không mở được video: {video}")
-    fps = float(cap.get(cv2.CAP_PROP_FPS) or 25.0)
+    fps = float(probe.get(cv2.CAP_PROP_FPS) or 25.0)
     if not (1.0 <= fps <= 120.0):
         fps = 25.0
-    frame_total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    frame_total = int(probe.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    probe.release()
     # h264 yêu cầu chẵn
     ew = int(w) - (int(w) % 2)
     eh = int(h) - (int(h) % 2)
@@ -701,8 +754,8 @@ def cover_and_burn(
     )
     if sys.platform == "win32":
         _ff_kw["creationflags"] = int(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
-    # Ưu tiên NVENC; fail → caller thấy stderr. fast encode trung gian.
-    v_args = list(h264_encoder_args(fast=True))
+    # Ưu tiên NVENC throughput (bản trung gian); fail → caller thấy stderr.
+    v_args = list(h264_encoder_args(throughput=True))
     proc = subprocess.Popen(
         [
             "ffmpeg",
@@ -743,26 +796,71 @@ def cover_and_burn(
     assert proc.stdin is not None
     if project_id:
         _job_procs.setdefault(project_id, []).append(proc)
+
+    # Decode bằng NVDEC; chỉ download frame về RAM vì blur/Pillow vẫn cần CPU.
+    # ponytail: fallback VideoCapture giữ tương thích codec/driver không có CUDA.
+    decoder = None
+    cap = None
+    if nvdec_available(video):
+        decode_kw: dict[str, Any] = {
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.DEVNULL,
+        }
+        if sys.platform == "win32":
+            decode_kw["creationflags"] = int(
+                getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+            )
+        decoder = subprocess.Popen(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
+                "-i", str(video), "-an", "-sn", "-dn",
+                "-vf", "hwdownload,format=nv12",
+                "-f", "rawvideo", "-pix_fmt", "bgr24", "-",
+            ],
+            **decode_kw,
+        )
+        if project_id:
+            _job_procs.setdefault(project_id, []).append(decoder)
+    else:
+        cap = cv2.VideoCapture(str(video))
+        if not cap.isOpened():
+            raise RuntimeError(f"Không mở được video: {video}")
     # Nếu frame lẻ: crop khi ghi (ghi ew×eh)
     _frame_ew, _frame_eh = ew, eh
     _src_w, _src_h = int(w), int(h)
 
-    # Cue indices cho mỗi frame. Title dọc có thể tồn tại đồng thời với hardsub
-    # ngang; chỉ giữ một index sẽ làm title dài nuốt toàn bộ subtitle phía sau.
-    max_frames = frame_total if frame_total > 0 else 10_000_000
-    cover_idx: list[list[int]] = [[] for _ in range(max_frames)]
-    burn_idx: list[list[int]] = [[] for _ in range(max_frames)]
+    # Cue indices theo frame — sparse (chỉ frame có cue), tránh cấp phát N×list rỗng
+    # (trước đây list[frame_total] khiến video dài đứng lâu ở «Dùng vùng che…»).
+    from collections import defaultdict
+
+    if frame_total <= 0:
+        # CAP_PROP_FRAME_COUNT đôi khi 0 — ước lượng; không cấp phát 10M list rỗng
+        dur_est = float(ffprobe_duration(video) or 0.0)
+        frame_total = max(1, int(dur_est * fps) + 1) if dur_est > 0 else int(fps * 60)
+
+    cover_idx: dict[int, list[int]] = defaultdict(list)
+    burn_idx: dict[int, list[int]] = defaultdict(list)
     for ci, cue in enumerate(cues):
         if ci < len(cue_need_mask) and cue_need_mask[ci]:
             f0 = max(0, int(float(cue[0]) * fps))
-            f1 = min(max_frames, int(math.ceil(float(cue[1]) * fps)))
+            f1 = min(frame_total, int(math.ceil(float(cue[1]) * fps)))
             for fi in range(f0, f1):
                 cover_idx[fi].append(ci)
         if burn:
             f0 = max(0, int(float(cue[2]) * fps))
-            f1 = min(max_frames, int(math.ceil(float(cue[3]) * fps)))
+            f1 = min(frame_total, int(math.ceil(float(cue[3]) * fps)))
             for fi in range(f0, f1):
                 burn_idx[fi].append(ci)
+
+    if project_id:
+        set_status(
+            project_id,
+            step="export",
+            progress=20,
+            message=f"Xuất khung 0/{frame_total} ({workers} luồng)",
+            running=True,
+        )
 
     def _paint_one(item: tuple[int, Any]) -> tuple[int, bytes]:
         fi, fr = item
@@ -776,8 +874,8 @@ def cover_and_burn(
             ch = min(fh, _frame_eh)
             canvas[:ch, :cw] = fr[:ch, :cw]
             fr = canvas
-        cis = cover_idx[fi] if fi < len(cover_idx) else []
-        bis = burn_idx[fi] if fi < len(burn_idx) else []
+        cis = cover_idx.get(fi) or []
+        bis = burn_idx.get(fi) or []
         for ci in cis:
             fits = cue_fits[ci] if ci < len(cue_fits) else []
             # Per-cue mask style (effect overlay) hoặc global cover mask
@@ -821,20 +919,55 @@ def cover_and_burn(
                     continue
             ov = cue_overlays[bi]
             if ov is not None:
-                fr = _blit_overlay(fr, ov)
+                sid = cue_segment_ids[bi] if bi < len(cue_segment_ids) else ""
+                sm = segments_by_id.get(sid, {}) if sid else {}
+                alpha = max(0.0, min(1.0, float(sm.get("logoOpacity", 1.0))))
+                now = fi / fps
+                start = float(sm.get("start") or 0)
+                end = float(sm.get("end") or now)
+                fade_in_end = float(sm.get("logoFadeInEnd") or start)
+                fade_out_start = float(sm.get("logoFadeOutStart") or end)
+                if now < fade_in_end:
+                    alpha *= max(0.0, (now - start) / max(1e-6, fade_in_end - start))
+                if now > fade_out_start:
+                    alpha *= max(0.0, (end - now) / max(1e-6, end - fade_out_start))
+                fr = _blit_overlay(fr, ov, alpha)
         return fi, fr.tobytes()
 
     # Prefetch đọc + pool blur/blit; ghi ffmpeg theo thứ tự frame.
     import threading
     from queue import Empty, Queue
 
-    batch_n = max(24, workers * 12)
-    # Hàng đợi batch đã paint (bytes theo thứ tự trong batch)
-    painted_q: Queue[list[bytes] | None] = Queue(maxsize=max(2, min(6, workers)))
+    batch_n = max(48, workers * 20)
+    # Queue sâu hơn → NVENC ít bị đói khi paint/CPU chậm hơn encode
+    painted_q: Queue[list[bytes] | None] = Queue(maxsize=max(4, min(16, workers * 2)))
     read_err: list[BaseException] = []
+    # ~50 cập nhật / video (theo batch, không theo frame — tránh status_every = frame_total//N
+    # khiến gần như không bao giờ % khớp và UI kẹt «Dùng vùng che…»).
+    n_batches_est = max(1, (frame_total + batch_n - 1) // batch_n) if frame_total > 0 else 8
+    status_every = max(1, n_batches_est // 50)
 
     def _reader_painter() -> None:
+        import numpy as np
+
         frame_i = 0
+        batch_i = 0
+        frame_bytes = _src_w * _src_h * 3
+
+        def read_frame() -> tuple[bool, Any]:
+            if decoder is None:
+                assert cap is not None
+                return cap.read()
+            assert decoder.stdout is not None
+            raw = bytearray()
+            while len(raw) < frame_bytes:
+                chunk = decoder.stdout.read(frame_bytes - len(raw))
+                if not chunk:
+                    return False, None
+                raw.extend(chunk)
+            frame = np.frombuffer(raw, dtype=np.uint8).reshape((_src_h, _src_w, 3))
+            return True, frame
+
         try:
             with ThreadPoolExecutor(
                 max_workers=workers, thread_name_prefix="burn"
@@ -843,7 +976,7 @@ def cover_and_burn(
                     check_cancel(project_id)
                     batch: list[tuple[int, Any]] = []
                     for _ in range(batch_n):
-                        ok, frame = cap.read()
+                        ok, frame = read_frame()
                         if not ok:
                             break
                         batch.append((frame_i, frame))
@@ -853,8 +986,15 @@ def cover_and_burn(
                     # map giữ thứ tự → ghi ffmpeg tuần tự không reorder
                     raws = [raw for _fi, raw in pool.map(_paint_one, batch)]
                     painted_q.put(raws)
-                    if project_id and frame_total > 0:
-                        pct = 20 + int(50 * min(1.0, frame_i / frame_total))
+                    batch_i += 1
+                    if project_id and (
+                        batch_i == 1
+                        or batch_i % status_every == 0
+                        or (frame_total > 0 and frame_i >= frame_total)
+                    ):
+                        pct = 20 + int(
+                            50 * min(1.0, frame_i / max(1, frame_total))
+                        )
                         set_status(
                             project_id,
                             step="export",
@@ -870,6 +1010,7 @@ def cover_and_burn(
     t = threading.Thread(target=_reader_painter, name="burn-read", daemon=True)
     try:
         t.start()
+        pipe_dead = False
         while True:
             check_cancel(project_id)
             try:
@@ -880,16 +1021,47 @@ def cover_and_burn(
                 continue
             if batch_raw is None:
                 break
-            for raw in batch_raw:
-                proc.stdin.write(raw)
+            # Một write/batch — giảm syscall, nuôi NVENC đều hơn
+            try:
+                if proc.poll() is not None:
+                    pipe_dead = True
+                    break
+                proc.stdin.write(b"".join(batch_raw))
+            except BrokenPipeError:
+                pipe_dead = True
+                break
+            except OSError as e:
+                if e.errno in (32, 22) or getattr(e, "winerror", None) in (232, 109):
+                    pipe_dead = True
+                    break
+                raise
+            if pipe_dead:
+                break
         t.join(timeout=5)
         if read_err:
             raise read_err[0]
     finally:
-        cap.release()
+        if cap is not None:
+            cap.release()
+        if decoder is not None:
+            try:
+                if decoder.stdout:
+                    decoder.stdout.close()
+            except OSError:
+                pass
+            if decoder.poll() is None:
+                decoder.terminate()
+            decoder.wait()
+            if project_id and project_id in _job_procs:
+                _job_procs[project_id] = [
+                    x for x in _job_procs[project_id] if x is not decoder
+                ]
         try:
-            proc.stdin.close()
+            if proc.stdin and not proc.stdin.closed:
+                proc.stdin.close()
         except BrokenPipeError:
+            pass
+        except OSError:
             pass
         rc = proc.wait()
         if project_id and project_id in _job_procs:
@@ -916,7 +1088,7 @@ def cover_and_burn(
             code = code - 4_294_967_296
         raise RuntimeError(
             f"cover_and_burn ffmpeg failed (code={code})"
-            + (f" — {tail}" if tail else "")
+            + (f" — {tail}" if tail else " — broken pipe (ffmpeg thoát sớm)")
         )
     try:
         err_path.unlink(missing_ok=True)

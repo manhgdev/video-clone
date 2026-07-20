@@ -151,8 +151,8 @@ export type AspectPreset =
   | { id: string; label: string; w: number; h: number; orient: 'landscape' | 'portrait' | 'square' }
 
 export const ASPECT_PRESETS: AspectPreset[] = [
-  { id: 'original', label: 'Bản gốc' },
-  { id: 'custom', label: 'Tùy chỉnh', disabled: true },
+  { id: 'original', label: 'Gốc (không cắt)' },
+  { id: 'custom', label: 'Cắt tự do' },
   { id: '16:9', label: '16:9', w: 16, h: 9, orient: 'landscape' },
   { id: '4:3', label: '4:3', w: 4, h: 3, orient: 'landscape' },
   { id: '2.35:1', label: '2.35:1', w: 235, h: 100, orient: 'landscape' },
@@ -164,8 +164,20 @@ export const ASPECT_PRESETS: AspectPreset[] = [
   { id: '1:1', label: '1:1', w: 1, h: 1, orient: 'square' },
 ]
 
-export function resolveCropRect(sourceW: number, sourceH: number, presetId: string): CropRect {
+export function resolveCropRect(
+  sourceW: number,
+  sourceH: number,
+  presetId: string,
+  custom?: { x: number; y: number; w: number; h: number } | null,
+): CropRect {
   if (sourceW <= 0 || sourceH <= 0) return { x: 0, y: 0, w: 1, h: 1 }
+  if (presetId === 'custom' && custom) {
+    const x = Math.max(0, Math.min(0.95, custom.x))
+    const y = Math.max(0, Math.min(0.95, custom.y))
+    const w = Math.max(0.05, Math.min(1 - x, custom.w))
+    const h = Math.max(0.05, Math.min(1 - y, custom.h))
+    return { x: x * sourceW, y: y * sourceH, w: w * sourceW, h: h * sourceH }
+  }
   if (!presetId || presetId === 'original' || presetId === 'custom') {
     return { x: 0, y: 0, w: sourceW, h: sourceH }
   }

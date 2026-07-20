@@ -119,14 +119,12 @@ def asr_paddleocr(
     total = max(1, len(jpgs))
     n = len(jpgs)
     w_req = int(workers or 0)
-    # hardsub đáy: ≤90% core, tối đa 6 luồng
-    # GPU nhỏ thrash khi dựng >4 bộ det/cls/rec; CPU vẫn cho tối đa 6.
+    # Auto GPU: gần full VRAM (gpu_job_cap); không còn trần cứng 1–4.
     gpu_ocr = _rapidocr_gpu_kwargs()["det_use_cuda"]
-    w = _ocr_pool_workers(
-        w_req,
-        cap=min(4 if gpu_ocr else 6, _cpu_budget(0.9)),
-        gpu=gpu_ocr,
-    )
+    from pipeline.core.resources import gpu_job_cap
+
+    gpu_cap = gpu_job_cap() if gpu_ocr else min(6, _cpu_budget(0.9))
+    w = _ocr_pool_workers(w_req, cap=gpu_cap, gpu=gpu_ocr)
     w = max(1, min(w, n if n else 1))
     _limit_onnx_threads()
 
@@ -208,9 +206,10 @@ def asr_paddleocr(
     vert: list[dict[str, Any]] = []
     labels: list[dict[str, Any]] = []
     vend = video_end or dur_hint or 30.0
-    # Overlay OCR: đường riêng (overlay_scan) — thưa theo độ dài, không 3× full refine
+    # Overlay OCR: đường riêng — auto GPU gần full, không kẹp 1 luồng.
     sub_req = 0 if w_req <= 0 else max(1, w_req // 2)
-    sub_w = _ocr_pool_workers(sub_req, cap=1 if gpu_ocr else 2, gpu=gpu_ocr)
+    sub_cap = max(2, gpu_cap) if gpu_ocr else 2
+    sub_w = _ocr_pool_workers(sub_req, cap=sub_cap, gpu=gpu_ocr)
     _limit_onnx_threads()
     try:
         from .overlay_scan import run_overlay_ocr

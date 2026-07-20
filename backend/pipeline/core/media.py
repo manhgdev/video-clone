@@ -52,16 +52,42 @@ def nvenc_available() -> bool:
         return False
 
 
-def h264_encoder_args(*, fast: bool = False) -> list[str]:
+def nvdec_available(path: Path) -> bool:
+    """Probe CUDA/NVDEC against the actual input codec."""
+    try:
+        return subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
+                "-i", str(path), "-frames:v", "1",
+                "-vf", "hwdownload,format=nv12",
+                "-f", "null", "-",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=15,
+        ).returncode == 0
+    except (FileNotFoundError, subprocess.SubprocessError, OSError):
+        return False
+
+
+def h264_encoder_args(*, fast: bool = False, throughput: bool = False) -> list[str]:
     if nvenc_available():
+        if throughput:
+            # Bản trung gian (burn raw→mp4): ưu tiên fps nuôi NVENC, chất lượng để encode 1080 cuối.
+            return [
+                "-c:v", "h264_nvenc", "-preset", "p1",
+                "-tune", "ll", "-rc", "vbr", "-cq", "28", "-b:v", "0",
+                "-pix_fmt", "yuv420p",
+            ]
         return [
             "-c:v", "h264_nvenc", "-preset", "p3" if fast else "p5",
             "-tune", "hq", "-rc", "vbr", "-cq", "18", "-b:v", "0",
             "-pix_fmt", "yuv420p",
         ]
     return [
-        "-c:v", "libx264", "-preset", "veryfast" if fast else "fast",
-        "-crf", "18", "-pix_fmt", "yuv420p",
+        "-c:v", "libx264", "-preset", "ultrafast" if throughput else ("veryfast" if fast else "fast"),
+        "-crf", "26" if throughput else "18", "-pix_fmt", "yuv420p",
     ]
 
 def detect_device() -> dict[str, Any]:
@@ -336,19 +362,24 @@ def hardware() -> dict[str, str]:
 
 
 def ffprobe_duration(path: Path) -> float:
-    out = subprocess.check_output(
-        [
-            "ffprobe",
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            str(path),
-        ],
-        text=True,
-    ).strip()
+    """Độ dài giây; file hỏng / ffprobe fail → 0.0 (không raise)."""
+    try:
+        out = subprocess.check_output(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return 0.0
     try:
         return float(out)
     except ValueError:
@@ -522,7 +553,7 @@ def retime_video_segments(
     return out, remapped
 
 def ensure_preview_clip(
-    source: Path, dest: Path, sec: float, project_id: str | None = None
+    source: Path, dest: Path, sec: float, project_id: str | None = None, *, start: float = 0
 ) -> Path:
     """Cắt N giây đầu để thử nhanh; cache theo dest path.
 
@@ -546,7 +577,7 @@ def ensure_preview_clip(
                 "ffmpeg",
                 "-y",
                 "-ss",
-                "0",
+                str(start),
                 "-t",
                 str(sec),
                 "-i",
@@ -563,7 +594,7 @@ def ensure_preview_clip(
                 "ffmpeg",
                 "-y",
                 "-ss",
-                "0",
+                str(start),
                 "-t",
                 str(sec),
                 "-i",
@@ -665,8 +696,15 @@ def ensure_playback_speed(
     else:
         cmd += ["-an"]
     cmd.append(str(tmp))
-    run_cmd(project_id, cmd)
-    tmp.replace(dest)
+    try:
+        run_cmd(project_id, cmd)
+        tmp.replace(dest)
+    except Exception:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     return dest
 
 
@@ -816,8 +854,10 @@ def remap_timeline_for_speed_change(meta: dict, old_speed: float, new_speed: flo
     new_speed = clamp_playback_speed(new_speed)
     if abs(old_speed - new_speed) < 1e-9:
         return
-    # Chụp baseline nếu chưa có (từ timeline đang ở old_speed)
-    ensure_timeline_baseline(meta, old_speed)
+    # Chụp lại baseline từ timeline hiện tại ở old_speed.
+    # ponytail: refresh current content so a stale bake snapshot cannot discard
+    # TTS, caption, or overlay edits made since the previous speed change.
+    meta["timelineBaseline"] = _snapshot_timeline_1x(meta, old_speed)
     apply_timeline_from_baseline(meta, new_speed)
 
 def preview_1x_path(project_id: str, meta: dict) -> Path:
@@ -870,19 +910,47 @@ def video_size(path: Path) -> tuple[int, int]:
     return int(w), int(h)
 
 
+def video_codec(path: Path) -> str:
+    return subprocess.check_output(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=codec_name",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        text=True,
+    ).strip().lower()
+
+
 def encode_export_1080(
     src: Path,
     dst: Path,
     project_id: str | None = None,
+    target_height: int | None = 1080,
 ) -> Path:
-    """Xuất 1080p: dọc 1080×?, ngang ?×1080; H.264 chất lượng cao."""
+    """Encode H.264 cuối: cạnh chuẩn theo target; None giữ kích thước gốc."""
     w, h = video_size(src)
-    # portrait → cạnh ngắn (width) = 1080; landscape → height = 1080
-    if h >= w:
-        vf = "scale=1080:-2"
+    if target_height is None:
+        vf = None
+        already_target = True
+    elif h >= w:
+        vf = f"scale={target_height}:-2"
+        already_target = w == target_height
     else:
-        vf = "scale=-2:1080"
-    tmp = dst.with_suffix(".tmp1080.mp4")
+        vf = f"scale=-2:{target_height}"
+        already_target = h == target_height
+    video_args = (
+        ["-c:v", "copy"]
+        if already_target and video_codec(src) == "h264"
+        else (["-vf", vf, *h264_encoder_args()] if vf else h264_encoder_args())
+    )
+    tmp = dst.with_suffix(".tmp_export.mp4")
     tmp.unlink(missing_ok=True)
     dst.parent.mkdir(parents=True, exist_ok=True)
     run_cmd(
@@ -892,9 +960,7 @@ def encode_export_1080(
             "-y",
             "-i",
             str(src),
-            "-vf",
-            vf,
-            *h264_encoder_args(),
+            *video_args,
             "-c:a",
             "aac",
             "-b:a",
@@ -930,29 +996,36 @@ def resolve_export_crop(
     source_w: int,
     source_h: int,
     preset_id: str,
+    custom: dict[str, float] | None = None,
 ) -> tuple[int, int, int, int] | None:
     """Center-crop giống resolveCropRect — None = giữ nguyên khung."""
     if source_w <= 0 or source_h <= 0:
         return None
     key = (preset_id or "original").strip()
-    if key in ("", "original", "custom"):
+    if key == "custom" and custom:
+        x = max(0.0, min(0.95, float(custom.get("x", 0)))) * source_w
+        y = max(0.0, min(0.95, float(custom.get("y", 0)))) * source_h
+        w = max(0.05, min(1.0 - x / source_w, float(custom.get("w", 1)))) * source_w
+        h = max(0.05, min(1.0 - y / source_h, float(custom.get("h", 1)))) * source_h
+    elif key in ("", "original", "custom"):
         return None
-    dims = _ASPECT_PRESETS.get(key)
-    if not dims:
-        return None
-    tw, th = dims
-    target = tw / th
-    source = source_w / source_h
-    if source >= target:
-        h = float(source_h)
-        w = h * target
-        x = (source_w - w) / 2.0
-        y = 0.0
     else:
-        w = float(source_w)
-        h = w / target
-        x = 0.0
-        y = (source_h - h) / 2.0
+        dims = _ASPECT_PRESETS.get(key)
+        if not dims:
+            return None
+        tw, th = dims
+        target = tw / th
+        source = source_w / source_h
+        if source >= target:
+            h = float(source_h)
+            w = h * target
+            x = (source_w - w) / 2.0
+            y = 0.0
+        else:
+            w = float(source_w)
+            h = w / target
+            x = 0.0
+            y = (source_h - h) / 2.0
     xi = max(0, int(round(x)))
     yi = max(0, int(round(y)))
     wi = int(round(w))
@@ -976,11 +1049,12 @@ def crop_export_aspect(
     dst: Path,
     preset_id: str,
     *,
+    custom: dict[str, float] | None = None,
     project_id: str | None = None,
 ) -> Path:
     """Cắt khung theo previewAspectRatio (sau burn, trước encode 1080)."""
     sw, sh = video_size(src)
-    crop = resolve_export_crop(sw, sh, preset_id)
+    crop = resolve_export_crop(sw, sh, preset_id, custom)
     if crop is None:
         if src.resolve() != dst.resolve():
             import shutil

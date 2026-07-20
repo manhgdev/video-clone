@@ -41,15 +41,55 @@ from pipeline.core.project import (
     video_fingerprint,
 )
 from pipeline.core.resources import adaptive_workers
+from pipeline.export.compound import expand_compound_segments
+from pipeline.export.source_video import export_source_video
 from pipeline.ocr.locate import attach_speech_hardsub_boxes
 from pipeline.translate import translate_segments
 from pipeline.tts import tts_cache_key, tts_segment
 
 from pipeline.orchestrate.tts_fit import assign_tts_fit_speeds
 
+
+def _logo_schedule(item: dict[str, Any], st: float, en: float, x: float, y: float) -> list[tuple[float, float, float, float, float]]:
+    if str(item.get("motion") or "fixed") != "random":
+        return [(st, en, x, y, 0.0)]
+    frames = item.get("positionKeyframes") or [{"at": st, "x": x, "y": y}]
+    visible = max(0.5, float(item.get("visibleSec") or 4))
+    fade = min(max(0.0, float(item.get("fadeSec") or 0.5)), visible / 2)
+    return [
+        (fst, min(en, fst + visible), float(frame.get("x") or 0), float(frame.get("y") or 0), fade)
+        for frame in frames
+        if (fst := max(st, float(frame.get("at") if frame.get("at") is not None else st))) < en
+    ]
+
 def run_export(project_id: str, *, nested: bool = False) -> Path:
+    job_gen: int | None = None
+    if not nested:
+        job_gen = begin_job(project_id)
+        set_status(
+            project_id,
+            step="export",
+            progress=2,
+            message="Đang xuất…",
+            running=True,
+            error=None,
+        )
     meta = load_meta(project_id)
+    if not meta:
+        raise RuntimeError("Không tìm thấy project")
     video, preview_sec = export_source_video(project_id, meta)
+    root = ensure_layout(project_id)
+    source_dur = ffprobe_duration(video)
+    export_start = max(0, float(meta.get("exportStartSec") or 0))
+    export_end = float(meta.get("exportEndSec") or 0)
+    if export_start > 0 or (export_end > 0 and source_dur > 0 and export_end < source_dur - 0.02):
+        video = ensure_preview_clip(
+            video,
+            root / "cache" / f"export_{round(export_start * 1000)}_{round(export_end * 1000)}.mp4",
+            min(export_end, max(0.05, source_dur - export_start)),
+            project_id,
+            start=export_start,
+        )
     # chỉ giữ cue trong độ dài clip (tránh đoạn full khi nhầm cache)
     vid_dur = ffprobe_duration(video) or 1e9
     segments = [
@@ -75,6 +115,31 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
             continue
         st = float(item.get("start") or 0)
         en = float(item.get("end") or 0)
+        if kind == "logo":
+            asset_path = ""
+            asset_url = str(item.get("assetUrl") or "")
+            if asset_url.startswith(f"/data/{project_id}/"):
+                candidate = (root / asset_url.split(f"/data/{project_id}/", 1)[1]).resolve()
+                if root.resolve() in candidate.parents and candidate.is_file():
+                    asset_path = str(candidate)
+            for index, (fst, fen, fx, fy, fade) in enumerate(_logo_schedule(item, st, en, x, y)):
+                if fen <= fst:
+                    continue
+                source = str(item.get("logoSource") or "text")
+                text = str(item.get("text") or "Logo").strip() or "Logo"
+                fs = int(item.get("fontSize") or 42)
+                text_overlays.append({
+                    "id": f"logo-{item.get('id', '')}-{index}", "start": fst, "end": fen,
+                    "translation": text if source == "text" else "logo", "source": "", "layout": "horizontal",
+                    "fontSize": fs, "fontFamily": str(item.get("fontFamily") or "system"),
+                    "textColor": str(item.get("color") or "#ffffff"),
+                    "bbox": {"x": fx, "y": fy, "w": w, "h": h},
+                    "captionLayout": {"x": fx, "y": fy, "w": w, "h": h, "lines": [text], "fontSize": fs},
+                    "skipCoverMask": True, "logoAssetPath": asset_path if source != "text" else "",
+                    "logoOpacity": max(0, min(100, int(item.get("opacity") or 85))) / 100,
+                    "logoFadeInEnd": fst + fade, "logoFadeOutStart": fen - fade,
+                })
+            continue
         if kind == "effect":
             # Vùng hiệu ứng: chỉ mask, không chữ
             text_overlays.append(
@@ -125,7 +190,6 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
             }
         )
     settings = meta.get("settings") or {}
-    root = ensure_layout(project_id)
     match_mode = str(settings.get("matchDuration") or "preferVideo")
     baked_prefer = bool(meta.get("bakedPreferVideo"))
     # preferVideo đã bake vào file → không setpts thêm lúc mux
@@ -138,9 +202,6 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
         for segment in segments
     )
     out = out_final(project_id)
-    job_gen: int | None = None
-    if not nested:
-        job_gen = begin_job(project_id)
 
     # cover / burn độc lập; "Không dịch" → không chèn caption
     no_translate = str(settings.get("targetLang") or "") in ("none", "off", "source", "")
@@ -162,6 +223,15 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
             video, segments = retime_video_segments(
                 video, segments, root / "cache", project_id
             )
+            # Retime hỏng (moov missing…) → bỏ cache, dùng nguồn gốc
+            if ffprobe_duration(video) <= 0:
+                bad = Path(video)
+                if bad.is_file() and "retimed_" in bad.name:
+                    try:
+                        bad.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                video, _ = export_source_video(project_id, meta)
             # timeline đã map — mux chỉ đặt TTS full, không cascade cắt
             meta["segments"] = segments
             save_meta(project_id, meta)
@@ -311,9 +381,10 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
         else:
             shutil.copy2(burned, out)
 
-        # Cắt khung đúng previewAspectRatio (editor) trước khi scale 1080
+        # Cắt khung đúng previewAspectRatio (editor) trước khi scale đầu ra.
         aspect = str(settings.get("previewAspectRatio") or "original")
-        if aspect not in ("", "original", "custom"):
+        custom_crop = settings.get("previewCrop")
+        if aspect not in ("", "original") and (aspect != "custom" or custom_crop):
             set_status(
                 project_id,
                 step="export",
@@ -322,23 +393,37 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
                 running=True,
             )
             check_cancel(project_id)
-            crop_export_aspect(out, out, aspect, project_id=project_id)
+            crop_export_aspect(out, out, aspect, custom=custom_crop, project_id=project_id)
 
-        # Chuẩn hóa 1080p + encode chất lượng (mọi nhánh)
+        resolution = str(settings.get("exportResolution") or "1080").lower()
+        allowed_resolutions = {"144", "240", "360", "480", "720", "1080", "1440", "2160"}
+        if resolution != "original" and resolution not in allowed_resolutions:
+            resolution = "1080"
+        target_height = None if resolution == "original" else int(resolution)
+        resolution_label = "gốc" if target_height is None else f"{target_height}p"
+        # Chuẩn hóa độ phân giải + encode chất lượng (mọi nhánh)
         set_status(
             project_id,
             step="export",
             progress=92,
-            message=f"{hint}Encode 1080p…",
+            message=f"{hint}Encode {resolution_label}…",
             running=True,
         )
         check_cancel(project_id)
-        encode_export_1080(out, out, project_id=project_id)
+        encode_export_1080(out, out, project_id=project_id, target_height=target_height)
 
         # bản dễ tìm: backend/public/exports/<id>.mp4
         exports = PUBLIC_DATA / "exports"
         exports.mkdir(exist_ok=True)
         easy = exports / f"{project_id}.mp4"
+        render_id = f"{project_id}-{time.time_ns()}"
+        archive = exports / f"{render_id}.mp4"
+        shutil.copy2(out, archive)
+        render_name = str(meta.pop("pendingRenderName", "")).strip() or f"Render {project_id}"
+        (exports / f"{render_id}.json").write_text(
+            json.dumps({"name": render_name, "projectId": project_id}, ensure_ascii=False),
+            encoding="utf-8",
+        )
         shutil.copy2(out, easy)
 
         out_dur = ffprobe_duration(out)
@@ -348,6 +433,7 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
         meta["outputPath"] = str(out.resolve())
         meta["outputRel"] = rel
         meta["exportCopy"] = easy_rel
+        meta["lastRenderId"] = render_id
         meta["exportSize"] = f"{ow}x{oh}"
         save_meta(project_id, meta)
         if preview_sec > 0:

@@ -48,6 +48,7 @@ export type Segment = {
 }
 
 export type OverlayMaskStyle = 'blur' | 'solid' | 'mosaic'
+export type LogoKeyframe = { at: number; x: number; y: number }
 
 export type TextOverlay = {
   id: string
@@ -59,14 +60,27 @@ export type TextOverlay = {
   w: number
   h: number
   fontSize: number
+  fontFamily?: string
   color: string
   /** text = chữ tự do; effect = vùng hiệu ứng (làm mờ / màu / khối) */
-  kind?: 'text' | 'effect'
+  kind?: 'text' | 'effect' | 'logo'
   /** Kiểu mặt nạ khi kind=effect */
   maskStyle?: OverlayMaskStyle
   maskColor?: string
   /** 0–100 */
   maskOpacity?: number
+  logoSource?: 'text' | 'image' | 'icon'
+  assetUrl?: string
+  iconId?: string
+  scope?: 'full' | 'range'
+  motion?: 'fixed' | 'random'
+  opacity?: number
+  visibleSec?: number
+  hiddenSec?: number
+  fadeSec?: number
+  safeMargin?: number
+  positionSeed?: number
+  positionKeyframes?: LogoKeyframe[]
 }
 
 export type ProjectSettings = {
@@ -137,6 +151,10 @@ export type ProjectSettings = {
   workers: number
   /** Tỷ lệ khung preview / xuất: original | 16:9 | 9:16 | … */
   previewAspectRatio: string
+  /** Vùng cắt tự do, tọa độ chuẩn hóa 0–1 theo video gốc. */
+  previewCrop?: { x: number; y: number; w: number; h: number } | null
+  /** Độ phân giải cạnh chuẩn khi xuất; original = giữ kích thước sau crop. */
+  exportResolution: '144' | '240' | '360' | '480' | '720' | '1080' | '1440' | '2160' | 'original'
   /**
    * Setting riêng theo engine (Whisper / OCR).
    * matchDuration + lọc âm không dùng chung — đổi nhận dạng nhớ từng bộ.
@@ -261,4 +279,18 @@ export type JobStatus = {
   bakedPreferVideo?: boolean
   /** Tốc độ đã bake vào file preview (1 = chưa bake) */
   bakedSpeed?: number
+}
+
+export type RenderedVideo = {
+  renderId: string
+  projectId: string
+  name: string
+  createdAt: string
+  sizeBytes: number
+  duration: number
+  width: number
+  height: number
+  videoUrl: string
+  downloadUrl: string
+  thumbnailUrl: string
 }

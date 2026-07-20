@@ -1,6 +1,7 @@
 """run_pipeline orchestrator."""
 from __future__ import annotations
 
+import copy
 import json
 import shutil
 import time
@@ -58,7 +59,38 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
     tag = preview_tag(preview_sec)
     a_key = asr_cache_key(settings, source_fp)
     t_key = trans_cache_key(settings)
-    cache = meta.get("cache") or {}
+    run_caches = meta.get("translationCaches")
+    if not isinstance(run_caches, dict):
+        run_caches = {}
+    current_tag = preview_tag(max(0, int(meta.get("previewSec") or 0)))
+    current_segments = meta.get("segments") or []
+    current_cache = meta.get("cache") or {}
+    if current_segments:
+        checkpoint = run_caches.get(current_tag)
+        if not isinstance(checkpoint, dict):
+            checkpoint = {}
+        checkpoint.update({
+            "asrKey": current_cache.get("asrKey", checkpoint.get("asrKey")),
+            "transKey": current_cache.get("transKey", checkpoint.get("transKey")),
+            "segments": copy.deepcopy(current_segments),
+        })
+        run_caches[current_tag] = checkpoint
+    run_cache = run_caches.get(tag)
+    if not isinstance(run_cache, dict):
+        run_cache = {}
+    # Nâng cache đơn cũ vào đúng cửa sổ hiện tại nếu key còn khớp.
+    legacy_cache = meta.get("cache") or {}
+    if not run_cache and legacy_cache.get("asrKey") == a_key and meta.get("segments"):
+        run_cache = {
+            "asrKey": legacy_cache.get("asrKey"),
+            "transKey": legacy_cache.get("transKey"),
+            "segments": meta.get("segments"),
+        }
+    cached_segments = copy.deepcopy(run_cache.get("segments") or [])
+    cache = {
+        "asrKey": run_cache.get("asrKey"),
+        "transKey": run_cache.get("transKey"),
+    }
 
     try:
         if preview_sec > 0:
@@ -114,8 +146,8 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
         meta["previewSec"] = preview_sec
 
         # —— ASR (reuse segments if same engine+lang+video+preview) ——
-        if cache.get("asrKey") == a_key and meta.get("segments"):
-            segments = meta["segments"]
+        if cache.get("asrKey") == a_key and cached_segments:
+            segments = cached_segments
             set_status(
                 project_id,
                 step="asr",
@@ -186,7 +218,7 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
 
             # giữ bản dịch + chỉnh preview (bbox, font…) khi cùng dòng chữ nguồn
             prev_by_source: dict[str, dict[str, Any]] = {}
-            for s in meta.get("segments") or []:
+            for s in cached_segments:
                 src = (s.get("source") or "").strip()
                 if src:
                     prev_by_source[src] = s
@@ -239,7 +271,7 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                         if old.get(k) is not None and seg.get(k) is None:
                             seg[k] = old[k]
 
-            cache_asr_path(project_id).write_text(
+            cache_asr_path(project_id, tag).write_text(
                 json.dumps({"key": a_key, "segments": segments}, ensure_ascii=False),
                 encoding="utf-8",
             )
@@ -352,6 +384,12 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
         settings = {**settings, "previewSec": ui_prev if preview_sec <= 0 else preview_sec}
         meta["settings"] = settings
         meta["cache"] = cache
+        run_caches[tag] = {
+            "asrKey": cache.get("asrKey"),
+            "transKey": cache.get("transKey"),
+            "segments": copy.deepcopy(segments),
+        }
+        meta["translationCaches"] = run_caches
         meta["previewSec"] = preview_sec
         # clip thật sự đã ASR/dịch — xuất phải dùng đúng file này
         meta["workVideo"] = str(video.resolve())

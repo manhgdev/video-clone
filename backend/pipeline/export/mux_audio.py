@@ -21,6 +21,7 @@ from ..core.project import ensure_layout, out_final, set_status
 
 
 from .stem import (
+    _num,
     find_cached_no_vocals,
     read_stem_progress,
     resolve_stem_source_video,

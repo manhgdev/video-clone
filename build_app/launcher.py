@@ -25,6 +25,7 @@ def app_home() -> Path:
 
 home = app_home()
 home.mkdir(parents=True, exist_ok=True)
+os.environ["VIDEO_CLONE_DESKTOP"] = "1"
 os.environ.setdefault("VIDEO_CLONE_HOME", str(home))
 os.environ.setdefault("VIDEO_CLONE_DATA", str(home / "data"))
 os.environ.setdefault("VIDEO_CLONE_PUBLIC_DATA", str(home / "public_data"))
@@ -131,6 +132,25 @@ def wait_for_server(timeout: float = 30.0) -> bool:
     return False
 
 
+def wait_for_parent_exit(pid: int) -> None:
+    """Let a replacement desktop process wait until the old API releases its port."""
+    if sys.platform == "win32":
+        import ctypes
+
+        handle = ctypes.windll.kernel32.OpenProcess(0x00100000, False, pid)
+        if handle:
+            ctypes.windll.kernel32.WaitForSingleObject(handle, 30_000)
+            ctypes.windll.kernel32.CloseHandle(handle)
+        return
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return
+        time.sleep(0.1)
+
+
 def centered_xy(width: int, height: int) -> tuple[int, int]:
     """Góc trên-trái để cửa sổ nằm giữa màn hình chính."""
     sw, sh = 1920, 1080
@@ -225,6 +245,8 @@ def run_desktop() -> int:
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
-    if len(sys.argv) > 1:
+    if len(sys.argv) == 3 and sys.argv[1] == "--restart-after":
+        wait_for_parent_exit(int(sys.argv[2]))
+    elif len(sys.argv) > 1:
         raise SystemExit(2)
     raise SystemExit(run_desktop())

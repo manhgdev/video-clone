@@ -95,7 +95,7 @@ if (!py) {
     const opts = {
       cwd,
       stdio: 'inherit',
-      env: process.env,
+      env: label === 'api' ? { ...process.env, VIDEO_CLONE_SUPERVISED: '1' } : process.env,
       // Windows: tách khỏi job object của terminal khi có thể
       detached: false,
     }

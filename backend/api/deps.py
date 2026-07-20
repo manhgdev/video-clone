@@ -40,6 +40,8 @@ class Settings(BaseModel):
     previewSec: int = 0
     workers: int = 0
     previewAspectRatio: str = "original"
+    previewCrop: dict[str, float] | None = None
+    exportResolution: str = "1080"
     forceTts: bool = False
 
 
@@ -72,6 +74,9 @@ class SegmentIn(BaseModel):
 
 class ExportPayload(Settings):
     segments: list[SegmentIn] | None = None
+    exportEndSec: float | None = None
+    exportStartSec: float | None = None
+    renderName: str = Field(min_length=1, max_length=120)
 
 
 class TextOverlayIn(BaseModel):
@@ -84,11 +89,24 @@ class TextOverlayIn(BaseModel):
     w: float
     h: float
     fontSize: int = 42
+    fontFamily: str | None = None
     color: str = "#ffffff"
     kind: str | None = "text"
     maskStyle: str | None = None
     maskColor: str | None = None
     maskOpacity: int | None = None
+    logoSource: str | None = None
+    assetUrl: str | None = None
+    iconId: str | None = None
+    scope: str | None = None
+    motion: str | None = None
+    opacity: int | None = None
+    visibleSec: float | None = None
+    hiddenSec: float | None = None
+    fadeSec: float | None = None
+    safeMargin: float | None = None
+    positionSeed: int | None = None
+    positionKeyframes: list[dict[str, float]] | None = None
 
 
 class CloudBlock(BaseModel):
@@ -130,13 +148,18 @@ class RetranslateIn(BaseModel):
 
 class StudioSynthIn(BaseModel):
     text: str = ""
+    srtText: str = ""
     voice: str = "system"
+    speaker_id: str | None = None
     lang: str = "vi"
     speed: float = 1.0
     volume: float = 1.0
     pitch: float = 0.0
     style: str = "tu_nhien"
     matchDuration: str = "none"
+    keepTimeline: bool = False
+    autoSplit: bool = False
+    gapMs: int = 0
     title: str = ""
 
 

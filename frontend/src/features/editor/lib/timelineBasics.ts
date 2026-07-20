@@ -15,12 +15,12 @@ export const ZOOM_MIN = 0.002
 export const ZOOM_MAX = 40
 export const PX_PER_SEC_BASE = 50
 
-/** Fit / kéo hết cỡ trái = nội dung chiếm ~50% khung, phải trống. */
-export const FIT_WIDTH_RATIO = 0.5
+/** Fit / kéo hết cỡ trái = nội dung chiếm ~80% khung. */
+export const FIT_WIDTH_RATIO = 0.8
 
-export function fitTimelineZoom(durationSec: number, widthPx: number) {
+export function fitTimelineZoom(durationSec: number, widthPx: number, widthRatio = FIT_WIDTH_RATIO) {
   if (durationSec <= 0 || widthPx <= 0) return 1
-  const usable = Math.max(48, (widthPx - 8) * FIT_WIDTH_RATIO)
+  const usable = Math.max(48, (widthPx - 8) * widthRatio)
   const z = usable / (durationSec * PX_PER_SEC_BASE)
   // Không kẹp ZOOM_MIN cao — video dài cần z << 0.05 để còn 50% trống
   return Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, Math.round(z * 10000) / 10000))

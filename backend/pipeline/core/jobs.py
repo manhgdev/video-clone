@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 import threading
 import time
 from typing import Any
@@ -15,6 +16,38 @@ _lock = threading.Lock()
 
 class Cancelled(Exception):
     """Job bị user huỷ."""
+
+
+def kill_process_tree(proc: subprocess.Popen) -> None:
+    """Dừng cả process con; p.kill() một mình để sót ffmpeg/Demucs trên Windows."""
+    if proc.poll() is not None:
+        return
+    if sys.platform == "win32":
+        subprocess.run(
+            ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=int(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)),
+            check=False,
+        )
+    try:
+        proc.kill()
+    except OSError:
+        pass
+
+
+def register_process(project_id: str | None, proc: subprocess.Popen) -> None:
+    if project_id:
+        with _lock:
+            _job_procs.setdefault(project_id, []).append(proc)
+
+
+def unregister_process(project_id: str | None, proc: subprocess.Popen) -> None:
+    if project_id:
+        with _lock:
+            current = _job_procs.get(project_id)
+            if current is not None:
+                _job_procs[project_id] = [item for item in current if item is not proc]
 
 
 def begin_job(project_id: str) -> int:
@@ -31,10 +64,7 @@ def begin_job(project_id: str) -> int:
         old = list(_job_procs.get(project_id, []))
         _job_procs[project_id] = []
     for p in old:
-        try:
-            p.kill()
-        except OSError:
-            pass
+        kill_process_tree(p)
     return gen
 
 
@@ -73,10 +103,7 @@ def request_cancel(project_id: str) -> bool:
         ev.set()
         procs = list(_job_procs.get(project_id, []))
     for p in procs:
-        try:
-            p.kill()
-        except OSError:
-            pass
+        kill_process_tree(p)
     return True
 
 
@@ -165,9 +192,7 @@ def run_cmd(project_id: str | None, cmd: list[str], **kwargs: Any) -> None:
     except Exception:
         pass
     p = subprocess.Popen(cmd, **kw)
-    if project_id:
-        with _lock:
-            _job_procs.setdefault(project_id, []).append(p)
+    register_process(project_id, p)
     try:
         while p.poll() is None:
             check_cancel(project_id)
@@ -176,9 +201,4 @@ def run_cmd(project_id: str | None, cmd: list[str], **kwargs: Any) -> None:
             check_cancel(project_id)
             raise subprocess.CalledProcessError(p.returncode or 1, cmd)
     finally:
-        if project_id:
-            with _lock:
-                if project_id in _job_procs:
-                    _job_procs[project_id] = [
-                        x for x in _job_procs[project_id] if x is not p
-                    ]
+        unregister_process(project_id, p)

@@ -281,7 +281,7 @@ def _ocr_cue_boxes(
 
 
 def _resolve_workers(requested: int | None, *, cap: int = 16, n: int | None = None) -> int:
-    """1–cap theo setting; 0 tự điều chỉnh theo tài nguyên đang rảnh."""
+    """1–cap theo setting; 0 = auto CPU (paint/blur). Job GPU dùng gpu_job_cap riêng."""
     return adaptive_workers(requested, kind="cpu", cap=cap, tasks=n)
 
 

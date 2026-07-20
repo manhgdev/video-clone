@@ -831,6 +831,28 @@ body.tts-dash-resizing iframe {
   height: 4px;
 }
 
+.tts-slider-number {
+  flex: 0 0 62px;
+  width: 62px;
+  height: 25px;
+  margin: -4px 0 -2px;
+  border: 1px solid var(--tts-line);
+  border-radius: 6px;
+  padding: 0 5px;
+  background: var(--tts-bg);
+  color: var(--tts-ink);
+  font: inherit;
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  outline: none;
+}
+
+.tts-slider-number:focus {
+  border-color: var(--tts-blue);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--tts-blue) 16%, transparent);
+}
+
 .tts-slider-marks {
   display: flex;
   justify-content: space-between;

@@ -8,6 +8,7 @@ import { ResizablePanelGroup, ResizablePanel, ResizableHandle, useDefaultLayout 
 import { ScrollArea } from '@/shared/ui/scroll-area'
 import { fitOverlayFontPx, layoutOcrOverlay, midInsideVerticalWatermark } from '@/features/editor/ocrOverlayLayout'
 import { expandCompoundShell } from '@/features/project/expandCompound'
+import { generateLogoKeyframes, logoFrame } from '@/features/editor/lib/logoMotion'
 import {
   type AssetsTab,
   type CtxMenu,
@@ -26,7 +27,6 @@ import {
   CAPTION_LANE_DEFS,
   COVER_MASK_STYLES,
   EFFECT_PRESETS,
-  FIT_WIDTH_RATIO,
   FONT_SIZES,
   HISTORY_MAX,
   MIN_CLIP_SEC,
@@ -40,6 +40,7 @@ import {
   autoFontFromBbox,
   buildExportSegments,
   captionChromeStyle,
+  captionFontCss,
   captionFontStyle,
   captionLaneOf,
   captionPlacement,
@@ -147,12 +148,23 @@ type Props = {
   }) => void
   /** Undo bake: chỉ đổi workVideo/URL, giữ segments từ history */
   onRestoreBakedSpeed?: (speed: number) => void | Promise<void>
-  onExport: (segments?: Segment[]) => void | Promise<void>
+  onExport: (segments?: Segment[], exportEndSec?: number, exportStartSec?: number, renderName?: string) => void | Promise<void>
   onSettings: (settings: ProjectSettings) => void
   overlays: TextOverlay[]
   onOverlayChange: (overlay: TextOverlay, isNew?: boolean) => void
   onOverlayDelete: (overlayId: string) => void
   onOverlaysReplace: (overlays: TextOverlay[]) => void | Promise<void>
+}
+
+const TIMELINE_TOOLS_STORAGE_KEY = 'videoclone.editor.timeline-tools'
+
+function loadTimelineTool(name: 'mainTrackMagnet' | 'autoSnapping' | 'mediaLinked') {
+  try {
+    const saved = JSON.parse(localStorage.getItem(TIMELINE_TOOLS_STORAGE_KEY) || '{}') as Record<string, unknown>
+    return typeof saved[name] === 'boolean' ? saved[name] : true
+  } catch {
+    return true
+  }
 }
 
 
@@ -238,6 +250,8 @@ export default function LivePreviewEditor({
     if (settings.defaultVoice) setGlobalVoice((v) => v || settings.defaultVoice)
   }, [settings.defaultVoice])
   const [videoSize, setVideoSize] = useState({ width: 1080, height: 1920 })
+  const [cropEditing, setCropEditing] = useState(false)
+  const [cropDraft, setCropDraft] = useState(() => settings.previewCrop ?? { x: 0.1, y: 0.1, w: 0.8, h: 0.8 })
   const [selectedId, setSelectedId] = useState<string | null>(null)
   /** Multi-select caption (Ctrl/Shift / marquee) */
   const [selectedIds, setSelectedIds] = useState<string[]>([])
@@ -270,6 +284,8 @@ export default function LivePreviewEditor({
     displaySpeedDraft(settings.matchDuration, bakedSpeed, bakedPreferVideo, hasBakedSpeed),
   )
   const [speedBusy, setSpeedBusy] = useState(false)
+  const [speedCancelling, setSpeedCancelling] = useState(false)
+  const speedCancelRequestedRef = useRef(false)
   const [speedError, setSpeedError] = useState<string | null>(null)
   const [stemStatus, setStemStatus] = useState<'off' | 'loading' | 'ready' | 'error'>('off')
   const [stemProgress, setStemProgress] = useState(0)
@@ -289,10 +305,11 @@ export default function LivePreviewEditor({
   const [trackFocus, setTrackFocus] = useState<'video' | 'caption' | 'dub' | 'bg' | 'text'>('video')
   const [selectedMediaId, setSelectedMediaId] = useState<string | null>(null)
   const [videoClips, setVideoClips] = useState<MediaClip[]>([])
-  void beginMediaDrag
-  void beginTimelineTextDrag
   const [bgClips, setBgClips] = useState<MediaClip[]>([])
   const [tool, setTool] = useState<'select' | 'cover' | 'text'>('select')
+  const [mainTrackMagnet, setMainTrackMagnet] = useState(() => loadTimelineTool('mainTrackMagnet'))
+  const [autoSnapping, setAutoSnapping] = useState(() => loadTimelineTool('autoSnapping'))
+  const [mediaLinked, setMediaLinked] = useState(() => loadTimelineTool('mediaLinked'))
   const [zoom, setZoom] = useState(1)
   const zoomTouchedRef = useRef(false)
   const [scrollLeft, setScrollLeft] = useState(0)
@@ -302,6 +319,12 @@ export default function LivePreviewEditor({
   const pastRef = useRef<EditorSnap[]>([])
   const futureRef = useRef<EditorSnap[]>([])
   const historyQuietRef = useRef(false)
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(TIMELINE_TOOLS_STORAGE_KEY, JSON.stringify({ mainTrackMagnet, autoSnapping, mediaLinked }))
+    } catch { /* Trình duyệt chặn storage: vẫn giữ trạng thái trong phiên hiện tại. */ }
+  }, [mainTrackMagnet, autoSnapping, mediaLinked])
   const [assetsTab, setAssetsTab] = useState<AssetsTab>('media')
   const [propTab, setPropTab] = useState<PropTab>('caption')
   const [fontSizeDraft, setFontSizeDraft] = useState(0)
@@ -311,6 +334,12 @@ export default function LivePreviewEditor({
   const [previewZoom, setPreviewZoom] = useState<'fit' | number>('fit')
   const [fitMenuOpen, setFitMenuOpen] = useState(false)
   const fitMenuRef = useRef<HTMLDivElement>(null)
+  const logoFileRef = useRef<HTMLInputElement>(null)
+  const [logoDraft, setLogoDraft] = useState<TextOverlay | null>(null)
+  const [logoDraftBase, setLogoDraftBase] = useState<TextOverlay | null>(null)
+  const [logoDraftFile, setLogoDraftFile] = useState<File | null>(null)
+  const [logoApplying, setLogoApplying] = useState(false)
+  const [logoError, setLogoError] = useState<string | null>(null)
   const PREVIEW_ZOOM_PRESETS = [0.25, 0.5, 0.75, 1, 1.5, 2] as const
   const pxPerSec = PX_PER_SEC_BASE * zoom
 
@@ -562,6 +591,21 @@ export default function LivePreviewEditor({
     }
   }
 
+  function followPlaybackPlayhead(current: number) {
+    const scrl = tracksScrollRef.current
+    if (!scrl || scrl.clientWidth <= 0) return
+    const playhead = current * pxPerSec
+    if (playhead < scrl.scrollLeft + scrl.clientWidth * 0.9) return
+    const next = Math.min(
+      Math.max(0, scrl.scrollWidth - scrl.clientWidth),
+      Math.max(0, playhead - scrl.clientWidth * 0.1),
+    )
+    if (next <= scrl.scrollLeft + 0.5) return
+    scrl.scrollLeft = next
+    if (rulerScrollRef.current) rulerScrollRef.current.scrollLeft = next
+    setScrollLeft(next)
+  }
+
   function syncLabelsY() {
     const lab = labelsScrollRef.current
     const trk = tracksScrollRef.current
@@ -573,38 +617,47 @@ export default function LivePreviewEditor({
 
   const selected = selectedId ? segments.find((s) => s.id === selectedId) : undefined
   const lastSegment = segments[segments.length - 1]
+  const videoSourceStart = videoClips.length === 1 ? (videoClips[0].sourceStart ?? 0) : 0
+  const timelineToVideoTime = (value: number) => value + videoSourceStart
+  const videoToTimelineTime = (value: number) => Math.max(0, value - videoSourceStart)
+  const videoTrackEnd = videoClips.length ? Math.max(...videoClips.map((clip) => clip.end)) : 0
   // Preview Ns → chỉ làm việc trong Ns (khớp xuất). Dịch full → cả video.
   const sourceDur = Number.isFinite(duration) && duration > 0 ? duration : 0
   const clipCap = workClipSec > 0 ? workClipSec : 0
   const timelineDuration = clipCap > 0
-    ? Math.min(clipCap, sourceDur > 0 ? sourceDur : clipCap)
-    : Math.max(sourceDur, lastSegment?.end ?? 0, 1)
+    ? Math.min(Math.max(0, clipCap - videoSourceStart), sourceDur > 0 ? Math.max(0, sourceDur - videoSourceStart) : clipCap)
+    : videoTrackEnd > 0 ? Math.max(videoTrackEnd, 1) : Math.max(sourceDur - videoSourceStart, lastSegment?.end ?? 0, 1)
   const [tracksViewportW, setTracksViewportW] = useState(0)
-  // Mép trái slider = đúng zoom fit 50%
-  const zoomFitMin = useMemo(() => {
+  // Fit mặc định 80%; slider cho phép thu nhỏ timeline xuống 30% khung.
+  const zoomSliderMin = useMemo(() => {
+    const w = tracksViewportW
+    if (w <= 0 || timelineDuration <= 0) return ZOOM_MIN
+    return fitTimelineZoom(timelineDuration, w, 0.3)
+  }, [timelineDuration, tracksViewportW])
+  const zoomFitValue = useMemo(() => {
     const w = tracksViewportW
     if (w <= 0 || timelineDuration <= 0) return ZOOM_MIN
     return fitTimelineZoom(timelineDuration, w)
   }, [timelineDuration, tracksViewportW])
+  const zoomSliderValue = zoom <= zoomFitValue
+    ? 50 * (zoom - zoomSliderMin) / Math.max(1e-6, zoomFitValue - zoomSliderMin)
+    : 50 + 50 * Math.log(zoom / zoomFitValue) / Math.max(1e-6, Math.log(ZOOM_MAX / zoomFitValue))
+  function zoomFromSlider(value: number) {
+    const position = Math.max(0, Math.min(100, value))
+    return position <= 50
+      ? zoomSliderMin + (zoomFitValue - zoomSliderMin) * position / 50
+      : zoomFitValue * Math.pow(ZOOM_MAX / zoomFitValue, (position - 50) / 50)
+  }
   const videoSpan = timelineDuration
-  // Chiều rộng nội dung clip — khi zoom min ≈ 50% viewport (phải trống)
-  const contentPx = Math.ceil(timelineDuration * pxPerSec)
-  const halfViewport = tracksViewportW > 80
-    ? Math.floor((tracksViewportW - 8) * FIT_WIDTH_RATIO)
-    : 0
-  // Zoom gần min → không cho content rộng hơn 50% khung (ép trống phải)
-  const nearFit = zoom <= zoomFitMin * 1.02
-  const trackWidth = nearFit && halfViewport > 0
-    ? Math.max(120, Math.min(contentPx, halfViewport))
-    : Math.max(120, contentPx)
+  const trackWidth = Math.max(1, timelineDuration * pxPerSec)
   const playheadPx = time * pxPerSec - scrollLeft
   const tickInterval = [1, 2, 5, 10, 30, 60, 120, 300, 600].find((c) => c * pxPerSec >= 80) ?? 600
   const ticks = Array.from(
     { length: Math.ceil(timelineDuration / tickInterval) + 1 },
     (_, i) => i * tickInterval,
-  ).filter((t) => t <= timelineDuration + tickInterval)
+  ).filter((t) => t <= timelineDuration + 0.001)
 
-  // Đo viewport + fit 50% khi mở / đổi project
+  // Đo viewport + fit 80% khi mở / đổi project
   useEffect(() => {
     let ro: ResizeObserver | null = null
     let raf = 0
@@ -640,13 +693,9 @@ export default function LivePreviewEditor({
 
   function setZoomManual(next: number | ((z: number) => number)) {
     zoomTouchedRef.current = true
-    const w = tracksScrollRef.current?.clientWidth ?? 0
-    const zMin = w > 0 && timelineDuration > 0
-      ? fitTimelineZoom(timelineDuration, w)
-      : ZOOM_MIN
     setZoom((z) => {
       const v = typeof next === 'function' ? next(z) : next
-      return Math.max(zMin, Math.min(ZOOM_MAX, v))
+      return Math.max(zoomSliderMin, Math.min(ZOOM_MAX, v))
     })
   }
 
@@ -684,12 +733,15 @@ export default function LivePreviewEditor({
   const sourceWidth = videoSize.width
   const sourceHeight = videoSize.height
   const aspectId = settings.previewAspectRatio ?? 'original'
-  const crop = useMemo(
-    () => resolveCropRect(sourceWidth, sourceHeight, aspectId),
-    [sourceWidth, sourceHeight, aspectId],
+  const appliedCrop = useMemo(
+    () => resolveCropRect(sourceWidth, sourceHeight, aspectId, settings.previewCrop),
+    [sourceWidth, sourceHeight, aspectId, settings.previewCrop],
   )
+  const crop = cropEditing
+    ? { x: 0, y: 0, w: sourceWidth, h: sourceHeight }
+    : appliedCrop
   const getCachedPreviewLayout = (s: Segment, override?: PixelBox) => {
-    const key = `${s.id}|${s.translation}|${s.layout}|${s.bbox ? `${s.bbox.x},${s.bbox.y},${s.bbox.w},${s.bbox.h}` : ''}|${settings.subtitleFontSize}|${settings.subtitleFontFamily}|${crop.x},${crop.y},${crop.w},${crop.h}|${override ? `${override.x},${override.y},${override.w},${override.h}` : ''}`
+    const key = `v10|${s.id}|${s.translation}|${s.layout}|${s.bbox ? `${s.bbox.x},${s.bbox.y},${s.bbox.w},${s.bbox.h}` : ''}|${settings.subtitleFontSize}|${settings.subtitleFontFamily}|${crop.x},${crop.y},${crop.w},${crop.h}|${override ? `${override.x},${override.y},${override.w},${override.h}` : ''}`
     const cached = layoutCacheRef.current[s.id]
     if (cached && cached.key === key) {
       return cached.val
@@ -909,8 +961,25 @@ export default function LivePreviewEditor({
     const present = new Set(layoutSegs.map((s) => captionLaneOf(s, sourceHeight || 1920)))
     return CAPTION_LANE_DEFS.filter((l) => l.key === 'horizontal' || present.has(l.key))
   }, [layoutSegs, sourceHeight])
-  const activeOverlays = overlays.filter((o) => time >= o.start && time < o.end)
+  const previewLogoDraft = logoDraft
+    ? { ...logoDraft, positionKeyframes: generateLogoKeyframes(logoDraft, timelineDuration, sourceWidth, sourceHeight, segments, logoDraft.positionSeed) }
+    : null
+  const previewOverlays = previewLogoDraft
+    ? [...overlays.filter((o) => o.id !== previewLogoDraft.id), previewLogoDraft]
+    : overlays
+  const activeOverlays = previewOverlays.filter((o) => time >= o.start && time < o.end)
   const selectedOverlay = overlays.find((o) => o.id === selectedOverlayId) ?? null
+  const appliedLogo = overlays.find((o) => o.kind === 'logo') ?? null
+  const logoUiState = logoDraft ?? appliedLogo
+  const logoDraftChanged = Boolean(logoDraft && (
+    logoDraftFile
+    || !logoDraftBase
+    || JSON.stringify({ ...logoDraft, positionKeyframes: undefined, assetUrl: logoDraft.assetUrl?.startsWith('blob:') ? undefined : logoDraft.assetUrl })
+      !== JSON.stringify({ ...logoDraftBase, positionKeyframes: undefined })
+  ))
+  const logoDraftApplied = Boolean(logoDraft && overlays.some((o) => o.id === logoDraft.id && o.kind === 'logo'))
+  const logoToggleRemoves = logoDraftApplied && !logoDraftChanged
+  const logoToggleDisabled = logoApplying || (!logoToggleRemoves && (!logoDraftChanged || !logoDraft?.text.trim()))
 
   useEffect(() => {
     setSpeedDraft(
@@ -1349,7 +1418,7 @@ export default function LivePreviewEditor({
     const video = videoRef.current
     focusCaption(segment)
     if (!video) return
-    video.currentTime = segment.start
+    video.currentTime = timelineToVideoTime(segment.start)
     setTime(segment.start)
     void video.play().catch(() => { /* requires explicit user gesture */ })
   }
@@ -1476,7 +1545,41 @@ export default function LivePreviewEditor({
     window.addEventListener('pointerup', commit, { once: true })
   }
 
-  /** Kéo clip Video / Âm gốc (media) — free move + trim mép. */
+  function snapMediaRange(
+    track: 'video' | 'bg',
+    clipId: string,
+    mode: 'move' | 'start' | 'end',
+    start: number,
+    end: number,
+  ) {
+    if (!autoSnapping || pxPerSec <= 0) return { start, end }
+    const list = track === 'video' ? videoClips : bgClips
+    const points = [0, time, timelineDuration]
+    for (const clip of list) {
+      if (clip.id !== clipId) points.push(clip.start, clip.end)
+    }
+    const threshold = 8 / pxPerSec
+    const nearest = (value: number) => points.reduce(
+      (best, point) => Math.abs(point - value) < Math.abs(best - value) ? point : best,
+      value,
+    )
+    if (mode === 'start') {
+      const point = nearest(start)
+      return { start: Math.abs(point - start) <= threshold ? point : start, end }
+    }
+    if (mode === 'end') {
+      const point = nearest(end)
+      return { start, end: Math.abs(point - end) <= threshold ? point : end }
+    }
+    const startPoint = nearest(start)
+    const endPoint = nearest(end)
+    const startDelta = startPoint - start
+    const endDelta = endPoint - end
+    const delta = Math.abs(startDelta) <= Math.abs(endDelta) ? startDelta : endDelta
+    return Math.abs(delta) <= threshold ? { start: start + delta, end: end + delta } : { start, end }
+  }
+
+  /** Kéo clip Video / Âm gốc (media) — move + trim + auto snap. */
   function beginMediaDrag(
     event: ReactPointerEvent,
     track: 'video' | 'bg',
@@ -1552,6 +1655,9 @@ export default function LivePreviewEditor({
       } else {
         end = Math.min(maxT, Math.max(original.start + minDuration, original.end + delta))
       }
+      const snapped = snapMediaRange(track, clip.id, mode, start, end)
+      start = snapped.start
+      end = snapped.end
       const next = { id: clip.id, start, end }
       draftRef.current = next
       setDraft(next)
@@ -1572,6 +1678,12 @@ export default function LivePreviewEditor({
             .map((c) => (c.id === clip.id ? { ...c, start: current.start, end: current.end } : c))
             .sort((a, b) => a.start - b.start),
         )
+        if (track === 'video' && mediaLinked) {
+          setBgClips((prev) => prev.map((c) => {
+            if (Math.abs(c.start - original.start) > 0.02 || Math.abs(c.end - original.end) > 0.02) return c
+            return { ...c, start: current.start, end: current.end }
+          }))
+        }
       }
     }
     window.addEventListener('pointermove', update)
@@ -1825,11 +1937,6 @@ export default function LivePreviewEditor({
     })()
   }
 
-  /** @deprecated tên cũ — map sang compound (Alt+G) */
-  function mergeSelectedCaptions() {
-    createCompoundFromSelection()
-  }
-
   /** Id caption đang chọn — ưu tiên snapshot menu, rồi multi state. */
   function selectionCaptionIds(anchorId?: string | null, menuIds?: string[]): string[] {
     if (menuIds?.length) return expandGroupSelection([...new Set(menuIds)])
@@ -2026,21 +2133,52 @@ export default function LivePreviewEditor({
     event.preventDefault()
     // Chỉ tua playhead — không đổi track focus (đang Âm thanh/TTS thì vẫn giữ)
     const colLeft = col.getBoundingClientRect().left
-    const update = (clientX: number) => {
-      const px = clientX - colLeft + scroller.scrollLeft
+    let pointerX = event.clientX
+    let scrollRaf = 0
+    const seekAtPointer = () => {
+      const px = pointerX - colLeft + scroller.scrollLeft
       const nextTime = Math.max(0, Math.min(timelineDuration, px / pxPerSec))
-      video.currentTime = nextTime
+      video.currentTime = timelineToVideoTime(nextTime)
       setTime(nextTime)
       if (trackFocus === 'caption' || trackFocus === 'dub') {
         const current = segmentAt(segments, nextTime)
         if (current) setSelectedId(current.id)
       }
     }
+    const autoScroll = () => {
+      scrollRaf = 0
+      const rect = scroller.getBoundingClientRect()
+      const edge = Math.min(64, rect.width * 0.12)
+      const delta = pointerX < rect.left + edge
+        ? Math.max(-40, pointerX - rect.left - edge)
+        : pointerX > rect.right - edge
+          ? Math.min(40, pointerX - rect.right + edge)
+          : 0
+      if (delta) {
+        const next = Math.max(
+          0,
+          Math.min(scroller.scrollWidth - scroller.clientWidth, scroller.scrollLeft + delta),
+        )
+        if (next !== scroller.scrollLeft) {
+          scroller.scrollLeft = next
+          if (rulerScrollRef.current) rulerScrollRef.current.scrollLeft = next
+          setScrollLeft(next)
+          seekAtPointer()
+          scrollRaf = requestAnimationFrame(autoScroll)
+        }
+      }
+    }
+    const update = (clientX: number) => {
+      pointerX = clientX
+      seekAtPointer()
+      if (!scrollRaf) scrollRaf = requestAnimationFrame(autoScroll)
+    }
     dubHardSyncRef.current = true
     dubFinishedIdsRef.current.clear()
     update(event.clientX)
     const move = (pointer: PointerEvent) => update(pointer.clientX)
     const commit = () => {
+      cancelAnimationFrame(scrollRaf)
       window.removeEventListener('pointermove', move)
       window.removeEventListener('pointerup', commit)
     }
@@ -2059,7 +2197,7 @@ export default function LivePreviewEditor({
       const rect = bar.getBoundingClientRect()
       const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / Math.max(1, rect.width)))
       const nextTime = ratio * timelineDuration
-      video.currentTime = nextTime
+      video.currentTime = timelineToVideoTime(nextTime)
       setTime(nextTime)
       if (trackFocus === 'caption' || trackFocus === 'dub') {
         const current = pickTimelineSeg(segments, nextTime, selectedId)
@@ -2085,6 +2223,49 @@ export default function LivePreviewEditor({
     }
     window.addEventListener('pointermove', move)
     window.addEventListener('pointerup', commit, { once: true })
+  }
+
+  function beginFreeCrop() {
+    setCropDraft(settings.previewCrop ?? { x: 0.1, y: 0.1, w: 0.8, h: 0.8 })
+    setCropEditing(true)
+    setAspectMenuOpen(false)
+  }
+
+  function beginCropDrag(
+    event: ReactPointerEvent,
+    mode: 'move' | 'nw' | 'ne' | 'se' | 'sw',
+  ) {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    event.preventDefault()
+    event.stopPropagation()
+    const rect = canvas.getBoundingClientRect()
+    const startX = event.clientX
+    const startY = event.clientY
+    const original = { ...cropDraft }
+    const min = 0.05
+    const update = (clientX: number, clientY: number) => {
+      const dx = (clientX - startX) / Math.max(1, rect.width)
+      const dy = (clientY - startY) / Math.max(1, rect.height)
+      let { x, y, w, h } = original
+      if (mode === 'move') {
+        x = Math.max(0, Math.min(1 - w, x + dx))
+        y = Math.max(0, Math.min(1 - h, y + dy))
+      } else {
+        if (mode.includes('w')) { const right = x + w; x = Math.max(0, Math.min(right - min, x + dx)); w = right - x }
+        if (mode.includes('e')) w = Math.max(min, Math.min(1 - x, w + dx))
+        if (mode.includes('n')) { const bottom = y + h; y = Math.max(0, Math.min(bottom - min, y + dy)); h = bottom - y }
+        if (mode.includes('s')) h = Math.max(min, Math.min(1 - y, h + dy))
+      }
+      setCropDraft({ x, y, w, h })
+    }
+    const onMove = (e: PointerEvent) => update(e.clientX, e.clientY)
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp, { once: true })
   }
 
   function beginBboxDrag(
@@ -2212,11 +2393,13 @@ export default function LivePreviewEditor({
     const update = (move: PointerEvent) => {
       const dx = ((move.clientX - event.clientX) / rect.width) * crop.w
       const dy = ((move.clientY - event.clientY) / rect.height) * crop.h
-      onOverlayChange({
+      const next = {
         ...overlay,
         x: Math.round(Math.max(0, Math.min(sourceWidth - overlay.w, original.x + dx))),
         y: Math.round(Math.max(0, Math.min(sourceHeight - overlay.h, original.y + dy))),
-      })
+      }
+      if (logoDraft?.id === overlay.id) setLogoDraft(next)
+      else onOverlayChange(next)
     }
     const commit = () => { window.removeEventListener('pointermove', update); window.removeEventListener('pointerup', commit) }
     window.addEventListener('pointermove', update)
@@ -2302,6 +2485,7 @@ export default function LivePreviewEditor({
     const v = Math.round(Math.max(0.5, Math.min(2, raw)) * 100) / 100
     setSpeedDraft(v)
     if (speedBusy || busy) return
+    speedCancelRequestedRef.current = false
     setSpeedBusy(true)
     setSpeedError(null)
     const prevT = videoRef.current?.currentTime ?? time
@@ -2361,9 +2545,27 @@ export default function LivePreviewEditor({
         } catch { /* ignore */ }
       }
     } catch (e) {
-      setSpeedError(e instanceof Error ? e.message : String(e))
+      if (!speedCancelRequestedRef.current) {
+        setSpeedError(e instanceof Error ? e.message : String(e))
+      }
     } finally {
       setSpeedBusy(false)
+      setSpeedCancelling(false)
+      speedCancelRequestedRef.current = false
+    }
+  }
+
+  async function cancelVideoSpeed() {
+    if (!speedBusy || speedCancelling) return
+    speedCancelRequestedRef.current = true
+    setSpeedCancelling(true)
+    setSpeedError(null)
+    try {
+      await api.cancel(projectId)
+    } catch (e) {
+      speedCancelRequestedRef.current = false
+      setSpeedCancelling(false)
+      setSpeedError(e instanceof Error ? e.message : String(e))
     }
   }
 
@@ -2396,7 +2598,7 @@ export default function LivePreviewEditor({
     setPropTab('audio')
     const video = videoRef.current
     if (!video) return
-    video.currentTime = seg.start
+    video.currentTime = timelineToVideoTime(seg.start)
     setTime(seg.start)
     void video.play().catch(() => { /* requires gesture */ })
   }
@@ -2423,6 +2625,111 @@ export default function LivePreviewEditor({
     setPropTab('overlay')
     pushHistory()
     onOverlayChange(overlay, true)
+  }
+
+  function fitTextLogo(logo: TextOverlay, text = logo.text, fontSize = logo.fontSize) {
+    const canvas = document.createElement('canvas')
+    const ctx = canvas.getContext('2d')
+    if (ctx) ctx.font = `800 ${fontSize}px ${captionFontCss(logo.fontFamily ?? 'system')}`
+    const w = Math.ceil((ctx?.measureText(text || 'LOGO').width ?? fontSize * 3) + fontSize * .5)
+    const h = Math.ceil(fontSize * 1.45)
+    return { ...logo, text, fontSize, w: Math.min(crop.w, Math.max(24, w)), h: Math.max(18, h) }
+  }
+
+  function editLogo(source: 'text' | 'image' | 'icon' = 'text') {
+    if (logoDraftFile && logoDraft?.assetUrl?.startsWith('blob:')) URL.revokeObjectURL(logoDraft.assetUrl)
+    const existing = overlays.find((o) => o.kind === 'logo')
+    const shortEdge = Math.min(sourceWidth, sourceHeight)
+    let draft: TextOverlay = existing
+      ? { ...existing, positionKeyframes: [] }
+      : {
+          id: crypto.randomUUID(), start: 0, end: timelineDuration, text: 'LOGO',
+          x: Math.round(crop.x + crop.w * .04), y: Math.round(crop.y + crop.h * .04),
+          w: Math.max(48, Math.round(shortEdge * .12)), h: Math.max(24, Math.round(shortEdge * .06)),
+          fontSize: 12, fontFamily: 'system', color: '#ffffff', kind: 'logo',
+          logoSource: source, scope: 'full', motion: 'random', opacity: 85,
+          visibleSec: 4, hiddenSec: 2, fadeSec: .5, safeMargin: 4, positionSeed: Date.now(),
+        }
+    draft = { ...draft, logoSource: source }
+    if (source === 'text' && (!existing || existing.logoSource !== 'text')) {
+      draft = fitTextLogo(draft)
+    }
+    setLogoDraft(draft)
+    setLogoDraftBase(existing ? { ...existing } : null)
+    setLogoDraftFile(null)
+    setLogoError(null)
+    setSelectedOverlayId(draft.id)
+    setTrackFocus('text')
+    setPropTab('overlay')
+    return draft
+  }
+
+  async function stageLogoFile(file: File, iconId?: string) {
+    if (logoDraftFile && logoDraft?.assetUrl?.startsWith('blob:')) URL.revokeObjectURL(logoDraft.assetUrl)
+    const url = URL.createObjectURL(file)
+    const img = new Image()
+    img.src = url
+    await img.decode()
+    const base = editLogo(iconId ? 'icon' : 'image')
+    const h = Math.max(24, Math.round(Math.min(sourceWidth, sourceHeight) * .08))
+    const w = Math.max(24, Math.round(h * img.naturalWidth / Math.max(1, img.naturalHeight)))
+    setLogoDraft({ ...base, logoSource: iconId ? 'icon' : 'image', iconId, assetUrl: url, w, h })
+    setLogoDraftFile(file)
+  }
+
+  function unapplyLogo() {
+    const applied = overlays.find((o) => o.kind === 'logo')
+    if (!applied) return
+    const preserved = logoDraft ?? applied
+    pushHistory()
+    onOverlayDelete(applied.id)
+    // Keep one shared draft so both left Assets and right Properties switch
+    // back to "Apply logo" instead of one panel disappearing.
+    setLogoDraft({ ...preserved, positionKeyframes: [] })
+    setLogoDraftBase(null)
+    setLogoDraftFile(null)
+    setLogoError(null)
+    setSelectedOverlayId(preserved.id)
+    setTrackFocus('text')
+    setPropTab('overlay')
+  }
+
+  async function applyLogoDraft() {
+    if (!logoDraft || logoApplying) return
+    setLogoApplying(true)
+    setLogoError(null)
+    try {
+      let next = { ...logoDraft }
+      if (logoDraftFile) {
+        const uploaded = await api.uploadLogoAsset(projectId, logoDraftFile)
+        next.assetUrl = uploaded.url
+        URL.revokeObjectURL(logoDraft.assetUrl || '')
+      }
+      next.positionSeed = Date.now()
+      next.positionKeyframes = generateLogoKeyframes(next, timelineDuration, sourceWidth, sourceHeight, segments, next.positionSeed)
+      const exists = overlays.some((o) => o.id === next.id)
+      pushHistory()
+      await onOverlayChange(next, !exists)
+      setLogoDraft(next)
+      setLogoDraftBase({ ...next })
+      setLogoDraftFile(null)
+      setSelectedOverlayId(next.id)
+    } catch (e) {
+      setLogoError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setLogoApplying(false)
+    }
+  }
+
+  async function selectLogoIcon(iconId: 'play' | 'camera' | 'star') {
+    const canvas = document.createElement('canvas'); canvas.width = 256; canvas.height = 256
+    const ctx = canvas.getContext('2d'); if (!ctx) return
+    ctx.fillStyle = '#fff'; ctx.strokeStyle = '#fff'; ctx.lineWidth = 22; ctx.lineJoin = 'round'
+    if (iconId === 'play') { ctx.beginPath(); ctx.moveTo(72, 42); ctx.lineTo(210, 128); ctx.lineTo(72, 214); ctx.closePath(); ctx.fill() }
+    if (iconId === 'camera') { ctx.strokeRect(34, 70, 188, 132); ctx.strokeRect(82, 45, 92, 30); ctx.beginPath(); ctx.arc(128, 136, 48, 0, Math.PI * 2); ctx.stroke() }
+    if (iconId === 'star') { ctx.beginPath(); for (let i = 0; i < 10; i++) { const a = -Math.PI / 2 + i * Math.PI / 5; const r = i % 2 ? 52 : 108; const x = 128 + Math.cos(a) * r; const y = 128 + Math.sin(a) * r; i ? ctx.lineTo(x, y) : ctx.moveTo(x, y) } ctx.closePath(); ctx.fill() }
+    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'))
+    if (blob) await stageLogoFile(new File([blob], `${iconId}.png`, { type: 'image/png' }), iconId)
   }
 
   /** Thêm vùng hiệu ứng (làm mờ / màu / khối) — khung tự do, kéo + resize. */
@@ -2503,11 +2810,18 @@ export default function LivePreviewEditor({
         y = orig.y + (orig.h - nh)
         h = nh
       }
+      if (overlay.kind === 'logo' && overlay.logoSource !== 'text' && (edge.length === 2)) {
+        const ratio = orig.w / Math.max(1, orig.h)
+        if (Math.abs(dx) >= Math.abs(dy)) h = w / ratio
+        else w = h * ratio
+      }
       x = Math.max(0, Math.min(sourceWidth - w, Math.round(x)))
       y = Math.max(0, Math.min(sourceHeight - h, Math.round(y)))
       w = Math.round(Math.min(w, sourceWidth - x))
       h = Math.round(Math.min(h, sourceHeight - y))
-      onOverlayChange({ ...overlay, x, y, w, h })
+      const next = { ...overlay, x, y, w, h }
+      if (logoDraft?.id === overlay.id) setLogoDraft(next)
+      else onOverlayChange(next)
     }
     const commit = () => {
       window.removeEventListener('pointermove', update)
@@ -2600,6 +2914,11 @@ export default function LivePreviewEditor({
   }
 
   function focusText(overlayId: string) {
+    const overlay = overlays.find((item) => item.id === overlayId)
+    if (overlay?.kind === 'logo') {
+      editLogo(overlay.logoSource ?? 'text')
+      return
+    }
     setSelectedOverlayId(overlayId)
     setSelectedMediaId(null)
     setTrackFocus('text')
@@ -2697,7 +3016,7 @@ export default function LivePreviewEditor({
   function seekPlayhead(next: number) {
     const video = videoRef.current
     const clamped = Math.max(0, Math.min(timelineDuration, next))
-    if (video) video.currentTime = clamped
+    if (video) video.currentTime = timelineToVideoTime(clamped)
     setTime(clamped)
     const current = segmentAt(segments, clamped)
     if (current) setSelectedId(current.id)
@@ -2720,6 +3039,10 @@ export default function LivePreviewEditor({
       if (editTarget.track === 'video') {
         const next = splitMediaList(videoClips, editTarget.clip.id, t)
         setVideoClips(next)
+        if (mediaLinked) {
+          const bgClip = clipAtTime(bgClips, t)
+          if (bgClip) setBgClips(splitMediaList(bgClips, bgClip.id, t))
+        }
         setSelectedMediaId(next.find((c) => c.start === t)?.id ?? null)
       } else {
         const next = splitMediaList(bgClips, editTarget.clip.id, t)
@@ -2760,10 +3083,54 @@ export default function LivePreviewEditor({
     }
     if (editTarget.kind === 'media') {
       const start = Math.min(t, editTarget.clip.end - MIN_CLIP_SEC)
+      if (editTarget.track === 'video' && mainTrackMagnet) {
+        const removed = mergeTimeRanges([{ start: editTarget.clip.start, end: start }])
+        if (!removed.length) return
+        const shiftMedia = (list: MediaClip[]) => list
+          .map((c) => {
+            const nextStart = mapTimeAfterRipple(c.start, removed)
+            const nextEnd = mapTimeAfterRipple(c.end, removed)
+            return {
+              ...c,
+              start: nextStart,
+              end: nextEnd,
+              sourceStart: c.id === editTarget.clip.id
+                ? (c.sourceStart ?? c.start) + start - c.start
+                : c.sourceStart,
+            }
+          })
+          .filter((c) => c.end - c.start >= SPLIT_EDGE)
+        setVideoClips(shiftMedia)
+        void onSegmentsReplace(reindexSegments(
+          segments
+            .map((s) => rippleShiftSegment(s, removed))
+            .filter((s): s is Segment => Boolean(s)),
+        ))
+        void onOverlaysReplace(
+          overlays
+            .map((o) => rippleShiftOverlay(o, removed))
+            .filter((o): o is TextOverlay => Boolean(o)),
+        )
+        if (mediaLinked) setBgClips(shiftMedia)
+        setBookmarks((prev) => prev
+          .map((bookmark) => mapTimeAfterRipple(bookmark, removed))
+          .filter((bookmark, index, list) => list.findIndex((item) => Math.abs(item - bookmark) < 0.02) === index)
+          .sort((a, b) => a - b))
+        const nextTime = mapTimeAfterRipple(t, removed)
+        if (videoRef.current) videoRef.current.currentTime = start
+        setTime(nextTime)
+        return
+      }
       const patch = (list: MediaClip[]) =>
         list.map((c) => (c.id === editTarget.clip.id ? { ...c, start } : c))
-      if (editTarget.track === 'video') setVideoClips(patch)
-      else setBgClips(patch)
+      if (editTarget.track === 'video') {
+        setVideoClips(patch)
+        if (mediaLinked) setBgClips((list) => list.map((c) =>
+          Math.abs(c.start - editTarget.clip.start) <= 0.02 && Math.abs(c.end - editTarget.clip.end) <= 0.02
+            ? { ...c, start }
+            : c,
+        ))
+      } else setBgClips(patch)
       return
     }
     const seg = editTarget.seg
@@ -2782,8 +3149,14 @@ export default function LivePreviewEditor({
       const end = Math.max(t, editTarget.clip.start + MIN_CLIP_SEC)
       const patch = (list: MediaClip[]) =>
         list.map((c) => (c.id === editTarget.clip.id ? { ...c, end } : c))
-      if (editTarget.track === 'video') setVideoClips(patch)
-      else setBgClips(patch)
+      if (editTarget.track === 'video') {
+        setVideoClips(patch)
+        if (mediaLinked) setBgClips((list) => list.map((c) =>
+          Math.abs(c.start - editTarget.clip.start) <= 0.02 && Math.abs(c.end - editTarget.clip.end) <= 0.02
+            ? { ...c, end }
+            : c,
+        ))
+      } else setBgClips(patch)
       return
     }
     const seg = editTarget.seg
@@ -2859,12 +3232,15 @@ export default function LivePreviewEditor({
       )
       drop.add(editTarget.clip.id)
       const src = editTarget.track === 'video' ? videoClips : bgClips
+      const deleted = src.filter((c) => drop.has(c.id))
       const { next, removed } = rippleDeleteMediaClips(src, drop)
-      const packed = next.length ? next : [fullMediaClip(timelineDuration)]
+      const withoutDeleted = src.filter((c) => !drop.has(c.id))
+      const result = mainTrackMagnet ? next : withoutDeleted
+      const packed = result.length ? result : [fullMediaClip(timelineDuration)]
       if (editTarget.track === 'video') {
         setVideoClips(packed)
         // Ripple toàn project: caption / TTS / text / âm gốc theo cùng vùng xóa
-        if (removed.length) {
+        if (mainTrackMagnet && removed.length) {
           const segs = reindexSegments(
             segments
               .map((s) => rippleShiftSegment(s, removed))
@@ -2875,7 +3251,7 @@ export default function LivePreviewEditor({
             .map((o) => rippleShiftOverlay(o, removed))
             .filter((o): o is TextOverlay => Boolean(o))
           void onOverlaysReplace(ovs)
-          setBgClips((list) => {
+          if (mediaLinked) setBgClips((list) => {
             const shifted = list
               .map((c) => {
                 const start = mapTimeAfterRipple(c.start, removed)
@@ -2896,10 +3272,15 @@ export default function LivePreviewEditor({
           const vid = videoRef.current
           if (vid) {
             try {
-              vid.currentTime = tNew
+              vid.currentTime = timelineToVideoTime(tNew)
             } catch { /* ignore */ }
           }
           setTime(tNew)
+        }
+        if (!mainTrackMagnet && mediaLinked && deleted.length) {
+          setBgClips((list) => list.filter((c) => !deleted.some((d) =>
+            Math.abs(c.start - d.start) <= 0.02 && Math.abs(c.end - d.end) <= 0.02,
+          )))
         }
         setSelectedMediaId(packed[0]?.id ?? null)
         setSelectedMediaIds([])
@@ -2956,7 +3337,7 @@ export default function LivePreviewEditor({
       const vid = videoRef.current
       if (vid) {
         try {
-          vid.currentTime = tNew
+          vid.currentTime = timelineToVideoTime(tNew)
         } catch { /* ignore */ }
       }
       setTime(tNew)
@@ -3006,12 +3387,12 @@ export default function LivePreviewEditor({
       const seekTo = (next: number) => {
         if (!video) return
         const clamped = Math.max(0, Math.min(timelineDuration, next))
-        video.currentTime = clamped
+        video.currentTime = timelineToVideoTime(clamped)
         setTime(clamped)
         const current = segmentAt(segments, clamped)
         if (current) setSelectedId(current.id)
       }
-      const seekBy = (delta: number) => { if (video) seekTo(video.currentTime + delta) }
+      const seekBy = (delta: number) => { if (video) seekTo(videoToTimelineTime(video.currentTime) + delta) }
       const stepSegment = (dir: -1 | 1) => {
         const index = segments.findIndex((s) => s.id === selected?.id)
         const next = segments[index + dir]
@@ -3030,6 +3411,9 @@ export default function LivePreviewEditor({
           if (event.ctrlKey || event.metaKey) {
             event.preventDefault()
             redoEdit()
+          } else {
+            event.preventDefault()
+            setAutoSnapping((value) => !value)
           }
           break
         case 'Space':
@@ -3046,7 +3430,7 @@ export default function LivePreviewEditor({
         case 'Home': event.preventDefault(); seekTo(0); break
         case 'End':  event.preventDefault(); seekTo(timelineDuration); break
         case 'KeyT':
-          if (!event.ctrlKey && !event.metaKey) { event.preventDefault(); addTextOverlay() }
+          if (!event.ctrlKey && !event.metaKey) { event.preventDefault(); setMainTrackMagnet((value) => !value) }
           break
         case 'KeyS':
           if (!event.ctrlKey && !event.metaKey) { event.preventDefault(); splitAtPlayhead() }
@@ -3179,7 +3563,7 @@ export default function LivePreviewEditor({
 
   /* Effective properties tab: overlay chỉ khi có overlay; caption/audio/video luôn mở được (mode «Tất cả»). */
   const effectivePropTab: PropTab = (() => {
-    if (propTab === 'overlay' && !selectedOverlay) return selected ? 'caption' : 'video'
+    if (propTab === 'overlay' && !selectedOverlay && !logoDraft) return selected ? 'caption' : 'video'
     return propTab
   })()
   const isOverlaySeg = isOcrOverlayLayout(selected?.layout)
@@ -3335,7 +3719,9 @@ export default function LivePreviewEditor({
   async function handleExport() {
     if (busy) return
     const payload = buildExportSegments(segments, settings, sourceWidth, sourceHeight)
-    await Promise.resolve(onExport(payload))
+    const exportEndSec = Math.max(0, ...videoClips.map((clip) => clip.end))
+    const exportStartSec = videoClips.length === 1 ? (videoClips[0].sourceStart ?? 0) : 0
+    await Promise.resolve(onExport(payload, exportEndSec, exportStartSec))
   }
 
   const PROP_TABS: { key: PropTab; label: string; icon: React.ReactNode; hidden?: boolean }[] = [
@@ -3356,7 +3742,7 @@ export default function LivePreviewEditor({
       icon: <TabSvg><rect x="4" y="4" width="16" height="16" rx="1" strokeDasharray="3 3" /></TabSvg>,
     },
     {
-      key: 'overlay', label: 'Text overlay', hidden: !selectedOverlay,
+      key: 'overlay', label: logoDraft || selectedOverlay?.kind === 'logo' ? 'Logo / Watermark' : 'Text overlay', hidden: !selectedOverlay && !logoDraft,
       icon: <TabSvg><path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" /></TabSvg>,
     },
   ]
@@ -3401,6 +3787,35 @@ export default function LivePreviewEditor({
                     : 'Khớp: theo cài đặt'}
           </span>
           <span className="text-xs text-muted-foreground">{busy ? 'Đang xử lý…' : 'Đã lưu'}</span>
+          <label
+            className="h-8 flex items-center gap-1 rounded-md border border-border bg-background px-2 text-xs text-muted-foreground"
+            title="Chất lượng đầu ra"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+              <rect x="3" y="4" width="18" height="14" rx="2" />
+              <path d="M8 21h8M12 18v3" />
+            </svg>
+            <select
+              className="bg-transparent text-foreground outline-none cursor-pointer"
+              value={settings.exportResolution}
+              disabled={busy}
+              onChange={(e) => onSettings({
+                ...settings,
+                exportResolution: e.target.value as ProjectSettings['exportResolution'],
+              })}
+              aria-label="Chất lượng đầu ra"
+            >
+              <option value="144">144p</option>
+              <option value="240">240p</option>
+              <option value="360">360p</option>
+              <option value="480">480p</option>
+              <option value="720">720p</option>
+              <option value="1080">1080p</option>
+              <option value="1440">1440p (2K)</option>
+              <option value="2160">2160p (4K)</option>
+              <option value="original">Gốc</option>
+            </select>
+          </label>
           <button
             type="button"
             className="h-8 px-4 rounded-md bg-primary text-primary-foreground text-xs font-medium hover:opacity-90 transition-opacity disabled:opacity-50"
@@ -3450,7 +3865,12 @@ export default function LivePreviewEditor({
                             ? 'bg-accent text-accent-foreground'
                             : 'text-muted-foreground hover:bg-accent/60 hover:text-foreground',
                         )}
-                        onClick={() => setAssetsTab(tab.key)}
+                        onClick={() => {
+                          setAssetsTab(tab.key)
+                          if (tab.key === 'logo' && appliedLogo && !logoDraft) {
+                            editLogo(appliedLogo.logoSource ?? 'text')
+                          }
+                        }}
                       >
                         {tab.icon}
                       </button>
@@ -3514,8 +3934,30 @@ export default function LivePreviewEditor({
                       </PanelView>
                     )}
 
+                    {assetsTab === 'logo' && (
+                      <PanelView title="Logo / Watermark" showScrollbar>
+                        <p className="pb-2 text-[11px] text-muted-foreground">Chọn nguồn, xem trước rồi bấm Áp dụng logo.</p>
+                        <p className="mb-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Nguồn logo</p>
+                        <div className="grid grid-cols-3 gap-1.5">
+                          {(['text', 'image', 'icon'] as const).map((source) => (
+                            <button key={source} type="button" className={cn('rounded-md border p-2 text-xs transition-all hover:-translate-y-px hover:border-primary/70 hover:bg-primary/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary', logoUiState?.logoSource === source ? 'border-primary bg-primary/15 text-primary ring-1 ring-primary' : 'border-border bg-accent/40')} onClick={() => source === 'text' ? editLogo('text') : source === 'image' ? logoFileRef.current?.click() : void selectLogoIcon('star')}>
+                              <span className="mb-1 block text-base leading-none" aria-hidden>{source === 'text' ? 'T' : source === 'image' ? '▧' : '★'}</span>{logoUiState?.logoSource === source ? '✓ ' : ''}{source === 'text' ? 'Chữ' : source === 'image' ? 'PNG/Ảnh' : 'Icon'}
+                            </button>
+                          ))}
+                        </div>
+                        <input ref={logoFileRef} type="file" accept="image/png,image/webp,image/jpeg" className="hidden" onChange={(e) => { const file = e.target.files?.[0]; if (file) void stageLogoFile(file); e.currentTarget.value = '' }} />
+                        <div className="mt-2 grid grid-cols-3 gap-1.5">
+                          {(['play', 'camera', 'star'] as const).map((id) => <button key={id} type="button" className={cn('rounded-md border px-2 py-1.5 text-xs capitalize transition-colors hover:border-primary/70 hover:bg-primary/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary', logoUiState?.iconId === id ? 'border-primary bg-primary/15 text-primary ring-1 ring-primary' : 'border-border')} onClick={() => void selectLogoIcon(id)}><span className="mr-1" aria-hidden>{id === 'play' ? '▶' : id === 'camera' ? '▣' : '★'}</span>{logoUiState?.iconId === id ? '✓ ' : ''}{id}</button>)}
+                        </div>
+                        {appliedLogo && <div className="mt-2 flex items-center gap-1.5 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-1.5 text-[10px] text-emerald-700"><span className="size-1.5 rounded-full bg-emerald-500" />Đang áp dụng trên video</div>}
+                        {logoError && <p className="mt-2 text-[10px] text-destructive">{logoError}</p>}
+                        {logoDraft && <button type="button" disabled={logoToggleDisabled} className={cn('mt-3 w-full rounded-md px-3 py-2 text-xs font-medium transition-colors disabled:opacity-50', logoToggleRemoves ? 'border border-destructive/50 text-destructive hover:bg-destructive/10' : 'bg-primary text-primary-foreground hover:bg-primary/90')} onClick={() => logoToggleRemoves ? unapplyLogo() : void applyLogoDraft()}>{logoApplying ? 'Đang áp dụng…' : logoToggleRemoves ? 'Hủy áp dụng logo' : 'Áp dụng logo'}</button>}
+                        {!logoDraft && overlays.find((o) => o.kind === 'logo') && <button type="button" className="mt-3 w-full rounded-md border border-destructive/50 px-3 py-2 text-xs text-destructive transition-colors hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive" onClick={unapplyLogo}>Hủy áp dụng logo</button>}
+                      </PanelView>
+                    )}
+
                     {assetsTab === 'captions' && (
-                      <PanelView title="Captions">
+                      <PanelView title="Captions" showScrollbar>
                         <div className="flex flex-col gap-0.5">
                           {segments.map((segment) => (
                             <button
@@ -3585,7 +4027,7 @@ export default function LivePreviewEditor({
                                   setTrackFocus('text')
                                   setPropTab('overlay')
                                   if (videoRef.current) {
-                                    videoRef.current.currentTime = ov.start
+                                    videoRef.current.currentTime = timelineToVideoTime(ov.start)
                                     setTime(ov.start)
                                   }
                                 }}
@@ -3599,7 +4041,7 @@ export default function LivePreviewEditor({
                       </PanelView>
                     )}
 
-                    {!['media', 'text', 'captions', 'effects'].includes(assetsTab) && (
+                    {!['media', 'text', 'logo', 'captions', 'effects'].includes(assetsTab) && (
                       <div className="text-muted-foreground p-4 text-sm">
                         {ASSET_TABS.find((t) => t.key === assetsTab)?.label} sắp ra mắt...
                       </div>
@@ -3686,7 +4128,7 @@ export default function LivePreviewEditor({
                           playsInline
                           onPlay={() => {
                             setPlaying(true)
-                            syncDubAudio(videoRef.current?.currentTime ?? time, true)
+                            syncDubAudio(videoRef.current ? videoToTimelineTime(videoRef.current.currentTime) : time, true)
                           }}
                           onPause={() => {
                             setPlaying(false)
@@ -3696,22 +4138,26 @@ export default function LivePreviewEditor({
                             const { duration: mediaDuration, videoWidth, videoHeight } = event.currentTarget
                             setDuration(mediaDuration)
                             if (videoWidth > 0 && videoHeight > 0) setVideoSize({ width: videoWidth, height: videoHeight })
+                            if (event.currentTarget.currentTime < videoSourceStart) {
+                              event.currentTarget.currentTime = videoSourceStart
+                            }
                             // Preview clip: đứng ở đầu cửa sổ làm việc
                             if (workClipSec > 0 && event.currentTarget.currentTime > workClipSec) {
-                              event.currentTarget.currentTime = 0
+                              event.currentTarget.currentTime = videoSourceStart
                             }
                           }}
                           onTimeUpdate={(event) => {
-                            let current = event.currentTarget.currentTime
+                            let current = videoToTimelineTime(event.currentTarget.currentTime)
                             // Không cho chạy quá cửa sổ preview (xuất cũng chỉ đoạn này)
-                            if (workClipSec > 0 && current >= workClipSec - 0.04) {
-                              current = workClipSec
+                            if (current >= timelineDuration - 0.04) {
+                              current = timelineDuration
                               event.currentTarget.pause()
-                              event.currentTarget.currentTime = workClipSec
+                              event.currentTarget.currentTime = timelineToVideoTime(timelineDuration)
                               setPlaying(false)
                               pauseDubAudio()
                             }
                             setTime(current)
+                            if (!event.currentTarget.paused) followPlaybackPlayhead(current)
                             // Focus Video/BG: xem clip — không nhảy chọn Mid/Dọc (tránh hiện khung kéo)
                             if (trackFocus === 'caption' || trackFocus === 'dub') {
                               const now = pickTimelineSeg(segments, current, selectedId)
@@ -3738,7 +4184,7 @@ export default function LivePreviewEditor({
                             syncDubAudio(current, !event.currentTarget.paused)
                           }}
                           onSeeked={(event) => {
-                            const t = event.currentTarget.currentTime
+                            const t = videoToTimelineTime(event.currentTarget.currentTime)
                             if (trackFocus === 'caption' || trackFocus === 'dub') {
                               const current = pickTimelineSeg(segments, t, selectedId)
                               const cov = segmentAtCover(segments, t)
@@ -3756,9 +4202,58 @@ export default function LivePreviewEditor({
                             }
                             // Scrub timeline → ép TTS/stem khớp lại một lần
                             dubHardSyncRef.current = true
-                            syncDubAudio(event.currentTarget.currentTime, !event.currentTarget.paused)
+                            syncDubAudio(t, !event.currentTarget.paused)
                           }}
                         />
+
+                        {cropEditing && (
+                          <div className="absolute inset-0 z-[60] overflow-hidden">
+                            <div
+                              className="absolute border-2 border-cyan-400 cursor-move"
+                              style={{
+                                left: `${cropDraft.x * 100}%`,
+                                top: `${cropDraft.y * 100}%`,
+                                width: `${cropDraft.w * 100}%`,
+                                height: `${cropDraft.h * 100}%`,
+                                boxShadow: '0 0 0 9999px rgba(0,0,0,.55)',
+                              }}
+                              onPointerDown={(e) => beginCropDrag(e, 'move')}
+                            >
+                              {(['nw', 'ne', 'se', 'sw'] as const).map((handle) => (
+                                <span
+                                  key={handle}
+                                  className={cn(
+                                    'absolute size-4 rounded-sm border-2 border-cyan-500 bg-white',
+                                    handle === 'nw' && '-left-2 -top-2 cursor-nwse-resize',
+                                    handle === 'ne' && '-right-2 -top-2 cursor-nesw-resize',
+                                    handle === 'se' && '-right-2 -bottom-2 cursor-nwse-resize',
+                                    handle === 'sw' && '-left-2 -bottom-2 cursor-nesw-resize',
+                                  )}
+                                  onPointerDown={(e) => beginCropDrag(e, handle)}
+                                />
+                              ))}
+                            </div>
+                            <div className="absolute right-3 top-3 flex gap-2">
+                              <button
+                                type="button"
+                                className="rounded-md bg-black/70 px-3 py-1.5 text-xs text-white"
+                                onClick={() => setCropEditing(false)}
+                              >
+                                Hủy
+                              </button>
+                              <button
+                                type="button"
+                                className="rounded-md bg-cyan-500 px-3 py-1.5 text-xs font-medium text-black"
+                                onClick={() => {
+                                  onSettings({ ...settings, previewAspectRatio: 'custom', previewCrop: cropDraft })
+                                  setCropEditing(false)
+                                }}
+                              >
+                                Áp dụng
+                              </button>
+                            </div>
+                          </div>
+                        )}
 
                       {/* Snap guides — căn giữa ngang/dọc khi kéo khung (CapCut-style) */}
                       {draggingBox && (snapGuides.v || snapGuides.h) && (
@@ -3792,7 +4287,7 @@ export default function LivePreviewEditor({
                       {bboxSeg && selectedBox && showBboxAtPlayhead && tool !== 'text' && (
                         <div
                           className={cn(
-                            'absolute border-2 border-violet-400 cursor-move z-10 overflow-hidden',
+                            'group/bbox absolute border-2 border-violet-400 cursor-move z-10 overflow-visible',
                             !showCoverBlur && 'bg-violet-900/10 border-dashed',
                             draggingBox && 'opacity-80 ring-2 ring-violet-300',
                             (tool === 'cover' || effectivePropTab === 'mask') && 'border-yellow-400 ring-1 ring-yellow-400/50',
@@ -3809,7 +4304,7 @@ export default function LivePreviewEditor({
                             <span
                               key={handle}
                               className={cn(
-                                'absolute w-3.5 h-3.5 rounded-sm bg-white border-2 border-violet-500 shadow-sm z-20 touch-none',
+                                'absolute w-3.5 h-3.5 rounded-sm bg-white border-2 border-violet-500 shadow-sm z-20 touch-none opacity-0 hover:opacity-100 transition-opacity',
                                 handle === 'nw' && 'top-[-6px] left-[-6px] cursor-nwse-resize',
                                 handle === 'n'  && 'top-[-6px] left-[calc(50%-6px)] cursor-ns-resize',
                                 handle === 'ne' && 'top-[-6px] right-[-6px] cursor-nesw-resize',
@@ -3849,19 +4344,19 @@ export default function LivePreviewEditor({
                         <div
                           key={layerSeg.id}
                           className={cn(
-                            '@container [container-type:size] absolute z-20 pointer-events-none flex items-center justify-center overflow-hidden',
+                            '@container [container-type:size] absolute z-20 pointer-events-none flex items-center justify-center',
+                            'overflow-visible',
                           )}
                           style={sourceToDisplayStyle(
-                            // Chữ + mask cùng bbox đã định vị (cover) — không tràn
                             overlayLay === 'vertical' || overlayLay === 'mid' || overlayLay === 'label'
                               ? layerLayout.cover
-                              : layerLayout.cover,
+                              : layerLayout.caption,
                             crop,
                           )}
                         >
                           {overlayLay === 'vertical' ? (
                             <div
-                              className="text-white font-bold drop-shadow-[0_2px_4px_rgba(0,0,0,0.9)]"
+                              className="text-white font-bold"
                               style={{
                                 display: 'flex',
                                 flexDirection: 'column',
@@ -3870,12 +4365,13 @@ export default function LivePreviewEditor({
                                 gap: '0.08em',
                                 width: '100%',
                                 height: '100%',
-                                overflow: 'hidden',
+                                overflow: 'visible',
                                 margin: 0,
                                 padding: '0.04em 0.04em',
                                 boxSizing: 'border-box',
                                 ...overlayDisplayFontStyle('vertical', layerLayout.cover, fontPx, lines.length),
-                                ...captionChromeStyle(settings),
+                                 ...captionChromeStyle(settings),
+                                 transform: 'translateY(-0.06em)',
                               }}
                             >
                               {lines.map((unit, i) => (
@@ -3886,7 +4382,7 @@ export default function LivePreviewEditor({
                                     lineHeight: 1,
                                     whiteSpace: 'nowrap',
                                     maxWidth: '100%',
-                                    overflow: 'hidden',
+                                    overflow: 'visible',
                                     writingMode: 'horizontal-tb',
                                   }}
                                 >
@@ -3896,7 +4392,10 @@ export default function LivePreviewEditor({
                             </div>
                           ) : overlayLay === 'label' || overlayLay === 'mid' ? (
                             <p
-                              className="w-full h-full text-center text-white font-bold drop-shadow-[0_2px_4px_rgba(0,0,0,0.9)] flex flex-col items-center justify-center overflow-hidden"
+                              className={cn(
+                                'w-full h-full text-center text-white font-bold flex flex-col items-center justify-center',
+                                'overflow-visible',
+                              )}
                               style={{
                                 ...overlayDisplayFontStyle(
                                   overlayLay,
@@ -3905,6 +4404,7 @@ export default function LivePreviewEditor({
                                   lines.length,
                                 ),
                                 ...captionChromeStyle(settings),
+                                transform: 'translateY(-0.06em)',
                                 whiteSpace: 'nowrap',
                                 padding: '0.02em 0.04em',
                                 boxSizing: 'border-box',
@@ -3917,7 +4417,6 @@ export default function LivePreviewEditor({
                                   className="block w-full text-center"
                                   style={{
                                     whiteSpace: 'nowrap',
-                                    overflow: 'hidden',
                                     textOverflow: 'clip',
                                     maxWidth: '100%',
                                   }}
@@ -3929,19 +4428,20 @@ export default function LivePreviewEditor({
                           ) : (
                             <p
                               className={cn(
-                                'w-full text-center text-white font-bold drop-shadow-[0_2px_4px_rgba(0,0,0,0.9)]',
+                                'w-full text-center text-white font-bold',
                                 layerLayout.lines.length === 1 && 'whitespace-nowrap',
                               )}
                               style={{
                                 ...captionFontStyle(
                                   fontPx,
                                   layerLayout.lines.length === 1
-                                    ? layerLayout.cover.w
-                                    : layerLayout.cover.h,
+                                    ? layerLayout.caption.w
+                                    : layerLayout.caption.h,
                                   layerLayout.lines.length === 1 ? 'w' : 'h',
                                 ),
                                 ...captionChromeStyle(settings),
                                 lineHeight: 1.12,
+                                transform: 'translateY(-0.06em)',
                                 margin: 0,
                               }}
                             >
@@ -3958,15 +4458,22 @@ export default function LivePreviewEditor({
                       {/* below/above: soft shadow như bản đẹp — không nền, không stroke dày */}
                       {activeCaptionBox && timelineSeg?.translation.trim() && (
                         <div
-                          className="@container [container-type:size] absolute z-[22] pointer-events-none flex items-center justify-center overflow-hidden"
+                          className={cn(
+                            '@container [container-type:size] absolute z-[22] pointer-events-none flex items-center justify-center',
+                            'overflow-visible',
+                          )}
                           style={sourceToDisplayStyle(activeCaptionBox, crop)}
                         >
                           <p
-                            className="w-full h-full max-w-full text-center text-white font-bold leading-tight flex flex-col items-center justify-center overflow-hidden drop-shadow-[0_2px_4px_rgba(0,0,0,0.9)]"
+                            className={cn(
+                              'w-full h-full max-w-full text-center text-white font-bold leading-tight flex flex-col items-center justify-center',
+                              'overflow-visible',
+                            )}
                             style={{
                               fontSize: `min(${Math.max(10, activeCaptionPx)}px, calc(100cqh * 0.92 / ${Math.max(1, Math.ceil((timelineSeg.translation.trim().split(/\s+/).length) / 6))}), calc(100cqw * 0.2))`,
                               lineHeight: 1.12,
                               ...captionChromeStyle(settings),
+                              transform: 'translateY(-0.06em)',
                               backgroundColor: (settings.captionBgStyle || 'none') === 'none'
                                 ? 'transparent'
                                 : undefined,
@@ -3984,6 +4491,23 @@ export default function LivePreviewEditor({
                       {activeOverlays.map((overlay) => {
                         const isFx = overlay.kind === 'effect'
                         const sel = overlay.id === selectedOverlayId
+                        if (overlay.kind === 'logo') {
+                          const isLogoDraft = logoDraft?.id === overlay.id && !logoToggleRemoves
+                          const motionFrame = logoFrame(overlay, time)
+                          const frame = isLogoDraft && !playing
+                            ? { ...motionFrame, opacity: (overlay.opacity ?? 85) / 100 }
+                            : motionFrame
+                          const display = { ...overlay, x: frame.x, y: frame.y }
+                          return (
+                            <div key={overlay.id} className={cn('group absolute z-[25] cursor-move overflow-visible outline outline-1 outline-transparent hover:outline-cyan-300/70', isLogoDraft && 'outline-dashed !outline-amber-300', sel && !isLogoDraft && 'outline-2 !outline-cyan-300')} style={{ ...sourceToDisplayStyle(display, crop), containerType: 'size', opacity: frame.opacity * (isLogoDraft ? .55 : 1) }} onPointerDown={(e) => { if (isLogoDraft) beginOverlayDrag(e, overlay); else { e.stopPropagation(); editLogo(overlay.logoSource ?? 'text') } }}>
+                              {overlay.logoSource !== 'text' && overlay.assetUrl
+                                ? <img src={overlay.assetUrl} className="size-full object-contain pointer-events-none" draggable={false} />
+                                : <div className="size-full flex items-center justify-center text-center font-extrabold" style={{ ...captionFontStyle(overlay.fontSize, overlay.h), fontFamily: captionFontCss(overlay.fontFamily ?? 'system'), color: overlay.color, textShadow: '0 2px 4px #000' }}>{overlay.text || 'LOGO'}</div>}
+                              {(sel || isLogoDraft) && <span className={cn('absolute -top-5 left-0 whitespace-nowrap rounded px-1 text-[10px] text-white', isLogoDraft ? 'bg-amber-600' : 'bg-cyan-700')}>{isLogoDraft ? 'Bản xem trước' : 'Logo · kéo / resize'}</span>}
+                              {sel && (['nw', 'ne', 'sw', 'se'] as const).map((edge) => <span key={edge} className={cn('absolute size-4 rounded-sm bg-cyan-400 border border-white opacity-0 hover:opacity-100 transition-opacity', edge === 'nw' && '-left-2 -top-2 cursor-nwse-resize', edge === 'ne' && '-right-2 -top-2 cursor-nesw-resize', edge === 'sw' && '-left-2 -bottom-2 cursor-nesw-resize', edge === 'se' && '-right-2 -bottom-2 cursor-nwse-resize')} onPointerDown={(e) => beginOverlayResize(e, overlay, edge)} />)}
+                            </div>
+                          )
+                        }
                         if (isFx) {
                           const style = overlay.maskStyle ?? 'blur'
                           const color = overlay.maskColor ?? '#4c1d95'
@@ -4142,7 +4666,7 @@ export default function LivePreviewEditor({
                       <div className="w-px h-4 bg-border" />
                       <div ref={aspectMenuRef} className="relative">
                         {aspectMenuOpen && (
-                          <div className="absolute bottom-full right-0 mb-2 w-[200px] rounded-lg border border-border bg-popover py-1.5 shadow-lg text-popover-foreground text-[13px] z-50">
+                          <div className="absolute bottom-full right-0 mb-2 w-[200px] max-h-[340px] overflow-y-auto rounded-lg border border-border bg-popover py-1.5 shadow-lg text-popover-foreground text-[13px] z-50">
                             {ASPECT_PRESETS.filter((p) => p.id === 'original' || p.id === 'custom').map((preset) => {
                               const disabled = 'disabled' in preset && preset.disabled
                               return (
@@ -4156,8 +4680,11 @@ export default function LivePreviewEditor({
                                   )}
                                   onClick={() => {
                                     if (disabled) return
-                                    onSettings({ ...settings, previewAspectRatio: preset.id })
-                                    setAspectMenuOpen(false)
+                                    if (preset.id === 'custom') beginFreeCrop()
+                                    else {
+                                      onSettings({ ...settings, previewAspectRatio: preset.id })
+                                      setAspectMenuOpen(false)
+                                    }
                                   }}
                                 >
                                   <span className="w-4 shrink-0 text-primary">
@@ -4308,7 +4835,10 @@ export default function LivePreviewEditor({
                               ? 'bg-accent text-accent-foreground'
                               : 'text-muted-foreground hover:bg-accent/60 hover:text-foreground',
                           )}
-                          onClick={() => setPropTab(tab.key)}
+                          onClick={() => {
+                            if (tab.key === 'overlay' && appliedLogo && !logoDraft) editLogo(appliedLogo.logoSource ?? 'text')
+                            else setPropTab(tab.key)
+                          }}
                           onPointerDown={() => {
                             if (tab.key === 'mask') setTool('cover')
                           }}
@@ -4701,12 +5231,16 @@ export default function LivePreviewEditor({
                               <button
                                 type="button"
                                 className="w-full rounded-md border border-primary/40 bg-primary/10 text-primary hover:bg-primary/20 px-2 py-1.5 text-[11px] transition-colors disabled:opacity-50"
-                                disabled={busy || speedBusy}
+                                disabled={(busy && !speedBusy) || speedCancelling}
                                 title={`Bake toàn project @ ${speedDraft.toFixed(2)}× (Video + Caption + TTS + Âm gốc + Text)`}
-                                onClick={() => void applyVideoSpeed('all', speedDraft)}
+                                onClick={() => speedBusy
+                                  ? void cancelVideoSpeed()
+                                  : void applyVideoSpeed('all', speedDraft)}
                               >
-                                {speedBusy
-                                  ? `Đang bake ${speedDraft.toFixed(2)}×…`
+                                {speedCancelling
+                                  ? 'Đang hủy…'
+                                  : speedBusy
+                                    ? 'Hủy'
                                   : `Áp dụng tốc độ ${speedDraft.toFixed(2)}× cho tất cả`}
                               </button>
                               {speedError && (
@@ -5241,7 +5775,42 @@ export default function LivePreviewEditor({
                           </>
                         )}
 
-                        {effectivePropTab === 'overlay' && selectedOverlay && (
+                        {effectivePropTab === 'overlay' && logoDraft && (
+                          <div className="logo-editor-panel">
+                            <div className="logo-editor-full"><p className="text-sm font-medium">Logo / Watermark</p><p className="text-[10px] text-muted-foreground">Bản xem trước · chưa lưu vào video</p></div>
+                            {logoDraft.logoSource === 'text' && <div className="space-y-2"><PropLabel label="Nội dung"><input className="w-full rounded-md border border-border bg-input px-2 py-2 text-xs outline-none focus:border-primary" value={logoDraft.text} onChange={(e) => setLogoDraft(fitTextLogo(logoDraft, e.target.value))} /></PropLabel><div className="grid grid-cols-[1fr_auto] gap-2"><PropLabel label="Phông chữ"><select className="w-full rounded-md border border-border bg-input px-2 py-1.5 text-xs outline-none focus:border-primary" value={logoDraft.fontFamily ?? 'system'} onChange={(e) => { const next = { ...logoDraft, fontFamily: e.target.value }; setLogoDraft(fitTextLogo(next)) }}>{CAPTION_FONT_PRESETS.map((font) => <option key={font.id} value={font.id} style={{ fontFamily: font.css }}>{font.label}</option>)}</select></PropLabel><PropLabel label="Màu chữ"><input type="color" className="h-8 w-14 cursor-pointer rounded-md border border-border bg-input" value={logoDraft.color} onChange={(e) => setLogoDraft({ ...logoDraft, color: e.target.value })} /></PropLabel></div><div className="flex gap-1">{['#ffffff', '#000000', '#ffd166', '#ef476f', '#06d6a0', '#118ab2'].map((color) => <button key={color} type="button" title={color} className={cn('size-5 rounded-full border transition-transform hover:scale-110', logoDraft.color === color ? 'border-primary ring-1 ring-primary' : 'border-border')} style={{ backgroundColor: color }} onClick={() => setLogoDraft({ ...logoDraft, color })} />)}</div></div>}
+                            <div className={cn('rounded-md border border-border p-2 space-y-2', logoDraft.logoSource !== 'text' && 'logo-editor-full')}>
+                              <PropLabel label={`Kích thước: ${logoDraft.logoSource === 'text' ? `${logoDraft.fontSize}px` : `${Math.round(logoDraft.h / Math.max(1, Math.min(sourceWidth, sourceHeight)) * 100)}%`}`}>
+                                <input type="range" min={logoDraft.logoSource === 'text' ? 6 : 2} max={logoDraft.logoSource === 'text' ? 160 : 30} value={logoDraft.logoSource === 'text' ? logoDraft.fontSize : Math.round(logoDraft.h / Math.max(1, Math.min(sourceWidth, sourceHeight)) * 100)} className="w-full accent-primary" onChange={(e) => {
+                                  const value = Number(e.target.value)
+                                  if (logoDraft.logoSource === 'text') setLogoDraft(fitTextLogo(logoDraft, logoDraft.text, value))
+                                  else { const ratio = logoDraft.w / Math.max(1, logoDraft.h); const h = Math.round(Math.min(sourceWidth, sourceHeight) * value / 100); setLogoDraft({ ...logoDraft, h, w: Math.round(h * ratio) }) }
+                                }} />
+                              </PropLabel>
+                              <details open><summary className="cursor-pointer text-[10px] text-muted-foreground hover:text-foreground">Nâng cao</summary><div className="mt-2 grid grid-cols-4 gap-1.5"><NumField label="Rộng" value={logoDraft.w} onCommit={(v) => setLogoDraft({ ...logoDraft, w: Math.max(20, Math.round(v)) })} /><NumField label="Cao" value={logoDraft.h} onCommit={(v) => setLogoDraft({ ...logoDraft, h: Math.max(20, Math.round(v)) })} /><NumField label="X" value={logoDraft.x} onCommit={(v) => setLogoDraft({ ...logoDraft, x: Math.max(0, Math.min(sourceWidth - logoDraft.w, Math.round(v))) })} /><NumField label="Y" value={logoDraft.y} onCommit={(v) => setLogoDraft({ ...logoDraft, y: Math.max(0, Math.min(sourceHeight - logoDraft.h, Math.round(v))) })} /></div></details>
+                            </div>
+                            <div className="col-span-2 rounded-md border border-border p-2 space-y-2">
+                              <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Vị trí / chuyển động</p>
+                              <div className="grid grid-cols-2 gap-1">{(['fixed', 'random'] as const).map((motion) => <button key={motion} type="button" className={cn('rounded-md border p-1.5 text-xs transition-colors hover:bg-primary/10', logoDraft.motion === motion ? 'border-primary bg-primary/15 text-primary ring-1 ring-primary' : 'border-border')} onClick={() => setLogoDraft({ ...logoDraft, motion })}>{logoDraft.motion === motion ? '✓ ' : ''}{motion === 'fixed' ? 'Cố định' : 'Ngẫu nhiên'}</button>)}</div>
+                              <div className="grid grid-cols-2 gap-1">{(['full', 'range'] as const).map((scope) => <button key={scope} type="button" className={cn('rounded-md border p-1.5 text-xs transition-colors hover:bg-primary/10', logoDraft.scope === scope ? 'border-primary bg-primary/15 text-primary ring-1 ring-primary' : 'border-border')} onClick={() => setLogoDraft({ ...logoDraft, scope, ...(scope === 'full' ? { start: 0, end: timelineDuration } : {}) })}>{logoDraft.scope === scope ? '✓ ' : ''}{scope === 'full' ? 'Toàn video' : 'Theo đoạn'}</button>)}</div>
+                              <PropLabel label={`Độ mờ: ${logoDraft.opacity ?? 85}%`}><input type="range" min={5} max={100} value={logoDraft.opacity ?? 85} className="w-full accent-primary" onChange={(e) => setLogoDraft({ ...logoDraft, opacity: Number(e.target.value) })} /></PropLabel>
+                              {logoDraft.scope === 'range' && <div className="grid grid-cols-2 gap-2"><NumField label="Hiện từ (s)" value={logoDraft.start} step={.1} onCommit={(v) => setLogoDraft({ ...logoDraft, start: Math.max(0, Math.min(logoDraft.end - .1, v)) })} /><NumField label="Đến (s)" value={logoDraft.end} step={.1} onCommit={(v) => setLogoDraft({ ...logoDraft, end: Math.min(timelineDuration, Math.max(logoDraft.start + .1, v)) })} /></div>}
+                              {logoDraft.motion === 'random' && <div className="grid grid-cols-[auto_1fr_2fr] items-end gap-2"><p className="pb-2 text-[10px] font-medium text-muted-foreground">Tốc độ</p><div className="grid grid-cols-3 gap-1">{[
+                                { label: 'Chậm', visibleSec: 6, hiddenSec: 3 },
+                                { label: 'Vừa', visibleSec: 4, hiddenSec: 2 },
+                                { label: 'Nhanh', visibleSec: 2.5, hiddenSec: 1 },
+                              ].map((preset) => { const active = logoDraft.visibleSec === preset.visibleSec && logoDraft.hiddenSec === preset.hiddenSec; return <button key={preset.label} type="button" className={cn('rounded-md border p-1.5 text-[10px] transition-colors hover:bg-primary/10', active ? 'border-primary bg-primary/15 text-primary ring-1 ring-primary' : 'border-border')} onClick={() => setLogoDraft({ ...logoDraft, visibleSec: preset.visibleSec, hiddenSec: preset.hiddenSec })}>{active ? '✓ ' : ''}{preset.label}</button> })}</div><div className="grid grid-cols-4 gap-1.5"><NumField label="Hiện (s)" value={logoDraft.visibleSec ?? 4} step={.1} onCommit={(v) => setLogoDraft({ ...logoDraft, visibleSec: Math.max(.5, v) })} /><NumField label="Ẩn (s)" value={logoDraft.hiddenSec ?? 2} step={.1} onCommit={(v) => setLogoDraft({ ...logoDraft, hiddenSec: Math.max(0, v) })} /><NumField label="Fade (s)" value={logoDraft.fadeSec ?? .5} step={.1} onCommit={(v) => setLogoDraft({ ...logoDraft, fadeSec: Math.max(0, v) })} /><NumField label="Lề (%)" value={logoDraft.safeMargin ?? 4} step={1} onCommit={(v) => setLogoDraft({ ...logoDraft, safeMargin: Math.max(0, Math.min(20, v)) })} /></div></div>}
+                            </div>
+                            {logoError && <p className="col-span-2 text-[10px] text-destructive">{logoError}</p>}
+                            <button type="button" disabled={logoToggleDisabled} className={cn('col-span-2 w-full rounded-md px-3 py-2 text-xs font-medium transition-colors disabled:opacity-50', logoToggleRemoves ? 'border border-destructive/50 text-destructive hover:bg-destructive/10' : 'bg-primary text-primary-foreground hover:bg-primary/90')} onClick={() => logoToggleRemoves ? unapplyLogo() : void applyLogoDraft()}>{logoApplying ? 'Đang áp dụng…' : logoToggleRemoves ? 'Hủy áp dụng logo' : 'Áp dụng logo'}</button>
+                          </div>
+                        )}
+
+                        {effectivePropTab === 'overlay' && selectedOverlay?.kind === 'logo' && !logoDraft && (
+                          <button type="button" className="w-full rounded-md border border-destructive/50 px-3 py-2 text-xs text-destructive hover:bg-destructive/10" onClick={unapplyLogo}>Hủy áp dụng logo</button>
+                        )}
+
+                        {effectivePropTab === 'overlay' && selectedOverlay && selectedOverlay.kind !== 'logo' && !logoDraft && (
                           <>
                             <PropLabel label="Nội dung">
                               <textarea
@@ -5377,52 +5946,23 @@ export default function LivePreviewEditor({
                   <TlButton title="Nhân đôi clip" disabled={!canDuplicate} onClick={duplicateClip}>
                     <TabSvg><rect x="8" y="8" width="12" height="12" rx="1" /><path d="M4 16V5a1 1 0 0 1 1-1h11" /></TabSvg>
                   </TlButton>
-                  <TlButton
-                    title={
-                      selectedIds.length >= 2
-                        ? `Group ${selectedIds.length} clip (Ctrl+G)`
-                        : 'Group clip — chọn ≥2 (Ctrl/Shift+click)'
-                    }
-                    disabled={busy || selectedIds.length < 2 || trackFocus !== 'caption'}
-                    onClick={groupSelectedCaptions}
-                  >
+                  <TlButton title="Nam châm track chính — tự đóng khoảng trống khi xóa (T)" active={mainTrackMagnet} onClick={() => setMainTrackMagnet((value) => !value)}>
                     <TabSvg>
-                      <rect x="3" y="6" width="8" height="6" rx="1" />
-                      <rect x="13" y="6" width="8" height="6" rx="1" />
-                      <rect x="3" y="14" width="18" height="4" rx="1" />
+                      <path d="M5 4v7a7 7 0 0 0 14 0V4" />
+                      <path d="M5 8h4M15 8h4" />
                     </TabSvg>
                   </TlButton>
-                  <TlButton
-                    title="Ungroup (Ctrl+Shift+G)"
-                    disabled={
-                      busy
-                      || trackFocus !== 'caption'
-                      || !expandGroupSelection(
-                        selectedIds.length ? selectedIds : selectedId ? [selectedId] : [],
-                      ).some((id) => segments.find((s) => s.id === id)?.groupId)
-                    }
-                    onClick={ungroupSelectedCaptions}
-                  >
+                  <TlButton title="Tự động bắt dính mép clip và playhead (Y)" active={autoSnapping} onClick={() => setAutoSnapping((value) => !value)}>
                     <TabSvg>
-                      <rect x="3" y="6" width="8" height="6" rx="1" />
-                      <rect x="13" y="6" width="8" height="6" rx="1" />
-                      <path d="M4 18h16" />
-                      <path d="M9 14l3 4 3-4" />
+                      <path d="M12 3v18" />
+                      <path d="M3 8h5l-2-2M8 8 6 10" />
+                      <path d="M21 16h-5l2-2M16 16l2 2" />
                     </TabSvg>
                   </TlButton>
-                  <TlButton
-                    title={
-                      selectedIds.length >= 2
-                        ? `Ghép ${selectedIds.length} clip → chỉ còn video (Alt+G)`
-                        : 'Ghép compound CapCut (Alt+G) — ẩn caption/TTS, chỉ còn video'
-                    }
-                    disabled={busy || selectedIds.length < 2 || trackFocus !== 'caption'}
-                    onClick={mergeSelectedCaptions}
-                  >
+                  <TlButton title="Liên kết Video với Âm gốc" active={mediaLinked} onClick={() => setMediaLinked((value) => !value)}>
                     <TabSvg>
-                      <rect x="3" y="8" width="7" height="8" rx="1" />
-                      <rect x="14" y="8" width="7" height="8" rx="1" />
-                      <path d="M10 12h4" />
+                      <path d="M10 13a5 5 0 0 0 7.54.54l2-2a5 5 0 0 0-7.07-7.07l-1.15 1.15" />
+                      <path d="M14 11a5 5 0 0 0-7.54-.54l-2 2a5 5 0 0 0 7.07 7.07l1.14-1.14" />
                     </TabSvg>
                   </TlButton>
                   <TlButton title="Tách âm thanh → Xóa lời" disabled={busy} onClick={extractAudioFromVideo}>
@@ -5439,7 +5979,7 @@ export default function LivePreviewEditor({
                     <TabSvg><path d="M19 21l-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" /></TabSvg>
                   </TlButton>
                   <div className="w-px h-5 bg-border mx-0.5" />
-                  <TlButton title="Thêm text overlay tại playhead (T)" onClick={() => addTextOverlay()}>
+                  <TlButton title="Thêm text overlay tại playhead" onClick={() => addTextOverlay()}>
                     <TabSvg><path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" /></TabSvg>
                   </TlButton>
                   <TlButton
@@ -5450,21 +5990,21 @@ export default function LivePreviewEditor({
                 </div>
 
                 <div className="flex items-center gap-1">
-                  <TlButton title="Fit 50% ngang (bên phải trống)" onClick={zoomToFit}>
+                  <TlButton title="Fit 80% ngang" onClick={zoomToFit}>
                     <TabSvg><path d="M8 3H5a2 2 0 0 0-2 2v3" /><path d="M16 3h3a2 2 0 0 1 2 2v3" /><path d="M8 21H5a2 2 0 0 1-2-2v-3" /><path d="M16 21h3a2 2 0 0 0 2-2v-3" /></TabSvg>
                   </TlButton>
-                  <TlButton title="Thu nhỏ (tối thiểu 50% khung)" onClick={() => setZoomManual((z) => +(z / 1.5).toFixed(4))}>
+                  <TlButton title="Thu nhỏ (tối thiểu 30% khung)" onClick={() => setZoomManual((z) => +(z / 1.5).toFixed(4))}>
                     <TabSvg><circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" /><line x1="8" y1="11" x2="14" y2="11" /></TabSvg>
                   </TlButton>
                   <input
                     type="range"
-                    min={zoomFitMin}
-                    max={ZOOM_MAX}
-                    step={Math.max(0.0005, (ZOOM_MAX - zoomFitMin) / 400)}
-                    value={Math.min(ZOOM_MAX, Math.max(zoomFitMin, zoom))}
+                    min={0}
+                    max={100}
+                    step={0.25}
+                    value={Math.max(0, Math.min(100, zoomSliderValue))}
                     className="w-28 accent-primary"
-                    onChange={(e) => setZoomManual(Number(e.target.value))}
-                    title="Trái = 50% khung · Phải = phóng to"
+                    onChange={(e) => setZoomManual(zoomFromSlider(Number(e.target.value)))}
+                    title="Trái = 30% khung · Fit = 80% · Phải = phóng to"
                   />
                   <TlButton title="Phóng to" onClick={() => setZoomManual((z) => +(z * 1.5).toFixed(4))}>
                     <TabSvg><circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" /><line x1="11" y1="8" x2="11" y2="14" /><line x1="8" y1="11" x2="14" y2="11" /></TabSvg>
@@ -5733,7 +6273,10 @@ export default function LivePreviewEditor({
                       )
                     }}
                   >
-                    <div className="flex flex-col min-h-full pb-16 relative" style={{ width: trackWidth }}>
+                    <div
+                      className="flex flex-col min-h-full pb-16 relative overflow-x-hidden"
+                      style={{ width: trackWidth }}
+                    >
                       {marquee && (
                         <div
                           className="pointer-events-none absolute z-[40] border border-sky-400 bg-sky-400/15 rounded-sm"
@@ -5750,7 +6293,7 @@ export default function LivePreviewEditor({
                       <div
                         ref={trackRef}
                         className={cn(
-                          'relative h-[72px] box-border border-b border-border/80 bg-black/50',
+                          'relative h-[72px] box-border border-b border-border/80 bg-black/50 overflow-hidden',
                           trackHidden.video && 'opacity-30',
                         )}
                         onPointerDown={(e) => {
@@ -5762,7 +6305,10 @@ export default function LivePreviewEditor({
                       >
                         {/* Filmstrip theo từng clip — đoạn đã xóa = lỗ trống, không vẽ full bar */}
                         {videoUrl && videoClips.map((clip) => {
-                          const w = Math.max(2, (clip.end - clip.start) * pxPerSec)
+                          const display = groupDraft?.[clip.id]
+                            ? { ...clip, ...groupDraft[clip.id] }
+                            : draft?.id === clip.id ? { ...clip, ...draft } : clip
+                          const w = Math.max(2, (display.end - display.start) * pxPerSec)
                           const isSelected =
                             (trackFocus === 'video' && selectedMediaId === clip.id)
                             || selectedMediaIds.includes(clip.id)
@@ -5772,7 +6318,7 @@ export default function LivePreviewEditor({
                               type="button"
                               data-media-clip="video"
                               data-clip-id={clip.id}
-                              title={`Video ${formatTime(clip.start)}–${formatTime(clip.end)}`}
+                              title={`Video ${formatTime(display.start)}–${formatTime(display.end)}`}
                               className={cn(
                                 'absolute top-2 h-[calc(100%-16px)] rounded-md border-0 cursor-pointer z-[1] overflow-hidden p-0',
                                 isSelected
@@ -5780,24 +6326,35 @@ export default function LivePreviewEditor({
                                   : 'ring-1 ring-white/30 hover:ring-white/50',
                               )}
                               style={{
-                                left: clip.start * pxPerSec,
+                                left: display.start * pxPerSec,
                                 width: w,
                               }}
-                              onPointerDown={(e) => e.stopPropagation()}
+                              onPointerDown={(e) => {
+                                if (e.button !== 0) return
+                                beginMediaDrag(e, 'video', clip, 'move')
+                              }}
                               onClick={(e) => {
                                 e.stopPropagation()
                                 focusVideo(clip.id)
-                                selectClipKeepPlayhead(clip.start, clip.end)
+                                selectClipKeepPlayhead(display.start, display.end)
                               }}
                             >
+                              <span
+                                className="absolute inset-y-0 left-0 w-2.5 cursor-ew-resize hover:bg-white/25 z-10"
+                                onPointerDown={(e) => beginMediaDrag(e, 'video', clip, 'start')}
+                              />
                               <TimelineFilmstrip
                                 videoUrl={videoUrl}
                                 duration={videoSpan}
                                 widthPx={w}
                                 heightPx={56}
                                 className="absolute inset-0 pointer-events-none"
-                                startSec={clip.start}
-                                endSec={clip.end}
+                                startSec={display.start}
+                                endSec={display.end}
+                              />
+                              <span
+                                className="absolute inset-y-0 right-0 w-2.5 cursor-ew-resize hover:bg-white/25 z-10"
+                                onPointerDown={(e) => beginMediaDrag(e, 'video', clip, 'end')}
                               />
                             </button>
                           )
@@ -5853,7 +6410,7 @@ export default function LivePreviewEditor({
                       {!compoundMode && captionLanes.map((lane) => (
                       <div
                         key={lane.key}
-                        className={cn('relative h-10 box-border border-b border-border/80', trackHidden.caption && 'opacity-30')}
+                        className={cn('relative h-10 box-border border-b border-border/80 overflow-hidden', trackHidden.caption && 'opacity-30')}
                         style={{ backgroundColor: 'var(--background)' }}
                         onPointerDown={(e) => {
                           if ((e.target as HTMLElement).closest('[data-caption-clip]')) return
@@ -5943,7 +6500,7 @@ export default function LivePreviewEditor({
 
                       {/* Dub / TTS track — chỉ khi đã lồng hoặc đang dub */}
                       {showDubTrack && (
-                      <div className={cn('relative h-10 box-border border-b border-border/80', trackHidden.dub && 'opacity-30')} style={{ backgroundColor: 'var(--background)' }}>
+                      <div className={cn('relative h-10 box-border border-b border-border/80 overflow-hidden', trackHidden.dub && 'opacity-30')} style={{ backgroundColor: 'var(--background)' }}>
                         {(() => {
                           // Không bung compound — TTS đã gói trong shell (chỉ hiện video)
                           const dubs = segments.filter(
@@ -6005,7 +6562,10 @@ export default function LivePreviewEditor({
                                 )}
                                 style={{
                                   left: seg.start * pxPerSec,
-                                  width: Math.max(2, clipSec * pxPerSec),
+                                  width: Math.max(
+                                    2,
+                                    Math.min(clipSec, Math.max(0.05, timelineDuration - seg.start)) * pxPerSec,
+                                  ),
                                   boxSizing: 'border-box',
                                   background: isSelected ? '#c2780a' : '#E8A045',
                                 }}
@@ -6046,7 +6606,7 @@ export default function LivePreviewEditor({
 
                        {/* Âm gốc / nền — ẩn khi compound (gộp lên Video) */}
                        {!compoundMode && (
-                       <div className={cn('relative h-10 box-border border-b border-border/80', trackHidden.bg && 'opacity-30')} style={{ backgroundColor: 'var(--background)' }}>
+                       <div className={cn('relative h-10 box-border border-b border-border/80 overflow-hidden', trackHidden.bg && 'opacity-30')} style={{ backgroundColor: 'var(--background)' }}>
                          {(() => {
                            const on = settings.processOriginalAudio
                            const mode = settings.originalAudioMode
@@ -6080,6 +6640,9 @@ export default function LivePreviewEditor({
                             bg = '#666'
                           }
                           return bgClips.map((clip) => {
+                            const display = groupDraft?.[clip.id]
+                              ? { ...clip, ...groupDraft[clip.id] }
+                              : draft?.id === clip.id ? { ...clip, ...draft } : clip
                             const isSelected = (trackFocus === 'bg' && selectedMediaId === clip.id) || selectedMediaIds.includes(clip.id)
                             const fillPct = stemLoading ? Math.max(2, Math.min(98, stemPct || 1)) : 100
                             return (
@@ -6088,31 +6651,43 @@ export default function LivePreviewEditor({
                                 type="button"
                                 data-media-clip="bg"
                                 data-clip-id={clip.id}
-                                title={`${baseLabel} · ${formatTime(clip.start)}–${formatTime(clip.end)}`}
+                                title={`${baseLabel} · ${formatTime(display.start)}–${formatTime(display.end)}`}
                                 className={cn(
                                   'absolute top-1.5 h-[calc(100%-12px)] rounded-md text-[11px] text-white whitespace-nowrap overflow-hidden px-2 flex items-center cursor-pointer border-0 hover:opacity-90',
                                   isSelected && 'ring-[1.5px] ring-sky-300',
                                   stemLoading && 'cursor-wait',
                                 )}
                                 style={{
-                                  left: clip.start * pxPerSec,
-                                  width: Math.max(2, (clip.end - clip.start) * pxPerSec),
+                                  left: display.start * pxPerSec,
+                                  width: Math.max(2, (display.end - display.start) * pxPerSec),
                                   boxSizing: 'border-box',
                                   background: stemLoading
                                     ? `linear-gradient(90deg, #3D7AE5 ${fillPct}%, #7a8eb0 ${fillPct}%)`
                                     : bg,
                                   opacity: on && mode === 'mute' ? 0.45 : 0.92,
                                 }}
+                                onPointerDown={(e) => {
+                                  if (e.button !== 0 || stemLoading) return
+                                  beginMediaDrag(e, 'bg', clip, 'move')
+                                }}
                                 onClick={() => {
                                   focusBg(clip.id)
-                                  selectClipKeepPlayhead(clip.start, clip.end)
+                                  selectClipKeepPlayhead(display.start, display.end)
                                 }}
                                 onContextMenu={(e) => {
                                   focusBg(clip.id)
                                   openCtxMenu({ kind: 'bg', x: e.clientX, y: e.clientY }, e)
                                 }}
                               >
-                                {baseLabel}
+                                <span
+                                  className="absolute inset-y-0 left-0 w-2.5 cursor-ew-resize hover:bg-white/25 z-10"
+                                  onPointerDown={(e) => beginMediaDrag(e, 'bg', clip, 'start')}
+                                />
+                                <span className="truncate pointer-events-none">{baseLabel}</span>
+                                <span
+                                  className="absolute inset-y-0 right-0 w-2.5 cursor-ew-resize hover:bg-white/25 z-10"
+                                  onPointerDown={(e) => beginMediaDrag(e, 'bg', clip, 'end')}
+                                />
                               </button>
                             )
                              })
@@ -6121,8 +6696,10 @@ export default function LivePreviewEditor({
                        )}
 
                        {/* Text overlay track */}
-                       <div className={cn('relative h-10 box-border border-b border-border/80', trackHidden.text && 'opacity-30')} style={{ backgroundColor: 'var(--background)' }}>
-                         {overlays.map((overlay) => (
+                       <div className={cn('relative h-10 box-border border-b border-border/80 overflow-hidden', trackHidden.text && 'opacity-30')} style={{ backgroundColor: 'var(--background)' }}>
+                         {overlays.map((overlay) => {
+                           const display = draft?.id === overlay.id ? { ...overlay, ...draft } : overlay
+                           return (
                            <button
                              key={overlay.id}
                             type="button"
@@ -6134,20 +6711,36 @@ export default function LivePreviewEditor({
                               trackLocked.text && 'cursor-not-allowed',
                             )}
                             style={{
-                              left: overlay.start * pxPerSec,
-                              width: Math.max(2, (overlay.end - overlay.start) * pxPerSec),
+                               left: display.start * pxPerSec,
+                               width: Math.max(2, (display.end - display.start) * pxPerSec),
                               boxSizing: 'border-box',
                               background: trackFocus === 'text' && overlay.id === selectedOverlayId ? '#d97706' : '#E8913A',
                             }}
-                            onClick={() => focusText(overlay.id)}
+                             onPointerDown={(e) => {
+                               if (e.button !== 0) return
+                               beginTimelineTextDrag(e, overlay, 'move')
+                             }}
+                             onClick={() => {
+                               focusText(overlay.id)
+                               selectClipKeepPlayhead(display.start, display.end)
+                             }}
                             onContextMenu={(e) => {
                               focusText(overlay.id)
                               openCtxMenu({ kind: 'overlay', overlayId: overlay.id, x: e.clientX, y: e.clientY }, e)
                             }}
-                          >
-                            {overlay.text}
-                          </button>
-                        ))}
+                           >
+                             <span
+                               className="absolute inset-y-0 left-0 w-2.5 cursor-ew-resize hover:bg-white/25 z-10"
+                               onPointerDown={(e) => beginTimelineTextDrag(e, overlay, 'start')}
+                             />
+                             <span className="truncate pointer-events-none">{overlay.text}</span>
+                             <span
+                               className="absolute inset-y-0 right-0 w-2.5 cursor-ew-resize hover:bg-white/25 z-10"
+                               onPointerDown={(e) => beginTimelineTextDrag(e, overlay, 'end')}
+                             />
+                           </button>
+                           )
+                         })}
                       </div>
 
                     </div>
@@ -6679,13 +7272,13 @@ export default function LivePreviewEditor({
 }
 
 /* ── OpenCut PanelView: h-11 header with title + scrollable content ── */
-function PanelView({ title, children }: { title: string; children: React.ReactNode }) {
+function PanelView({ title, children, showScrollbar = false }: { title: string; children: React.ReactNode; showScrollbar?: boolean }) {
   return (
     <div className="relative flex h-full flex-col">
       <div className="bg-background h-11 shrink-0 pl-3 pr-2 flex items-center justify-between border-b border-border">
         <span className="text-muted-foreground text-sm">{title}</span>
       </div>
-      <div className="scrollbar-hidden size-full overflow-y-auto pt-2">
+      <div className={cn('w-full min-h-0 flex-1 pt-2', showScrollbar ? 'overflow-y-scroll' : 'overflow-y-auto scrollbar-hidden')}>
         <div className="w-full flex-1 px-2 pt-0">{children}</div>
       </div>
     </div>

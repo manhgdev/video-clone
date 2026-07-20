@@ -1,17 +1,16 @@
 import type { HardwareInfo } from '@/features/project/project.types'
 import {
-  IconBatch,
   IconBook,
   IconCam,
   IconDownload,
-  IconFilm,
   IconGear,
   IconLogo,
   IconMic,
+  IconVideo,
 } from '@/shared/components/Icons'
 import './Header.css'
 
-export type AppMode = 'clone' | 'tts' | 'download' | 'film' | 'batch'
+export type AppMode = 'clone' | 'tts' | 'download' | 'film' | 'batch' | 'renders'
 
 function IconSun({ size = 16 }: { size?: number }) {
   return (
@@ -37,8 +36,10 @@ const NAV: {
   action?: 'config'
 }[] = [
   { id: 'clone', label: 'Clone Video', Icon: IconCam, mode: 'clone' },
-  { id: 'film', label: 'Clone Phim', Icon: IconFilm, mode: 'film' },
-  { id: 'batch', label: 'Clone Hàng loạt', Icon: IconBatch, mode: 'batch' },
+  { id: 'renders', label: 'Đã render', Icon: IconVideo, mode: 'renders' },
+  // ponytail: Film/Batch chỉ ẩn khỏi nav; giữ page để bật lại khi hai luồng hoàn thiện.
+  // { id: 'film', label: 'Clone Phim', Icon: IconFilm, mode: 'film' },
+  // { id: 'batch', label: 'Clone Hàng loạt', Icon: IconBatch, mode: 'batch' },
   { id: 'download', label: 'Download Video', Icon: IconDownload, mode: 'download' },
   { id: 'tts', label: 'Text to Speech', Icon: IconMic, mode: 'tts' },
   { id: 'config', label: 'Cấu hình', Icon: IconGear, action: 'config' },

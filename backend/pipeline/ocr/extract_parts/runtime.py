@@ -29,7 +29,7 @@ _cuda_dlls_ready = False
 
 
 def _cpu_budget(ratio: float = 0.9) -> int:
-    """Số luồng CPU dùng cho OCR (mặc định 90% core — chừa UI)."""
+    """Số luồng CPU dùng cho OCR (auto gần full cores)."""
     n = os.cpu_count() or 4
     return max(1, min(n, int(n * ratio)))
 
@@ -37,8 +37,16 @@ def _cpu_budget(ratio: float = 0.9) -> int:
 def _ocr_pool_workers(
     requested: int | None, *, cap: int | None = None, gpu: bool = False
 ) -> int:
-    budget = _cpu_budget(0.9)
-    hard = cap if cap is not None else min(4, budget)
+    # Auto GPU: cap = gpu_job_cap (gần full); adaptive chỉ hạ nhẹ khi card đang full.
+    from pipeline.core.resources import gpu_job_cap
+
+    budget = _cpu_budget(0.95 if gpu else 0.9)
+    if cap is not None:
+        hard = cap
+    elif gpu:
+        hard = gpu_job_cap()
+    else:
+        hard = budget
     return adaptive_workers(
         requested, kind="gpu" if gpu else "cpu", cap=min(hard, budget)
     )

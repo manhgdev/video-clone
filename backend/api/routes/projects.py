@@ -58,7 +58,7 @@ from pipeline import (
     tts_segment,
     video_fingerprint,
 )
-from pipeline.core.jobs import arm_job
+from pipeline.core.jobs import Cancelled, arm_job, clear_job
 from pipeline.core.media import meta_baked_speed, meta_has_user_bake, video_size
 from pipeline.export.mux import (
     export_project_audio,
@@ -183,6 +183,7 @@ def api_rebake_speed(project_id: str, body: RebakeSpeedIn):
 
     cache = ensure_layout(project_id) / "cache"
     preview_sec = max(0, int(meta.get("previewSec") or 0))
+    arm_job(project_id)
     try:
         if abs(speed - 1.0) < 0.001:
             work = base
@@ -211,6 +212,16 @@ def api_rebake_speed(project_id: str, body: RebakeSpeedIn):
             meta["workDuration"] = float(ffprobe_duration(work) or 0)
         meta["workVideo"] = str(work.resolve())
         save_meta(project_id, meta)
+    except Cancelled as e:
+        set_status(
+            project_id,
+            step="video",
+            progress=0,
+            message="Đã huỷ áp dụng tốc độ",
+            running=False,
+            error="cancelled",
+        )
+        raise HTTPException(409, "cancelled") from e
     except Exception as e:
         set_status(
             project_id,
@@ -221,6 +232,8 @@ def api_rebake_speed(project_id: str, body: RebakeSpeedIn):
             error=str(e)[:500],
         )
         raise HTTPException(500, f"Bake tốc độ thất bại: {e}") from e
+    finally:
+        clear_job(project_id)
 
     speed_baked = abs(speed - 1.0) > 0.001
     work_clip = float(meta["workDuration"]) if speed_baked else float(preview_sec)

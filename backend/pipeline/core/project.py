@@ -99,8 +99,9 @@ def cache_frames(project_id: str, tag: str = "full") -> Path:
     return ensure_layout(project_id) / "cache" / f"frames_{tag}"
 
 
-def cache_asr_path(project_id: str) -> Path:
-    return ensure_layout(project_id) / "cache" / "asr.json"
+def cache_asr_path(project_id: str, tag: str | None = None) -> Path:
+    name = f"asr_{tag}.json" if tag else "asr.json"
+    return ensure_layout(project_id) / "cache" / name
 
 
 def out_burned(project_id: str) -> Path:

@@ -99,6 +99,45 @@ def _gpu_headroom() -> tuple[float, float] | None:
         return None
 
 
+def gpu_job_cap(
+    *,
+    per_job_mb: int = 1200,
+    reserve_mb: int = 700,
+    hard_max: int = 12,
+) -> int:
+    """Số job GPU song song (OCR/engine) — auto gần full VRAM; full thì hạ nhẹ.
+
+    Không còn trần cứng 1–4: máy 6GB thường ~3–4; 12GB+ có thể cao hơn.
+    """
+    try:
+        raw = subprocess.check_output(
+            [
+                "nvidia-smi",
+                "--query-gpu=memory.total,memory.free,utilization.gpu",
+                "--format=csv,noheader,nounits",
+            ],
+            text=True,
+            timeout=1.5,
+            stderr=subprocess.DEVNULL,
+        ).splitlines()[0]
+        total, free, util = (float(x.strip()) for x in raw.split(",")[:3])
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+        return 4
+    # Card rảnh: tính theo gần hết VRAM; đang full: theo free còn lại.
+    if util < 75.0:
+        usable = total * 0.90 - reserve_mb
+    else:
+        usable = free - reserve_mb * 0.5
+    n = int(max(0.0, usable) // max(400, int(per_job_mb)))
+    # Đang full util → chỉ giảm nhẹ (không về 1)
+    if util >= 94.0:
+        n = max(1, round(n * 0.85))
+    elif util >= 85.0:
+        n = max(1, round(n * 0.92))
+    cores = max(1, os.cpu_count() or 4)
+    return max(1, min(int(hard_max), n, cores))
+
+
 def adaptive_workers(
     requested: int | None,
     *,
@@ -106,20 +145,19 @@ def adaptive_workers(
     cap: int = 16,
     tasks: int | None = None,
 ) -> int:
-    """Số >0 là cố định; 0/None tự tăng giảm theo CPU, RAM và GPU rảnh."""
+    """Số >0 là cố định; 0/None = auto: dùng gần hết máy, chỉ hạ nhẹ khi đang full."""
     limit = max(1, int(cap))
     if requested is not None and int(requested) > 0:
         value = min(limit, int(requested))
     else:
         cores = max(1, os.cpu_count() or 4)
         cpu_idle, memory_free = _cpu_idle_and_memory()
-        # Dùng 55–95% logical cores: máy rảnh thì tăng ngay, máy đang bận vẫn
-        # để đủ luồng cho pipeline tiến nhanh mà không làm treo UI/OS.
-        cpu_target = max(1, round(cores * (0.55 + 0.40 * cpu_idle)))
-        if memory_free < 0.12:
-            cpu_target = max(1, cpu_target // 3)
-        elif memory_free < 0.22:
-            cpu_target = max(1, cpu_target // 2)
+        # Auto: 88–100% logical cores — máy rảnh thì full; CPU đang full chỉ hạ nhẹ.
+        cpu_target = max(1, round(cores * (0.88 + 0.12 * cpu_idle)))
+        if memory_free < 0.10:
+            cpu_target = max(1, round(cpu_target * 0.55))
+        elif memory_free < 0.18:
+            cpu_target = max(1, round(cpu_target * 0.75))
 
         if kind == "network":
             value = max(2, min(limit, cpu_target * 2))
@@ -129,10 +167,19 @@ def adaptive_workers(
                 value = min(limit, cpu_target)
             else:
                 gpu_idle, vram_free = gpu
-                gpu_limit = 4 if gpu_idle >= 0.55 and vram_free >= 0.35 else 2
-                if vram_free < 0.18 or gpu_idle < 0.20:
-                    gpu_limit = 1
-                value = min(limit, cpu_target, gpu_limit)
+                # Dùng hết GPU khi còn headroom; full thì chỉ giảm ~10–15%.
+                # (Bỏ trần cứng 4 luồng cũ — đó là lý do util GPU thấp.)
+                if vram_free < 0.08:
+                    scale = 0.55  # VRAM sát đáy — tránh OOM
+                elif gpu_idle < 0.06:  # util ≳ 94%
+                    scale = 0.85
+                elif gpu_idle < 0.15:  # util ≳ 85%
+                    scale = 0.92
+                else:
+                    scale = 1.0
+                # Khi GPU còn rảnh: đẩy gần full cores (không bị cpu_target kéo xuống thấp)
+                base = cpu_target if scale < 1.0 else max(cpu_target, round(cores * 0.95))
+                value = max(1, min(limit, round(base * scale)))
         else:
             value = min(limit, cpu_target)
     if tasks is not None:

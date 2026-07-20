@@ -57,6 +57,25 @@ def _ocr_cuda_check() -> tuple[bool, str]:
         return False, str(e)[:160]
 
 
+def _ocr_cuda_check_fresh(python: str | Path = sys.executable) -> tuple[bool, str]:
+    """Probe ORT in a new process; this API may still hold the old CPU DLL."""
+    try:
+        proc = subprocess.run(
+            [
+                str(python),
+                "-c",
+                "import onnxruntime as ort; print(','.join(ort.get_available_providers()))",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        detail = (proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else proc.stderr.strip())[:500]
+        return proc.returncode == 0 and "CUDAExecutionProvider" in detail, detail or "no providers"
+    except Exception as e:
+        return False, str(e)[:160]
+
+
 def install_ocr_cuda() -> dict[str, Any]:
     """Install the OCR GPU runtime into the Python running this API."""
     ok, detail = _ocr_cuda_check()
@@ -93,10 +112,13 @@ def install_ocr_cuda() -> dict[str, Any]:
         )
         if proc.returncode:
             raise RuntimeError((proc.stderr or proc.stdout)[-2000:])
+        ok, detail = _ocr_cuda_check_fresh(py)
+        if not ok:
+            raise RuntimeError(f"CUDA provider unavailable after install: {detail}")
         return {
             "ok": True,
-            "message": "Đã cài OCR GPU — hãy đóng và mở lại ứng dụng",
-            "detail": str(venv),
+            "message": "Đã cài OCR GPU",
+            "detail": detail,
         }
     pip = [sys.executable, "-m", "pip"]
     subprocess.run(
@@ -120,6 +142,22 @@ def install_ocr_cuda() -> dict[str, Any]:
         )
         if proc.returncode:
             raise RuntimeError((proc.stderr or proc.stdout)[-2000:])
+        proc = subprocess.run(
+            pip
+            + [
+                "install",
+                "--force-reinstall",
+                "--no-deps",
+                "--progress-bar",
+                "off",
+                "onnxruntime-gpu>=1.23,<1.24",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        if proc.returncode:
+            raise RuntimeError((proc.stderr or proc.stdout)[-2000:])
     except Exception:
         # ponytail: keep OCR usable if the optional 2 GB GPU install fails.
         subprocess.run(
@@ -129,22 +167,8 @@ def install_ocr_cuda() -> dict[str, Any]:
             timeout=300,
         )
         raise
-    ok, detail = _ocr_cuda_check()
-    if not ok:
-        subprocess.run(
-            pip + ["uninstall", "-y", "onnxruntime-gpu"],
-            capture_output=True,
-            text=True,
-            timeout=180,
-        )
-        subprocess.run(
-            pip + ["install", "onnxruntime"],
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-        raise RuntimeError(f"CUDA provider unavailable after install: {detail}")
-    return {"ok": True, "message": "Đã cài GPU tăng tốc", "detail": detail}
+    # ponytail: Windows keeps the old ORT DLL mapped until this API exits; verify after restart.
+    return {"ok": True, "message": "Đã cài GPU tăng tốc", "detail": "CUDAExecutionProvider"}
 
 
 def _demucs_venv_python() -> Path | None:

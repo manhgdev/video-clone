@@ -13,6 +13,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from pipeline.core.config import DATA, PUBLIC_DATA, SERVER_ROOT
+from pipeline.core.jobs import kill_process_tree
 
 _DEFAULT_DOWNLOAD_ROOT = PUBLIC_DATA / "downloads"
 _PREF_PATH = DATA / "download_root.json"
@@ -435,10 +436,7 @@ def cancel_job(job_id: str) -> bool:
         _append_log_unlocked(j, "Đã hủy bởi người dùng")
         proc = _PROCS.pop(job_id, None)
     if proc and proc.poll() is None:
-        try:
-            proc.kill()
-        except OSError:
-            pass
+        kill_process_tree(proc)
     _schedule_persist()
     return True
 
@@ -467,13 +465,10 @@ def delete_job(job_id: str, *, delete_files: bool = True) -> bool:
         del _JOBS[job_id]
     if proc is not None and proc.poll() is None:
         try:
-            proc.kill()
+            kill_process_tree(proc)
             proc.wait(timeout=5)
         except Exception:
-            try:
-                proc.kill()
-            except OSError:
-                pass
+            kill_process_tree(proc)
     if delete_files:
         if abs_file:
             try:
@@ -771,10 +766,7 @@ def _run_ytdlp(job_id: str) -> None:
         with _LOCK:
             cur = _JOBS.get(job_id)
             if not cur or cur["status"] == "error":
-                try:
-                    proc.kill()
-                except OSError:
-                    pass
+                kill_process_tree(proc)
                 break
         line = line.rstrip()
         if not line:

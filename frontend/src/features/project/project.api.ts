@@ -3,6 +3,7 @@ import type {
   HardwareInfo,
   JobStatus,
   ProjectSettings,
+  RenderedVideo,
   Segment,
   SystemChecks,
   TextOverlay,
@@ -12,6 +13,18 @@ import { fetchJson } from '@/shared/api/fetchJson'
 const base = '/api'
 
 export const api = {
+  renders: () => fetchJson<{ items: RenderedVideo[] }>(`${base}/renders`, undefined, 30_000),
+
+  revealRender: (renderId: string) =>
+    fetchJson<{ ok: boolean; path: string }>(`${base}/renders/${renderId}/reveal`, { method: 'POST' }),
+
+  renameRender: (renderId: string, name: string) =>
+    fetchJson<{ renderId: string; name: string }>(`${base}/renders/${renderId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    }),
+
   hardware: () => fetchJson<HardwareInfo>(`${base}/hardware`, undefined, 8000),
 
   systemChecks: () =>
@@ -318,6 +331,16 @@ export const api = {
       method: 'DELETE',
     }),
 
+  uploadLogoAsset: async (projectId: string, file: File) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    return fetchJson<{ url: string; width: number; height: number }>(
+      `${base}/projects/${projectId}/logo-asset`,
+      { method: 'POST', body: fd },
+      30_000,
+    )
+  },
+
   run: (projectId: string, settings: ProjectSettings) =>
     fetchJson<{ ok: boolean }>(`${base}/projects/${projectId}/run`, {
       method: 'POST',
@@ -347,13 +370,13 @@ export const api = {
       5000,
     ),
 
-  export: (projectId: string, settings: ProjectSettings, segments?: Segment[]) =>
+  export: (projectId: string, settings: ProjectSettings, segments: Segment[] | undefined, exportEndSec: number | undefined, exportStartSec: number | undefined, renderName: string) =>
     fetchJson<{ ok: boolean; url: string; path?: string; exports?: string }>(
       `${base}/projects/${projectId}/export`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(segments ? { ...settings, segments } : settings),
+        body: JSON.stringify({ ...settings, renderName, ...(segments ? { segments } : {}), ...(exportEndSec && exportEndSec > 0 ? { exportEndSec } : {}), ...(exportStartSec && exportStartSec > 0 ? { exportStartSec } : {}) }),
       },
     ),
 

@@ -10,6 +10,7 @@ import TtsPage from '@/pages/TtsPage'
 import DownloadPage from '@/pages/DownloadPage'
 import FilmPage from '@/pages/FilmPage'
 import BatchPage from '@/pages/BatchPage'
+import RendersPage from '@/pages/RendersPage'
 import { api } from '@/features/project/project.api'
 import { expandSegmentsForList, patchSegmentInTree } from '@/features/project/expandCompound'
 import type { HardwareInfo, JobStatus, ProjectSettings, Segment, Step, TextOverlay } from '@/features/project/project.types'
@@ -88,6 +89,8 @@ const defaultSettings: ProjectSettings = {
   previewSec: 20,
   workers: 0,
   previewAspectRatio: 'original',
+  previewCrop: null,
+  exportResolution: '1080',
   engineProfiles: {
     whisper: { ...ENGINE_DEFAULTS.whisper },
     paddleocr: { ...ENGINE_DEFAULTS.paddleocr },
@@ -185,6 +188,10 @@ function loadSettings(): ProjectSettings {
     ] as const
     if (!okAspect.includes(s.previewAspectRatio as (typeof okAspect)[number])) {
       s.previewAspectRatio = 'original'
+    }
+    const okResolution = ['144', '240', '360', '480', '720', '1080', '1440', '2160', 'original'] as const
+    if (!okResolution.includes(s.exportResolution as (typeof okResolution)[number])) {
+      s.exportResolution = '1080'
     }
     const okMatch = ['preferVideo', 'none', 'natural', 'stretch'] as const
     if (!okMatch.includes(s.matchDuration as (typeof okMatch)[number])) {
@@ -800,7 +807,7 @@ export default function App() {
     })
   }
 
-  async function onExport(exportSegments?: Segment[]) {
+  async function onExport(exportSegments?: Segment[], exportEndSec?: number, exportStartSec?: number, renderName = '') {
     if (!projectId || status.running) return
     setExportUrl(null)
     setExportPath(null)
@@ -836,7 +843,8 @@ export default function App() {
     if (Array.isArray(exportSegments)) {
       setSegments(exportSegments)
     }
-    const res = await api.export(projectId, settings, segs)
+    const finalRenderName = renderName.trim() || `Render ${projectId}`
+    const res = await api.export(projectId, settings, segs, exportEndSec, exportStartSec, finalRenderName)
     pendingExportUrl.current = res.url
     pendingExportPath.current = res.exports || res.path || null
     setStatus((s) => ({ ...s, running: true }))
@@ -1184,6 +1192,8 @@ export default function App() {
         <FilmPage />
       ) : appMode === 'batch' ? (
         <BatchPage />
+      ) : appMode === 'renders' ? (
+        <RendersPage />
       ) : editorOpen ? (
         <LivePreviewEditor
           key={projectId}

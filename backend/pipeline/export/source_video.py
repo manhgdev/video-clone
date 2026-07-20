@@ -7,6 +7,7 @@ from typing import Any
 from pipeline.core.media import ensure_preview_clip
 from pipeline.core.project import ensure_layout
 
+
 def export_source_video(project_id: str, meta: dict[str, Any]) -> tuple[Path, int]:
     """Clip xuất = đúng độ dài lần dịch (meta.previewSec), không lấy nhầm source full."""
     source = Path(meta["videoPath"]).resolve()
@@ -39,8 +40,3 @@ def export_source_video(project_id: str, meta: dict[str, Any]) -> tuple[Path, in
         project_id,
     )
     return clip, preview_sec
-
-
-
-from pipeline.export.compound import expand_compound_segments
-

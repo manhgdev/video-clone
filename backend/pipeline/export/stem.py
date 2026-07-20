@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ..core.jobs import run_cmd
+from ..core.jobs import kill_process_tree, register_process, run_cmd, unregister_process
 from ..core.media import _has_audio_stream, ffprobe_duration, h264_encoder_args
 from ..core.project import ensure_layout, out_final, set_status
 
@@ -508,6 +508,7 @@ def _run_demucs_mlx_progress(
         [python, "-c", _MLX_SEPARATE_PY, str(source_wav), str(separated)],
         **kw,
     )
+    register_process(project_id, proc)
     assert proc.stdout is not None
     last_pct = 18
     lock = threading.Lock()
@@ -537,9 +538,10 @@ def _run_demucs_mlx_progress(
                     set_stem_progress(project_id, 88, "Demucs-MLX xong — ghi stem…")
         code = proc.wait(timeout=3600)
     except Exception:
-        proc.kill()
+        kill_process_tree(proc)
         raise
     finally:
+        unregister_process(project_id, proc)
         stop_hb.set()
         hb.join(timeout=1.0)
     return code, "".join(err_chunks)[-800:]
@@ -600,6 +602,7 @@ def _run_demucs_progress(
         return subprocess.Popen(cmd, **kw)
 
     def _consume(proc: subprocess.Popen[str]) -> tuple[int, str]:
+        register_process(project_id, proc)
         assert proc.stdout is not None
         last_pct = 18
         lock = threading.Lock()
@@ -636,9 +639,10 @@ def _run_demucs_progress(
                         )
             code = proc.wait(timeout=3600)
         except Exception:
-            proc.kill()
+            kill_process_tree(proc)
             raise
         finally:
+            unregister_process(project_id, proc)
             stop_hb.set()
             hb.join(timeout=1.0)
         return code, "".join(err_chunks)[-600:]

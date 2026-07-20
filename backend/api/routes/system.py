@@ -3,8 +3,11 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import shutil
+import subprocess
+import sys
 import threading
 import uuid
 from datetime import datetime
@@ -153,7 +156,14 @@ def api_install_ocr_cuda():
     from pipeline.core.system_check import install_ocr_cuda
 
     try:
-        return install_ocr_cuda()
+        result = install_ocr_cuda()
+        desktop = os.environ.get("VIDEO_CLONE_DESKTOP") == "1"
+        if desktop or os.environ.get("VIDEO_CLONE_SUPERVISED") == "1":
+            if desktop:
+                subprocess.Popen([sys.executable, "--restart-after", str(os.getpid())])
+            threading.Timer(1.0, lambda: os._exit(0)).start()
+            result["message"] = "Đã cài GPU tăng tốc — đang tự khởi động lại"
+        return result
     except Exception as e:
         raise HTTPException(500, str(e)) from e
 

@@ -53,6 +53,8 @@ export const defaultSettings: ProjectSettings = {
   previewSec: 20,
   workers: 0,
   previewAspectRatio: 'original',
+  previewCrop: null,
+  exportResolution: '1080',
   engineProfiles: {
     whisper: { ...ENGINE_DEFAULTS.whisper },
     paddleocr: { ...ENGINE_DEFAULTS.paddleocr },
@@ -187,6 +189,10 @@ export function loadSettings(): ProjectSettings {
     ] as const
     if (!okAspect.includes(s.previewAspectRatio as (typeof okAspect)[number])) {
       s.previewAspectRatio = 'original'
+    }
+    const okResolution = ['144', '240', '360', '480', '720', '1080', '1440', '2160', 'original'] as const
+    if (!okResolution.includes(s.exportResolution as (typeof okResolution)[number])) {
+      s.exportResolution = '1080'
     }
     const okMatch = ['preferVideo', 'none', 'natural', 'stretch'] as const
     if (!okMatch.includes(s.matchDuration as (typeof okMatch)[number])) {

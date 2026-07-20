@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import threading
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,24 +24,8 @@ def create_app() -> FastAPI:
     # ponytail: do NOT import torch here — blocks worker 10–40s on Windows;
     # cuDNN path fix runs in warm-models thread after listen.
 
-    app = FastAPI(title="Video-Clone Local")
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-
-    @app.get("/api/health")
-    def api_health() -> dict[str, str]:
-        """Cheap readiness — dev.mjs / proxies; no torch / model load."""
-        return {"ok": "1", "status": "up"}
-
-    app.include_router(router)
-    app.mount("/data", StaticFiles(directory=str(PUBLIC_DATA)), name="public-data")
-
-    @app.on_event("startup")
-    def _warm_models() -> None:
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
         try:
             from pipeline.download import ensure_download_dirs
 
@@ -77,5 +62,22 @@ def create_app() -> FastAPI:
                 pass
 
         threading.Thread(target=_run, name="warm-models", daemon=True).start()
+        yield
+
+    app = FastAPI(title="Video-Clone Local", lifespan=lifespan)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    @app.get("/api/health")
+    def api_health() -> dict[str, str]:
+        """Cheap readiness — dev.mjs / proxies; no torch / model load."""
+        return {"ok": "1", "status": "up"}
+
+    app.include_router(router)
+    app.mount("/data", StaticFiles(directory=str(PUBLIC_DATA)), name="public-data")
 
     return app

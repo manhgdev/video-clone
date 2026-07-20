@@ -178,7 +178,8 @@ def api_export(project_id: str, payload: ExportPayload):
     if not meta:
         raise HTTPException(404)
     # UI checkbox phải thắng meta cũ; previewSec ô Preview ≠ độ dài lần dịch
-    dumped = payload.model_dump(exclude={"segments"}, exclude_none=False)
+    dumped = payload.model_dump(exclude={"segments", "exportEndSec", "exportStartSec", "renderName"}, exclude_none=False)
+    meta["pendingRenderName"] = payload.renderName.strip()
     if payload.segments is not None:
         # List từ editor = source of truth (không merge giữ meta cũ → lệch WYSIWYG)
         ordered = sorted(payload.segments, key=lambda s: (s.start, s.end, s.id))
@@ -192,6 +193,18 @@ def api_export(project_id: str, payload: ExportPayload):
             d["index"] = i
             out.append(d)
         meta["segments"] = out
+    if payload.exportEndSec is not None:
+        if not math.isfinite(payload.exportEndSec) or payload.exportEndSec <= 0:
+            raise HTTPException(422, "exportEndSec phải lớn hơn 0")
+        meta["exportEndSec"] = float(payload.exportEndSec)
+    else:
+        meta.pop("exportEndSec", None)
+    if payload.exportStartSec is not None:
+        if not math.isfinite(payload.exportStartSec) or payload.exportStartSec < 0:
+            raise HTTPException(422, "exportStartSec phải lớn hơn hoặc bằng 0")
+        meta["exportStartSec"] = float(payload.exportStartSec)
+    else:
+        meta.pop("exportStartSec", None)
     run_preview = max(0, int(meta.get("previewSec") or 0))
     ui_prev = max(0, int(dumped.get("previewSec") or 0))
     if ui_prev <= 0:
@@ -202,13 +215,13 @@ def api_export(project_id: str, payload: ExportPayload):
     # xuất theo clip lần dịch gần nhất (0 = full), không theo ô Preview
     meta["previewSec"] = run_preview
     save_meta(project_id, meta)
-    hint = f"preview {run_preview}s" if run_preview > 0 else "full"
+    hint = "full" if run_preview <= 0 else f"preview {run_preview}s"
     arm_job(project_id)
     set_status(
         project_id,
         step="export",
         progress=1,
-        message=f"Queued ({hint})…",
+        message=f"Đang xuất ({hint})…",
         running=True,
         error=None,
     )

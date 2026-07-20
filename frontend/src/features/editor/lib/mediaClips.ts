@@ -2,10 +2,10 @@ import type { Segment, TextOverlay } from '@/features/project/project.types'
 import { MIN_CLIP_SEC, SPLIT_EDGE } from './timelineBasics'
 
 /** Clip Video / Âm gốc trên timeline (tách khỏi Caption·TTS) */
-export type MediaClip = { id: string; start: number; end: number }
+export type MediaClip = { id: string; start: number; end: number; sourceStart?: number }
 
 export function fullMediaClip(end: number): MediaClip {
-  return { id: crypto.randomUUID(), start: 0, end: Math.max(end, MIN_CLIP_SEC) }
+  return { id: crypto.randomUUID(), start: 0, end: Math.max(end, MIN_CLIP_SEC), sourceStart: 0 }
 }
 
 /**
@@ -74,7 +74,7 @@ export function splitMediaList(clips: MediaClip[], clipId: string, t: number): M
     if (!(t > c.start + SPLIT_EDGE && t < c.end - SPLIT_EDGE)) return [c]
     return [
       { ...c, end: t },
-      { id: crypto.randomUUID(), start: t, end: c.end },
+      { ...c, id: crypto.randomUUID(), start: t, end: c.end, sourceStart: (c.sourceStart ?? c.start) + t - c.start },
     ]
   })
 }

@@ -3,7 +3,7 @@ import {
   layoutOcrOverlay,
   ocrFallbackCover,
 } from '@/features/editor/ocrOverlayLayout'
-import type { PixelBox, CropRect } from './previewStyles'
+import { resolveCropRect, type PixelBox, type CropRect } from './previewStyles'
 import { isOcrOverlayLayout, effectiveOverlayLayout } from './segmentQuery'
 
 export const AUTO_SUBTITLE_FONT = 48
@@ -330,17 +330,8 @@ export function overlayCoverSeed(seg: Segment, frameW: number, frameH: number): 
     if (layout === 'horizontal' || isCjkHardsubSource(seg.source)) return null
     return clampCoverBox(ocrFallbackCover(frameW, frameH, layout), frameW, frameH)
   }
-  const box = tightenStoredBbox(seg, clampCoverBox(seg.bbox, frameW, frameH), frameW)
-  if (layout === 'vertical' && box.w > box.h * 0.85) {
-    return clampCoverBox(ocrFallbackCover(frameW, frameH, 'vertical'), frameW, frameH)
-  }
+  const box = clampCoverBox(seg.bbox, frameW, frameH)
   // mid: chỉ bỏ khung gần full-frame (lưới đáy nhầm). 2 dòng hardsub giữa/đáy vẫn giữ.
-  if (layout === 'mid' && (box.w > frameW * 0.92 || box.h > frameH * 0.28)) {
-    return clampCoverBox(ocrFallbackCover(frameW, frameH, 'mid'), frameW, frameH)
-  }
-  if (layout === 'label' && (box.w > frameW * 0.7 || box.h > frameH * 0.35)) {
-    return clampCoverBox(ocrFallbackCover(frameW, frameH, 'label'), frameW, frameH)
-  }
   return box
 }
 
@@ -371,7 +362,7 @@ export function storedOverLayout(seg: Segment, frameW: number, frameH: number): 
   const b = seg.bbox
   if (!b || !cl?.lines?.length || cl.w <= 0 || cl.h <= 0) return null
   return {
-    cover: tightenStoredBbox(seg, clampCoverBox(b, frameW, frameH), frameW),
+    cover: clampCoverBox(b, frameW, frameH),
     caption: {
       x: Math.round(cl.x),
       y: Math.round(cl.y),
@@ -506,6 +497,20 @@ export function intersectBox(a: PixelBox, crop: CropRect): PixelBox | null {
   return { x: Math.round(x), y: Math.round(y), w: Math.round(x2 - x), h: Math.round(y2 - y) }
 }
 
+function fitBoxToCrop(box: PixelBox, crop: CropRect): PixelBox {
+  const scale = Math.min(1, crop.w / Math.max(1, box.w), crop.h / Math.max(1, box.h))
+  const w = Math.max(4, Math.round(box.w * scale))
+  const h = Math.max(4, Math.round(box.h * scale))
+  const centerX = box.x + box.w / 2
+  const centerY = box.y + box.h / 2
+  return {
+    x: Math.round(Math.max(crop.x, Math.min(crop.x + crop.w - w, centerX - w / 2))),
+    y: Math.round(Math.max(crop.y, Math.min(crop.y + crop.h - h, centerY - h / 2))),
+    w,
+    h,
+  }
+}
+
 export function unionBox(a: PixelBox, b: PixelBox): PixelBox {
   const x = Math.min(a.x, b.x)
   const y = Math.min(a.y, b.y)
@@ -532,10 +537,10 @@ export function resolveCoverMaskOnly(
     seg.bbox ? clampCoverBox(seg.bbox, frameW, frameH) : cover,
     crop,
   )
-  return ink ? unionBox(ink, cover) : cover
+  return ink
 }
 
-/** Preview: dùng layout đã giãn ngang; 9:16 chỉ thêm mask che OCR trong crop. */
+/** Preview: cover/caption luôn nằm trong crop hiện tại (16:9, 9:16…). */
 export function resolvePreviewOverLayout(
   seg: Segment | undefined,
   settings: ProjectSettings,
@@ -546,15 +551,78 @@ export function resolvePreviewOverLayout(
 ): PreviewOverLayout | null {
   const base = resolveOverLayout(seg, settings, frameW, frameH, coverOverride)
   if (!base) return null
-  if (cropCoversFull(crop, frameW, frameH)) {
-    return { ...base, mask: base.cover }
+  // Khung ngang ôm caption với padding đều để chữ luôn nằm giữa bbox.
+  if (crop.w >= crop.h) {
+    const fontPx = base.fontPx ?? 16
+    const padY = Math.max(2, Math.round(fontPx * 0.08))
+    const offsetY = Math.max(3, Math.round(fontPx * 0.25))
+    const caption = {
+      ...base.caption,
+      y: Math.min(crop.y + crop.h - base.caption.h - padY, base.caption.y + offsetY),
+    }
+    const y = Math.max(crop.y, caption.y - padY)
+    const bottom = Math.min(crop.y + crop.h, caption.y + caption.h + padY)
+    const cover = { ...base.cover, y, h: Math.max(4, bottom - y) }
+    return { ...base, cover, caption, mask: cover }
   }
-  const ink = intersectBox(base.cover, crop) ?? intersectBox(
-    seg!.bbox ? clampCoverBox(seg!.bbox, frameW, frameH) : base.cover,
-    crop,
+  const fullCrop = cropCoversFull(crop, frameW, frameH)
+  const fittedCover = fullCrop ? base.cover : fitBoxToCrop(base.cover, crop)
+  let caption = fullCrop ? base.caption : fitBoxToCrop(base.caption, crop)
+  const text = seg?.translation?.trim() || base.lines.join(' ')
+  const preferredFont = resolveCaptionFontSize(seg, settings, frameW, frameH)
+  const maxLines = 2
+  let fontPx = preferredFont
+  let lines = wrapCaptionText(text, caption.w * 0.9, fontPx, maxLines)
+  while (
+    fontPx > 10
+    && lines.some((line) => measureLineWidth(line, fontPx) > caption.w * 0.98)
+  ) {
+    fontPx -= 1
+    lines = wrapCaptionText(text, caption.w * 0.9, fontPx, maxLines)
+  }
+  const neededHeight = Math.ceil(fontPx * lines.length * 1.25 + 8)
+  if (caption.h < neededHeight) {
+    caption = fitBoxToCrop({
+      ...caption,
+      y: caption.y + (caption.h - neededHeight) / 2,
+      h: neededHeight,
+    }, crop)
+  }
+  const offsetY = Math.max(2, Math.round(fontPx * 0.06))
+  const groupBottom = Math.max(
+    fittedCover.y + fittedCover.h,
+    caption.y + caption.h,
   )
-  const mask = ink ? unionBox(ink, base.cover) : base.cover
-  return { ...base, mask }
+  const shiftY = Math.max(0, Math.min(offsetY, crop.y + crop.h - groupBottom))
+  const shiftedCover = { ...fittedCover, y: fittedCover.y + shiftY }
+  caption = { ...caption, y: caption.y + shiftY }
+  const union = unionBox(shiftedCover, caption)
+  const maskSeed = unionBox(fittedCover, caption)
+  const maskBottom = Math.min(
+    crop.y + crop.h,
+    maskSeed.y + maskSeed.h + Math.round(fontPx * 0.65),
+  )
+  const mask = intersectBox({
+    ...maskSeed,
+    h: maskBottom - maskSeed.y,
+  }, crop) ?? maskSeed
+  const padY = Math.max(2, Math.round(fontPx * 0.08))
+  const coverY = Math.max(crop.y, caption.y - padY)
+  const coverBottom = Math.min(crop.y + crop.h, caption.y + caption.h + padY)
+  const cover = fitBoxToCrop({
+    x: union.x,
+    y: coverY,
+    w: union.w,
+    h: Math.max(4, coverBottom - coverY),
+  }, crop)
+  return {
+    ...base,
+    cover,
+    caption,
+    lines,
+    fontPx,
+    mask,
+  }
 }
 
 export function estimatePreviewCaptionBox(
@@ -619,9 +687,10 @@ export function buildExportSegments(
 ): Segment[] {
   if (!settings.burnSubs || frameW <= 0) return segments
   const place = captionPlacement(settings)
+  const crop = resolveCropRect(frameW, frameH, settings.previewAspectRatio ?? 'original', settings.previewCrop)
   return segments.map((seg) => {
     if (!seg.translation.trim()) return seg
-    const layout = resolveOverLayout(seg, settings, frameW, frameH)
+    const layout = resolvePreviewOverLayout(seg, settings, frameW, frameH, crop)
     if (layout) {
       const fontPx = layout.fontPx ?? resolveCaptionFontSize(seg, settings, frameW, frameH)
       return segmentWithLayout(seg, layout, fontPx)
@@ -832,7 +901,7 @@ export function seedCoverBox(
   fontSizePx = AUTO_SUBTITLE_FONT,
 ): PixelBox | null {
   if (seg?.bbox) {
-    return tightenStoredBbox(seg, clampCoverBox(seg.bbox, frameW, frameH), frameW)
+    return clampCoverBox(seg.bbox, frameW, frameH)
   }
   if (seg && isCjkHardsubSource(seg.source)) return null
   return fallbackCoverBox(frameW, frameH, fontSizePx)

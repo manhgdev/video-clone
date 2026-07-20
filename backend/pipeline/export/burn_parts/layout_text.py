@@ -318,7 +318,12 @@ def _caption_overlay(layout: dict[str, Any]) -> tuple[Any, int, int] | None:
     bg_style = str(layout.get("bg_style") or "none").lower()
     bg_hex = str(layout.get("bg_hex") or "#000000")
     bg_op = max(0, min(100, int(layout.get("bg_opacity") if layout.get("bg_opacity") is not None else 55)))
-    m = 6
+    # Chừa theo font metrics, không dùng margin cố định: dấu tiếng Việt và
+    # descender (g/q/y) có thể vượt box layout vài pixel ở font lớn.
+    draw_probe = ImageDraw.Draw(Image.new("L", (1, 1)))
+    metric_box = draw_probe.textbbox((0, 0), "Áạgqỵ", font=font)
+    metric_h = max(1, metric_box[3] - metric_box[1])
+    m = max(6, int(math.ceil(metric_h * 0.3)))
     bw, bh = (x1 - x0) + 2 * m, (y1 - y0) + 2 * m
     if bw < 4 or bh < 4:
         return None
@@ -340,7 +345,8 @@ def _caption_overlay(layout: dict[str, Any]) -> tuple[Any, int, int] | None:
             outline=(255, 255, 255, 30) if is_box else None,
             width=1,
         )
-    ty = m + max(0, (box_h - text_h) // 2)
+    # Optical center: line-box + shadow nặng phía dưới làm chữ nhìn thấp hơn tâm bbox.
+    ty = m + max(0, (box_h - text_h) // 2) - int(round(metric_h * 0.06))
     thick = False  # ponytail: preview dùng soft shadow cho mọi layout; thick outline khác preview
     outline_thick = (
         (-3, 0),
@@ -396,7 +402,7 @@ def _caption_overlay(layout: dict[str, Any]) -> tuple[Any, int, int] | None:
     return rgba, x0 - m, y0 - m
 
 
-def _blit_overlay(frame_bgr: Any, overlay: tuple[Any, int, int]) -> Any:
+def _blit_overlay(frame_bgr: Any, overlay: tuple[Any, int, int], opacity: float = 1.0) -> Any:
     import numpy as np
 
     rgba, x0, y0 = overlay
@@ -410,7 +416,7 @@ def _blit_overlay(frame_bgr: Any, overlay: tuple[Any, int, int]) -> Any:
     patch = rgba[sy0 : sy0 + (y1 - dy0), sx0 : sx0 + (x1 - dx0)]
     if patch.size == 0:
         return frame_bgr
-    a = patch[:, :, 3:4].astype(np.float32) * (1.0 / 255.0)
+    a = patch[:, :, 3:4].astype(np.float32) * (max(0.0, min(1.0, opacity)) / 255.0)
     # PIL RGB → BGR
     src = patch[:, :, 2::-1].astype(np.float32)
     roi = frame_bgr[dy0:y1, dx0:x1]
@@ -418,6 +424,22 @@ def _blit_overlay(frame_bgr: Any, overlay: tuple[Any, int, int]) -> Any:
         np.uint8
     )
     return frame_bgr
+
+
+def _image_overlay(path: str, box: tuple[int, int, int, int]) -> tuple[Any, int, int] | None:
+    import numpy as np
+    from PIL import Image
+    x0, y0, x1, y1 = box
+    if x1 <= x0 or y1 <= y0:
+        return None
+    try:
+        image = Image.open(path).convert("RGBA")
+        image.thumbnail((x1 - x0, y1 - y0), Image.Resampling.LANCZOS)
+    except Exception:
+        return None
+    canvas = Image.new("RGBA", (x1 - x0, y1 - y0), (0, 0, 0, 0))
+    canvas.alpha_composite(image, ((canvas.width - image.width) // 2, (canvas.height - image.height) // 2))
+    return np.asarray(canvas), x0, y0
 
 
 def _wrap_balanced(draw: Any, text: str, font: Any, max_w: int) -> list[str]:

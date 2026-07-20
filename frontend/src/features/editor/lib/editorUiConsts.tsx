@@ -2,7 +2,7 @@ import React from 'react'
 
 /* ── OpenCut assets-panel tab rail (same tabs as opencut.app) ── */
 export type AssetsTab =
-  | 'media' | 'sounds' | 'text' | 'stickers' | 'effects'
+  | 'media' | 'sounds' | 'text' | 'logo' | 'stickers' | 'effects'
   | 'transitions' | 'captions' | 'filters' | 'adjustment' | 'settings'
 
 export const ASSET_TABS: { key: AssetsTab; label: string; icon: React.ReactNode }[] = [
@@ -17,6 +17,10 @@ export const ASSET_TABS: { key: AssetsTab; label: string; icon: React.ReactNode 
   {
     key: 'text', label: 'Text',
     icon: <TabSvg><polyline points="4 7 4 4 20 4 20 7" /><line x1="9" y1="20" x2="15" y2="20" /><line x1="12" y1="4" x2="12" y2="20" /></TabSvg>,
+  },
+  {
+    key: 'logo', label: 'Logo',
+    icon: <TabSvg><path d="M4 5h16v14H4z" /><path d="m7 15 3-3 2 2 3-4 2 5" /><circle cx="9" cy="9" r="1" /></TabSvg>,
   },
   {
     key: 'stickers', label: 'Stickers',
