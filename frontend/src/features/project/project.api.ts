@@ -30,8 +30,12 @@ export const api = {
 
   hardware: () => fetchJson<HardwareInfo>(`${base}/hardware`, undefined, 8000),
 
-  systemChecks: () =>
-    fetchJson<SystemChecks>(`${base}/system/checks`, undefined, 20_000),
+  systemChecks: (refresh = false) =>
+    fetchJson<SystemChecks>(
+      `${base}/system/checks${refresh ? '?refresh=1' : ''}`,
+      undefined,
+      refresh ? 20_000 : 8_000,
+    ),
 
   installAiRuntime: () =>
     fetchJson<{ ok: boolean; message: string; detail: string }>(

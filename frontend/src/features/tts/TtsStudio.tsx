@@ -494,7 +494,7 @@ export default function TtsStudio({
   const [autoSplit, setAutoSplit] = useState(saved.autoSplit)
   const [outputFormat, setOutputFormat] = useState<TtsOutputFormat>(saved.outputFormat)
   const [busy, setBusy] = useState(false)
-  const [busyKind, setBusyKind] = useState<'synth' | 'preview' | 'clone' | null>(null)
+  const [busyKind, setBusyKind] = useState<'synth' | 'clone' | null>(null)
   const [busyProgress, setBusyProgress] = useState(0)
   const [progressMinimized, setProgressMinimized] = useState(false)
   const [error, setError] = useState('')
@@ -523,6 +523,7 @@ export default function TtsStudio({
   const [srtRaw, setSrtRaw] = useState('')
   /** Dashboard « Nhập nội dung »: text | srt — quyết định synth path */
   const [inputMode, setInputMode] = useState<'text' | 'srt'>('text')
+  const [previewBusy, setPreviewBusy] = useState(false)
   const [previewingVoiceId, setPreviewingVoiceId] = useState<string | null>(null)
   const [selectedVoiceIds, setSelectedVoiceIds] = useState<Set<string>>(() => new Set())
   const [bulkMoveOpen, setBulkMoveOpen] = useState(false)
@@ -986,17 +987,16 @@ export default function TtsStudio({
 
   async function onPreview() {
     if (!voice) return
-    // Chưa có WAV mẫu / ô trống → tự điền câu mẫu theo ngôn ngữ
     let sample = previewSample.trim().slice(0, 200)
     if (!sample) {
       sample = previewSampleFor(lang).slice(0, 200)
       setPreviewSample(sample)
     }
-    setBusyKind('preview')
-    setBusy(true)
+    voicePreviewRef.current?.pause()
+    setPreviewingVoiceId(null)
+    setPreviewBusy(true)
     setError('')
     const requestJobId = crypto.randomUUID().replaceAll('-', '').slice(0, 12)
-    activeJobIdRef.current = requestJobId
     try {
       const res = await api.ttsStudioSynth({
         jobId: requestJobId,
@@ -1011,11 +1011,7 @@ export default function TtsStudio({
         autoSplit: false,
         title: 'Nghe thử',
       })
-      if (cancelledJobIdsRef.current.has(requestJobId)) return
-      setBusyProgress(100)
       applyJobUrls(res)
-      if (!(res as { cached?: boolean }).cached) await loadHistory()
-      // Chỉ phát trong player — không mở tab / không download
       requestAnimationFrame(() => {
         const el = audioRef.current
         if (!el) return
@@ -1025,16 +1021,9 @@ export default function TtsStudio({
         })
       })
     } catch (e) {
-      if (!cancelledJobIdsRef.current.has(requestJobId)) {
-        setError(e instanceof Error ? e.message : 'Nghe thử thất bại')
-      }
+      setError(e instanceof Error ? e.message : 'Nghe thử thất bại')
     } finally {
-      cancelledJobIdsRef.current.delete(requestJobId)
-      if (activeJobIdRef.current === requestJobId) {
-        activeJobIdRef.current = null
-        setBusy(false)
-        setBusyKind(null)
-      }
+      setPreviewBusy(false)
     }
   }
 
@@ -1318,8 +1307,8 @@ export default function TtsStudio({
                 <button
                   type="button"
                   className="tts-btn-sm tts-btn-icon"
-                  title={previewingVoiceId === v.id ? 'Dừng' : 'Phát audio mẫu có sẵn'}
-                  aria-label={previewingVoiceId === v.id ? 'Dừng' : 'Nghe thử'}
+                  title={previewingVoiceId === v.id ? 'Dừng audio mẫu' : 'Phát audio mẫu gốc'}
+                  aria-label={previewingVoiceId === v.id ? 'Dừng' : 'Phát audio mẫu'}
                   onClick={() => toggleVoicePreview(v)}
                 >
                   {previewingVoiceId === v.id ? <IconPause size={13} /> : <IconPlay size={13} />}
@@ -1358,24 +1347,15 @@ export default function TtsStudio({
     )
   }
 
-  const busyTitle =
-    busyKind === 'preview'
-      ? 'Nghe thử giọng'
-      : busyKind === 'clone'
-        ? 'Clone giọng nói'
-        : 'Tạo giọng nói'
+  const busyTitle = busyKind === 'clone' ? 'Clone giọng nói' : 'Tạo giọng nói'
   const busyMessage =
-    busyKind === 'preview'
-      ? isVieneuVoice
-        ? 'Đang tổng hợp mẫu VieNeu…'
-        : 'Đang tổng hợp mẫu…'
-      : busyKind === 'clone'
-        ? 'Đang tạo giọng clone…'
-        : srtRaw.trim()
-          ? 'Đang tạo giọng từ SRT…'
-          : isVieneuVoice
-            ? 'Đang tạo giọng VieNeu (lần đầu có thể nạp model)…'
-            : 'Đang tạo giọng nói…'
+    busyKind === 'clone'
+      ? 'Đang tạo giọng clone…'
+      : srtRaw.trim()
+        ? 'Đang tạo giọng từ SRT…'
+        : isVieneuVoice
+          ? 'Đang tạo giọng VieNeu (lần đầu có thể nạp model)…'
+          : 'Đang tạo giọng nói…'
 
   function renderHistoryBody() {
     return (
@@ -2341,8 +2321,8 @@ export default function TtsStudio({
                     type="button"
                     className="tts-btn-sm tts-btn-icon"
                     onClick={() => toggleVoicePreview(selectedVoice)}
-                    title={previewingVoiceId === selectedVoice.id ? 'Dừng' : 'Phát audio mẫu có sẵn, không tạo TTS'}
-                    aria-label={previewingVoiceId === selectedVoice.id ? 'Dừng' : 'Nghe thử'}
+                    title={previewingVoiceId === selectedVoice.id ? 'Dừng audio mẫu' : 'Phát audio mẫu gốc (không tạo TTS)'}
+                    aria-label={previewingVoiceId === selectedVoice.id ? 'Dừng' : 'Phát audio mẫu'}
                   >
                     {previewingVoiceId === selectedVoice.id ? <IconPause size={13} /> : <IconPlay size={13} />}
                   </button>
@@ -2372,7 +2352,7 @@ export default function TtsStudio({
                 )
               })()}
             </label>
-              <label className="tts-field">
+            <label className="tts-field">
               <span>Nghe thử giọng</span>
               <div className="tts-listen-row">
                 <input
@@ -2385,10 +2365,11 @@ export default function TtsStudio({
                 <button
                   type="button"
                   className="tts-btn tts-btn-ghost"
-                  disabled={busy || !voice}
+                  disabled={busy || previewBusy || !voice}
                   onClick={() => void onPreview()}
+                  title="Tổng hợp TTS từ câu trong ô (không phải audio mẫu gốc)"
                 >
-                  <IconHeadphones size={14} /> Nghe thử
+                  <IconHeadphones size={14} /> {previewBusy ? 'Đang tạo…' : 'Nghe thử'}
                 </button>
               </div>
             </label>

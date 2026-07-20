@@ -16,8 +16,22 @@ PUBLIC_DATA = Path(
         SERVER_ROOT / "public",
     )
 )
-DATA.mkdir(parents=True, exist_ok=True)
-PUBLIC_DATA.mkdir(parents=True, exist_ok=True)
+
+# ponytail: không mkdir lúc import — PyInstaller build sẽ tạo backend/public trống
+def ensure_data_dirs() -> None:
+    DATA.mkdir(parents=True, exist_ok=True)
+    PUBLIC_DATA.mkdir(parents=True, exist_ok=True)
+
+
+def export_display_path(path: Path) -> str:
+    """Đường dẫn hiển thị: app desktop = full path; dev = backend/public/… trong repo."""
+    resolved = path.resolve()
+    if os.environ.get("VIDEO_CLONE_DESKTOP") == "1":
+        return str(resolved)
+    try:
+        return str(resolved.relative_to(REPO_ROOT.resolve())).replace("\\", "/")
+    except ValueError:
+        return str(resolved).replace("\\", "/")
 
 # ponytail: load backend/.env once; no python-dotenv dep
 _env_path = SERVER_ROOT / ".env"

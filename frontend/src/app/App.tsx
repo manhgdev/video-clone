@@ -21,6 +21,23 @@ const SETTINGS_LS = 'videoclone.settings'
 const SESSION_LS = 'videoclone.session'
 const SIDEBAR_W_LS = 'videoclone.sidebarWidth'
 const THEME_LS = 'videoclone.theme'
+const SETUP_GATE_LS = 'videoclone.setupGate'
+
+function loadSetupGate(): boolean {
+  try {
+    return localStorage.getItem(SETUP_GATE_LS) === '1'
+  } catch {
+    return false
+  }
+}
+
+function persistSetupGate() {
+  try {
+    localStorage.setItem(SETUP_GATE_LS, '1')
+  } catch {
+    /* ignore */
+  }
+}
 
 function loadTheme(): boolean {
   try { return localStorage.getItem(THEME_LS) === 'dark' } catch { return false }
@@ -270,10 +287,13 @@ export default function App() {
     { id: 'system', name: 'Giọng hệ thống (theo ngôn ngữ đích)' },
   ])
   const [settings, setSettings] = useState(loadSettings)
-  const [configOpen, setConfigOpen] = useState(false)
-  const [configSection, setConfigSection] = useState<'setup' | 'cloud' | 'tts'>('cloud')
-  const [forceSetup, setForceSetup] = useState(false)
-  const [setupReady, setSetupReady] = useState(true)
+  const [configOpen, setConfigOpen] = useState(() => !loadSetupGate())
+  const [configSection, setConfigSection] = useState<'setup' | 'cloud' | 'tts'>(() =>
+    loadSetupGate() ? 'cloud' : 'setup',
+  )
+  const [setupGatePassed, setSetupGatePassed] = useState(loadSetupGate)
+  const [setupReady, setSetupReady] = useState(loadSetupGate)
+  const [setupChecked, setSetupChecked] = useState(loadSetupGate)
   const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth)
   const sidebarWidthRef = useRef(sidebarWidth)
   const sidebarDrag = useRef<{ startX: number; startW: number } | null>(null)
@@ -336,31 +356,49 @@ export default function App() {
     api.hardware().then(setHw).catch(() => setHw({ label: 'Local', accel: 'cpu' }))
   }, [])
 
-  // First-run: thiếu ffmpeg / package → mở tab Thiết lập
+  function passSetupGate() {
+    persistSetupGate()
+    setSetupGatePassed(true)
+    setSetupReady(true)
+    setConfigSection('cloud')
+    setConfigOpen(false)
+  }
+
+  // Lần đầu: mở Thiết lập, chặn app nếu thiếu bắt buộc. Lần sau: chỉ kiểm tra nền.
   useEffect(() => {
     let cancelled = false
-    void api
-      .systemChecks()
-      .then((c) => {
+
+    async function bootstrapSetup() {
+      if (!setupGatePassed) {
+        setConfigSection('setup')
+        setConfigOpen(true)
+      }
+      for (let attempt = 0; attempt < 40; attempt++) {
         if (cancelled) return
-        if (!c.ok) {
-          setSetupReady(false)
-          setForceSetup(true)
-          setConfigSection('setup')
-          setConfigOpen(true)
-        } else {
-          setSetupReady(true)
-          setForceSetup(false)
+        try {
+          const c = await api.systemChecks(attempt > 0)
+          if (cancelled) return
+          setSetupChecked(true)
+          if (setupGatePassed) {
+            setSetupReady(true)
+          } else {
+            setSetupReady(c.ok)
+          }
+          return
+        } catch {
+          await new Promise((r) => window.setTimeout(r, 250))
         }
-      })
-      .catch(() => {
-        // API chưa lên — không chặn UI; user mở Cấu hình sau
-        if (!cancelled) setSetupReady(true)
-      })
+      }
+      if (cancelled) return
+      setSetupChecked(true)
+      if (!setupGatePassed) setSetupReady(false)
+    }
+
+    void bootstrapSetup()
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [setupGatePassed])
 
   // F5 / Vite HMR: mở lại project đang làm (kể cả đang export)
   useEffect(() => {
@@ -1148,9 +1186,13 @@ export default function App() {
     setPreviewEditorOpen(true)
   }
 
+  const firstRunBlocked = !setupGatePassed && setupChecked && !setupReady
+  const appUsable = setupGatePassed || (setupChecked && setupReady)
+  const configModalOpen = configOpen || firstRunBlocked
+
   return (
     <div className={editorOpen && appMode === 'clone' ? 'app app--editor' : 'app'}>
-      {!(editorOpen && appMode === 'clone') && (
+      {appUsable && !(editorOpen && appMode === 'clone') && (
       <Header
         hardware={hw}
         dark={dark}
@@ -1167,32 +1209,30 @@ export default function App() {
         }}
         onToggleTheme={() => setDark(d => !d)}
         onOpenConfig={() => {
-          setConfigSection(forceSetup && !setupReady ? 'setup' : 'cloud')
+          if (setupGatePassed) setConfigSection('cloud')
           setConfigOpen(true)
         }}
       />
       )}
       <ConfigModal
-        open={configOpen}
+        open={configModalOpen}
         initialSection={configSection}
-        forceSetup={forceSetup && !setupReady}
-        onSetupReady={() => {
-          setSetupReady(true)
-          setForceSetup(false)
-        }}
+        forceSetup={firstRunBlocked}
+        onSetupReady={passSetupGate}
         onSaved={() => {
           const l = settings.targetLang === 'none' ? 'vi' : settings.targetLang
           void api.voices(l).then(setVoices).catch(() => {})
         }}
         onClose={() => {
-          if (forceSetup && !setupReady) return
+          if (firstRunBlocked) return
           setConfigOpen(false)
           // đóng config cũng refresh voices (user có thể vừa lưu key)
           const l = settings.targetLang === 'none' ? 'vi' : settings.targetLang
           void api.voices(l).then(setVoices).catch(() => {})
         }}
       />
-      {appMode === 'tts' ? (
+      {appUsable ? (
+      appMode === 'tts' ? (
         <TtsPage
           voices={voices}
           sideOpen={ttsSideOpen}
@@ -1378,7 +1418,8 @@ export default function App() {
           />
         </main>
       </div>
-      )}
+      )
+      ) : null}
       {viewExportSrc && (
         <div
           className="export-modal-backdrop"

@@ -58,6 +58,7 @@ from pipeline import (
     tts_segment,
     video_fingerprint,
 )
+from pipeline.core.config import export_display_path
 from pipeline.core.jobs import arm_job
 from pipeline.core.media import meta_baked_speed, meta_has_user_bake, video_size
 from pipeline.export.mux import (
@@ -229,8 +230,8 @@ def api_export(project_id: str, payload: ExportPayload):
     return {
         "ok": True,
         "url": f"/api/projects/{project_id}/output",
-        "path": f"backend/public/{project_id}/out/final.mp4",
-        "exports": f"backend/public/exports/{project_id}.mp4",
+        "path": export_display_path(project_dir(project_id) / "out" / "final.mp4"),
+        "exports": export_display_path(PUBLIC_DATA / "exports" / f"{project_id}.mp4"),
     }
 
 

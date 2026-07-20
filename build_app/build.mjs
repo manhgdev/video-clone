@@ -13,14 +13,20 @@ const versionFilePath = path.join(root, 'build_app', 'VERSION')
 // onedir = nhanh (Windows mặc định). ONEFILE=1 để gói 1 file (chậm vì bước PKG).
 const oneFile = process.env.ONEFILE === '1' || process.env.ONEFILE === 'true'
 const clean = process.env.CLEAN === '1' || process.env.CLEAN === 'true'
+const skipArchive = process.env.SKIP_ARCHIVE === '1' || process.env.SKIP_ARCHIVE === 'true'
 const npmCommand = isWin ? process.env.ComSpec || 'cmd.exe' : 'npm'
 
 function npmArgs(...args) {
   return isWin ? ['/d', '/s', '/c', `npm ${args.join(' ')}`] : args
 }
 
-function run(command, args) {
-  const result = spawnSync(command, args, { cwd: root, stdio: 'inherit', shell: false })
+function run(command, args, extraEnv = {}) {
+  const result = spawnSync(command, args, {
+    cwd: root,
+    stdio: 'inherit',
+    shell: false,
+    env: { ...process.env, ...extraEnv },
+  })
   if (result.status !== 0) process.exit(result.status ?? 1)
 }
 
@@ -55,8 +61,25 @@ function formatSemver({ major, minor, patch }) {
 
 function bumpPatch(version) {
   const s = parseSemver(version)
-  s.patch += 1
+  if (s.patch >= 9) {
+    s.patch = 0
+    s.minor += 1
+  } else {
+    s.patch += 1
+  }
   return formatSemver(s)
+}
+
+for (const [input, expected] of [
+  ['2.0.8', '2.0.9'],
+  ['2.0.9', '2.1.0'],
+  ['2.1.9', '2.2.0'],
+]) {
+  const got = bumpPatch(input)
+  if (got !== expected) {
+    console.error(`bumpPatch(${input}) = ${got}, expected ${expected}`)
+    process.exit(1)
+  }
 }
 
 if (!existsSync(python)) {
@@ -100,6 +123,8 @@ const args = [
   '--add-data', `${versionFilePath}${dataSep}.`,
   ...(existsSync(iconIco) ? ['--add-data', `${iconIco}${dataSep}.`] : []),
   '--collect-all', 'webview',
+  '--hidden-import', 'timeit',
+  '--hidden-import', 'pickletools',
 ]
 
 // Các gói AI được cài vào %LOCALAPPDATA%/VideoClone/.venv-runtime ở lần mở đầu tiên.
@@ -143,7 +168,12 @@ for (const tool of ['ffmpeg', 'ffprobe']) {
 }
 
 args.push(path.join(root, 'build_app', 'launcher.py'))
-run(python, args)
+const buildHome = path.join(root, 'build_app', '.build-home')
+run(python, args, {
+  VIDEO_CLONE_HOME: buildHome,
+  VIDEO_CLONE_DATA: path.join(buildHome, 'data'),
+  VIDEO_CLONE_PUBLIC_DATA: path.join(buildHome, 'public_data'),
+})
 
 const releaseDir = path.join(root, 'build_app', 'release')
 const verName = `VideoClone_v${appVersion}`
@@ -164,7 +194,7 @@ if (oneFile) {
   output = path.join(outDir, isWin ? 'VideoClone.exe' : 'VideoClone')
 }
 
-if (packageTarget) {
+if (packageTarget && !skipArchive) {
   const { default: archiver } = await import('archiver')
   const platform = isWin ? 'windows' : isMac ? 'macos' : 'linux'
   const archivePath = path.join(releaseDir, `${verName}-${platform}-${process.arch}.zip`)

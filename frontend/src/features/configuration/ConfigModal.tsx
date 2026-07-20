@@ -96,21 +96,21 @@ export default function ConfigModal({
   const [installProgressMinimized, setInstallProgressMinimized] = useState(false)
   const [installPopupError, setInstallPopupError] = useState('')
 
-  const loadChecks = useCallback(() => {
+  const loadChecks = useCallback((refresh = false) => {
     setChecksLoading(true)
     setChecksErr('')
     void api
-      .systemChecks()
+      .systemChecks(refresh)
       .then((c) => {
         setChecks(c)
-        if (c.ok) onSetupReady?.()
+        if (c.ok && forceSetup) onSetupReady?.()
       })
       .catch((e: Error) => {
         setChecksErr(e.message || 'Không kiểm tra được hệ thống')
         setChecks(null)
       })
       .finally(() => setChecksLoading(false))
-  }, [onSetupReady])
+  }, [onSetupReady, forceSetup])
 
   useEffect(() => {
     if (!open) return
@@ -169,7 +169,7 @@ export default function ConfigModal({
           ? await api.installOcrCuda()
           : await api.installDemucsCuda()
       setMsg(result.message + (result.detail ? ` · ${result.detail}` : ''))
-      loadChecks()
+      loadChecks(true)
     } catch (e) {
       const message = e instanceof Error
           ? e.message
@@ -272,7 +272,7 @@ export default function ConfigModal({
       onClick={canClose ? tryClose : undefined}
     >
       <div
-        className="cfg-modal cfg-modal-wide"
+        className={`cfg-modal cfg-modal-wide${section === 'setup' ? ' cfg-modal-setup' : ''}`}
         role="dialog"
         aria-modal
         aria-label="Cấu hình"
@@ -282,9 +282,11 @@ export default function ConfigModal({
           <div>
             <h2>Cấu hình</h2>
             <p>
-              {forceSetup && !checks?.ok
-                ? 'Cài đủ thành phần bắt buộc để bắt đầu'
-                : 'Thiết lập hệ thống · API dịch · ElevenLabs'}
+              {forceSetup && checksLoading
+                ? 'Đang kiểm tra thiết lập…'
+                : forceSetup && !checks?.ok
+                  ? 'Cài đủ thành phần bắt buộc để bắt đầu'
+                  : 'Thiết lập hệ thống · API dịch · ElevenLabs'}
             </p>
           </div>
           {canClose ? (
@@ -307,21 +309,25 @@ export default function ConfigModal({
               <span className="cfg-dot" title="Sẵn sàng" />
             ) : null}
           </button>
-          <button
-            type="button"
-            className={section === 'cloud' ? 'active' : undefined}
-            onClick={() => setSection('cloud')}
-          >
-            API dịch
-          </button>
-          <button
-            type="button"
-            className={section === 'tts' ? 'active' : undefined}
-            onClick={() => setSection('tts')}
-          >
-            ElevenLabs
-            {elSavedCount > 0 ? <span className="cfg-dot" title="Đã có key" /> : null}
-          </button>
+          {!forceSetup ? (
+            <>
+              <button
+                type="button"
+                className={section === 'cloud' ? 'active' : undefined}
+                onClick={() => setSection('cloud')}
+              >
+                API dịch
+              </button>
+              <button
+                type="button"
+                className={section === 'tts' ? 'active' : undefined}
+                onClick={() => setSection('tts')}
+              >
+                ElevenLabs
+                {elSavedCount > 0 ? <span className="cfg-dot" title="Đã có key" /> : null}
+              </button>
+            </>
+          ) : null}
         </div>
 
         {section === 'cloud' && (
@@ -357,7 +363,7 @@ export default function ConfigModal({
                 type="button"
                 className="cfg-secondary cfg-setup-refresh"
                 disabled={checksLoading || !!installing}
-                onClick={loadChecks}
+                onClick={() => loadChecks(true)}
               >
                 {checksLoading ? 'Đang kiểm tra…' : 'Kiểm tra lại'}
               </button>
@@ -498,7 +504,7 @@ export default function ConfigModal({
             </p>
           </div>
         ) : section === 'cloud' ? (
-          <div className="cfg-body">
+          <div className="cfg-body cfg-body-grid">
             <label>
               <span>API key {cur.apiKeySet ? '(đã lưu — nhập để thay)' : ''}</span>
               <input
@@ -547,7 +553,7 @@ export default function ConfigModal({
           </div>
         ) : (
           <div className="cfg-body">
-            <div className="cfg-el-list">
+            <div className="cfg-el-grid">
               {elSlots.map((val, i) => {
                 const saved = i < elSavedCount && !val
                 return (
@@ -610,7 +616,7 @@ export default function ConfigModal({
                     onSetupReady?.()
                     onClose()
                   } else {
-                    loadChecks()
+                    loadChecks(true)
                   }
                 }}
               >

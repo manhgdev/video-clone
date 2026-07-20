@@ -10,7 +10,7 @@ from typing import Any
 
 from pipeline.asr import asr_paddleocr, asr_whisper
 from pipeline.export.burn import cover_and_burn
-from pipeline.core.config import PUBLIC_DATA
+from pipeline.core.config import PUBLIC_DATA, export_display_path
 from pipeline.core.jobs import Cancelled, begin_job, check_cancel, clear_job, short_cmd_error
 from pipeline.core.media import (
     crop_export_aspect,
@@ -428,8 +428,8 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
 
         out_dur = ffprobe_duration(out)
         ow, oh = video_size(out)
-        rel = f"backend/public/{project_id}/out/final.mp4"
-        easy_rel = f"backend/public/exports/{project_id}.mp4"
+        rel = export_display_path(out)
+        easy_rel = export_display_path(easy)
         meta["outputPath"] = str(out.resolve())
         meta["outputRel"] = rel
         meta["exportCopy"] = easy_rel

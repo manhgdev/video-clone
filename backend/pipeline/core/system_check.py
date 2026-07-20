@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -31,15 +32,64 @@ def _run_ver(cmd: list[str], *, timeout: float = 4.0) -> str:
         return f"error: {e}"
 
 
-def _mod_ok(name: str) -> tuple[bool, str]:
+def _mod_ok(name: str, *, dist_map: dict[str, list[str]] | None = None) -> tuple[bool, str]:
     try:
         spec = importlib.util.find_spec(name)
         if spec is None:
             return False, "chưa cài"
-        dists = importlib.metadata.packages_distributions().get(name) or []
+        dists = (dist_map or _pkg_distributions()).get(name) or []
         return True, importlib.metadata.version(dists[0]) if dists else "ok"
     except Exception as e:
         return False, str(e)[:80]
+
+
+_PKG_DIST: dict[str, list[str]] | None = None
+
+
+def _pkg_distributions() -> dict[str, list[str]]:
+    global _PKG_DIST
+    if _PKG_DIST is None:
+        _PKG_DIST = importlib.metadata.packages_distributions()
+    return _PKG_DIST
+
+
+_CHECKS_CACHE: tuple[float, dict[str, Any]] | None = None
+_CHECKS_TTL = 45.0
+_TORCH_CUDA_CACHE: tuple[float, bool] | None = None
+_TORCH_CUDA_TTL = 120.0
+_OCR_CUDA_CACHE: tuple[float, tuple[bool, str]] | None = None
+_OCR_CUDA_TTL = 60.0
+_DEMUCS_PY_CACHE: tuple[float, Path | None] | None = None
+_DEMUCS_PY_TTL = 300.0
+
+
+def _invalidate_checks_cache() -> None:
+    global _CHECKS_CACHE, _TORCH_CUDA_CACHE, _OCR_CUDA_CACHE, _demucs_cache, _DEMUCS_PY_CACHE
+    _CHECKS_CACHE = None
+    _TORCH_CUDA_CACHE = None
+    _OCR_CUDA_CACHE = None
+    _demucs_cache = None
+    _DEMUCS_PY_CACHE = None
+
+
+def _torch_cuda_ready_cached() -> bool:
+    global _TORCH_CUDA_CACHE
+    now = time.monotonic()
+    if _TORCH_CUDA_CACHE and now - _TORCH_CUDA_CACHE[0] < _TORCH_CUDA_TTL:
+        return _TORCH_CUDA_CACHE[1]
+    ok = _torch_cuda_ready()
+    _TORCH_CUDA_CACHE = (now, ok)
+    return ok
+
+
+def _ocr_cuda_check_cached(*, refresh: bool = False) -> tuple[bool, str]:
+    global _OCR_CUDA_CACHE
+    now = time.monotonic()
+    if not refresh and _OCR_CUDA_CACHE and now - _OCR_CUDA_CACHE[0] < _OCR_CUDA_TTL:
+        return _OCR_CUDA_CACHE[1]
+    result = _ocr_cuda_check()
+    _OCR_CUDA_CACHE = (now, result)
+    return result
 
 
 _AI_RUNTIME_PACKAGES = (
@@ -54,19 +104,176 @@ _AI_RUNTIME_PACKAGES = (
     "soundfile",
     "soxr",
     "tokenizers",
+    "transformers",
 )
 _VIENEU_PACKAGE = "vieneu>=3.2.0"
+_TORCH_CUDA_INDEX = "https://download.pytorch.org/whl/cu124"
+_TORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
+_AI_RUNTIME_MODULES = (
+    "faster_whisper",
+    "rapidocr_onnxruntime",
+    "PIL",
+    "cv2",
+    "torch",
+    "torchaudio",
+    "transformers",
+    "vieneu",
+)
+
+
+def _nvidia_present() -> bool:
+    return bool(_which("nvidia-smi"))
+
+
+def _apple_silicon_runtime() -> bool:
+    return sys.platform == "darwin" and platform.machine().lower() in ("arm64", "aarch64")
+
+
+def _runtime_torch_accel() -> str:
+    if _nvidia_present():
+        return "cuda"
+    if _apple_silicon_runtime():
+        return "mac"
+    return "cpu"
+
+
+def _torch_cuda_ready() -> bool:
+    try:
+        import torch
+
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
+
+
+def _runtime_python() -> Path:
+    if getattr(sys, "frozen", False):
+        home = Path(os.environ["VIDEO_CLONE_HOME"])
+        venv = home / ".venv-runtime"
+        return venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+    return Path(sys.executable)
+
+
+def _clear_torch_modules() -> None:
+    for name in list(sys.modules):
+        if name == "torch" or name.startswith("torch."):
+            del sys.modules[name]
+
+
+def _runtime_pip_cmd(*extra: str) -> list[str]:
+    if getattr(sys, "frozen", False):
+        home = Path(os.environ["VIDEO_CLONE_HOME"])
+        venv = home / ".venv-runtime"
+        py = venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+        uv = shutil.which("uv")
+        if not uv or not py.is_file():
+            raise RuntimeError("Bản ứng dụng thiếu uv hoặc venv runtime — vào Thiết lập → Cài gói AI")
+        return [uv, "pip", "install", "--python", str(py), *extra]
+    return [sys.executable, "-m", "pip", "install", *extra]
+
+
+def _runtime_pip_uninstall_cmd(*packages: str) -> list[str]:
+    if getattr(sys, "frozen", False):
+        home = Path(os.environ["VIDEO_CLONE_HOME"])
+        venv = home / ".venv-runtime"
+        py = venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+        uv = shutil.which("uv")
+        if not uv or not py.is_file():
+            raise RuntimeError("Bản ứng dụng thiếu uv hoặc venv runtime — vào Thiết lập → Cài gói AI")
+        return [uv, "pip", "uninstall", "--python", str(py), "-y", *packages]
+    return [sys.executable, "-m", "pip", "uninstall", "-y", *packages]
+
+
+def _runtime_pip_install(
+    *packages: str,
+    index_url: str | None = None,
+    timeout: float = 600,
+) -> None:
+    if not packages:
+        return
+    cmd = _runtime_pip_cmd("--upgrade", *packages)
+    if index_url:
+        cmd.extend(["--index-url", index_url])
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    if proc.returncode:
+        raise RuntimeError((proc.stderr or proc.stdout)[-2000:])
+
+
+def _install_runtime_torch(*, accel: str | None = None) -> None:
+    """PyTorch khớp GPU — VieNeu auto chỉ dùng CUDA khi torch.cuda sẵn sàng."""
+    wanted = accel or _runtime_torch_accel()
+    if wanted == "cuda":
+        subprocess.run(
+            _runtime_pip_uninstall_cmd("torch", "torchaudio", "torchvision"),
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        _runtime_pip_install(
+            "torch",
+            "torchaudio",
+            index_url=_TORCH_CUDA_INDEX,
+            timeout=2400,
+        )
+        return
+    if wanted == "mac":
+        _runtime_pip_install("torch", "torchaudio", timeout=1200)
+        return
+    idx = None if sys.platform == "darwin" else _TORCH_CPU_INDEX
+    _runtime_pip_install("torch", "torchaudio", index_url=idx, timeout=1200)
+
+
+def _runtime_torch_needs_install() -> bool:
+    if not _mod_ok("torch")[0] or not _mod_ok("torchaudio")[0]:
+        return True
+    return _nvidia_present() and not _torch_cuda_ready_cached()
+
+
+def ensure_runtime_torch() -> None:
+    """VieNeu zmAI/clone cần torch(+audio); NVIDIA cần bản CUDA (không phải PyPI CPU)."""
+    if not _runtime_torch_needs_install():
+        return
+    before_cuda = _torch_cuda_ready()
+    _install_runtime_torch()
+    if not before_cuda:
+        _clear_torch_modules()
+
+
+def ensure_runtime_transformers() -> None:
+    """VieNeu PyTorch backend cần transformers (đăng ký model_type vieneu_v3)."""
+    if _mod_ok("transformers")[0]:
+        return
+    _runtime_pip_install("transformers", timeout=1200)
+
+
+def ensure_torchaudio() -> None:
+    ensure_runtime_torch()
+
+
+def _ai_runtime_detail(*, torch_cuda: bool | None = None) -> str:
+    base = "Whisper · OCR · zmAI · VieNeu Local"
+    if _nvidia_present():
+        cuda = torch_cuda if torch_cuda is not None else _torch_cuda_ready_cached()
+        if cuda:
+            try:
+                import torch
+
+                return f"{base} · VieNeu CUDA · {torch.cuda.get_device_name(0)}"
+            except Exception:
+                return f"{base} · VieNeu CUDA"
+        return f"{base} · VieNeu ONNX/CPU (cần PyTorch CUDA)"
+    return base
 
 
 def install_ai_runtime() -> dict[str, Any]:
     """Cài nhóm ASR/OCR nặng vào venv riêng của bản desktop."""
-    modules = ("faster_whisper", "rapidocr_onnxruntime", "PIL", "cv2", "vieneu")
-    missing = [name for name in modules if not _mod_ok(name)[0]]
-    if not missing:
+    missing = [name for name in _AI_RUNTIME_MODULES if not _mod_ok(name)[0]]
+    needs_torch = _runtime_torch_needs_install()
+    if not missing and not needs_torch:
         return {
             "ok": True,
             "message": "Gói AI đã sẵn sàng",
-            "detail": "Whisper · OCR · zmAI · VieNeu Local",
+            "detail": _ai_runtime_detail(),
         }
 
     if getattr(sys, "frozen", False):
@@ -84,24 +291,32 @@ def install_ai_runtime() -> dict[str, Any]:
                 text=True,
                 timeout=900,
             )
-        cmd = [uv, "pip", "install", "--python", str(py), "--upgrade", *_AI_RUNTIME_PACKAGES]
+        base_cmd = [uv, "pip", "install", "--python", str(py), "--upgrade", *_AI_RUNTIME_PACKAGES]
         vieneu_cmd = [
             uv, "pip", "install", "--python", str(py), "--upgrade", "--no-deps", _VIENEU_PACKAGE
         ]
     else:
-        cmd = [sys.executable, "-m", "pip", "install", "--upgrade", *_AI_RUNTIME_PACKAGES]
+        base_cmd = [sys.executable, "-m", "pip", "install", "--upgrade", *_AI_RUNTIME_PACKAGES]
         vieneu_cmd = [
             sys.executable, "-m", "pip", "install", "--upgrade", "--no-deps", _VIENEU_PACKAGE
         ]
 
-    for install_cmd in (cmd, vieneu_cmd):
-        proc = subprocess.run(install_cmd, capture_output=True, text=True, timeout=1800)
+    if missing:
+        proc = subprocess.run(base_cmd, capture_output=True, text=True, timeout=1800)
         if proc.returncode:
             raise RuntimeError((proc.stderr or proc.stdout)[-3000:])
+    if "vieneu" in missing or not _mod_ok("vieneu")[0]:
+        proc = subprocess.run(vieneu_cmd, capture_output=True, text=True, timeout=1800)
+        if proc.returncode:
+            raise RuntimeError((proc.stderr or proc.stdout)[-3000:])
+    if needs_torch:
+        _install_runtime_torch()
+        _clear_torch_modules()
+    _invalidate_checks_cache()
     return {
         "ok": True,
         "message": "Đã cài gói AI — đang khởi động lại",
-        "detail": "Whisper · RapidOCR · zmAI · VieNeu Local",
+        "detail": _ai_runtime_detail(),
     }
 
 
@@ -178,6 +393,7 @@ def install_ocr_cuda() -> dict[str, Any]:
         ok, detail = _ocr_cuda_check_fresh(py)
         if not ok:
             raise RuntimeError(f"CUDA provider unavailable after install: {detail}")
+        _invalidate_checks_cache()
         return {
             "ok": True,
             "message": "Đã cài OCR GPU",
@@ -231,11 +447,17 @@ def install_ocr_cuda() -> dict[str, Any]:
         )
         raise
     # ponytail: Windows keeps the old ORT DLL mapped until this API exits; verify after restart.
+    _invalidate_checks_cache()
     return {"ok": True, "message": "Đã cài GPU tăng tốc", "detail": "CUDAExecutionProvider"}
 
 
 def _demucs_venv_python() -> Path | None:
     """Tìm python .venv-demucs — ưu tiên venv đã import được demucs."""
+    global _DEMUCS_PY_CACHE
+    now = time.monotonic()
+    if _DEMUCS_PY_CACHE and now - _DEMUCS_PY_CACHE[0] < _DEMUCS_PY_TTL:
+        return _DEMUCS_PY_CACHE[1]
+
     from pipeline.export.stem import _demucs_py_in, _demucs_root_candidates
 
     candidates: list[Path] = []
@@ -244,6 +466,7 @@ def _demucs_venv_python() -> Path | None:
         if py.is_file():
             candidates.append(py)
     if not candidates:
+        _DEMUCS_PY_CACHE = (now, None)
         return None
 
     def _import_ok(exe: Path) -> bool:
@@ -251,23 +474,28 @@ def _demucs_venv_python() -> Path | None:
             r = subprocess.run(
                 [str(exe), "-c", "import demucs, soundfile"],
                 capture_output=True,
-                timeout=90,
+                timeout=25,
             )
             if r.returncode == 0:
                 return True
             r2 = subprocess.run(
                 [str(exe), "-c", "import demucs_mlx, soundfile"],
                 capture_output=True,
-                timeout=90,
+                timeout=25,
             )
             return r2.returncode == 0
         except (OSError, subprocess.SubprocessError):
             return False
 
+    found: Path | None = None
     for py in candidates:
         if _import_ok(py):
-            return py
-    return candidates[0]
+            found = py
+            break
+    if found is None:
+        found = candidates[0]
+    _DEMUCS_PY_CACHE = (now, found)
+    return found
 
 
 def _apple_silicon() -> bool:
@@ -301,7 +529,7 @@ def _demucs_check_uncached() -> tuple[bool, str]:
                 ],
                 capture_output=True,
                 text=True,
-                timeout=90,
+                timeout=45,
             )
         except (OSError, subprocess.SubprocessError) as e:
             return False, str(e)[:160]
@@ -326,7 +554,7 @@ def _demucs_check_uncached() -> tuple[bool, str]:
             ],
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=45,
         )
     except (OSError, subprocess.SubprocessError) as e:
         return False, str(e)[:160]
@@ -348,7 +576,7 @@ def _demucs_check_uncached() -> tuple[bool, str]:
     return True, detail
 
 
-_DEMUCS_CACHE_TTL = 60.0
+_DEMUCS_CACHE_TTL = 300.0
 _demucs_cache: tuple[float, tuple[bool, str]] | None = None
 _demucs_cache_lock = threading.Lock()
 
@@ -376,6 +604,7 @@ def install_demucs_cuda() -> dict[str, Any]:
     if not ok:
         raise RuntimeError(f"Demucs chưa sẵn sàng sau khi cài: {detail} · python={py}")
     label = "Apple GPU" if _apple_silicon() else ("NVIDIA GPU" if _which("nvidia-smi") else "CPU")
+    _invalidate_checks_cache()
     return {"ok": True, "message": f"Đã cài Demucs ({label})", "detail": detail}
 
 
@@ -422,8 +651,20 @@ def _install_from_plan(plan: dict[str, Any], item_id: str) -> tuple[str, str, st
     return value, label, hint
 
 
-def system_checks() -> dict[str, Any]:
+def system_checks(*, refresh: bool = False) -> dict[str, Any]:
     """Danh sách dependency + ready/missing cho first-run UI."""
+    global _CHECKS_CACHE
+    if not refresh:
+        now = time.monotonic()
+        if _CHECKS_CACHE and now - _CHECKS_CACHE[0] < _CHECKS_TTL:
+            return _CHECKS_CACHE[1]
+    result = _system_checks_uncached()
+    _CHECKS_CACHE = (time.monotonic(), result)
+    return result
+
+
+def _system_checks_uncached() -> dict[str, Any]:
+    """Chạy probe thật — Demucs/OCR/torch song song; kết quả được cache ~45s."""
     from .media import detect_device
 
     items: list[dict[str, Any]] = []
@@ -498,24 +739,41 @@ def system_checks() -> dict[str, Any]:
         )
     )
 
-    # Runtime AI được cài sau để bản desktop tải nhanh và nhẹ.
-    runtime_modules = ("faster_whisper", "rapidocr_onnxruntime", "PIL", "cv2", "vieneu")
-    runtime_missing = [mid for mid in runtime_modules if not _mod_ok(mid)[0]]
+    # Probe nặng (Demucs / OCR CUDA / torch.cuda) — chạy song song, cache riêng từng mục.
+    dist = _pkg_distributions()
+    nvidia = device.get("gpuKind") == "nvidia"
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        fut_demucs = pool.submit(_demucs_check)
+        fut_ocr = pool.submit(_ocr_cuda_check_cached) if nvidia else None
+        fut_cuda = pool.submit(_torch_cuda_ready_cached) if _nvidia_present() else None
+        demucs_ok, demucs_detail = fut_demucs.result()
+        cuda_ok, cuda_detail = fut_ocr.result() if fut_ocr else (True, "")
+        torch_cuda_ok = fut_cuda.result() if fut_cuda else True
+
+    runtime_missing = [mid for mid in _AI_RUNTIME_MODULES if not _mod_ok(mid, dist_map=dist)[0]]
+    runtime_torch_cuda = _nvidia_present() and not torch_cuda_ok
     items.append(
         _item(
             id="ai_runtime",
             name="Gói AI · Whisper + OCR + VieNeu",
-            ok=not runtime_missing,
+            ok=not runtime_missing and not runtime_torch_cuda,
             required=True,
-            detail=("đã cài" if not runtime_missing else f"thiếu: {', '.join(runtime_missing)}"),
-            hint="Cài một lần để dùng Whisper, OCR, zmAI và VieNeu Local. Có thể mất vài phút.",
+            detail=(
+                _ai_runtime_detail(torch_cuda=torch_cuda_ok)
+                if not runtime_missing
+                else f"thiếu: {', '.join(runtime_missing)}"
+            ),
+            hint=(
+                "Cài một lần để dùng Whisper, OCR, zmAI và VieNeu Local. "
+                "Có NVIDIA: VieNeu dùng GPU khi PyTorch CUDA đã cài (vài phút)."
+            ),
             install="ai_runtime",
             installLabel="Cài gói AI",
         )
     )
 
     for mid, title, req in (("httpx", "httpx", True),):
-        ok, detail = _mod_ok(mid)
+        ok, detail = _mod_ok(mid, dist_map=dist)
         inst, lab, hint = _install_from_plan(plan, mid)
         items.append(
             _item(
@@ -531,9 +789,7 @@ def system_checks() -> dict[str, Any]:
         )
 
     # OCR CUDA — chỉ relevant trên NVIDIA
-    cuda_ok, cuda_detail = _ocr_cuda_check()
     ocr_inst, ocr_lab, ocr_hint = _install_from_plan(plan, "ocr_cuda")
-    nvidia = device.get("gpuKind") == "nvidia"
     items.append(
         _item(
             id="ocr_cuda",
@@ -555,8 +811,7 @@ def system_checks() -> dict[str, Any]:
         )
     )
 
-    # Demucs
-    demucs_ok, demucs_detail = _demucs_check()
+    # Demucs — đã probe ở trên
     dem_inst, dem_lab, dem_hint = _install_from_plan(plan, "demucs")
     items.append(
         _item(
@@ -612,7 +867,7 @@ def system_checks() -> dict[str, Any]:
         try:
             import httpx
 
-            r = httpx.get("http://127.0.0.1:11434/api/tags", timeout=1.5)
+            r = httpx.get("http://127.0.0.1:11434/api/tags", timeout=0.6)
             ol_ok = r.status_code < 500
             if ol_ok:
                 n = len((r.json() or {}).get("models") or [])

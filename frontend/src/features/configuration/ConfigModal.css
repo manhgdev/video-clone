@@ -4,13 +4,13 @@
   z-index: 1000;
   display: grid;
   place-items: center;
-  padding: 20px;
+  padding: 16px;
   background: rgba(15, 23, 42, 0.45);
 }
 
 .cfg-modal {
-  width: min(520px, 100%);
-  max-height: min(90vh, 720px);
+  width: min(720px, 100%);
+  max-height: min(92vh, 860px);
   overflow: auto;
   border-radius: 14px;
   background: var(--card);
@@ -21,8 +21,13 @@
 }
 
 .cfg-modal-wide {
-  width: min(640px, 100%);
-  max-height: min(92vh, 820px);
+  width: min(960px, 100%);
+  max-height: min(94vh, 920px);
+}
+
+.cfg-modal-setup {
+  width: min(1180px, 96vw);
+  max-height: min(96vh, 980px);
 }
 
 .cfg-head {
@@ -162,8 +167,14 @@
 
 .cfg-device-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px 14px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px 16px;
+}
+
+@media (max-width: 900px) {
+  .cfg-device-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 .cfg-device-grid > div {
@@ -209,11 +220,53 @@
   list-style: none;
   margin: 0;
   padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  max-height: min(48vh, 420px);
-  overflow: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 10px;
+  align-content: start;
+}
+
+.cfg-setup {
+  gap: 14px;
+}
+
+.cfg-body-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 16px;
+  align-items: start;
+}
+
+.cfg-body-grid label:first-of-type {
+  grid-column: 1 / -1;
+}
+
+.cfg-body-grid .cfg-el-add {
+  grid-column: 1 / -1;
+}
+
+.cfg-body-grid .cfg-hint {
+  grid-column: 1 / -1;
+}
+
+.cfg-el-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 10px;
+}
+
+.cfg-el-grid .cfg-el-row {
+  align-items: end;
+}
+
+@media (max-width: 720px) {
+  .cfg-body-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .cfg-check-list {
+    grid-template-columns: 1fr;
+  }
 }
 
 .cfg-check-item {
@@ -241,8 +294,12 @@
 .cfg-check-top {
   display: grid;
   grid-template-columns: 22px 1fr auto;
-  gap: 10px;
+  gap: 10px 12px;
   align-items: start;
+}
+
+.cfg-check-main {
+  min-width: 0;
 }
 
 .cfg-check-status {
@@ -349,7 +406,7 @@
 
 .cfg-check-cmd {
   display: block;
-  max-width: 180px;
+  max-width: 100%;
   font-size: 0.68rem;
   background: var(--surface);
   border-radius: 6px;

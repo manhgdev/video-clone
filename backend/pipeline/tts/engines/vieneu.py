@@ -10,6 +10,8 @@ Preset list can be read from package assets without loading ONNX graphs.
 from __future__ import annotations
 
 import json
+import hashlib
+import importlib.metadata
 import logging
 import os
 import threading
@@ -25,6 +27,8 @@ _client_err: str | None = None
 _load_state = "cold"  # cold | loading | ready | error
 _reference_lock = threading.Lock()
 _reference_cache: dict[str, tuple[int, int, dict[str, Any]]] = {}
+_clone_lock = threading.Lock()
+_clone_cache: dict[str, tuple[int, int]] = {}
 
 
 def _torch_cuda_ready() -> bool:
@@ -221,6 +225,10 @@ def get_client() -> Any:
             pass
         _load_state = "loading"
         try:
+            from pipeline.core.system_check import ensure_runtime_torch, ensure_runtime_transformers
+
+            ensure_runtime_torch()
+            ensure_runtime_transformers()
             # Prefetch torch cuDNN before any other CUDA package binds the DLL name
             try:
                 from ...core.cuda_dll import prefer_torch_cudnn
@@ -248,14 +256,16 @@ def get_client() -> Any:
             # Re-enroll clones from disk
             for item in voice_store.load_cloned():
                 ref = item.get("ref")
-                name = item.get("name") or item.get("id")
-                if not ref or not name:
+                clone_id = item.get("id")
+                if not ref or not clone_id:
                     continue
                 path = voice_store.VIENEU_ROOT / str(ref)
                 if not path.is_file():
                     continue
                 try:
-                    _client.add_voice(str(name), str(path), denoise=False, save=False)
+                    _client.add_voice(str(clone_id), str(path), denoise=False, save=False)
+                    stat = path.stat()
+                    _clone_cache[str(clone_id)] = (stat.st_mtime_ns, stat.st_size)
                 except Exception:
                     pass
             try:
@@ -456,19 +466,73 @@ def _encoded_reference(client: Any, voice_id: str) -> dict[str, Any]:
         if cached and cached[:2] == (stat.st_mtime_ns, stat.st_size):
             return cached[2]
         try:
+            vieneu_version = importlib.metadata.version("vieneu")
+        except importlib.metadata.PackageNotFoundError:
+            vieneu_version = "unknown"
+        token = f"{voice_id}:{stat.st_mtime_ns}:{stat.st_size}:{vieneu_version}"
+        digest = hashlib.sha256(token.encode("utf-8")).hexdigest()[:24]
+        disk_cache = voice_store.CACHE_DIR / f"zmai-reference-{digest}.npz"
+        try:
+            import numpy as np
+
+            with np.load(disk_cache, allow_pickle=False) as saved:
+                encoded = {
+                    "speaker_emb": saved["speaker_emb"],
+                    "codes": saved["codes"] if bool(saved["has_codes"][0]) else None,
+                    "style": "tu_nhien",
+                }
+            _reference_cache[voice_id] = (stat.st_mtime_ns, stat.st_size, encoded)
+            return encoded
+        except (OSError, KeyError, ValueError):
+            disk_cache.unlink(missing_ok=True)
+        try:
+            from pipeline.core.system_check import ensure_torchaudio
+
+            ensure_torchaudio()
             speaker_emb, ref_codes = client.encode_reference(path, denoise=False)
         except Exception as e:
+            msg = str(e)
+            if "torchaudio" in msg.lower():
+                msg = (
+                    f"{msg} — VieNeu cần torchaudio để encode giọng zmAI; "
+                    "thử Thiết lập → Cài gói AI"
+                )
             raise RuntimeError(
                 f"Không encode được reference của giọng {item.get('name') or voice_id} "
-                f"({path}): {e}"
+                f"({path}): {msg}"
             ) from e
         encoded = {
             "speaker_emb": speaker_emb,
             "codes": ref_codes,
             "style": "tu_nhien",
         }
+        try:
+            import numpy as np
+
+            voice_store.CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            temp = disk_cache.with_name(f".{disk_cache.name}.{os.getpid()}.tmp")
+            with temp.open("wb") as handle:
+                np.savez(
+                    handle,
+                    speaker_emb=np.asarray(speaker_emb),
+                    codes=np.asarray(ref_codes) if ref_codes is not None else np.empty(0, dtype=np.int64),
+                    has_codes=np.asarray([ref_codes is not None], dtype=np.bool_),
+                )
+            temp.replace(disk_cache)
+        except (OSError, TypeError, ValueError):
+            temp.unlink(missing_ok=True) if "temp" in locals() else None
         _reference_cache[voice_id] = (stat.st_mtime_ns, stat.st_size, encoded)
         return encoded
+
+
+def _register_clone(client: Any, clone_id: str, path: Path) -> None:
+    stat = path.stat()
+    fingerprint = (stat.st_mtime_ns, stat.st_size)
+    with _clone_lock:
+        if _clone_cache.get(clone_id) == fingerprint:
+            return
+        client.add_voice(clone_id, str(path), denoise=False, save=False)
+        _clone_cache[clone_id] = fingerprint
 
 
 def synthesize(
@@ -494,13 +558,11 @@ def synthesize(
         infer_kwargs["voice"] = _encoded_reference(client, name)
     elif kind == "clone":
         entry = next((x for x in voice_store.load_cloned() if x.get("id") == name), None)
-        voice_arg = (entry.get("name") if entry else None) or name
         ref = entry.get("ref") if entry else None
         ref_path = voice_store.VIENEU_ROOT / str(ref) if ref else None
         if ref_path and ref_path.is_file():
-            infer_kwargs.update(ref_audio=str(ref_path), denoise=False)
-        else:
-            infer_kwargs["voice"] = str(voice_arg)
+            _register_clone(client, name, ref_path)
+        infer_kwargs["voice"] = name
     else:
         infer_kwargs["voice"] = name
 
@@ -524,9 +586,9 @@ def synthesize(
         try:
             audio = client.infer(text, **infer_kwargs)
         except Exception:
-            if kind != "clone" or "ref_audio" not in infer_kwargs:
+            if kind != "clone" or not ref_path:
                 raise
-            audio = client.infer(text, voice=str(voice_arg), style=style)
+            audio = client.infer(text, ref_audio=str(ref_path), denoise=False, style=style)
 
     try:
         client.save(audio, str(out_wav))
@@ -581,10 +643,10 @@ def clone_voice(
             )
     client = get_client()
     try:
-        client.add_voice(display, str(dest), denoise=bool(denoise), save=False)
+        client.add_voice(safe, str(dest), denoise=bool(denoise), save=False)
     except Exception as e1:
         try:
-            client.add_voice(display, str(dest), denoise=False, save=False)
+            client.add_voice(safe, str(dest), denoise=False, save=False)
         except Exception as e2:
             raise RuntimeError(
                 "Clone giọng cần engine PyTorch (GPU). "
@@ -597,6 +659,8 @@ def clone_voice(
     except Exception:
         pass
     clean_tags = voice_store.normalize_voice_tags(tags, strict=True)
+    stat = dest.stat()
+    _clone_cache[safe] = (stat.st_mtime_ns, stat.st_size)
     voice_store.add_cloned(safe, display, f"cloned/{safe}.wav", tags=clean_tags)
     return {
         "id": f"{PREFIX_VIENEU}clone:{safe}",
@@ -622,6 +686,8 @@ def reset_client() -> None:
         _load_state = "cold"
     with _reference_lock:
         _reference_cache.clear()
+    with _clone_lock:
+        _clone_cache.clear()
     # Release cached model tensors after a cancelled GPU job instead of leaving
     # their RAM/VRAM reserved until the application exits.
     import gc

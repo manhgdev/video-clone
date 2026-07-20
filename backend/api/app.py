@@ -27,6 +27,12 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         try:
+            from pipeline.core.config import ensure_data_dirs
+
+            ensure_data_dirs()
+        except Exception:
+            pass
+        try:
             from pipeline.download import ensure_download_dirs
 
             ensure_download_dirs()
@@ -40,6 +46,9 @@ def create_app() -> FastAPI:
         ).start()
 
         def _run() -> None:
+            from pipeline.core.system_check import ensure_runtime_torch
+
+            ensure_runtime_torch()
             try:
                 from pipeline.core.cuda_dll import prefer_torch_cudnn
 

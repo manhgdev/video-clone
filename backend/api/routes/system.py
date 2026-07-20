@@ -139,12 +139,12 @@ def health():
 
 
 @router.get("/api/system/checks")
-def api_system_checks():
+def api_system_checks(refresh: bool = False):
     """Dependency checklist cho tab Thiết lập / first-run."""
     from pipeline.core.system_check import system_checks
 
     try:
-        return system_checks()
+        return system_checks(refresh=refresh)
     except Exception as e:
         # Không để exception Python kéo sập UI; native crash vẫn chỉ tránh bằng check nhẹ.
         raise HTTPException(500, f"system checks failed: {e}") from e
