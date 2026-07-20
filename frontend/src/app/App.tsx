@@ -1102,6 +1102,52 @@ export default function App() {
 
   const editorOpen = previewEditorOpen && !!videoUrl && !!projectId
 
+  async function editRenderedProject(id: string) {
+    const switchVersion = ++projectSwitchRef.current
+    const [st, segs] = await Promise.all([api.status(id), api.segments(id)])
+    if (projectSwitchRef.current !== switchVersion) return
+    activeProjectRef.current = id
+    persistSession(id)
+    setProjectId(id)
+    setVideoUrl(freshVideoUrl(`/api/projects/${id}/video`))
+    const wc = typeof st.workClipSec === 'number' ? Math.max(0, st.workClipSec) : 0
+    workClipSecRef.current = wc
+    setWorkClipSec(wc)
+    const dur = Number(st.duration || 0)
+    setDuration(wc > 0 ? wc : dur)
+    const bs = typeof st.bakedSpeed === 'number' && st.bakedSpeed > 0 ? st.bakedSpeed : 1
+    const speedOff1 = Math.abs(bs - 1) > 0.02
+    const baked = Boolean(st.bakedPreferVideo) && speedOff1
+    bakedPreferVideoRef.current = baked
+    setBakedPreferVideo(baked)
+    setBakedSpeed(bs)
+    setHasBakedSpeed(Boolean((st as { hasBakedSpeed?: boolean }).hasBakedSpeed) || speedOff1)
+    const extra = st as JobStatus & { settings?: Partial<ProjectSettings> }
+    const mergedVoice = extra.settings?.defaultVoice || settings.defaultVoice
+    setSegments(applyDefaultVoice(asSegmentList(segs), mergedVoice))
+    if (extra.settings && typeof extra.settings === 'object') {
+      setSettings((current) => {
+        const next = { ...current, ...extra.settings }
+        persistSettings(next)
+        return next
+      })
+    }
+    setStatus({
+      step: st.step || 'video',
+      progress: st.progress || 0,
+      message: st.message || 'Đã mở lại project',
+      running: Boolean(st.running),
+      error: st.error,
+      outputRel: st.outputRel,
+    })
+    if (st.running) busyAt.current = Date.now()
+    setExportUrl(!st.running && st.outputRel && (st.progress || 0) >= 100 ? `/api/projects/${id}/output` : null)
+    setExportPath(!st.running && st.outputRel && (st.progress || 0) >= 100 ? st.outputRel : null)
+    setViewExportSrc(null)
+    setAppMode('clone')
+    setPreviewEditorOpen(true)
+  }
+
   return (
     <div className={editorOpen && appMode === 'clone' ? 'app app--editor' : 'app'}>
       {!(editorOpen && appMode === 'clone') && (
@@ -1193,7 +1239,7 @@ export default function App() {
       ) : appMode === 'batch' ? (
         <BatchPage />
       ) : appMode === 'renders' ? (
-        <RendersPage />
+        <RendersPage onEdit={editRenderedProject} />
       ) : editorOpen ? (
         <LivePreviewEditor
           key={projectId}

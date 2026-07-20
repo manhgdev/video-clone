@@ -13,7 +13,7 @@ import { fetchJson } from '@/shared/api/fetchJson'
 const base = '/api'
 
 export const api = {
-  renders: () => fetchJson<{ items: RenderedVideo[] }>(`${base}/renders`, undefined, 30_000),
+  renders: () => fetchJson<{ items: RenderedVideo[]; canReveal: boolean }>(`${base}/renders`, undefined, 30_000),
 
   revealRender: (renderId: string) =>
     fetchJson<{ ok: boolean; path: string }>(`${base}/renders/${renderId}/reveal`, { method: 'POST' }),
@@ -24,6 +24,9 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name }),
     }),
+
+  deleteRender: (renderId: string) =>
+    fetchJson<{ ok: boolean }>(`${base}/renders/${renderId}`, { method: 'DELETE' }),
 
   hardware: () => fetchJson<HardwareInfo>(`${base}/hardware`, undefined, 8000),
 

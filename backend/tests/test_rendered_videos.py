@@ -18,6 +18,7 @@ def test_render_list_keeps_versions_and_thumbnail_cache(tmp_path, monkeypatch):
     assert {row["renderId"] for row in rows} == {"project-100", "project-200"}
     assert all(row["projectId"] == "project" for row in rows)
     assert rows[0]["thumbnailUrl"].startswith("/api/renders/")
+    assert rendered.api_renders()["canReveal"] is False
     assert next(row for row in rows if row["renderId"] == "project-200")["name"] == "Bản đẹp"
     saved = rendered.api_rename_render("project-100", rendered.RenderRenameIn(name=" Bản mới "))
     assert saved["name"] == "Bản mới"
@@ -34,3 +35,8 @@ def test_render_list_keeps_versions_and_thumbnail_cache(tmp_path, monkeypatch):
     assert first == second
     assert first.read_bytes() == b"jpg"
     assert len(calls) == 1
+
+    assert rendered.api_delete_render("project-200") == {"ok": True}
+    assert not (exports / "project-200.mp4").exists()
+    assert not (exports / "project-200.json").exists()
+    assert not first.exists()

@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { createWriteStream, existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 
@@ -69,7 +69,10 @@ const appVersion = formatSemver(parseSemver(pkg.version || '1.0.0'))
 writeFileSync(versionFilePath, `${appVersion}\n`, 'utf8')
 console.log(`Building VideoClone v${appVersion} (${oneFile ? 'onefile' : 'onedir'}${clean ? ', clean' : ''})`)
 
-if (!existsSync(path.join(root, 'node_modules', '.bin', isWin ? 'tsc.cmd' : 'tsc'))) {
+if (
+  !existsSync(path.join(root, 'node_modules', '.bin', isWin ? 'tsc.cmd' : 'tsc')) ||
+  !existsSync(path.join(root, 'node_modules', 'archiver'))
+) {
   console.log('Thiếu dependency frontend — đang cài đặt...')
   run(npmCommand, npmArgs('install', '--no-package-lock'))
 }
@@ -145,17 +148,39 @@ run(python, args)
 const releaseDir = path.join(root, 'build_app', 'release')
 const verName = `VideoClone_v${appVersion}`
 let output
+let packageTarget = ''
 if (oneFile) {
   const built = path.join(releaseDir, isWin ? 'VideoClone.exe' : isMac ? 'VideoClone.app' : 'VideoClone')
   output = path.join(releaseDir, isWin ? `${verName}.exe` : isMac ? `${verName}.app` : verName)
   if (existsSync(output)) rmSync(output, { recursive: true, force: true })
   if (existsSync(built)) renameSync(built, output)
+  packageTarget = output
 } else {
   const builtDir = path.join(releaseDir, 'VideoClone')
   const outDir = path.join(releaseDir, verName)
   if (existsSync(outDir)) rmSync(outDir, { recursive: true, force: true })
   if (existsSync(builtDir)) renameSync(builtDir, outDir)
+  packageTarget = outDir
   output = path.join(outDir, isWin ? 'VideoClone.exe' : 'VideoClone')
+}
+
+if (packageTarget) {
+  const { default: archiver } = await import('archiver')
+  const platform = isWin ? 'windows' : isMac ? 'macos' : 'linux'
+  const archivePath = path.join(releaseDir, `${verName}-${platform}-${process.arch}.zip`)
+  if (existsSync(archivePath)) rmSync(archivePath, { force: true })
+  await new Promise((resolve, reject) => {
+    const output = createWriteStream(archivePath)
+    const archive = archiver('zip', { zlib: { level: 9 } })
+    output.on('close', resolve)
+    output.on('error', reject)
+    archive.on('error', reject)
+    archive.pipe(output)
+    if (statSync(packageTarget).isDirectory()) archive.directory(packageTarget, oneFile ? path.basename(packageTarget) : false)
+    else archive.file(packageTarget, { name: path.basename(packageTarget) })
+    archive.finalize()
+  })
+  console.log(`Bản ZIP: ${archivePath}`)
 }
 
 const nextVersion = bumpPatch(appVersion)

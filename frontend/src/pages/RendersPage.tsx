@@ -25,14 +25,16 @@ function renderName(item: RenderedVideo) {
   return item.name?.trim() || `Render ${item.projectId}`
 }
 
-export default function RendersPage() {
+export default function RendersPage({ onEdit }: { onEdit: (projectId: string) => Promise<void> }) {
   const [items, setItems] = useState<RenderedVideo[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [canReveal, setCanReveal] = useState(false)
   const [viewing, setViewing] = useState<RenderedVideo | null>(null)
   const [page, setPage] = useState(1)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [nameDraft, setNameDraft] = useState('')
+  const [openingId, setOpeningId] = useState<string | null>(null)
   const totalPages = Math.max(1, Math.ceil(items.length / PAGE_SIZE))
   const safePage = Math.min(page, totalPages)
   const pageItems = items.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE)
@@ -41,7 +43,9 @@ export default function RendersPage() {
     setLoading(true)
     setError('')
     try {
-      setItems((await api.renders()).items)
+      const result = await api.renders()
+      setItems(result.items)
+      setCanReveal(result.canReveal)
       setPage(1)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Không tải được danh sách render')
@@ -78,6 +82,28 @@ export default function RendersPage() {
       setEditingId(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Không đổi được tên render')
+    }
+  }
+
+  async function deleteRender(item: RenderedVideo) {
+    if (!window.confirm(`Xóa video “${renderName(item)}”? Thao tác này không thể hoàn tác.`)) return
+    try {
+      await api.deleteRender(item.renderId)
+      setItems((current) => current.filter((row) => row.renderId !== item.renderId))
+      if (viewing?.renderId === item.renderId) setViewing(null)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Không xóa được video render')
+    }
+  }
+
+  async function editRender(item: RenderedVideo) {
+    setOpeningId(item.renderId)
+    setError('')
+    try {
+      await onEdit(item.projectId)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Không mở lại được project trong editor')
+      setOpeningId(null)
     }
   }
 
@@ -141,8 +167,15 @@ export default function RendersPage() {
               </div>
               <div className="render-actions">
                 <button type="button" onClick={() => setViewing(item)}>Xem</button>
-                <a href={item.downloadUrl} download={`video-clone-${item.renderId}.mp4`}><IconDownload size={14} /> Tải xuống</a>
-                <button type="button" onClick={() => void reveal(item.renderId)}>Mở thư mục</button>
+                {canReveal ? (
+                  <button type="button" onClick={() => void reveal(item.renderId)}>Mở thư mục</button>
+                ) : (
+                  <a href={item.downloadUrl} download={`video-clone-${item.renderId}.mp4`}><IconDownload size={14} /> Tải xuống</a>
+                )}
+                <button type="button" disabled={openingId === item.renderId} onClick={() => void editRender(item)}>
+                  {openingId === item.renderId ? 'Đang mở…' : 'Sửa'}
+                </button>
+                <button type="button" className="render-delete" onClick={() => void deleteRender(item)}>Xóa</button>
               </div>
             </article>
           ))}

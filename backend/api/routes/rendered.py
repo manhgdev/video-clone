@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 import json
 import subprocess
+import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -97,7 +98,7 @@ def ensure_thumbnail(render_id: str) -> Path:
 
 @router.get("/api/renders")
 def api_renders():
-    return {"items": list_rendered_videos()}
+    return {"items": list_rendered_videos(), "canReveal": bool(getattr(sys, "frozen", False))}
 
 
 @router.put("/api/renders/{render_id}")
@@ -114,6 +115,17 @@ def api_rename_render(render_id: str, body: RenderRenameIn):
         encoding="utf-8",
     )
     return {"renderId": render_id, "name": name}
+
+
+@router.delete("/api/renders/{render_id}")
+def api_delete_render(render_id: str):
+    path = _render_path(render_id)
+    if path is None:
+        raise HTTPException(404, "Khong tim thay file render")
+    path.unlink()
+    path.with_suffix(".json").unlink(missing_ok=True)
+    (PUBLIC_DATA / "exports" / "thumbnails" / f"{render_id}.jpg").unlink(missing_ok=True)
+    return {"ok": True}
 
 
 @router.get("/api/renders/{render_id}/video")

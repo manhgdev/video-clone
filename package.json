@@ -1,7 +1,7 @@
 {
   "name": "video-clone",
   "private": true,
-  "version": "2.0.1",
+  "version": "2.0.2",
   "type": "module",
   "scripts": {
     "setup": "node scripts/setup.mjs",
@@ -25,6 +25,7 @@
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
     "@vitejs/plugin-react": "^4.5.0",
+    "archiver": "^7.0.1",
     "tailwindcss": "^4.3.2",
     "typescript": "~5.8.3",
     "vite": "^6.3.5"
