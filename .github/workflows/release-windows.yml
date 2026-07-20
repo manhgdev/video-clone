@@ -19,7 +19,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
 
       - uses: actions/setup-python@v5
         with:
@@ -28,7 +27,7 @@ jobs:
       - name: Install build tools
         shell: pwsh
         run: |
-          npm ci
+          npm install
           python -m venv backend/.venv
           backend/.venv/Scripts/python.exe -m pip install --upgrade pip
           backend/.venv/Scripts/python.exe -m pip install -r backend/requirements-app.txt pyinstaller pywebview uv pythonnet
