@@ -1,203 +1,168 @@
-# Video-Clone
+# VideoClone
 
-Studio **dịch phụ đề + lồng tiếng AI** cho video (đặc biệt short / nấu ăn có hardsub CJK).
+Ứng dụng desktop/web để tải video, nhận diện lời nói hoặc chữ trên khung hình, dịch, lồng tiếng AI và xuất video hoàn chỉnh. Luồng xử lý mặc định chạy local; chỉ các engine cloud đã chọn mới gửi dữ liệu ra ngoài.
 
-- Nhận diện lời nói (Whisper) **hoặc** chữ trên màn hình (OCR)
-- Dịch sang tiếng Việt (và ngôn ngữ khác)
-- TTS lồng tiếng (CapCut / ElevenLabs / hệ thống)
-- **Cover** hardsub gốc + **burn** bản dịch (horizontal / title dọc / nhãn graphic)
+## Chức năng
 
-Mặc định chạy **local**; cloud chỉ khi bật engine / có API key.
+| Màn hình | Nội dung |
+|---|---|
+| **Clone Video** | Upload video → Whisper/OCR → dịch → sửa từng đoạn → lồng tiếng → xuất MP4 |
+| **Đã render** | Xem thumbnail, đổi tên, phát, tải xuống và mở thư mục; 10 video mỗi trang, mới nhất trước |
+| **Download Video** | Tải video từ URL, quản lý hàng đợi và đưa file đã tải vào Clone Video |
+| **Text to Speech** | Tạo audio từ văn bản, clone/quản lý giọng, xuất WAV/MP3/SRT/ZIP và xem lịch sử |
+| **Cấu hình** | API key, engine, thư mục dữ liệu và kiểm tra/cài các thành phần bắt buộc |
 
----
+### Pipeline Clone Video
 
-## Tính năng chính
+1. Nhận diện lời nói bằng `faster-whisper` hoặc chữ trên video bằng RapidOCR.
+2. Dịch bằng Google, TikTok, MyMemory, Ollama hoặc dịch vụ có API key.
+3. Sửa nội dung, thời gian và loại đoạn trong editor (`horizontal`, `vertical`, `label`).
+4. Tạo giọng đọc, điều chỉnh tốc độ, âm lượng và cao độ.
+5. Dùng FFmpeg để che hardsub gốc, burn bản dịch, ghép audio và xuất MP4.
 
-| Bước | Chi tiết |
-|------|----------|
-| **ASR** | [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — voice |
-| **OCR** | RapidOCR — hardsub đáy, title dọc, nhãn nguyên liệu / 1 chữ giữa khung |
-| **Dịch** | Google free · MyMemory · TikTok free · Ollama · OpenAI / Gemini / DeepSeek / OpenRouter / Grok |
-| **TTS** | CapCut (unofficial) · ElevenLabs · macOS `say` / Linux `espeak-ng` |
-| **Export** | ffmpeg: cover hardsub + burn VI + mux audio |
+Mỗi project giữ output mới nhất. Các output cũ hợp lệ vẫn được quét vào tab **Đã render** và tự tạo/cache thumbnail khi cần.
 
-### Layout đoạn
+## Engine hỗ trợ
 
-- **horizontal** — phụ đề đáy (TTS mặc định bật)
-- **vertical** — tiêu đề dọc đầu clip (TTS mặc định tắt; có checkbox **Lồng tiếng**)
-- **label** — nhãn graphic / nguyên liệu (TTS mặc định tắt; cover bám OCR, chữ VI fit ô)
+### Dịch
 
-### OCR phụ (engine `paddleocr` / `screen`)
+| Engine | Ghi chú |
+|---|---|
+| Google · TikTok · MyMemory | Không cần API key; fallback mặc định Google → TikTok → MyMemory |
+| Ollama | LLM local |
+| OpenAI · Gemini · DeepSeek · OpenRouter · Grok | Cần API key trong **Cấu hình** hoặc biến môi trường |
 
-1. Hardsub đáy (frames cache)  
-2. Hardsub ngắn giữa khung (vd. `行`)  
-3. Title dọc  
-4. Nhãn cột bên / nguyên liệu (song song, coarse + refine)
+### TTS
 
----
+| Engine | Ghi chú |
+|---|---|
+| **zmAI** | Bộ giọng tham chiếu tiếng Việt đi kèm, chạy qua VieNeu |
+| **VieNeu Local** | TTS tiếng Việt local, hỗ trợ giọng có sẵn và giọng clone |
+| **CapCut** | Dịch vụ không chính thức, không bảo đảm SLA |
+| **ElevenLabs** | TTS cloud; hỗ trợ nhiều key qua `ELEVENLABS_API_KEYS` |
+| **System** | Giọng hệ điều hành: macOS `say`, Linux `espeak-ng` và Windows SAPI khi khả dụng |
 
-## Yêu cầu
+VieNeu/Whisper/OCR là nhóm AI nặng. Bản desktop không đóng gói sẵn nhóm này: lần mở đầu tiên, vào **Cấu hình → Thiết lập** và cài xong gói bắt buộc trước khi sử dụng.
 
-- **Node** 18+ (Vite + React)
-- **Python** 3.11+ (khuyến nghị 3.12+)
-- **ffmpeg** trên PATH
-- macOS / Linux (TTS hệ thống khác nhau)
+## Chạy từ source
 
-Tuỳ chọn:
+### Yêu cầu
 
-- [Ollama](https://ollama.com) — dịch local  
-- `ELEVENLABS_API_KEYS` — TTS cloud  
-- Key cloud dịch (OpenAI, Gemini, …) trong UI **Cấu hình** hoặc `.env`
+- Node.js 18+
+- Python 3.11+ (khuyến nghị 3.12)
+- FFmpeg và FFprobe trên `PATH`
+- Windows, macOS hoặc Linux
 
----
-
-## Cài & chạy
-
-```bash
-# Frontend
-npm install
-
-# Backend
-cd server
-python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-
-# (tuỳ chọn) Ollama
-ollama serve
-ollama pull llama3.2:1b
-```
-
-Hai terminal:
+### Cài đặt và chạy
 
 ```bash
-# API — http://127.0.0.1:8787
-cd server && source .venv/bin/activate
-python -m uvicorn main:app --reload --port 8787
-
-# UI — http://localhost:5173
-npm run dev
+npm run setup
+npm run dev:all
 ```
 
-Hoặc:
+`setup` cài package frontend, tạo `backend/.venv` và cài `backend/requirements.txt`. `dev:all` mở đồng thời:
+
+- UI: `http://127.0.0.1:5173`
+- API: `http://127.0.0.1:8787`
+- Swagger: `http://127.0.0.1:8787/docs`
+
+Các lệnh riêng:
 
 ```bash
-npm run server   # chỉ backend
+npm run dev       # chỉ Vite
+npm run server    # chỉ FastAPI
+npm run build     # kiểm tra TypeScript và build frontend
 ```
 
-Env mẫu: `backend/.env.example` → `backend/.env`
+Sao chép `backend/.env.example` thành `backend/.env` nếu cần cấu hình qua file:
 
 ```env
 ELEVENLABS_API_KEYS=sk_xxx,sk_yyy
-# CAPCUT_DEVICE_JSON=/path/to/device.json
 # OPENAI_API_KEY=
 # GEMINI_API_KEY=
+# CAPCUT_DEVICE_JSON=
 ```
 
----
+## Build ứng dụng Windows
 
-## Workflow UI
+Chuẩn bị môi trường build theo `.github/workflows/release-windows.yml`, sau đó chạy:
 
-1. **Upload / chọn video** (sidebar)  
-2. Chọn engine: Whisper / OCR màn hình; ngôn ngữ nguồn–đích; translator; giọng TTS  
-3. **Dịch toàn bộ** → ASR/OCR + dịch  
-4. Sửa segment (thời gian, bản dịch, **Lồng tiếng** cho dọc/nhãn)  
-5. **Lồng tiếng** → TTS  
-6. **Xuất bản** → cover + burn + mux → tải MP4  
+```bash
+npm run build:app
+```
 
-Dữ liệu project (public media): `backend/public/<project_id>/`.
-Clone voices (private): `backend/data/voices/vieneu/cloned/`.
+Bản mặc định là thư mục chạy độc lập tại `build_app/release/VideoClone_v<version>/`. Phải giữ nguyên cả thư mục, không sao chép riêng `VideoClone.exe`.
 
----
+```powershell
+$env:ONEFILE='1'; npm run build:app   # tuỳ chọn: một file EXE, build/chạy đầu chậm hơn
+$env:CLEAN='1'; npm run build:app     # xoá cache PyInstaller của lần build trước
+```
 
-## Cấu trúc repo
+GitHub Actions tự build artifact Windows khi chạy thủ công hoặc push tag `v*`; với tag, workflow đồng thời tạo/cập nhật GitHub Release gồm EXE và ZIP.
+
+## Dữ liệu
+
+- Source mode: `backend/public/<project_id>/` chứa media project/output.
+- Giọng clone: `backend/data/voices/vieneu/cloned/`.
+- Desktop Windows: dữ liệu và package AI cài sau nằm trong `%LOCALAPPDATA%\VideoClone`.
+
+Không xoá các thư mục dữ liệu nếu còn project, bản render hoặc giọng clone cần giữ.
+
+## API chính
+
+Base URL: `http://127.0.0.1:8787`
+
+| API | Chức năng |
+|---|---|
+| `POST /api/upload` | Tạo project từ video |
+| `POST /api/projects/{id}/run` | Nhận diện và dịch |
+| `POST /api/projects/{id}/dub` | Tạo audio lồng tiếng |
+| `POST /api/projects/{id}/export` | Xuất video |
+| `GET /api/projects/{id}/segments` | Đọc danh sách đoạn |
+| `PUT /api/projects/{id}/segments/{segment_id}` | Sửa một đoạn |
+| `GET /api/renders` | Danh sách video đã render |
+| `POST /api/tts/studio/synthesize` | Tạo audio trong TTS Studio |
+| `GET /api/system/checks` | Kiểm tra thành phần hệ thống |
+
+Danh sách đầy đủ và schema request/response có tại `/docs` khi API đang chạy.
+
+## Cấu trúc source
 
 ```text
-frontend/
-  src/
-    app/                  App shell, mode, session
-    pages/                Trang cấp cao
-    features/             editor, project, TTS, download, cấu hình
-    shared/               API helper, component, type và UI dùng chung
-  public/                 Favicon, logo và static asset
+frontend/src/
+  app/          shell, mode và session
+  pages/        trang cấp cao
+  features/     editor, project, download, TTS, cấu hình
+  shared/       API client, component và type dùng chung
+
 backend/
-  main.py                 Entry point FastAPI
-  api/
-    routes/               Route HTTP theo domain
-  pipeline/
-    asr/ ocr/ mt/ tts/    Xử lý nhận dạng, dịch và giọng nói
-    export/ download/     Xuất bản và tải media
-    orchestrate/ core/    Điều phối job và hạ tầng dùng chung
-  tests/                  Test backend theo hành vi
-scripts/                  Setup, dev và build app
+  main.py       entry point FastAPI
+  api/routes/   route HTTP theo domain
+  pipeline/     ASR, OCR, dịch, TTS, download, export và điều phối job
+  tests/        kiểm thử backend
+
+scripts/        setup và dev runner
+build_app/      launcher, cấu hình và output desktop
 ```
 
-Quy tắc chia source và hướng dẫn cập nhật: [STRUCTURE.MD](STRUCTURE.MD).
+Quy tắc đặt file và hướng dẫn chia module: [STRUCTURE.MD](STRUCTURE.MD).
 
----
+## Kiểm tra trước khi cập nhật
 
-## Dịch (translator)
+```bash
+npm run build
+backend/.venv/Scripts/python.exe -m pytest backend/tests
+```
 
-| Engine | Ghi chú |
-|--------|---------|
-| `google` | Free GTX API — không key |
-| `mymemory` | Free, quota theo IP |
-| `tiktok` | Free content translate |
-| `ollama` | Local LLM |
-| `openai` / `gemini` / `deepseek` / `openrouter` / `grok` | Cần key |
+Trên macOS/Linux, thay đường dẫn Python bằng `backend/.venv/bin/python`.
 
-Free chain fallback: **Google → TikTok → MyMemory**.
+## Giới hạn
 
-Clean bản dịch: bỏ CJK sót, chuẩn hoá `·` / `、` → `, ` (giữ list nguyên liệu).
-
----
-
-## TTS
-
-| Engine | Ghi chú |
-|--------|---------|
-| **CapCut** | Unofficial ([K07VN/capcut-tts-api](https://github.com/K07VN/capcut-tts-api)); `capcut_device.json` tự tạo; shark `ret=-6` → xóa file để mint lại |
-| **ElevenLabs** | `ELEVENLABS_API_KEYS` (xoay key khi 401/429) |
-| **system** | macOS `say` / `espeak-ng` |
-
-Giọng mặc định UI: CapCut **Thanh Niên Tự Tin** (`cc:BV075_streaming:…`).
-
-Title dọc / nhãn: **không TTS** trừ khi bật checkbox **Lồng tiếng** trên card.
-
----
-
-## Export (cover + burn)
-
-- Hardsub đáy: dải dưới, blur/cover + burn VI  
-- Title dọc: cột giữa, font VI đủ dấu  
-- Nhãn: cover bám OCR (multi-box), chữ fit ô (stack dọc nếu cột CJK)  
-- Cache OCR boxes theo version (`ocr_boxes_v*`); đổi logic → version mới (export lại)
-
----
-
-## API (tóm tắt)
-
-Base: `http://127.0.0.1:8787`
-
-- `POST /projects` — upload video  
-- `GET /projects` · `GET /projects/{id}`  
-- `POST /projects/{id}/run` — asr / translate / tts / export  
-- `PATCH /projects/{id}/segments/{seg_id}` — sửa segment (`layout`, `dub`, …)  
-- `GET /projects/{id}/export` — file xuất  
-
-Chi tiết: mở `/docs` khi uvicorn chạy.
-
----
-
-## Ghi chú / giới hạn
-
-- OCR phụ đề phụ thuộc chất lượng chữ trên khung; cache ASR version (`o*`) — đổi engine OCR cần chạy lại **Dịch toàn bộ**  
-- CapCut TTS không chính thức, có thể bị rate-limit  
-- Google/MyMemory free: không SLA; list nhãn nên kiểm tra dấu phẩy sau clean  
-- Cần GPU cho Whisper lớn; CPU vẫn chạy được model nhỏ  
-
----
+- Kết quả OCR phụ thuộc độ rõ, vị trí và hiệu ứng chữ trong video.
+- Whisper model lớn và một số backend VieNeu cần nhiều RAM/GPU; model nhỏ hoặc ONNX vẫn có thể chạy CPU.
+- CapCut, Google, TikTok và MyMemory là dịch vụ ngoài/không SLA, có thể thay đổi hoặc giới hạn tần suất.
+- Luôn kiểm tra lại bản dịch, timing và audio trước khi xuất bản cuối.
 
 ## License
 
-Private / nội bộ — chỉnh theo nhu cầu repo.
+Private / nội bộ — điều chỉnh theo chính sách của repository.
