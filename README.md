@@ -112,23 +112,27 @@ Clone voices (private): `backend/data/voices/vieneu/cloned/`.
 
 ## Cấu trúc repo
 
-```
+```text
 frontend/
-  src/                    React UI (app, pages, features, shared)
-  public/                 static frontend (favicon, logo)
-  index.html
-  vite.config.ts
+  src/
+    app/                  App shell, mode, session
+    pages/                Trang cấp cao
+    features/             editor, project, TTS, download, cấu hình
+    shared/               API helper, component, type và UI dùng chung
+  public/                 Favicon, logo và static asset
 backend/
-  main.py                 FastAPI
-  requirements.txt
-  data/                   private (clone voices, app_config, temp)
-  public/                 video/audio jobs
-  resources/voice-ref/    zmAI reference wav
+  main.py                 Entry point FastAPI
+  api/
+    routes/               Route HTTP theo domain
   pipeline/
-    asr/ ocr/ tts/ export/ core/ run.py
-  tests/
-scripts/                  setup + dev:all
+    asr/ ocr/ mt/ tts/    Xử lý nhận dạng, dịch và giọng nói
+    export/ download/     Xuất bản và tải media
+    orchestrate/ core/    Điều phối job và hạ tầng dùng chung
+  tests/                  Test backend theo hành vi
+scripts/                  Setup, dev và build app
 ```
+
+Quy tắc chia source và hướng dẫn cập nhật: [STRUCTURE.MD](STRUCTURE.MD).
 
 ---
 
