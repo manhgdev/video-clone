@@ -51,7 +51,9 @@ jobs:
           $exe = Join-Path $package.FullName 'VideoClone.exe'
           if (-not (Test-Path $exe)) { throw "Không tìm thấy EXE: $exe" }
           $zip = Join-Path (Split-Path $package.FullName) "$($package.Name)-windows-x64.zip"
-          Compress-Archive -Path "$($package.FullName)\*" -DestinationPath $zip -CompressionLevel Optimal
+          if (-not (Test-Path $zip)) {
+            Compress-Archive -Path "$($package.FullName)\*" -DestinationPath $zip -CompressionLevel Optimal
+          }
           "directory=$($package.FullName)" >> $env:GITHUB_OUTPUT
           "zip=$zip" >> $env:GITHUB_OUTPUT
 
