@@ -267,6 +267,32 @@ def reference_path(item: dict[str, Any]) -> Path:
     return REFERENCE_ROOT / str(item.get("ref_file") or "")
 
 
+def replace_voice_audio(voice_id: str, source_wav: Path) -> dict[str, Any]:
+    """Atomically replace the local reference audio for a zmAI or cloned voice."""
+    vid = (voice_id or "").strip()
+    clone_id = vid.removeprefix("vn:clone:")
+    clone = next((x for x in load_cloned() if x.get("id") == clone_id), None)
+    reference = get_reference_voice(vid)
+    entry = clone or reference
+    if not entry:
+        raise KeyError(f"Không tìm thấy giọng '{vid}'")
+    ref_name = str(entry.get("ref") if clone else entry.get("ref_file") or "")
+    if not ref_name:
+        raise FileNotFoundError("Giọng không có file tham chiếu")
+    root = VIENEU_ROOT if clone else REFERENCE_ROOT
+    target = (root / ref_name).resolve()
+    if root.resolve() not in target.parents:
+        raise ValueError("Đường dẫn file giọng không hợp lệ")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    pending = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        shutil.copy2(source_wav, pending)
+        pending.replace(target)
+    finally:
+        pending.unlink(missing_ok=True)
+    return entry
+
+
 def rename_reference(voice_id: str, new_name: str) -> dict[str, Any] | None:
     return update_reference(voice_id, name=new_name)
 

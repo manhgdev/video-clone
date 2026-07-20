@@ -147,6 +147,7 @@ class RetranslateIn(BaseModel):
 
 
 class StudioSynthIn(BaseModel):
+    jobId: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{8,64}$")
     text: str = ""
     srtText: str = ""
     voice: str = "system"

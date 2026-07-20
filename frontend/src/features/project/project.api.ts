@@ -107,6 +107,7 @@ export const api = {
     }>>(`${base}/tts/status`, undefined, 15_000),
 
   ttsStudioSynth: (body: {
+    jobId?: string
     text?: string
     srtText?: string
     voice: string
@@ -217,6 +218,16 @@ export const api = {
         body: JSON.stringify(body),
       },
     ),
+
+  ttsStudioVoiceReplaceAudio: (voiceId: string, file: File) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    return fetchJson<{ ok: boolean; id: string; name: string }>(
+      `${base}/tts/studio/voices/${encodeURIComponent(voiceId)}/audio`,
+      { method: 'PUT', body: fd },
+      180_000,
+    )
+  },
 
   ttsStudioVoicesBulkMove: (voiceIds: string[], target: 'zmai' | 'clone') =>
     fetchJson<{

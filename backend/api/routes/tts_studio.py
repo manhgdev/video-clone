@@ -5,6 +5,7 @@ import json
 import math
 import re
 import shutil
+import subprocess
 import threading
 import uuid
 from datetime import datetime
@@ -106,6 +107,7 @@ def api_tts_studio_synth(body: StudioSynthIn):
                 keep_timeline=bool(body.keepTimeline),
                 title=body.title or "",
                 gap_ms=int(body.gapMs or 0),
+                job_id=body.jobId,
             )
         return synth_text_job(
             text=text,
@@ -119,6 +121,7 @@ def api_tts_studio_synth(body: StudioSynthIn):
             title=body.title or "",
             auto_split=bool(body.autoSplit),
             gap_ms=int(body.gapMs or 0),
+            job_id=body.jobId,
         )
     except Exception as e:
         raise HTTPException(500, str(e)) from e
@@ -431,6 +434,35 @@ def api_tts_studio_voice_patch(voice_id: str, body: VoicePatchIn):
         raise HTTPException(400, str(e)) from e
     except Exception as e:
         raise HTTPException(500, str(e)) from e
+
+
+@router.put("/api/tts/studio/voices/{voice_id:path}/audio")
+async def api_tts_studio_voice_audio(voice_id: str, file: UploadFile = File(...)):
+    """Replace a local voice reference, normalizing the upload to mono WAV."""
+    vid = (voice_id or "").strip()
+    if not vid:
+        raise HTTPException(400, "Thiếu id giọng")
+    ext = Path(file.filename or "voice.wav").suffix or ".wav"
+    source = DATA / f"_voice_source_{uuid.uuid4().hex}{ext}"
+    normalized = DATA / f"_voice_source_{uuid.uuid4().hex}.wav"
+    try:
+        with source.open("wb") as output:
+            shutil.copyfileobj(file.file, output)
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", str(source), "-ac", "1", "-ar", "48000", str(normalized)],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        entry = voice_store.replace_voice_audio(vid, normalized)
+        return {"ok": True, "id": vid, "name": entry.get("name") or vid}
+    except KeyError as e:
+        raise HTTPException(404, str(e)) from e
+    except (FileNotFoundError, ValueError, subprocess.CalledProcessError) as e:
+        raise HTTPException(400, "File audio không hợp lệ hoặc FFmpeg chưa sẵn sàng") from e
+    finally:
+        source.unlink(missing_ok=True)
+        normalized.unlink(missing_ok=True)
 
 
 @router.delete("/api/tts/studio/voices/{voice_id:path}")

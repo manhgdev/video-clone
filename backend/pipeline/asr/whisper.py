@@ -6,6 +6,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from ..core.jobs import Cancelled, check_cancel
 from ..core.project import set_status
 from ..core.resources import adaptive_workers
 from ..ocr.extract import (  # noqa: F401 — public re-exports for run.py / burn / tests
@@ -70,6 +71,24 @@ def warm_whisper(workers: int = 0) -> str:
     """Nạp model nền (startup)."""
     get_whisper(workers or 2)
     return "ok"
+
+
+def reset_whisper() -> None:
+    """Unload Whisper after cancellation so CPU/GPU memory is returned."""
+    global _whisper, _whisper_threads
+    with _whisper_lock:
+        model, _whisper = _whisper, None
+        _whisper_threads = None
+    try:
+        inner = getattr(model, "model", None)
+        unload = getattr(inner, "unload_model", None)
+        if callable(unload):
+            unload()
+    except Exception:
+        pass
+    import gc
+
+    gc.collect()
 
 
 def _word_parts(seg: Any) -> list[tuple[float, float, str, float]]:
@@ -201,25 +220,33 @@ def asr_whisper(
     )
     out: list[dict[str, Any]] = []
     last_report = 0.0
-    for seg in segments:
-        rows = _segments_from_whisper(seg)
-        if not rows:
-            continue
-        out.extend(rows)
-        # heartbeat — Whisper hay đứng % ở 22; message đổi để UI không tưởng đơ
-        if project_id:
-            now = time.monotonic()
-            if len(out) == 1 or now - last_report >= 1.5:
-                last_report = now
-                t_end = float(rows[-1]["end"])
-                pct = min(48, 22 + len(out))
-                set_status(
-                    project_id,
-                    step="asr",
-                    progress=pct,
-                    message=f"Whisper đã nhận {len(out)} đoạn · ~{t_end:.0f}s…",
-                    running=True,
-                )
+    try:
+        for seg in segments:
+            check_cancel(project_id)
+            rows = _segments_from_whisper(seg)
+            if not rows:
+                continue
+            out.extend(rows)
+            # heartbeat — Whisper hay đứng % ở 22; message đổi để UI không tưởng đơ
+            if project_id:
+                now = time.monotonic()
+                if len(out) == 1 or now - last_report >= 1.5:
+                    last_report = now
+                    t_end = float(rows[-1]["end"])
+                    pct = min(48, 22 + len(out))
+                    set_status(
+                        project_id,
+                        step="asr",
+                        progress=pct,
+                        message=f"Whisper đã nhận {len(out)} đoạn · ~{t_end:.0f}s…",
+                        running=True,
+                    )
+    except Cancelled:
+        close = getattr(segments, "close", None)
+        if callable(close):
+            close()
+        reset_whisper()
+        raise
     # re-index + sort (sau split gap)
     out.sort(key=lambda s: (float(s.get("start") or 0), float(s.get("end") or 0)))
     for i, row in enumerate(out, start=1):

@@ -6,7 +6,7 @@ import platform
 import re
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from ..core.config import EL_ADAM
 from ..core.media import ffprobe_duration
@@ -240,6 +240,7 @@ def tts_segment(
     volume: float = 1.0,
     pitch: float = 0.0,
     style: str = "tu_nhien",
+    cancel_check: Callable[[], bool] | None = None,
 ) -> float:
     """Synth (if needed) + optional speed/volume/pitch + duration fit.
 
@@ -252,7 +253,13 @@ def tts_segment(
             force_refit = False
         resolved = resolve_voice(voice, lang)
         if vieneu_engine.parse_voice(resolved):
-            vieneu_engine.synthesize(text, resolved, out_wav, style=style)
+            vieneu_engine.synthesize(
+                text,
+                resolved,
+                out_wav,
+                style=style,
+                cancel_check=cancel_check,
+            )
         else:
             synthesize_raw(text, voice, out_wav, lang=lang, style=style)
         if abs(speed - 1.0) > 0.02 or abs(volume - 1.0) > 0.02 or abs(pitch) > 0.1:

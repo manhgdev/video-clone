@@ -11,7 +11,7 @@ from typing import Any
 from pipeline.asr import asr_paddleocr, asr_whisper
 from pipeline.export.burn import cover_and_burn
 from pipeline.core.config import PUBLIC_DATA
-from pipeline.core.jobs import Cancelled, begin_job, check_cancel, clear_job, short_cmd_error
+from pipeline.core.jobs import Cancelled, begin_job, check_cancel, clear_job, is_cancelled, short_cmd_error
 from pipeline.core.media import (
     crop_export_aspect,
     encode_export_1080,
@@ -155,11 +155,14 @@ def run_dub(project_id: str, *, finalize: bool = True, nested: bool = False) -> 
                         match,
                         lang=lang,
                         force_refit=True,
+                        cancel_check=lambda: is_cancelled(project_id),
                     )
                 except Exception:
+                    check_cancel(project_id)
                     return dur
             last: Exception | None = None
             for attempt in range(3):
+                check_cancel(project_id)
                 try:
                     wav.unlink(missing_ok=True)
                     wav.with_suffix(".mp3").unlink(missing_ok=True)
@@ -170,8 +173,10 @@ def run_dub(project_id: str, *, finalize: bool = True, nested: bool = False) -> 
                         target,
                         match,
                         lang=lang,
+                        cancel_check=lambda: is_cancelled(project_id),
                     )
                 except Exception as exc:
+                    check_cancel(project_id)
                     last = exc
                     wav.unlink(missing_ok=True)
                     if attempt < 2:
@@ -249,6 +254,14 @@ def run_dub(project_id: str, *, finalize: bool = True, nested: bool = False) -> 
                 running=False,
             )
     except Cancelled:
+        # All worker futures have stopped here; release the local neural model
+        # instead of retaining RAM/VRAM after an explicit cancellation.
+        try:
+            from pipeline.tts.engines.vieneu import reset_client
+
+            reset_client()
+        except Exception:
+            pass
         set_status(
             project_id,
             step="dub",

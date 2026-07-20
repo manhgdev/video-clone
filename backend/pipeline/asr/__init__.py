@@ -3,6 +3,7 @@ from .whisper import (  # noqa: F401
     _tighten_bounds,
     asr_whisper,
     get_whisper,
+    reset_whisper,
     warm_whisper,
 )
 from pipeline.ocr.extract import (  # noqa: F401
@@ -15,6 +16,7 @@ __all__ = [
     "asr_whisper",
     "asr_paddleocr",
     "get_whisper",
+    "reset_whisper",
     "warm_whisper",
     "_tighten_bounds",
     "_rapidocr_gpu_kwargs",

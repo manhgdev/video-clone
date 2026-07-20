@@ -15,7 +15,7 @@ import os
 import threading
 import warnings
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from ..schemas import PREFIX_VIENEU
 from .. import voice_store
@@ -477,6 +477,7 @@ def synthesize(
     out_wav: Path,
     *,
     style: str = "tu_nhien",
+    cancel_check: Callable[[], bool] | None = None,
 ) -> None:
     parsed = parse_voice(voice)
     if not parsed:
@@ -488,31 +489,44 @@ def synthesize(
     if style not in ("tu_nhien", "tin_tuc", "doc_truyen"):
         style = "tu_nhien"
 
+    infer_kwargs: dict[str, Any] = {"style": style}
     if kind == "reference":
-        audio = client.infer(
-            text,
-            voice=_encoded_reference(client, name),
-            style=style,
-        )
+        infer_kwargs["voice"] = _encoded_reference(client, name)
     elif kind == "clone":
         entry = next((x for x in voice_store.load_cloned() if x.get("id") == name), None)
         voice_arg = (entry.get("name") if entry else None) or name
         ref = entry.get("ref") if entry else None
         ref_path = voice_store.VIENEU_ROOT / str(ref) if ref else None
         if ref_path and ref_path.is_file():
-            try:
-                audio = client.infer(
-                    text,
-                    ref_audio=str(ref_path),
-                    denoise=False,
-                    style=style,
-                )
-            except Exception:
-                audio = client.infer(text, voice=str(voice_arg), style=style)
+            infer_kwargs.update(ref_audio=str(ref_path), denoise=False)
         else:
-            audio = client.infer(text, voice=str(voice_arg), style=style)
+            infer_kwargs["voice"] = str(voice_arg)
     else:
-        audio = client.infer(text, voice=name, style=style)
+        infer_kwargs["voice"] = name
+
+    if cancel_check:
+        import numpy as np
+
+        stream = client.infer_stream(text, **infer_kwargs)
+        chunks: list[Any] = []
+        try:
+            for chunk in stream:
+                if cancel_check():
+                    raise RuntimeError("Job đã hủy")
+                chunks.append(chunk)
+        finally:
+            if cancel_check() and hasattr(stream, "close"):
+                stream.close()
+        if cancel_check():
+            raise RuntimeError("Job đã hủy")
+        audio = np.concatenate(chunks) if chunks else np.array([], dtype=np.float32)
+    else:
+        try:
+            audio = client.infer(text, **infer_kwargs)
+        except Exception:
+            if kind != "clone" or "ref_audio" not in infer_kwargs:
+                raise
+            audio = client.infer(text, voice=str(voice_arg), style=style)
 
     try:
         client.save(audio, str(out_wav))
@@ -608,3 +622,15 @@ def reset_client() -> None:
         _load_state = "cold"
     with _reference_lock:
         _reference_cache.clear()
+    # Release cached model tensors after a cancelled GPU job instead of leaving
+    # their RAM/VRAM reserved until the application exits.
+    import gc
+
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass

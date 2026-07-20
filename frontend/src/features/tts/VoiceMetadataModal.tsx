@@ -109,12 +109,13 @@ export default function VoiceMetadataModal({
   name: string
   tags: string[]
   language?: string
-  onSave: (name: string, tags: VoiceTagLabel[], language: VoiceLanguageValue) => Promise<void>
+  onSave: (name: string, tags: VoiceTagLabel[], language: VoiceLanguageValue, file: File | null) => Promise<void>
   onClose: () => void
 }) {
   const [name, setName] = useState(initialName)
   const [tags, setTags] = useState<VoiceTagLabel[]>(() => canonicalVoiceTags(initialTags))
   const [language, setLanguage] = useState<VoiceLanguageValue>(() => normalizeVoiceLanguage(initialLanguage))
+  const [file, setFile] = useState<File | null>(null)
   const [saving, setSaving] = useState(false)
   const [validation, setValidation] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
@@ -139,7 +140,7 @@ export default function VoiceMetadataModal({
     setSaving(true)
     setValidation('')
     try {
-      await onSave(cleanName, tags, language)
+      await onSave(cleanName, tags, language, file)
     } finally {
       setSaving(false)
     }
@@ -191,6 +192,15 @@ export default function VoiceMetadataModal({
               </option>
             ))}
           </select>
+        </label>
+        <label className="tts-field">
+          <span>Đổi file giọng <small>(không bắt buộc)</small></span>
+          <input
+            type="file"
+            accept="audio/*,.wav,.mp3,.m4a,.flac,.ogg"
+            disabled={saving}
+            onChange={(event) => setFile(event.target.files?.[0] || null)}
+          />
         </label>
         {validation && <p className="tts-modal-validation" role="alert">{validation}</p>}
         <VoiceTagPicker value={tags} onChange={setTags} disabled={saving} />

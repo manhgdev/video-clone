@@ -82,7 +82,7 @@ const args = [
   '--workpath', path.join(root, 'build_app', '.work'),
   '--specpath', path.join(root, 'build_app'),
   '--paths', path.join(root, 'backend'),
-  '--add-data', `${path.join(root, 'dist')}${dataSep}dist`,
+  '--add-data', `${path.join(root, 'frontend', 'dist')}${dataSep}dist`,
   '--add-data', `${path.join(root, 'backend', 'pipeline', 'tts', 'voices_capcut.json')}${dataSep}pipeline/tts`,
   '--add-data', `${path.join(root, 'backend', 'resources', 'voice-ref')}${dataSep}resources/voice-ref`,
   '--add-data', `${versionFilePath}${dataSep}.`,

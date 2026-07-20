@@ -15,7 +15,7 @@ from ..core.media import ffprobe_duration
 from ..export.srt import SRT_STYLES, cues_from_parts, parse_srt, style_params, write_srt, _split_for_style, wrap_capcut_text
 from . import audio_utils
 from .engines.vieneu import parse_voice as parse_vieneu_voice
-from .engines.vieneu import reference_cache_token
+from .engines.vieneu import reference_cache_token, reset_client as reset_vieneu_client
 from .manager import list_voices, tts_segment
 from .text_split import split_sentences
 from .voice_store import TTS_OUTPUT, TTS_TEMP, ensure_vieneu_dirs
@@ -41,7 +41,7 @@ def _job_fingerprint(
 
     raw = "|".join(
         [
-            "v3",  # CapCut short cues SRT
+            "v5",  # exact SRT cue timeline, neutral input speed
             (text or "").strip(),
             (srt_text or "").strip(),
             (voice or "").strip(),
@@ -281,6 +281,7 @@ def synth_text_job(
                 volume=volume,
                 pitch=pitch,
                 style=style,
+                cancel_check=lambda: _is_cancelled(job_id),
             )
             part_paths.append(part)
             part_durs.append(ffprobe_duration(part))
@@ -341,6 +342,8 @@ def synth_text_job(
             "cached": False,
         }
     except Exception:
+        if _is_cancelled(job_id) and parse_vieneu_voice(voice):
+            reset_vieneu_client()
         if job_dir.is_dir() and not (job_dir / "audio.wav").is_file():
             shutil.rmtree(job_dir, ignore_errors=True)
         raise
@@ -370,6 +373,9 @@ def synth_srt_job(
     if not cues:
         raise ValueError("SRT rỗng hoặc không parse được")
     ensure_vieneu_dirs()
+    effective_match = (
+        "stretch" if keep_timeline and match_duration == "natural" else match_duration
+    )
     fp = _job_fingerprint(
         text="",
         srt_text=srt_text,
@@ -379,7 +385,7 @@ def synth_srt_job(
         volume=volume,
         pitch=pitch,
         style=style,
-        match_duration=match_duration,
+        match_duration=effective_match,
         keep_timeline=keep_timeline,
         auto_split=False,
         gap_ms=gap_ms,
@@ -397,7 +403,7 @@ def synth_srt_job(
     out_cues: list[dict] = []
     cursor = 0.0
     try:
-        match = match_duration if match_duration in ("none", "natural", "stretch", "preferVideo") else "natural"
+        match = effective_match if effective_match in ("none", "natural", "stretch", "preferVideo") else "stretch"
         for i, cue in enumerate(cues):
             if _is_cancelled(job_id):
                 raise RuntimeError("Job đã hủy")
@@ -418,6 +424,7 @@ def synth_srt_job(
                 volume=volume,
                 pitch=pitch,
                 style=style,
+                cancel_check=lambda: _is_cancelled(job_id),
             )
             part_paths.append(part)
             dur = float(ffprobe_duration(part) or 0.15)
@@ -425,10 +432,8 @@ def synth_srt_job(
             src_start = float(cue["start"])
             src_end = max(src_start, float(cue["end"]))
             if keep_timeline:
-                # timeline tuyệt đối theo file SRT
                 start = src_start
-                # match duration: end = slot gốc; không match: end = start + audio
-                end = src_end if use_match != "none" else src_start + dur
+                end = src_end
             else:
                 start = cursor
                 end = start + dur
@@ -447,13 +452,13 @@ def synth_srt_job(
             )
         wav = job_dir / "audio.wav"
         if keep_timeline:
-            # Mix theo start gốc + độ dài audio thật (adelay), không cắt theo end SRT
+            # Mix theo đúng timestamp SRT; _mix_timeline chặn từng audio trong slot.
             _mix_timeline(
                 part_paths,
                 [
                     {
                         "start": float(c["_srcStart"]),
-                        "end": float(c["_srcStart"]) + float(c["_dur"]),
+                        "end": float(c["_srcEnd"]),
                     }
                     for c in out_cues
                 ],
@@ -473,7 +478,7 @@ def synth_srt_job(
             }
             for c in out_cues
         ]
-        # SRT xuất: luôn bám timestamp + text gốc khi keep_timeline
+        # SRT xuất giữ nguyên timestamp/text đầu vào.
         if keep_timeline:
             export_cues = [
                 {
@@ -543,6 +548,8 @@ def synth_srt_job(
             "cached": False,
         }
     except Exception:
+        if _is_cancelled(job_id) and parse_vieneu_voice(voice):
+            reset_vieneu_client()
         if job_dir.is_dir() and not (job_dir / "audio.wav").is_file():
             shutil.rmtree(job_dir, ignore_errors=True)
         raise
@@ -565,7 +572,10 @@ def _mix_timeline(parts: list[Path], cues: list[dict], out: Path) -> None:
     for i, p in enumerate(parts):
         inputs.extend(["-i", str(p)])
         delay_ms = int(max(0.0, float(cues[i]["start"])) * 1000)
-        filters.append(f"[{i + 1}:a]adelay={delay_ms}|{delay_ms}[a{i}]")
+        slot = max(0.01, float(cues[i]["end"]) - float(cues[i]["start"]))
+        filters.append(
+            f"[{i + 1}:a]atrim=duration={slot:.3f},adelay={delay_ms}|{delay_ms}[a{i}]"
+        )
         mix_ins.append(f"[a{i}]")
     n = len(parts) + 1
     filters.append(

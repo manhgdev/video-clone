@@ -502,6 +502,8 @@ export default function TtsStudio({
   const [mp3Url, setMp3Url] = useState<string | null>(null)
   // ponytail: SRT/ZIP URLs are derived from jobId when downloading.
   const [jobId, setJobId] = useState<string | null>(null)
+  const activeJobIdRef = useRef<string | null>(null)
+  const cancelledJobIdsRef = useRef(new Set<string>())
   const [duration, setDuration] = useState(0)
   const [playbackTime, setPlaybackTime] = useState(0)
   const [playbackDuration, setPlaybackDuration] = useState(0)
@@ -515,7 +517,6 @@ export default function TtsStudio({
   const [mainSrtMenuOpen, setMainSrtMenuOpen] = useState(false)
   const [status, setStatus] = useState<Record<string, EngineStatus>>({})
   const [cloneName, setCloneName] = useState('')
-  const [cloneText, setCloneText] = useState('')
   const [cloneFile, setCloneFile] = useState<File | null>(null)
   const [cloneTags, setCloneTags] = useState<VoiceTagLabel[]>([])
   const [previewSample, setPreviewSample] = useState('')
@@ -944,8 +945,11 @@ export default function TtsStudio({
     setBusyKind('synth')
     setBusy(true)
     setError('')
+    const requestJobId = crypto.randomUUID().replaceAll('-', '').slice(0, 12)
+    activeJobIdRef.current = requestJobId
     try {
       const res = await api.ttsStudioSynth({
+        jobId: requestJobId,
         text: useSrt ? undefined : text.trim(),
         srtText: useSrt ? srtRaw : undefined,
         voice,
@@ -960,16 +964,23 @@ export default function TtsStudio({
         gapMs: useSrt ? 0 : gapOn ? gapMs : 0,
         title: (useSrt ? srtRaw : text).trim().slice(0, 48),
       })
+      if (cancelledJobIdsRef.current.has(requestJobId)) return
       setBusyProgress(100)
       applyJobUrls(res)
       // Cùng giọng + chữ + setting → server trả cache, không thêm lịch sử mới
       if (!(res as { cached?: boolean }).cached) await loadHistory()
       setTimeout(() => audioRef.current?.play().catch(() => {}), 80)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Tạo giọng thất bại')
+      if (!cancelledJobIdsRef.current.has(requestJobId)) {
+        setError(e instanceof Error ? e.message : 'Tạo giọng thất bại')
+      }
     } finally {
-      setBusy(false)
-      setBusyKind(null)
+      cancelledJobIdsRef.current.delete(requestJobId)
+      if (activeJobIdRef.current === requestJobId) {
+        activeJobIdRef.current = null
+        setBusy(false)
+        setBusyKind(null)
+      }
     }
   }
 
@@ -984,8 +995,11 @@ export default function TtsStudio({
     setBusyKind('preview')
     setBusy(true)
     setError('')
+    const requestJobId = crypto.randomUUID().replaceAll('-', '').slice(0, 12)
+    activeJobIdRef.current = requestJobId
     try {
       const res = await api.ttsStudioSynth({
+        jobId: requestJobId,
         text: sample,
         voice,
         lang,
@@ -997,6 +1011,7 @@ export default function TtsStudio({
         autoSplit: false,
         title: 'Nghe thử',
       })
+      if (cancelledJobIdsRef.current.has(requestJobId)) return
       setBusyProgress(100)
       applyJobUrls(res)
       if (!(res as { cached?: boolean }).cached) await loadHistory()
@@ -1010,25 +1025,36 @@ export default function TtsStudio({
         })
       })
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Nghe thử thất bại')
+      if (!cancelledJobIdsRef.current.has(requestJobId)) {
+        setError(e instanceof Error ? e.message : 'Nghe thử thất bại')
+      }
     } finally {
-      setBusy(false)
-      setBusyKind(null)
+      cancelledJobIdsRef.current.delete(requestJobId)
+      if (activeJobIdRef.current === requestJobId) {
+        activeJobIdRef.current = null
+        setBusy(false)
+        setBusyKind(null)
+      }
     }
   }
 
   async function onCancelJob() {
-    if (jobId) {
+    const runningJobId = activeJobIdRef.current
+    if (runningJobId) {
+      cancelledJobIdsRef.current.add(runningJobId)
+      activeJobIdRef.current = null
+      setBusy(false)
+      setBusyKind(null)
+      setBusyProgress(0)
+      setError('Đã hủy')
       try {
-        await api.ttsStudioCancel(jobId)
+        await api.ttsStudioCancel(runningJobId)
       } catch {
         /* ignore */
       }
+      return
     }
-    setBusy(false)
-    setBusyKind(null)
-    setBusyProgress(0)
-    setError('Đã hủy')
+    audioRef.current?.pause()
   }
 
   async function onClone() {
@@ -1040,7 +1066,7 @@ export default function TtsStudio({
     setBusy(true)
     setError('')
     try {
-      const v = await api.ttsStudioClone(cloneName.trim(), cloneFile, cloneText.trim(), cloneTags)
+      const v = await api.ttsStudioClone(cloneName.trim(), cloneFile, '', cloneTags)
       setBusyProgress(100)
       setEngine('clone')
       preferredVoiceRef.current = v.id
@@ -1048,7 +1074,6 @@ export default function TtsStudio({
       onRefreshVoices?.(lang)
       setCloneFile(null)
       setCloneName('')
-      setCloneText('')
       setCloneTags([])
       go('voice') // danh sách / quản lý ở tab riêng
     } catch (e) {
@@ -1064,12 +1089,14 @@ export default function TtsStudio({
     name: string,
     tags: VoiceTagLabel[],
     language: string,
+    file: File | null,
   ) {
     setBusyKind('clone')
     setBusy(true)
     setError('')
     try {
       const v = await api.ttsStudioVoicePatch(voiceId, { name, tags, language })
+      if (file) await api.ttsStudioVoiceReplaceAudio(v.id, file)
       if (voice === voiceId) {
         preferredVoiceRef.current = v.id
         setVoice(v.id)
@@ -2055,15 +2082,6 @@ export default function TtsStudio({
                 <span>Tên giọng</span>
                 <input type="text" value={cloneName} placeholder="Ví dụ: Giọng của tôi" onChange={(e) => setCloneName(e.target.value)} />
               </label>
-              <label className="tts-field">
-                <span>Văn bản tham khảo (tùy chọn — v3 Turbo không bắt buộc)</span>
-                <input
-                  type="text"
-                  value={cloneText}
-                  placeholder="Nhập nội dung đã đọc trong file audio"
-                  onChange={(e) => setCloneText(e.target.value)}
-                />
-              </label>
               <VoiceTagPicker value={cloneTags} onChange={setCloneTags} />
               <button
                 type="button"
@@ -2078,7 +2096,7 @@ export default function TtsStudio({
         )}
 
         {section === 'history' && (
-          <div className="tts-page-panel">
+          <div className="tts-page-panel tts-history-page">
             <section className="tts-card tts-history-card" id="tts-history">
               <h3 className="tts-card-title"><span className="tts-step">7</span> Lịch sử tạo giọng</h3>
               {renderHistoryBody()}
@@ -2421,7 +2439,7 @@ export default function TtsStudio({
               <span>
                 Giữ nguyên timeline SRT
                 <small>
-                  Bật: audio đặt đúng start SRT; file SRT xuất = cue gốc (khuyến nghị).
+                  Bật: audio và file xuất giữ đúng start/end của từng cue SRT.
                   Tắt: nối tuần tự, timestamp SRT theo audio.
                 </small>
               </span>
@@ -2526,15 +2544,6 @@ export default function TtsStudio({
             <label className="tts-field">
               <span>Tên giọng</span>
               <input type="text" value={cloneName} placeholder="Ví dụ: Giọng của tôi" onChange={(e) => setCloneName(e.target.value)} />
-            </label>
-            <label className="tts-field">
-              <span>Văn bản tham khảo (tùy chọn — v3 Turbo không bắt buộc)</span>
-              <input
-                type="text"
-                value={cloneText}
-                placeholder="Nhập nội dung đã đọc trong file audio"
-                onChange={(e) => setCloneText(e.target.value)}
-              />
             </label>
             <VoiceTagPicker value={cloneTags} onChange={setCloneTags} />
             <button
@@ -2833,11 +2842,11 @@ export default function TtsStudio({
       {editingVoice && (
         <VoiceMetadataModal
           name={voiceDisplayName(editingVoice.id, voices, editingVoice.name)}
-          tags={editingVoice.tags || []}
+          tags={voiceMetadata(editingVoice).tags.map((tag) => tag.label)}
           language={editingVoice.language}
           onClose={() => setEditingVoice(null)}
-          onSave={(name, tags, language) =>
-            onSaveVoiceMetadata(editingVoice.id, name, tags, language)
+          onSave={(name, tags, language, file) =>
+            onSaveVoiceMetadata(editingVoice.id, name, tags, language, file)
           }
         />
       )}
