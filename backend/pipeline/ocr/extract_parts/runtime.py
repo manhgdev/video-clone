@@ -41,9 +41,13 @@ def _ocr_pool_workers(
     from pipeline.core.resources import pack_gpu_workers
 
     if gpu:
-        hard = cap if cap is not None else pack_gpu_workers(per_job_mb=900, reserve_mb=400, hard_max=16)
-        return adaptive_workers(requested, kind="gpu", cap=hard)
-    budget = _cpu_budget(0.90)
+        hard = (
+            cap
+            if cap is not None
+            else pack_gpu_workers(per_job_mb=450, reserve_mb=350, hard_max=20)
+        )
+        return adaptive_workers(requested, kind="gpu", cap=max(1, int(hard)))
+    budget = _cpu_budget(0.92)
     hard = cap if cap is not None else budget
     return adaptive_workers(requested, kind="cpu", cap=min(hard, budget))
 
@@ -56,11 +60,11 @@ def _ocr_semaphore() -> threading.Semaphore:
 
         # _rapidocr_gpu_kwargs định nghĩa bên dưới cùng file
         if _rapidocr_gpu_kwargs().get("det_use_cuda"):
-            n = pack_gpu_workers(per_job_mb=900, reserve_mb=400, hard_max=16)
+            n = pack_gpu_workers(per_job_mb=450, reserve_mb=350, hard_max=20)
         else:
-            n = _cpu_budget(0.90)
+            n = _cpu_budget(0.92)
     except Exception:
-        n = _cpu_budget(0.90)
+        n = _cpu_budget(0.92)
     if _ocr_sem is None or _ocr_sem_n != n:
         _ocr_sem = threading.Semaphore(n)
         _ocr_sem_n = n

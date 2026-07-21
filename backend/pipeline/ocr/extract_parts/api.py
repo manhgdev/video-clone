@@ -119,11 +119,14 @@ def asr_paddleocr(
     total = max(1, len(jpgs))
     n = len(jpgs)
     w_req = int(workers or 0)
-    # Auto GPU: gần full VRAM (gpu_job_cap); không còn trần cứng 1–4.
+    # Auto GPU: pack VRAM RapidOCR ~450MB/job — không kẹp 2–4 khi card rảnh.
     gpu_ocr = _rapidocr_gpu_kwargs()["det_use_cuda"]
-    from pipeline.core.resources import gpu_job_cap
+    from pipeline.core.resources import pack_gpu_workers
 
-    gpu_cap = gpu_job_cap() if gpu_ocr else min(6, _cpu_budget(0.9))
+    if gpu_ocr:
+        gpu_cap = pack_gpu_workers(per_job_mb=450, reserve_mb=350, hard_max=20)
+    else:
+        gpu_cap = min(16, _cpu_budget(0.92))
     w = _ocr_pool_workers(w_req, cap=gpu_cap, gpu=gpu_ocr)
     w = max(1, min(w, n if n else 1))
     _limit_onnx_threads()
@@ -203,7 +206,7 @@ def asr_paddleocr(
         _ocr_job,
         kind="gpu" if gpu_ocr else "cpu",
         requested=w_req if w_req > 0 else None,
-        cap=max(w, gpu_cap if gpu_ocr else min(12, _cpu_budget(0.9))),
+        cap=max(w, gpu_cap if gpu_ocr else min(16, _cpu_budget(0.92))),
         thread_name_prefix="ocr-asr",
         on_progress=_ocr_prog,
         cancel_check=lambda: check_cancel(project_id),
@@ -230,9 +233,9 @@ def asr_paddleocr(
     vert: list[dict[str, Any]] = []
     labels: list[dict[str, Any]] = []
     vend = video_end or dur_hint or 30.0
-    # Overlay OCR: đường riêng — auto GPU gần full, không kẹp 1 luồng.
-    sub_req = 0 if w_req <= 0 else max(1, w_req // 2)
-    sub_cap = max(2, gpu_cap) if gpu_ocr else 2
+    # Overlay OCR: cùng bank VRAM/CPU — không kẹp 2 luồng / không //2.
+    sub_req = 0 if w_req <= 0 else max(1, w_req)
+    sub_cap = max(4, gpu_cap)
     sub_w = _ocr_pool_workers(sub_req, cap=sub_cap, gpu=gpu_ocr)
     _limit_onnx_threads()
     try:

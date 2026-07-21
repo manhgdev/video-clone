@@ -36,7 +36,6 @@ type Props = {
   resetOcrRegion: (scope: 'one' | 'all') => void
   /** Caption | CAP-MID | Dọc | Nhãn — chỉ áp cùng lane */
   applyAllLaneLabel?: string
-  editSegment: (seg: Segment) => void
 }
 
 export function EditorMaskPanel({
@@ -59,7 +58,6 @@ export function EditorMaskPanel({
   applyCoverMaskToAll,
   resetOcrRegion,
   applyAllLaneLabel = 'lane',
-  editSegment,
 }: Props) {
   const dur = Math.max(0, timelineDuration)
   const [applyMode, setApplyMode] = useState<'full' | 'range'>('full')

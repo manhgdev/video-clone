@@ -6104,7 +6104,6 @@ export default function LivePreviewEditor({
                             applyCoverMaskToAll={applyCoverMaskToAll}
                             resetOcrRegion={resetOcrRegion}
                             applyAllLaneLabel={applyAllLaneLabel}
-                            editSegment={editSegment}
                           />
                         )}
 

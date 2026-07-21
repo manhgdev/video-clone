@@ -378,9 +378,23 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
             and bool(settings.get("burnSubs", True))
             and segments
         ):
-            locate_w = adaptive_workers(
-                int(settings.get("workers") or 0), kind="cpu", cap=12
-            )
+            # Định vị: ưu tiên GPU (RapidOCR) khi có CUDA — không kẹp kind=cpu → 2 luồng
+            try:
+                from pipeline.ocr.extract import _rapidocr_gpu_kwargs
+                from pipeline.core.resources import pack_gpu_workers
+
+                _loc_cuda = bool(_rapidocr_gpu_kwargs().get("det_use_cuda"))
+            except Exception:
+                _loc_cuda = False
+            if _loc_cuda:
+                _loc_cap = pack_gpu_workers(per_job_mb=450, reserve_mb=350, hard_max=16)
+                locate_w = adaptive_workers(
+                    int(settings.get("workers") or 0), kind="gpu", cap=_loc_cap
+                )
+            else:
+                locate_w = adaptive_workers(
+                    int(settings.get("workers") or 0), kind="cpu", cap=14
+                )
             set_status(
                 project_id,
                 step="translate",

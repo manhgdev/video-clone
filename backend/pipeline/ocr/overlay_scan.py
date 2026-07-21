@@ -6,10 +6,12 @@ Không lưới refine 0.12s. Hardsub đáy crop riêng (extract).
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable
 
 from ..core.jobs import check_cancel
+from ..core.resources import progress_msg
 from .cover_timing import attach_cover_times
 from .extract import (
     _merge_label_segments,
@@ -268,24 +270,33 @@ def _neighbor_empty(
 
 
 class _OverlayProbe:
-    """Seek + OCR full ROI — dùng chung coarse / binary-search biên."""
+    """Seek + OCR full ROI — TLS VideoCapture/OCR per thread (parallel-safe)."""
 
     def __init__(self, video: Path, *, project_id: str | None, workers: int) -> None:
         import cv2
 
         self._cv2 = cv2
-        self.cap = cv2.VideoCapture(str(video))
-        self.ok = self.cap.isOpened()
-        self.vw = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1080) if self.ok else 1080
-        self.vh = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 1920) if self.ok else 1920
+        self.video = Path(video)
         self.project_id = project_id
-        self._ = min(_ocr_pool_workers(workers, cap=min(2, workers or 1)), 2)
+        # Không kẹp 2 — pool theo GPU/CPU budget (caller đã pack)
+        self._w = max(1, int(workers or 1))
         self._tls: Any = type("T", (), {})()
         self._sem = _ocr_semaphore()
+        # Probe kích thước 1 lần
+        cap0 = cv2.VideoCapture(str(self.video))
+        self.ok = cap0.isOpened()
+        self.vw = int(cap0.get(cv2.CAP_PROP_FRAME_WIDTH) or 1080) if self.ok else 1080
+        self.vh = int(cap0.get(cv2.CAP_PROP_FRAME_HEIGHT) or 1920) if self.ok else 1920
+        # Giữ 1 cap chính cho refine tuần tự (edge) — thread chính
+        self.cap = cap0 if self.ok else None
 
     def close(self) -> None:
-        if self.ok:
-            self.cap.release()
+        if self.cap is not None:
+            try:
+                self.cap.release()
+            except Exception:
+                pass
+            self.cap = None
 
     def _engine(self):
         eng = getattr(self._tls, "ocr", None)
@@ -294,12 +305,23 @@ class _OverlayProbe:
             eng = self._tls.ocr
         return eng
 
+    def _thread_cap(self):
+        """Mỗi thread 1 VideoCapture — không share seek."""
+        cap = getattr(self._tls, "cap", None)
+        if cap is None or not cap.isOpened():
+            cap = self._cv2.VideoCapture(str(self.video))
+            self._tls.cap = cap
+        return cap
+
     def ocr_at(self, t: float) -> dict[str, list[tuple[str, dict[str, int]]]]:
         check_cancel(self.project_id)
         if not self.ok:
             return {"mid": [], "vertical": [], "label": []}
-        self.cap.set(self._cv2.CAP_PROP_POS_MSEC, float(t) * 1000.0)
-        ok, frame = self.cap.read()
+        cap = self._thread_cap()
+        if not cap.isOpened():
+            return {"mid": [], "vertical": [], "label": []}
+        cap.set(self._cv2.CAP_PROP_POS_MSEC, float(t) * 1000.0)
+        ok, frame = cap.read()
         if not ok:
             return {"mid": [], "vertical": [], "label": []}
         snap = frame.copy()
@@ -322,18 +344,34 @@ def _scan_overlay_stamps(
     on_progress: ProgressCb = None,
     progress_label: str = "OCR overlay",
 ) -> tuple[list[Hit], list[Hit], list[Hit], dict[float, set[str]]]:
-    """1 seek + 1 OCR / mốc → hits + map layout có mặt tại mỗi mốc coarse."""
+    """OCR mốc coarse song song — mỗi worker 1 VideoCapture + 1 RapidOCR TLS."""
     if not stamps:
         return [], [], [], {}
-    probe = _OverlayProbe(video, project_id=project_id, workers=workers)
+    w = max(1, int(workers or 1))
+    probe = _OverlayProbe(video, project_id=project_id, workers=w)
     mid_hits: list[Hit] = []
     vert_hits: list[Hit] = []
     lab_hits: list[Hit] = []
     stamp_layouts: dict[float, set[str]] = {}
     total = len(stamps)
+    done = 0
     try:
-        for i, t in enumerate(stamps):
-            boxes = probe.ocr_at(t)
+        def _one(t: float) -> tuple[float, dict[str, list[tuple[str, dict[str, int]]]]]:
+            return float(t), probe.ocr_at(float(t))
+
+        if w <= 1 or total <= 1:
+            results = [_one(t) for t in stamps]
+        else:
+            results = []
+            with ThreadPoolExecutor(max_workers=min(w, total), thread_name_prefix="ocr-ov") as ex:
+                futs = {ex.submit(_one, t): t for t in stamps}
+                for fut in as_completed(futs):
+                    results.append(fut.result())
+            # giữ thứ tự theo stamps (ổn định cluster)
+            order = {float(t): i for i, t in enumerate(stamps)}
+            results.sort(key=lambda r: order.get(r[0], 0))
+
+        for t, boxes in results:
             present: set[str] = set()
             for tx, bb in boxes.get("mid") or []:
                 mid_hits.append((t, tx, bb))
@@ -345,8 +383,9 @@ def _scan_overlay_stamps(
                 lab_hits.append((t, tx, bb))
                 present.add("label")
             stamp_layouts[float(t)] = present
-            if on_progress and (i % max(1, total // 20 or 1) == 0 or i + 1 == total):
-                on_progress(i + 1, total, progress_label)
+            done += 1
+            if on_progress and (done % max(1, total // 20 or 1) == 0 or done == total):
+                on_progress(done, total, progress_label)
     finally:
         probe.close()
     return mid_hits, vert_hits, lab_hits, stamp_layouts
@@ -615,7 +654,7 @@ def run_overlay_ocr(
             project_id,
             step="asr",
             progress=min(p1, max(p0, pct)),
-            message=f"{label} {done}/{total}…",
+            message=progress_msg(label, done, total, workers=max(1, int(workers or 1))),
             running=True,
         )
 

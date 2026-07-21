@@ -358,8 +358,8 @@ def adaptive_workers(
             value = max(2, min(limit, round(6 + 14 * cpu_idle)))
         elif kind in ("gpu", "tts"):
             # OCR frame nhẹ hơn TTS neural
-            per_mb = 1500 if kind == "tts" else 900
-            reserve = 600 if kind == "tts" else 400
+            per_mb = 1500 if kind == "tts" else 450
+            reserve = 600 if kind == "tts" else 350
             smi = _nvidia_smi_mem()
             if smi is None:
                 frac = 0.6 if kind == "tts" else 0.95
