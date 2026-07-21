@@ -41,7 +41,7 @@ from pipeline.core.project import (
     trans_cache_key,
     video_fingerprint,
 )
-from pipeline.core.resources import adaptive_workers
+from pipeline.core.resources import adaptive_workers, progress_msg
 from pipeline.ocr.locate import attach_speech_hardsub_boxes
 from pipeline.translate import translate_segments
 from pipeline.tts import tts_cache_key, tts_segment
@@ -173,11 +173,13 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
             segments = []
             frames_ok = any(cache_frames(project_id, tag).glob("*.jpg"))
             if use_ocr:
+                ocr_req = int(settings.get("workers") or 0)
+                # Message chi tiết (N luồng) do asr_paddleocr/_report cập nhật
                 set_status(
                     project_id,
                     step="asr",
                     progress=15,
-                    message="OCR màn hình (phụ đề trên khung)…",
+                    message=progress_msg("OCR", workers=(None if ocr_req <= 0 else ocr_req)),
                     running=True,
                 )
                 segments = asr_paddleocr(
@@ -185,7 +187,7 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                     project_id,
                     reuse_frames=frames_ok,
                     tag=tag,
-                    workers=int(settings.get("workers") or 0),
+                    workers=ocr_req,
                     source_lang=str(settings.get("sourceLang") or "auto"),
                 )
                 if not segments:
@@ -202,7 +204,7 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                     project_id,
                     step="asr",
                     progress=20,
-                    message=f"Whisper ASR ({w} luồng) — % có thể đứng lâu, vẫn chạy…",
+                    message=progress_msg("Whisper", workers=w),
                     running=True,
                 )
                 check_cancel(project_id)
@@ -303,23 +305,20 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                     i for i, s in enumerate(segments) if not (s.get("translation") or "").strip()
                 ]
 
-            set_status(
-                project_id,
-                step="translate",
-                progress=55,
-                message=(
-                    f"Giữ chữ nguồn {len(need_idx)}/{len(segments)} đoạn…"
-                    if settings.get("targetLang") in ("none", "off", "source", "")
-                    else f"Dịch {len(need_idx)}/{len(segments)} đoạn…"
-                ),
-                running=True,
-            )
+            translations: list[str] = []
             if need_idx:
                 texts = [segments[i]["source"] for i in need_idx]
                 target = settings.get("targetLang", "vi")
                 source = settings.get("sourceLang", "auto")
                 check_cancel(project_id)
                 if target in ("none", "off", "source", ""):
+                    set_status(
+                        project_id,
+                        step="translate",
+                        progress=55,
+                        message=f"Giữ chữ nguồn {len(need_idx)}/{len(segments)} đoạn…",
+                        running=True,
+                    )
                     # Giữ nguyên chữ nguồn — không gọi máy dịch
                     translations = list(texts)
                 else:
@@ -329,6 +328,13 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                         cap=16,
                         tasks=len(texts),
                     )
+                    set_status(
+                        project_id,
+                        step="translate",
+                        progress=55,
+                        message=progress_msg("Dịch", 0, len(need_idx), workers=w),
+                        running=True,
+                    )
                     translations = translate_segments(
                         texts,
                         target,
@@ -337,8 +343,19 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                         translator=str(settings.get("translator") or "google"),
                         workers=w,
                     )
+                # Ghi kết quả dịch vào segments (bug cũ: nằm nhầm trong else → luôn trống)
                 for i, tr in zip(need_idx, translations):
-                    segments[i]["translation"] = tr
+                    segments[i]["translation"] = (tr or "").strip() or segments[i].get(
+                        "translation"
+                    ) or ""
+            else:
+                set_status(
+                    project_id,
+                    step="translate",
+                    progress=55,
+                    message=f"Dịch 0/{len(segments)} đoạn…",
+                    running=True,
+                )
             for seg in segments:
                 seg["voice"] = inherit_voice(seg.get("voice"), voice)
             cache["transKey"] = t_key
@@ -351,27 +368,75 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
             and bool(settings.get("burnSubs", True))
             and segments
         ):
+            locate_w = adaptive_workers(
+                int(settings.get("workers") or 0), kind="cpu", cap=12
+            )
             set_status(
                 project_id,
                 step="translate",
                 progress=95,
-                message="Định vị caption trên khung (OCR)…",
+                message=progress_msg("Định vị OCR", workers=locate_w),
                 running=True,
             )
-            n_box = attach_speech_hardsub_boxes(
-                video,
-                segments,
-                only_missing=True,
-                project_id=project_id,
-                stable=bool(settings.get("stableCaptionLocate", False)),
-                analysis_region=settings.get("analysisRegion"),
-            )
+            n_box = 0
+            # Frozen: probe cv2 TRƯỚC — nếu path hỏng thì bỏ locate (vẫn giữ bản dịch).
+            # Tránh native crash OpenCV recursion kéo tắt cả app sau khi dịch xong.
+            cv2_ok = True
+            try:
+                import sys as _sys
+
+                if getattr(_sys, "frozen", False):
+                    from pipeline.core.runtime_site import ensure_cv2, prepare_cv2_import_path
+
+                    prepare_cv2_import_path()
+                    ensure_cv2()
+            except Exception as cv2_e:
+                cv2_ok = False
+                try:
+                    from pipeline.core.app_log import append_exception
+
+                    append_exception("[translate] skip OCR locate (cv2)", cv2_e)
+                except Exception:
+                    pass
+                set_status(
+                    project_id,
+                    step="translate",
+                    progress=96,
+                    message="Bỏ định vị OCR (OpenCV) — vẫn giữ bản dịch",
+                    running=True,
+                )
+            if cv2_ok:
+                try:
+                    n_box = attach_speech_hardsub_boxes(
+                        video,
+                        segments,
+                        only_missing=True,
+                        project_id=project_id,
+                        stable=bool(settings.get("stableCaptionLocate", False)),
+                        analysis_region=settings.get("analysisRegion"),
+                    )
+                except BaseException as ocr_e:
+                    # BaseException: bắt cả lỗi lạ; không để kill thread/app
+                    n_box = 0
+                    try:
+                        from pipeline.core.app_log import append_exception
+
+                        append_exception("[translate] OCR locate failed", ocr_e)  # type: ignore[arg-type]
+                    except Exception:
+                        pass
+                    set_status(
+                        project_id,
+                        step="translate",
+                        progress=96,
+                        message=f"Bỏ định vị OCR ({type(ocr_e).__name__}) — vẫn giữ bản dịch",
+                        running=True,
+                    )
             if n_box:
                 set_status(
                     project_id,
                     step="translate",
                     progress=97,
-                    message=f"Đã gắn vị trí {n_box}/{len(segments)} câu…",
+                    message=progress_msg("Định vị OCR", n_box, len(segments), workers=locate_w),
                     running=True,
                 )
 
@@ -421,7 +486,15 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
             running=False,
             error="cancelled",
         )
+        return
     except Exception as e:
+        # Đã ghi status — không re-raise (desktop: exception thread + OCR native dễ kéo tắt app)
+        try:
+            from pipeline.core.app_log import append_exception
+
+            append_exception(f"[translate:{project_id}] FAILED", e)
+        except Exception:
+            pass
         set_status(
             project_id,
             step="translate",
@@ -430,7 +503,6 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
             running=False,
             error=short_cmd_error(e),
         )
-        raise
     finally:
         clear_job(project_id, job_gen)
 

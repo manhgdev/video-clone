@@ -10,6 +10,7 @@ import httpx
 
 from pipeline.core.jobs import check_cancel
 from pipeline.core.project import set_status
+from pipeline.core.resources import progress_msg
 
 
 from .text import *  # noqa: F403
@@ -157,7 +158,7 @@ def translate_cloud(
             project_id,
             step="translate",
             progress=55,
-            message=f"Dịch {label} · {model}…",
+            message=progress_msg(f"Dịch {label}", workers=w, extra=str(model)),
             running=True,
         )
     done = 0
@@ -253,7 +254,7 @@ def translate_cloud(
                     project_id,
                     step="translate",
                     progress=55 + int(35 * cur / total),
-                    message=f"Dịch {label} {cur}/{total}",
+                    message=progress_msg(f"Dịch {label}", cur, total, workers=w),
                     running=True,
                 )
     return out

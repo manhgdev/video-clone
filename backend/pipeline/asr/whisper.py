@@ -8,7 +8,7 @@ from typing import Any
 
 from ..core.jobs import Cancelled, check_cancel
 from ..core.project import set_status
-from ..core.resources import adaptive_workers
+from ..core.resources import adaptive_workers, progress_msg
 from ..ocr.extract import (  # noqa: F401 — public re-exports for run.py / burn / tests
     asr_paddleocr,
     _ocr_join_lines,
@@ -34,6 +34,11 @@ def _resolve_asr_workers(workers: int | None) -> int:
     return adaptive_workers(workers, kind="cpu", cap=16)
 
 
+def whisper_loaded() -> bool:
+    """True nếu model đã nạp trong process (không cần tải lại)."""
+    return _whisper is not None
+
+
 def get_whisper(workers: int = 2):
     """Load 1 lần / process — không reload khi đổi workers."""
     global _whisper, _whisper_threads
@@ -54,15 +59,49 @@ def get_whisper(workers: int = 2):
                 device, compute = "cuda", "float16"
         except (ImportError, RuntimeError):
             pass
+        # Fallback: torch CUDA sẵn nhưng ctranslate2 chưa thấy GPU
+        if device == "cpu":
+            try:
+                from pipeline.core.accel import preferred_torch_device
 
-        cpu_threads = thr if device == "cpu" else min(4, thr)
+                if preferred_torch_device() == "cuda":
+                    try:
+                        import ctranslate2 as _ct2
+
+                        if _ct2.get_cuda_device_count() > 0:
+                            device, compute = "cuda", "float16"
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        # CUDA: ít CPU thread + num_workers>1 (batch decode). CPU: thr theo auto.
+        if device == "cuda":
+            import os as _os
+
+            cpu_threads = max(2, min(4, (_os.cpu_count() or 4) // 3))
+            # 2–4 worker CTranslate2 trên GPU (không = thr CPU)
+            num_workers = max(1, min(4, thr if thr > 0 else 2))
+        else:
+            import os as _os
+
+            cpu_threads = thr if thr > 0 else max(1, (_os.cpu_count() or 4) // 2)
+            cpu_threads = max(1, min(cpu_threads, max(1, int((_os.cpu_count() or 4) * 0.85))))
+            num_workers = 1
         _whisper = WhisperModel(
             "base",
             device=device,
             compute_type=compute,
             cpu_threads=cpu_threads,
-            num_workers=1,
+            num_workers=num_workers,
         )
+        # Gắn meta để progress hiển thị đúng
+        try:
+            _whisper._vc_device = device  # type: ignore[attr-defined]
+            _whisper._vc_threads = thr  # type: ignore[attr-defined]
+            _whisper._vc_num_workers = num_workers  # type: ignore[attr-defined]
+        except Exception:
+            pass
         _whisper_threads = thr
         return _whisper
 
@@ -178,25 +217,34 @@ def asr_whisper(
     import time
 
     thr = _resolve_asr_workers(workers)
+    cached = whisper_loaded()
     if project_id:
         set_status(
             project_id,
             step="asr",
-            progress=18,
-            message="Tải model Whisper…",
+            progress=18 if not cached else 22,
+            message=progress_msg(
+                "Whisper",
+                workers=thr,
+                extra="tải model" if not cached else "nhận dạng",
+            ),
             running=True,
         )
     model = get_whisper(thr)
     if project_id:
         device = getattr(getattr(model, "model", None), "device", "cpu")
+        dev = str(getattr(model, "_vc_device", None) or device or "cpu")
+        nw = int(getattr(model, "_vc_num_workers", 1) or 1)
         set_status(
             project_id,
             step="asr",
             progress=22,
-            message=(
-                "Whisper đang nhận dạng (CUDA) — % có thể đứng lâu…"
-                if device == "cuda"
-                else f"Whisper đang nhận dạng ({thr} luồng CPU) — % có thể đứng lâu…"
+            message=progress_msg(
+                "Whisper",
+                workers=thr,
+                extra=("CUDA" if dev == "cuda" else "CPU")
+                + (f" · {nw} worker" if dev == "cuda" and nw > 1 else "")
+                + (" · cache" if cached else ""),
             ),
             running=True,
         )
@@ -238,7 +286,7 @@ def asr_whisper(
                         project_id,
                         step="asr",
                         progress=pct,
-                        message=f"Whisper đã nhận {len(out)} đoạn · ~{t_end:.0f}s…",
+                        message=progress_msg("Whisper", len(out), workers=thr, extra=f"~{t_end:.0f}s"),
                         running=True,
                     )
     except Cancelled:
@@ -262,7 +310,7 @@ def asr_whisper(
             project_id,
             step="asr",
             progress=50,
-            message=f"Whisper xong — {len(out)} đoạn",
+            message=progress_msg("Whisper xong", len(out), workers=thr),
             running=True,
         )
     return out

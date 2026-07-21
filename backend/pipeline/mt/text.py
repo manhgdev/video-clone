@@ -21,8 +21,9 @@ def _report_mt(
     total: int,
     last_t: list[float],
     force: bool = False,
+    workers: int | None = None,
 ) -> None:
-    """Heartbeat dịch — cập nhật message ≥1.2s / lần đầu / lần cuối (tránh % đứng im)."""
+    """Heartbeat dịch — cập nhật message ≥1.2s; luôn hiện số luồng khi auto."""
     import time
 
     if not project_id or total <= 0:
@@ -31,11 +32,13 @@ def _report_mt(
     if not force and cur not in (1, total) and now - last_t[0] < 1.2:
         return
     last_t[0] = now
+    from pipeline.core.resources import progress_msg
+
     set_status(
         project_id,
         step="translate",
         progress=55 + int(35 * cur / max(1, total)),
-        message=f"Dịch {label} {cur}/{total} — vẫn chạy…",
+        message=progress_msg(f"Dịch {label}", cur, total, workers=workers),
         running=True,
     )
 

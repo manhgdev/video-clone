@@ -41,8 +41,10 @@ def classic_cover_fit(
     text_box: tuple[int, int, int, int] | None,
     frame_w: int,
     frame_h: int,
+    *,
+    font_size: int = 36,
 ) -> tuple[int, int, int, int] | None:
-    """Pad mỏng đối xứng — che vừa ink, không phình."""
+    """Pad mid/OCR như FE fitMidOcrCover — che stroke/shadow, không phình đáy."""
     if not ocr_boxes and text_box is None:
         return None
     if ocr_boxes:
@@ -58,22 +60,27 @@ def classic_cover_fit(
         y0 = min(y0, text_box[1])
         x1 = max(x1, text_box[2])
         y1 = max(y1, text_box[3])
-    cy = (y0 + y1) // 2
+    sh = max(1, y1 - y0)
+    sw = max(1, x1 - x0)
+    cx = (x0 + x1) / 2.0
+    fs = max(12, int(font_size))
     pad_x = max(3, int(round(frame_w * 0.003)))
-    pad_y = max(2, int(round(frame_h * 0.0015)))
-    x0 -= pad_x
-    x1 += pad_x
-    y0 -= pad_y
-    y1 += pad_y
-    max_h = max(24, int(frame_h * (0.18 if text_box is not None else 0.07)))
-    if (y1 - y0) > max_h:
-        y0, y1 = cy - max_h // 2, cy + max_h // 2
-    return (
-        max(0, x0),
-        max(0, y0),
-        min(frame_w, x1),
-        min(frame_h, y1),
-    )
+    pad_top = max(2, int(round(fs * 0.04)))
+    pad_bot = max(6, int(round(fs * 0.18))) + 4  # + COVER_SHADOW_BOT
+    top_slack = int(round(sh * 0.12))
+    bot_extra = max(pad_bot, int(round(sh * 0.12)), int(round(fs * 0.2)))
+    ny0 = max(0, y0 + top_slack - pad_top)
+    ny1 = min(frame_h, y1 + bot_extra)
+    w = min(frame_w, sw + pad_x * 2)
+    nx0 = max(0, int(round(cx - w / 2)))
+    nx1 = min(frame_w, nx0 + w)
+    max_h = max(24, int(frame_h * (0.18 if text_box is not None else 0.10)))
+    if (ny1 - ny0) > max_h:
+        cy = (ny0 + ny1) // 2
+        ny0, ny1 = cy - max_h // 2, cy + max_h // 2
+        ny0 = max(0, ny0)
+        ny1 = min(frame_h, ny1)
+    return (nx0, ny0, nx1, max(ny0 + 12, ny1))
 
 
 def default_overlay_paint(

@@ -1,6 +1,7 @@
 """FastAPI application factory."""
 from __future__ import annotations
 
+import sys
 import threading
 from contextlib import asynccontextmanager
 
@@ -45,10 +46,30 @@ def create_app() -> FastAPI:
             daemon=True,
         ).start()
 
-        def _run() -> None:
-            from pipeline.core.system_check import ensure_runtime_torch
+        try:
+            from pipeline.core.app_log import append_log, install_process_hooks
 
-            ensure_runtime_torch()
+            install_process_hooks()
+            append_log("[api] lifespan start", also_print=False)
+        except Exception:
+            pass
+
+        def _run() -> None:
+            # Frozen + dev warm: không pip torch (DLL lock / WinError 5). Chỉ warm model đã cài.
+            if getattr(sys, "frozen", False):
+                return
+            try:
+                from pipeline.core.system_check import ensure_runtime_torch
+
+                # ensure_runtime_torch no-ops pip when torch already loaded
+                ensure_runtime_torch()
+            except Exception as exc:
+                try:
+                    from pipeline.core.app_log import append_exception
+
+                    append_exception("[warm-models] ensure_runtime_torch skipped", exc)
+                except Exception:
+                    print(f"[warm-models] ensure_runtime_torch skipped: {exc}", flush=True)
             try:
                 from pipeline.core.cuda_dll import prefer_torch_cudnn
 
@@ -82,9 +103,14 @@ def create_app() -> FastAPI:
     )
 
     @app.get("/api/health")
-    def api_health() -> dict[str, str]:
-        """Cheap readiness — dev.mjs / proxies; no torch / model load."""
-        return {"ok": "1", "status": "up"}
+    def api_health() -> dict[str, object]:
+        """Cheap readiness — dev.mjs / desktop launcher; no torch / model load."""
+        import os
+
+        from pipeline.core.config import DATA
+
+        port = int(os.environ.get("VIDEO_CLONE_PORT") or 8787)
+        return {"ok": True, "app": "videoclone", "port": port, "data": str(DATA)}
 
     app.include_router(router)
     app.mount("/data", StaticFiles(directory=str(PUBLIC_DATA)), name="public-data")

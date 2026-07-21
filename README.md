@@ -1,48 +1,68 @@
 # VideoClone
 
-Ứng dụng desktop/web để tải video, nhận diện lời nói hoặc chữ trên khung hình, dịch, lồng tiếng AI và xuất video hoàn chỉnh. Luồng xử lý mặc định chạy local; chỉ các engine cloud đã chọn mới gửi dữ liệu ra ngoài.
+Ứng dụng desktop/web: tải video, nhận diện lời/chữ, dịch, lồng tiếng AI và xuất MP4. Xử lý mặc định **local**; chỉ engine cloud đã chọn mới gửi dữ liệu ra ngoài.
 
-## Chức năng
+**Version hiện tại:** xem `package.json` (desktop build: `npm run build:app`).
+
+---
+
+## Chức năng chính
 
 | Màn hình | Nội dung |
 |---|---|
-| **Clone Video** | Upload video → Whisper/OCR → dịch → sửa từng đoạn → lồng tiếng → xuất MP4 |
-| **Đã render** | Xem thumbnail, đổi tên, phát, tải xuống và mở thư mục; 10 video mỗi trang, mới nhất trước |
-| **Download Video** | Tải video từ URL, quản lý hàng đợi và đưa file đã tải vào Clone Video |
-| **Text to Speech** | Tạo audio từ văn bản, clone/quản lý giọng, xuất WAV/MP3/SRT/ZIP và xem lịch sử |
-| **Cấu hình** | API key, engine, thư mục dữ liệu và kiểm tra/cài các thành phần bắt buộc |
+| **Clone Video** | Upload → ASR/OCR → dịch → sửa timeline/bbox → lồng tiếng → xuất MP4 |
+| **Đã render** | Thumbnail, đổi tên, phát, tải, mở thư mục |
+| **Download Video** | Tải từ URL, hàng đợi, đưa vào Clone |
+| **Text to Speech** | Văn bản/SRT → audio, clone giọng, WAV/MP3/SRT/ZIP |
+| **Cấu hình** | API key, engine, thư mục dữ liệu, kiểm tra/cài gói AI |
 
 ### Pipeline Clone Video
 
-1. Nhận diện lời nói bằng `faster-whisper` hoặc chữ trên video bằng RapidOCR.
-2. Dịch bằng Google, TikTok, MyMemory, Ollama hoặc dịch vụ có API key.
-3. Sửa nội dung, thời gian và loại đoạn trong editor (`horizontal`, `vertical`, `label`).
-4. Tạo giọng đọc, điều chỉnh tốc độ, âm lượng và cao độ.
-5. Dùng FFmpeg để che hardsub gốc, burn bản dịch, ghép audio và xuất MP4.
+1. **ASR** `faster-whisper` (CUDA khi có) hoặc **OCR** RapidOCR (CUDA khi `onnxruntime-gpu`).
+2. **Dịch** Google / TikTok / MyMemory / Ollama / cloud có key.
+3. **Editor** sửa text, timing, layout (`horizontal` / `mid` / `vertical` / `label`), bbox, tốc độ video bake.
+4. **TTS** VieNeu (zmAI/clone), CapCut, ElevenLabs, System.
+5. **Export** FFmpeg: che hardsub, burn caption, mux TTS + BGM, tách stem (Demucs).
 
-Mỗi project giữ output mới nhất. Các output cũ hợp lệ vẫn được quét vào tab **Đã render** và tự tạo/cache thumbnail khi cần.
+Project giữ output mới nhất; tab **Đã render** quét các bản xuất hợp lệ.
 
-## Engine hỗ trợ
+---
+
+## Engine
 
 ### Dịch
 
 | Engine | Ghi chú |
 |---|---|
-| Google · TikTok · MyMemory | Không cần API key; fallback mặc định Google → TikTok → MyMemory |
+| Google · TikTok · MyMemory | Không key; fallback Google → TikTok → MyMemory |
 | Ollama | LLM local |
-| OpenAI · Gemini · DeepSeek · OpenRouter · Grok | Cần API key trong **Cấu hình** hoặc biến môi trường |
+| OpenAI · Gemini · DeepSeek · OpenRouter · Grok | Key trong **Cấu hình** hoặc `.env` |
 
 ### TTS
 
 | Engine | Ghi chú |
 |---|---|
-| **zmAI** | Bộ giọng tham chiếu tiếng Việt đi kèm, chạy qua VieNeu |
-| **VieNeu Local** | TTS tiếng Việt local, hỗ trợ giọng có sẵn và giọng clone |
-| **CapCut** | Dịch vụ không chính thức, không bảo đảm SLA |
-| **ElevenLabs** | TTS cloud; hỗ trợ nhiều key qua `ELEVENLABS_API_KEYS` |
-| **System** | Giọng hệ điều hành: macOS `say`, Linux `espeak-ng` và Windows SAPI khi khả dụng |
+| **zmAI** | Giọng tham chiếu VI đi kèm (VieNeu) |
+| **VieNeu Local** | TTS VI local + clone; ưu tiên **CUDA / Apple MPS** |
+| **CapCut** | Cloud không chính thức, không SLA |
+| **ElevenLabs** | Cloud; nhiều key qua `ELEVENLABS_API_KEYS` |
+| **System** | macOS `say` / Linux `espeak-ng` / Windows SAPI |
 
-VieNeu/Whisper/OCR là nhóm AI nặng. Bản desktop không đóng gói sẵn nhóm này: lần mở đầu tiên, vào **Cấu hình → Thiết lập** và cài xong gói bắt buộc trước khi sử dụng.
+### GPU (local AI)
+
+| Thành phần | Ưu tiên |
+|---|---|
+| VieNeu | CUDA → MPS → ONNX/CPU |
+| Whisper | CUDA (ctranslate2) → CPU |
+| OCR | CUDA (onnxruntime-gpu) → CPU |
+| Demucs stem | CUDA / MLX (Apple) → CPU |
+| FFmpeg encode | NVENC khi có |
+
+Desktop **không** đóng gói sẵn torch/OCR nặng: lần đầu vào **Cấu hình → Thiết lập** cài gói bắt buộc. Runtime Windows: `%LOCALAPPDATA%\VideoClone\.venv-runtime` (và `.venv-ocr`).
+
+**Huỷ job:** nút **Huỷ** (đỏ) / **X** khi đang chạy → cancel + kill process tree (ffmpeg/TTS/OCR). **Chạy nền** chỉ thu nhỏ popup, job vẫn chạy.
+
+---
 
 ## Chạy từ source
 
@@ -50,119 +70,125 @@ VieNeu/Whisper/OCR là nhóm AI nặng. Bản desktop không đóng gói sẵn n
 
 - Node.js 18+
 - Python 3.11+ (khuyến nghị 3.12)
-- FFmpeg và FFprobe trên `PATH`
-- Windows, macOS hoặc Linux
+- FFmpeg + FFprobe trên `PATH`
+- Windows / macOS / Linux
 
-### Cài đặt và chạy
+### Cài & dev
 
 ```bash
 npm run setup
 npm run dev:all
 ```
 
-`setup` cài package frontend, tạo `backend/.venv` và cài `backend/requirements.txt`. `dev:all` mở đồng thời:
-
-- UI: `http://127.0.0.1:5173`
-- API: `http://127.0.0.1:8787`
-- Swagger: `http://127.0.0.1:8787/docs`
-
-Các lệnh riêng:
+| URL | |
+|---|---|
+| UI | http://127.0.0.1:5173 |
+| API | http://127.0.0.1:8787 |
+| Swagger | http://127.0.0.1:8787/docs |
 
 ```bash
-npm run dev       # chỉ Vite
-npm run server    # chỉ FastAPI
-npm run build     # kiểm tra TypeScript và build frontend
+npm run dev        # Vite
+npm run server     # FastAPI :8787
+npm run build      # tsc + vite build
+npm run build:app  # desktop PyInstaller
 ```
 
-Sao chép `backend/.env.example` thành `backend/.env` nếu cần cấu hình qua file:
+Sao chép `backend/.env.example` → `backend/.env` nếu cần:
 
 ```env
 ELEVENLABS_API_KEYS=sk_xxx,sk_yyy
 # OPENAI_API_KEY=
 # GEMINI_API_KEY=
-# CAPCUT_DEVICE_JSON=
+# VIENEU_BACKEND=auto          # auto | pytorch | onnx | cpu
+# VIDEOCLONE_TORCH_DEVICE=     # cuda | mps | cpu (debug)
 ```
 
-## Build ứng dụng Windows
+---
 
-Chuẩn bị môi trường build theo `.github/workflows/release-windows.yml`, sau đó chạy:
+## Build desktop Windows
+
+Theo `.github/workflows/release-windows.yml`:
 
 ```bash
 npm run build:app
 ```
 
-Bản mặc định là thư mục chạy độc lập tại `build_app/release/VideoClone_v<version>/`. Phải giữ nguyên cả thư mục, không sao chép riêng `VideoClone.exe`.
+Output: `build_app/release/VideoClone_v<version>/` — **chạy cả thư mục**, không copy riêng `.exe`.
 
 ```powershell
-$env:ONEFILE='1'; npm run build:app   # tuỳ chọn: một file EXE, build/chạy đầu chậm hơn
-$env:CLEAN='1'; npm run build:app     # xoá cache PyInstaller của lần build trước
+$env:ONEFILE='1'; npm run build:app   # optional one-file
+$env:CLEAN='1'; npm run build:app     # xóa cache PyInstaller
 ```
 
-GitHub Actions tự build artifact Windows khi chạy thủ công hoặc push tag `v*`; với tag, workflow đồng thời tạo/cập nhật GitHub Release gồm EXE và ZIP.
+GitHub Actions build artifact khi workflow thủ công hoặc tag `v*` (Release kèm ZIP).
+
+---
 
 ## Dữ liệu
 
-- Source mode: `backend/public/<project_id>/` chứa media project/output.
-- Giọng clone: `backend/data/voices/vieneu/cloned/`.
-- Desktop Windows: dữ liệu và package AI cài sau nằm trong `%LOCALAPPDATA%\VideoClone`.
+| Mode | Đường dẫn |
+|---|---|
+| Source | `backend/public/<project_id>/` |
+| Giọng clone | `backend/data/voices/vieneu/` |
+| Desktop Win | `%LOCALAPPDATA%\VideoClone` (data + AI packages) |
 
-Không xoá các thư mục dữ liệu nếu còn project, bản render hoặc giọng clone cần giữ.
+Không xóa thư mục data nếu còn project/render/giọng cần giữ.
+
+---
 
 ## API chính
 
-Base URL: `http://127.0.0.1:8787`
+Base: `http://127.0.0.1:8787`
 
-| API | Chức năng |
-|---|---|
-| `POST /api/upload` | Tạo project từ video |
-| `POST /api/projects/{id}/run` | Nhận diện và dịch |
-| `POST /api/projects/{id}/dub` | Tạo audio lồng tiếng |
-| `POST /api/projects/{id}/export` | Xuất video |
-| `GET /api/projects/{id}/segments` | Đọc danh sách đoạn |
-| `PUT /api/projects/{id}/segments/{segment_id}` | Sửa một đoạn |
-| `GET /api/renders` | Danh sách video đã render |
-| `POST /api/tts/studio/synthesize` | Tạo audio trong TTS Studio |
-| `GET /api/system/checks` | Kiểm tra thành phần hệ thống |
+| Method | Path | |
+|---|---|---|
+| POST | `/api/upload` | Tạo project |
+| POST | `/api/projects/{id}/run` | ASR + dịch |
+| POST | `/api/projects/{id}/dub` | Lồng tiếng |
+| POST | `/api/projects/{id}/export` | Xuất video |
+| POST | `/api/projects/{id}/cancel` | Huỷ job (kill process) |
+| POST | `/api/projects/{id}/status/dismiss` | Đóng popup lỗi (clear meta) |
+| GET | `/api/projects/{id}/status` | Tiến độ |
+| GET/PUT | `/api/projects/{id}/segments` | Danh sách / thay segments |
+| GET | `/api/renders` | Video đã render |
+| POST | `/api/tts/studio/synthesize` | TTS Studio |
+| GET | `/api/system/checks` | Kiểm tra hệ thống |
 
-Danh sách đầy đủ và schema request/response có tại `/docs` khi API đang chạy.
+Schema đầy đủ: `/docs` khi API chạy.
 
-## Cấu trúc source
+---
+
+## Cấu trúc source (tóm tắt)
 
 ```text
-frontend/src/
-  app/          shell, mode và session
-  pages/        trang cấp cao
-  features/     editor, project, download, TTS, cấu hình
-  shared/       API client, component và type dùng chung
-
-backend/
-  main.py       entry point FastAPI
-  api/routes/   route HTTP theo domain
-  pipeline/     ASR, OCR, dịch, TTS, download, export và điều phối job
-  tests/        kiểm thử backend
-
-scripts/        setup và dev runner
-build_app/      launcher, cấu hình và output desktop
+frontend/src/   app · pages · features · shared
+backend/        api/routes · pipeline · tests
+scripts/        setup · dev
+build_app/      launcher · PyInstaller · release
 ```
 
-Quy tắc đặt file và hướng dẫn chia module: [STRUCTURE.MD](STRUCTURE.MD).
+Chi tiết module và quy tắc phụ thuộc: **[STRUCTURE.md](STRUCTURE.md)**.
 
-## Kiểm tra trước khi cập nhật
+---
+
+## Kiểm tra trước khi merge
 
 ```bash
 npm run build
 backend/.venv/Scripts/python.exe -m pytest backend/tests
 ```
 
-Trên macOS/Linux, thay đường dẫn Python bằng `backend/.venv/bin/python`.
+macOS/Linux: `backend/.venv/bin/python -m pytest backend/tests`.
+
+---
 
 ## Giới hạn
 
-- Kết quả OCR phụ thuộc độ rõ, vị trí và hiệu ứng chữ trong video.
-- Whisper model lớn và một số backend VieNeu cần nhiều RAM/GPU; model nhỏ hoặc ONNX vẫn có thể chạy CPU.
-- CapCut, Google, TikTok và MyMemory là dịch vụ ngoài/không SLA, có thể thay đổi hoặc giới hạn tần suất.
-- Luôn kiểm tra lại bản dịch, timing và audio trước khi xuất bản cuối.
+- OCR phụ thuộc độ rõ / vị trí chữ trên khung hình.
+- Whisper lớn và VieNeu PyTorch cần RAM/VRAM; máy yếu dùng model nhỏ / ONNX.
+- CapCut, Google, TikTok, MyMemory: dịch vụ ngoài, có thể đổi hoặc rate-limit.
+- Luôn rà bản dịch, timing và audio trước xuất bản cuối.
 
 ## License
 
-Private / nội bộ — điều chỉnh theo chính sách của repository.
+Private / nội bộ — theo chính sách repository.

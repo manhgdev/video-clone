@@ -34,7 +34,8 @@ type Props = {
   onSettings: (s: ProjectSettings) => void
   onUpload: (file: File) => void
   onTranslateAll: () => void
-  onPreview: () => void
+  /** previewSec = số giây từ ô Preview (đã commit draft) */
+  onPreview: (previewSec: number) => void
   onCancel: () => void
 }
 
@@ -188,14 +189,19 @@ export default function Sidebar({
     onSettings({ ...settings, [key]: value })
   }
 
-  const commitPreviewSec = () => {
+  /** Commit ô Preview → settings; trả về số giây đã chốt (dùng khi bấm Preview ngay). */
+  const commitPreviewSec = (): number => {
     if (busy) {
-      setPreviewDraft(String(settings.previewSec > 0 ? settings.previewSec : 20))
-      return
+      const cur = Math.max(5, Math.min(600, settings.previewSec > 0 ? settings.previewSec : 20))
+      setPreviewDraft(String(cur))
+      return cur
     }
     const value = Math.max(5, Math.min(600, Number(previewDraft) || 20))
     setPreviewDraft(String(value))
-    onSettings({ ...settings, previewSec: value })
+    if (value !== settings.previewSec) {
+      onSettings({ ...settings, previewSec: value })
+    }
+    return value
   }
 
   const fontSizes = [16, 20, 24, 28, 32, 36, 40, 48, 56, 64, 72, 80, 96, 120]
@@ -641,9 +647,13 @@ export default function Sidebar({
           type="button"
           className="secondary icon-only"
           disabled={busy || !videoUrl}
-          onClick={onPreview}
+          onClick={() => {
+            // Commit draft trước — đổi 5→10 rồi bấm ngay vẫn dùng 10s
+            const sec = commitPreviewSec()
+            onPreview(sec)
+          }}
           aria-label="Preview"
-          title={`Dịch ${settings.previewSec > 0 ? settings.previewSec : 20}s đầu — Xuất bản cũng ${settings.previewSec > 0 ? settings.previewSec : 20}s`}
+          title={`Dịch ${previewDraft || settings.previewSec || 20}s đầu (ô Preview) — Xuất cũng theo cửa sổ này`}
         >
           <IconPlay size={14} />
         </button>

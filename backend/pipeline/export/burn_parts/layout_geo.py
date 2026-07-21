@@ -207,7 +207,8 @@ def _cover_box_fit(
     y1 += pad_y
     if (y1 - y0) > max_h:
         y0, y1 = cy - max_h // 2, cy + max_h // 2
-    max_w = int(round(frame_w * 0.96))  # hardsub đáy hay >72% — đừng cắt lộ chữ
+    # Full ngang video — khớp editor (không cắt 85–96%)
+    max_w = frame_w
     if (x1 - x0) > max_w:
         cx = (x0 + x1) // 2
         x0, x1 = cx - max_w // 2, cx + max_w // 2

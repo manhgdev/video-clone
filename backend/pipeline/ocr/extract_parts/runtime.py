@@ -37,25 +37,30 @@ def _cpu_budget(ratio: float = 0.9) -> int:
 def _ocr_pool_workers(
     requested: int | None, *, cap: int | None = None, gpu: bool = False
 ) -> int:
-    # Auto GPU: cap = gpu_job_cap (gần full); adaptive chỉ hạ nhẹ khi card đang full.
-    from pipeline.core.resources import gpu_job_cap
+    # GPU: pack VRAM (đừng kẹp bằng CPU budget — để card đầy khi rảnh)
+    from pipeline.core.resources import pack_gpu_workers
 
-    budget = _cpu_budget(0.95 if gpu else 0.9)
-    if cap is not None:
-        hard = cap
-    elif gpu:
-        hard = gpu_job_cap()
-    else:
-        hard = budget
-    return adaptive_workers(
-        requested, kind="gpu" if gpu else "cpu", cap=min(hard, budget)
-    )
+    if gpu:
+        hard = cap if cap is not None else pack_gpu_workers(per_job_mb=900, reserve_mb=400, hard_max=16)
+        return adaptive_workers(requested, kind="gpu", cap=hard)
+    budget = _cpu_budget(0.90)
+    hard = cap if cap is not None else budget
+    return adaptive_workers(requested, kind="cpu", cap=min(hard, budget))
 
 
 def _ocr_semaphore() -> threading.Semaphore:
-    """Semaphore toàn cục: tổng job OCR phụ ≤ budget (không nhân 3 pass)."""
+    """Semaphore toàn cục OCR — GPU pack VRAM; CPU ≤ budget cores."""
     global _ocr_sem, _ocr_sem_n
-    n = _cpu_budget(0.9)
+    try:
+        from pipeline.core.resources import pack_gpu_workers
+
+        # _rapidocr_gpu_kwargs định nghĩa bên dưới cùng file
+        if _rapidocr_gpu_kwargs().get("det_use_cuda"):
+            n = pack_gpu_workers(per_job_mb=900, reserve_mb=400, hard_max=16)
+        else:
+            n = _cpu_budget(0.90)
+    except Exception:
+        n = _cpu_budget(0.90)
     if _ocr_sem is None or _ocr_sem_n != n:
         _ocr_sem = threading.Semaphore(n)
         _ocr_sem_n = n
@@ -170,7 +175,7 @@ def _rapidocr_labels(*, use_cuda: bool | None = None) -> Any:
 
 
 def _rapidocr_gpu_kwargs() -> dict[str, bool]:
-    """Use CUDA for all OCR models when ONNX Runtime exposes its GPU provider."""
+    """Ưu tiên CUDA khi onnxruntime-gpu có CUDAExecutionProvider."""
     try:
         prepare_cuda_dlls()
         import onnxruntime as ort

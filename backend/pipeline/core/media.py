@@ -843,22 +843,122 @@ def apply_timeline_from_baseline(meta: dict, new_speed: float) -> None:
             meta.pop("workDuration", None)
 
 
+def _merge_segment_content(dst: dict, src: dict) -> None:
+    """Giữ text/TTS/bbox từ src khi dst (sau scale) thiếu — không đụng start/end."""
+    if not isinstance(dst, dict) or not isinstance(src, dict):
+        return
+    for k in (
+        "translation",
+        "source",
+        "audioUrl",
+        "audioFile",
+        "audioDuration",
+        "bbox",
+        "bboxInherited",
+        "captionLayout",
+        "layout",
+        "dub",
+        "voice",
+        "fontSize",
+        "ttsVolume",
+        "ttsSpeed",
+        "videoSpeed",
+        "groupId",
+        "isCompound",
+    ):
+        sv, dv = src.get(k), dst.get(k)
+        if sv is None:
+            continue
+        if k in ("translation", "source"):
+            if not str(dv or "").strip() and str(sv).strip():
+                dst[k] = sv
+        elif dv is None:
+            dst[k] = sv
+    # compound children: merge theo id
+    sc = src.get("compoundChildren")
+    dc = dst.get("compoundChildren")
+    if isinstance(sc, list) and sc:
+        if not isinstance(dc, list) or not dc:
+            dst["compoundChildren"] = _deepcopy_json(sc)
+        else:
+            by_id = {str(c.get("id")): c for c in sc if isinstance(c, dict) and c.get("id")}
+            for c in dc:
+                if isinstance(c, dict) and c.get("id") and str(c["id"]) in by_id:
+                    _merge_segment_content(c, by_id[str(c["id"])])
+
+
+def _heal_segments_content(meta: dict) -> None:
+    """Sau remap: nếu segment mất translation/source, lấy lại từ bản trước remap / baseline."""
+    segs = meta.get("segments") or []
+    if not isinstance(segs, list):
+        return
+    # Ưu tiên snapshot pre-remap (gắn tạm), rồi baseline, rồi chính segs cũ
+    donors: list[dict] = []
+    pre = meta.pop("_preRemapSegments", None)
+    if isinstance(pre, list):
+        donors.extend(s for s in pre if isinstance(s, dict))
+    bl = meta.get("timelineBaseline") or {}
+    if isinstance(bl, dict):
+        bl_segs = bl.get("segments") or []
+        if isinstance(bl_segs, list):
+            donors.extend(s for s in bl_segs if isinstance(s, dict))
+    by_id: dict[str, dict] = {}
+    for s in donors:
+        sid = str(s.get("id") or "")
+        if sid and sid not in by_id:
+            by_id[sid] = s
+        # cũng index children
+        for ch in s.get("compoundChildren") or []:
+            if isinstance(ch, dict) and ch.get("id"):
+                cid = str(ch["id"])
+                if cid not in by_id:
+                    by_id[cid] = ch
+    for seg in segs:
+        if not isinstance(seg, dict):
+            continue
+        sid = str(seg.get("id") or "")
+        if sid and sid in by_id:
+            _merge_segment_content(seg, by_id[sid])
+        # heal children
+        for ch in seg.get("compoundChildren") or []:
+            if isinstance(ch, dict) and ch.get("id"):
+                cid = str(ch["id"])
+                if cid in by_id:
+                    _merge_segment_content(ch, by_id[cid])
+
+
 def remap_timeline_for_speed_change(meta: dict, old_speed: float, new_speed: float) -> None:
     """Đổi bake speed: timeline/caption/TTS/overlay scale đồng bộ từ baseline 1×.
 
     Không nhân chồng (0.8→1→2 luôn đúng như apply trực tiếp từ gốc).
     Compound children, coverStart/End, overlays đều scale.
     Không ghi đè videoSpeed từng câu (TTS fit).
+    Giữ translation/source/TTS/bbox — không để bake xóa text.
     """
     old_speed = clamp_playback_speed(old_speed)
     new_speed = clamp_playback_speed(new_speed)
     if abs(old_speed - new_speed) < 1e-9:
         return
+    # Giữ bản nội dung trước remap để heal nếu baseline cũ thiếu text
+    meta["_preRemapSegments"] = _deepcopy_json(meta.get("segments") or [])
     # Chụp lại baseline từ timeline hiện tại ở old_speed.
-    # ponytail: refresh current content so a stale bake snapshot cannot discard
-    # TTS, caption, or overlay edits made since the previous speed change.
     meta["timelineBaseline"] = _snapshot_timeline_1x(meta, old_speed)
     apply_timeline_from_baseline(meta, new_speed)
+    _heal_segments_content(meta)
+    # Đồng bộ text vào baseline 1× (lần bake sau không mất)
+    try:
+        bl = meta.get("timelineBaseline")
+        if isinstance(bl, dict) and isinstance(bl.get("segments"), list):
+            cur_by = {
+                str(s.get("id")): s
+                for s in (meta.get("segments") or [])
+                if isinstance(s, dict) and s.get("id")
+            }
+            for bs in bl["segments"]:
+                if isinstance(bs, dict) and bs.get("id") and str(bs["id"]) in cur_by:
+                    _merge_segment_content(bs, cur_by[str(bs["id"])])
+    except Exception:
+        pass
 
 def preview_1x_path(project_id: str, meta: dict) -> Path:
     """File preview/source 1× (chưa bake tốc độ)."""
@@ -933,23 +1033,45 @@ def encode_export_1080(
     dst: Path,
     project_id: str | None = None,
     target_height: int | None = 1080,
+    *,
+    crop: tuple[int, int, int, int] | None = None,
 ) -> Path:
-    """Encode H.264 cuối: cạnh chuẩn theo target; None giữ kích thước gốc."""
+    """Encode H.264 cuối: crop (tuỳ chọn) + scale trong **một** pass ffmpeg.
+
+    crop = (x, y, w, h) pixel nguồn — gộp với scale để khỏi encode 2 lần.
+    """
     w, h = video_size(src)
-    if target_height is None:
-        vf = None
-        already_target = True
-    elif h >= w:
-        vf = f"scale={target_height}:-2"
-        already_target = w == target_height
+    # Sau crop: kích thước frame đầu vào scale
+    if crop is not None:
+        _cx, _cy, cw, ch = crop
+        in_w, in_h = int(cw), int(ch)
     else:
-        vf = f"scale=-2:{target_height}"
-        already_target = h == target_height
-    video_args = (
-        ["-c:v", "copy"]
-        if already_target and video_codec(src) == "h264"
-        else (["-vf", vf, *h264_encoder_args()] if vf else h264_encoder_args())
-    )
+        in_w, in_h = w, h
+
+    vf_parts: list[str] = []
+    if crop is not None:
+        cx, cy, cw, ch = crop
+        vf_parts.append(f"crop={cw}:{ch}:{cx}:{cy}")
+
+    if target_height is None:
+        scale_vf = None
+        already_target = crop is None
+    elif in_h >= in_w:
+        scale_vf = f"scale={target_height}:-2"
+        already_target = crop is None and w == target_height
+    else:
+        scale_vf = f"scale=-2:{target_height}"
+        already_target = crop is None and h == target_height
+    if scale_vf:
+        vf_parts.append(scale_vf)
+
+    if already_target and crop is None and video_codec(src) == "h264":
+        video_args = ["-c:v", "copy"]
+    elif vf_parts:
+        video_args = ["-vf", ",".join(vf_parts), *h264_encoder_args()]
+    else:
+        video_args = h264_encoder_args()
+
     tmp = dst.with_suffix(".tmp_export.mp4")
     tmp.unlink(missing_ok=True)
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -998,7 +1120,7 @@ def resolve_export_crop(
     preset_id: str,
     custom: dict[str, float] | None = None,
 ) -> tuple[int, int, int, int] | None:
-    """Center-crop giống resolveCropRect — None = giữ nguyên khung."""
+    """Crop giống resolveCropRect FE — preset + pan (previewCrop x/y) hoặc custom."""
     if source_w <= 0 or source_h <= 0:
         return None
     key = (preset_id or "original").strip()
@@ -1019,12 +1141,23 @@ def resolve_export_crop(
         if source >= target:
             h = float(source_h)
             w = h * target
-            x = (source_w - w) / 2.0
-            y = 0.0
         else:
             w = float(source_w)
             h = w / target
-            x = 0.0
+        # Pan từ previewCrop (x,y normalized) — mặc định giữa
+        if custom is not None:
+            try:
+                nx = float(custom.get("x", (source_w - w) / 2.0 / source_w))
+                ny = float(custom.get("y", (source_h - h) / 2.0 / source_h))
+            except (TypeError, ValueError):
+                nx = (source_w - w) / 2.0 / max(1.0, float(source_w))
+                ny = (source_h - h) / 2.0 / max(1.0, float(source_h))
+            max_nx = max(0.0, 1.0 - w / source_w)
+            max_ny = max(0.0, 1.0 - h / source_h)
+            x = max(0.0, min(max_nx, nx)) * source_w
+            y = max(0.0, min(max_ny, ny)) * source_h
+        else:
+            x = (source_w - w) / 2.0
             y = (source_h - h) / 2.0
     xi = max(0, int(round(x)))
     yi = max(0, int(round(y)))

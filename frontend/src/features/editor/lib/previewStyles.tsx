@@ -164,6 +164,46 @@ export const ASPECT_PRESETS: AspectPreset[] = [
   { id: '1:1', label: '1:1', w: 1, h: 1, orient: 'square' },
 ]
 
+/** Cửa sổ crop chuẩn hóa (0–1) theo tỷ lệ — full chiều hẹp, cắt chiều rộng. */
+export function aspectWindowNorm(
+  sourceW: number,
+  sourceH: number,
+  presetId: string,
+): { w: number; h: number } | null {
+  if (sourceW <= 0 || sourceH <= 0) return null
+  if (!presetId || presetId === 'original' || presetId === 'custom') return null
+  const preset = ASPECT_PRESETS.find((p) => p.id === presetId && 'w' in p) as
+    | Extract<AspectPreset, { w: number }>
+    | undefined
+  if (!preset) return null
+  const target = preset.w / preset.h
+  const source = sourceW / sourceH
+  if (source >= target) {
+    // source rộng hơn → full height, crop ngang
+    const w = (sourceH * target) / sourceW
+    return { w: Math.min(1, w), h: 1 }
+  }
+  // source cao hơn → full width, crop dọc
+  const h = sourceW / target / sourceH
+  return { w: 1, h: Math.min(1, h) }
+}
+
+/** Crop mặc định giữa khung (normalized). */
+export function centeredAspectCrop(
+  sourceW: number,
+  sourceH: number,
+  presetId: string,
+): { x: number; y: number; w: number; h: number } | null {
+  const win = aspectWindowNorm(sourceW, sourceH, presetId)
+  if (!win) return null
+  return {
+    x: Math.max(0, (1 - win.w) / 2),
+    y: Math.max(0, (1 - win.h) / 2),
+    w: win.w,
+    h: win.h,
+  }
+}
+
 export function resolveCropRect(
   sourceW: number,
   sourceH: number,
@@ -171,6 +211,7 @@ export function resolveCropRect(
   custom?: { x: number; y: number; w: number; h: number } | null,
 ): CropRect {
   if (sourceW <= 0 || sourceH <= 0) return { x: 0, y: 0, w: 1, h: 1 }
+  // Cắt tự do: dùng đủ x,y,w,h
   if (presetId === 'custom' && custom) {
     const x = Math.max(0, Math.min(0.95, custom.x))
     const y = Math.max(0, Math.min(0.95, custom.y))
@@ -181,20 +222,24 @@ export function resolveCropRect(
   if (!presetId || presetId === 'original' || presetId === 'custom') {
     return { x: 0, y: 0, w: sourceW, h: sourceH }
   }
-  const preset = ASPECT_PRESETS.find((p) => p.id === presetId && 'w' in p) as
-    | Extract<AspectPreset, { w: number }>
-    | undefined
-  if (!preset) return { x: 0, y: 0, w: sourceW, h: sourceH }
-  const target = preset.w / preset.h
-  const source = sourceW / sourceH
-  if (source >= target) {
-    const h = sourceH
-    const w = h * target
-    return { x: (sourceW - w) / 2, y: 0, w, h }
+  const win = aspectWindowNorm(sourceW, sourceH, presetId)
+  if (!win) return { x: 0, y: 0, w: sourceW, h: sourceH }
+  // Preset cố định tỷ lệ: w/h khóa theo aspect; x/y từ previewCrop (kéo pan) hoặc giữa
+  let nx: number
+  let ny: number
+  if (custom && Number.isFinite(custom.x) && Number.isFinite(custom.y)) {
+    nx = Math.max(0, Math.min(1 - win.w, custom.x))
+    ny = Math.max(0, Math.min(1 - win.h, custom.y))
+  } else {
+    nx = (1 - win.w) / 2
+    ny = (1 - win.h) / 2
   }
-  const w = sourceW
-  const h = w / target
-  return { x: 0, y: (sourceH - h) / 2, w, h }
+  return {
+    x: nx * sourceW,
+    y: ny * sourceH,
+    w: win.w * sourceW,
+    h: win.h * sourceH,
+  }
 }
 
 export function sourceToDisplayStyle(

@@ -1,6 +1,8 @@
 """Job cancel flags + killable subprocess runner."""
 from __future__ import annotations
 
+import os
+import signal
 import subprocess
 import sys
 import threading
@@ -10,26 +12,57 @@ from typing import Any
 # cancel thật: Event + kill subprocess đang chạy
 _cancel_flags: dict[str, threading.Event] = {}
 _job_procs: dict[str, list[subprocess.Popen]] = {}
+_job_pids: dict[str, set[int]] = {}  # bare PIDs (frozen TTS worker, etc.)
 _job_gen: dict[str, int] = {}
 _lock = threading.Lock()
+# thread-local: project_id của worker TTS/export — subprocess tự gắn
+_tls = threading.local()
 
 
 class Cancelled(Exception):
     """Job bị user huỷ."""
 
 
-def kill_process_tree(proc: subprocess.Popen) -> None:
-    """Dừng cả process con; p.kill() một mình để sót ffmpeg/Demucs trên Windows."""
-    if proc.poll() is not None:
+def set_job_context(project_id: str | None) -> None:
+    """Gắn project_id cho thread hiện tại (TTS worker) → register_process tự biết."""
+    _tls.project_id = project_id
+
+
+def current_job_id() -> str | None:
+    pid = getattr(_tls, "project_id", None)
+    return pid if isinstance(pid, str) and pid else None
+
+
+def kill_pid_tree(pid: int) -> None:
+    """Kill process + children by OS pid."""
+    if pid <= 0:
         return
     if sys.platform == "win32":
         subprocess.run(
-            ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             creationflags=int(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)),
             check=False,
         )
+        return
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+
+
+def kill_process_tree(proc: subprocess.Popen) -> None:
+    """Dừng cả process con; p.kill() một mình để sót ffmpeg/Demucs trên Windows."""
+    if proc.poll() is not None:
+        return
+    try:
+        kill_pid_tree(int(proc.pid))
+    except Exception:
+        pass
     try:
         proc.kill()
     except OSError:
@@ -37,63 +70,107 @@ def kill_process_tree(proc: subprocess.Popen) -> None:
 
 
 def register_process(project_id: str | None, proc: subprocess.Popen) -> None:
-    if project_id:
-        with _lock:
-            _job_procs.setdefault(project_id, []).append(proc)
+    pid = project_id or current_job_id()
+    if not pid:
+        return
+    with _lock:
+        _job_procs.setdefault(pid, []).append(proc)
+        try:
+            _job_pids.setdefault(pid, set()).add(int(proc.pid))
+        except Exception:
+            pass
+    # đã cancel trước khi register → kill ngay
+    if is_cancelled(pid):
+        kill_process_tree(proc)
+
+
+def register_pid(project_id: str | None, pid: int) -> None:
+    jid = project_id or current_job_id()
+    if not jid or pid <= 0:
+        return
+    with _lock:
+        _job_pids.setdefault(jid, set()).add(int(pid))
+    if is_cancelled(jid):
+        kill_pid_tree(int(pid))
 
 
 def unregister_process(project_id: str | None, proc: subprocess.Popen) -> None:
-    if project_id:
-        with _lock:
-            current = _job_procs.get(project_id)
-            if current is not None:
-                _job_procs[project_id] = [item for item in current if item is not proc]
+    pid = project_id or current_job_id()
+    if not pid:
+        return
+    with _lock:
+        current = _job_procs.get(pid)
+        if current is not None:
+            _job_procs[pid] = [item for item in current if item is not proc]
+        try:
+            pset = _job_pids.get(pid)
+            if pset is not None:
+                pset.discard(int(proc.pid))
+        except Exception:
+            pass
+
+
+def unregister_pid(project_id: str | None, os_pid: int) -> None:
+    jid = project_id or current_job_id()
+    if not jid:
+        return
+    with _lock:
+        pset = _job_pids.get(jid)
+        if pset is not None:
+            pset.discard(int(os_pid))
 
 
 def begin_job(project_id: str) -> int:
-    """Bắt đầu job mới. Giữ cancel nếu user đã bấm Huỷ lúc còn Queued."""
+    """Bắt đầu job mới.
+
+    Kế thừa cancel chỉ khi user Huỷ lúc Queued (arm_job đã tạo event,
+    rồi request_cancel set). arm_job luôn reset event sạch trước mỗi job mới
+    nên cancel của lần trước không dính.
+    """
     with _lock:
         gen = int(_job_gen.get(project_id, 0)) + 1
         _job_gen[project_id] = gen
         prev = _cancel_flags.get(project_id)
-        already = prev is not None and prev.is_set()
+        inherit_cancel = bool(prev is not None and prev.is_set())
         ev = threading.Event()
-        if already:
+        if inherit_cancel:
             ev.set()
         _cancel_flags[project_id] = ev
         old = list(_job_procs.get(project_id, []))
+        old_pids = list(_job_pids.get(project_id, set()))
         _job_procs[project_id] = []
+        _job_pids[project_id] = set()
     for p in old:
         kill_process_tree(p)
+    for op in old_pids:
+        kill_pid_tree(op)
     return gen
 
 
 def arm_job(project_id: str) -> int:
-    """Gắn flag cancel sớm (Queued) — Huỷ trước begin_job vẫn ăn."""
+    """Gắn flag cancel sớm (Queued) — Huỷ trước begin_job vẫn ăn.
+
+    Luôn tạo event sạch (bỏ cancelled của job trước).
+    """
     with _lock:
-        if project_id not in _cancel_flags or _cancel_flags[project_id].is_set():
-            # job mới hoặc vừa huỷ xong → event sạch
-            if project_id not in _job_gen:
-                _job_gen[project_id] = 0
-            if project_id not in _cancel_flags or (
-                _cancel_flags.get(project_id) and _cancel_flags[project_id].is_set()
-                and project_id not in _job_procs
-            ):
-                # nếu đang cancelled và không có proc → chuẩn bị job mới
-                if project_id not in _cancel_flags or _cancel_flags[project_id].is_set():
-                    # only reset if not mid-flight without gen bump
-                    pass
-        if project_id not in _cancel_flags:
-            _cancel_flags[project_id] = threading.Event()
-            _job_gen.setdefault(project_id, 0)
-        elif _cancel_flags[project_id].is_set():
-            # job cũ đã huỷ — arm job mới
-            _cancel_flags[project_id] = threading.Event()
+        _job_gen.setdefault(project_id, 0)
+        _cancel_flags[project_id] = threading.Event()
         return int(_job_gen.get(project_id, 0))
 
 
+def kill_job_processes(project_id: str) -> None:
+    """Kill mọi subprocess đã register cho job (không đụng cancel flag)."""
+    with _lock:
+        procs = list(_job_procs.get(project_id, []) or [])
+        pids = list(_job_pids.get(project_id, set()) or set())
+    for p in procs:
+        kill_process_tree(p)
+    for op in pids:
+        kill_pid_tree(op)
+
+
 def request_cancel(project_id: str) -> bool:
-    """Đánh dấu huỷ. Luôn tạo flag nếu chưa có (Queued / trước begin_job)."""
+    """Đánh dấu huỷ + kill ngay mọi subprocess (ffmpeg/TTS/OCR/Demucs)."""
     with _lock:
         ev = _cancel_flags.get(project_id)
         if not ev:
@@ -101,19 +178,43 @@ def request_cancel(project_id: str) -> bool:
             _cancel_flags[project_id] = ev
             _job_gen.setdefault(project_id, 0)
         ev.set()
-        procs = list(_job_procs.get(project_id, []))
-    for p in procs:
-        kill_process_tree(p)
+    kill_job_processes(project_id)
+    # TTS Studio (job_id riêng) — chỉ set flag, không đệ quy request_cancel
+    try:
+        from pipeline.tts.studio import mark_cancel as _studio_mark
+
+        _studio_mark(project_id)
+    except Exception:
+        try:
+            from pipeline.tts import studio as _studio
+
+            with _studio._jobs_lock:
+                if project_id in _studio._running or project_id in _studio._cancel_flags:
+                    _studio._cancel_flags[project_id] = True
+        except Exception:
+            pass
+    # Frozen VieNeu: tắt worker pool (giải phóng VRAM, dừng infer)
+    try:
+        from pipeline.tts.engines.vieneu_frozen import shutdown_all_workers
+
+        shutdown_all_workers()
+    except Exception:
+        pass
     return True
 
 
 def clear_job(project_id: str, gen: int | None = None) -> None:
-    """Xóa flag. gen → chỉ clear đúng generation."""
+    """Xóa flag. gen → chỉ clear đúng generation. Kill sót process trước khi xóa."""
     with _lock:
         if gen is not None and _job_gen.get(project_id) != gen:
             return
+        procs = list(_job_procs.pop(project_id, []) or [])
+        pids = list(_job_pids.pop(project_id, set()) or set())
         _cancel_flags.pop(project_id, None)
-        _job_procs.pop(project_id, None)
+    for p in procs:
+        kill_process_tree(p)
+    for op in pids:
+        kill_pid_tree(op)
 
 
 def check_cancel(project_id: str | None, gen: int | None = None) -> None:
@@ -180,7 +281,8 @@ def short_cmd_error(exc: BaseException, *, limit: int = 280) -> str:
 
 def run_cmd(project_id: str | None, cmd: list[str], **kwargs: Any) -> None:
     """subprocess có thể kill khi huỷ."""
-    check_cancel(project_id)
+    jid = project_id or current_job_id()
+    check_cancel(jid)
     kw = dict(kwargs)
     kw.setdefault("stdout", subprocess.DEVNULL)
     kw.setdefault("stderr", subprocess.DEVNULL)
@@ -192,13 +294,17 @@ def run_cmd(project_id: str | None, cmd: list[str], **kwargs: Any) -> None:
     except Exception:
         pass
     p = subprocess.Popen(cmd, **kw)
-    register_process(project_id, p)
+    register_process(jid, p)
     try:
         while p.poll() is None:
-            check_cancel(project_id)
-            time.sleep(0.12)
+            try:
+                check_cancel(jid)
+            except Cancelled:
+                kill_process_tree(p)
+                raise
+            time.sleep(0.08)
         if p.returncode not in (0, None):
-            check_cancel(project_id)
+            check_cancel(jid)
             raise subprocess.CalledProcessError(p.returncode or 1, cmd)
     finally:
-        unregister_process(project_id, p)
+        unregister_process(jid, p)

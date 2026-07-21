@@ -10,6 +10,7 @@ import httpx
 
 from pipeline.core.jobs import check_cancel
 from pipeline.core.project import set_status
+from pipeline.core.resources import progress_msg
 
 
 from .text import *  # noqa: F403
@@ -98,7 +99,7 @@ def translate_ollama(
                     project_id,
                     step="translate",
                     progress=55,
-                    message=f"Dịch Ollama {model} · batch {bs} · {w} luồng…",
+                    message=progress_msg("Dịch Ollama", workers=w, extra=f"{model} · batch {bs}"),
                     running=True,
                 )
 
@@ -226,7 +227,7 @@ def translate_ollama(
                             project_id,
                             step="translate",
                             progress=pct,
-                            message=f"Dịch {model} {cur}/{total}",
+                            message=progress_msg(f"Dịch {model}", cur, total, workers=w),
                             running=True,
                         )
     except (httpx.HTTPError, RuntimeError) as e:

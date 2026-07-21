@@ -9,4 +9,5 @@ export * from './dubMath'
 export * from './TimelineFilmstrip'
 export * from './coverLayout'
 export * from './editorUiConsts'
+export * from './editorUiParts'
 

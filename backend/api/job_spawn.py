@@ -6,29 +6,47 @@ import traceback
 
 
 def spawn(fn, *args) -> None:
-    def wrap():
+    """Chạy job trên thread daemon — lỗi không lan ra main (kéo sập desktop)."""
+
+    def wrap() -> None:
+        job = getattr(fn, "__name__", "job")
         try:
             fn(*args)
-        except Exception as e:
-            # Pipeline thường tự set_status; lỗi sớm (ImportError/NameError…) thì không —
-            # không nuốt im → UI kẹt «Queued…».
-            traceback.print_exc()
+        except BaseException as e:
+            # Không re-raise. Native crash (cv2/CUDA) vẫn có thể kill process.
+            try:
+                from pipeline.core.jobs import Cancelled
+
+                if isinstance(e, Cancelled):
+                    return
+            except Exception:
+                if type(e).__name__ == "Cancelled":
+                    return
+            try:
+                from pipeline.core.app_log import append_exception
+
+                append_exception(f"[job:{job}] FAILED", e)
+            except Exception:
+                traceback.print_exc()
             project_id = args[0] if args else None
             if isinstance(project_id, str) and project_id:
                 try:
-                    from pipeline.core.jobs import Cancelled
                     from pipeline import set_status
 
-                    if isinstance(e, Cancelled):
-                        return
+                    msg = str(e).strip()[:280] or type(e).__name__
                     set_status(
                         project_id,
                         progress=0,
-                        message="Lỗi",
+                        message=f"Lỗi: {msg}",
                         running=False,
-                        error=str(e).strip()[:280] or type(e).__name__,
+                        error=msg,
                     )
-                except Exception:
-                    pass
+                except Exception as st_e:
+                    try:
+                        from pipeline.core.app_log import append_exception
 
-    threading.Thread(target=wrap, daemon=True).start()
+                        append_exception("[job] set_status failed", st_e)
+                    except Exception:
+                        traceback.print_exc()
+
+    threading.Thread(target=wrap, daemon=True, name=f"job-{getattr(fn, '__name__', 'fn')}").start()

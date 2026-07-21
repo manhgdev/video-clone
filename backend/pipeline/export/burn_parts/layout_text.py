@@ -76,24 +76,42 @@ def _layout_caption_over(
     draw = ImageDraw.Draw(probe)
 
     trimmed = (text or "").strip()
-    one_w = draw.textbbox((0, 0), trimmed, font=font)[2] if trimmed else 0
-    max_inner = max(24, frame_w - pad_x * 4)
-    if not trimmed:
-        lines = [""]
-    elif one_w <= int(max_inner * 1.05):
-        lines = [trimmed]
-    else:
-        lines = _wrap_text(draw, trimmed, font, max_inner)
-        if len(lines) > 3:
-            lines = _merge_to_n_lines(lines, 3)
-
-    line_boxes = [draw.textbbox((0, 0), ln, font=font) for ln in lines]
-    line_hs = [max(1, b[3] - b[1]) for b in line_boxes]
+    # Full ngang frame; 1 dòng (co font) rồi mới 2 dòng — khớp editor
+    max_inner = max(24, frame_w - max(8, pad_x * 2))
+    size = font_size
+    lines = [trimmed] if trimmed else [""]
+    line_hs: list[int] = [font_size]
     gap_line = max(2, font_size // 8)
-    text_w = max((b[2] - b[0]) for b in line_boxes) if line_boxes else one_w
-    text_h = sum(line_hs) + gap_line * max(0, len(lines) - 1)
+    text_w = 0
+    text_h = font_size
+    text_block_h = font_size
+    while size >= 12:
+        try:
+            font = ImageFont.truetype(font_path, size)
+        except OSError:
+            font = ImageFont.load_default()
+        one_w = draw.textbbox((0, 0), trimmed, font=font)[2] if trimmed else 0
+        if one_w <= int(max_inner * 1.05):
+            lines = [trimmed] if trimmed else [""]
+        else:
+            # Co font trước khi wrap 2 dòng
+            if size > 12 and one_w > max_inner:
+                size -= 1
+                continue
+            lines = _wrap_text(draw, trimmed, font, max_inner)
+            if len(lines) > 2:
+                lines = _merge_to_n_lines(lines, 2)
+        line_boxes = [draw.textbbox((0, 0), ln, font=font) for ln in lines]
+        line_hs = [max(1, b[3] - b[1]) for b in line_boxes]
+        gap_line = max(2, size // 8)
+        text_w = max((b[2] - b[0]) for b in line_boxes) if line_boxes else one_w
+        text_h = sum(line_hs) + gap_line * max(0, len(lines) - 1)
+        text_block_h = int(math.ceil(len(lines) * size * 1.12 + 4))
+        if text_w <= max_inner * 1.02 or size <= 12:
+            break
+        size -= 1
+    font_size = size
     line_h = (max(line_hs) if line_hs else font_size) + gap_line
-    text_block_h = int(math.ceil(len(lines) * font_size * 1.12 + 4))
 
     src_w = 0
     src = (source_text or "").strip()
@@ -105,7 +123,6 @@ def _layout_caption_over(
             cjk = sum(1 for c in src if "\u4e00" <= c <= "\u9fff")
             cjk_floor = int(math.ceil(cjk * src_fs * 1.15)) if cjk else 0
             outline = int(math.ceil(src_fs * 0.5))
-            # khớp preview measureSourceInkWidth — đủ outline hardsub
             src_w = max(int(math.ceil(raw * 1.2)), cjk_floor) + outline
         except OSError:
             pass
@@ -114,7 +131,7 @@ def _layout_caption_over(
     content_w = max(orig_w, text_w)
     cap_pad_x = 2
     cap_w = int(text_w + cap_pad_x * 2)
-    # Cover = che full chữ cũ (content từ source/OCR), rồi mới fit nếu VI dài hơn
+    # Cover full ngang được (frame_w)
     auto_w = min(frame_w, max(_fit_cover_width(content_w, cap_w, frame_w), cap_w))
     cover_box = _fit_hardsub_box(
         (ox0, oy0, ox1, oy1), auto_w, font_size, frame_w, frame_h, src
@@ -123,13 +140,11 @@ def _layout_caption_over(
     cover_w = cover_x1 - cover_x0
     cover_h = cover_y1 - cover_y0
 
-    # Caption frame trong cover (có thể hẹp hơn cover) — không co mask theo VI
     cap_w = int(text_w + cap_pad_x * 2)
     if len(lines) == 1:
-        edge = max(4, int(round(cover_w * 0.03)))
+        edge = max(2, int(round(cover_w * 0.02)))
         cap_w = min(cover_w, max(cap_w, cover_w - edge * 2))
     cap_x0 = max(cover_x0, min(cover_x1 - cap_w, int((cover_x0 + cover_x1) / 2 - cap_w / 2)))
-    # khớp preview captionCenterInCover — đúng giữa cover
     cap_y0 = cover_y0 + max(0, (cover_h - text_block_h) // 2)
     cap_box = (cap_x0, cap_y0, cap_x0 + cap_w, cap_y0 + text_block_h)
 

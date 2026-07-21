@@ -73,6 +73,72 @@ from pipeline.tts import engines_status
 
 router = APIRouter()
 
+_install_state: dict[str, Any] = {
+    "running": False,
+    "kind": "",
+    "message": "",
+    "error": "",
+    "needsRestart": False,
+    "result": None,
+}
+_install_lock = threading.Lock()
+
+
+def _setup_gate_path() -> Path:
+    home = (os.environ.get("VIDEO_CLONE_HOME") or "").strip()
+    if home:
+        return Path(home) / "setup_ok"
+    return Path(DATA) / "setup_ok"
+
+
+def _setup_gate_passed() -> bool:
+    return _setup_gate_path().is_file()
+
+
+def _mark_setup_gate() -> None:
+    path = _setup_gate_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("1\n", encoding="utf-8")
+
+
+def _start_install_job(kind: str, fn, *, needs_restart: bool = True) -> dict[str, Any]:
+    with _install_lock:
+        if _install_state["running"]:
+            return {
+                "ok": True,
+                "running": True,
+                "kind": _install_state["kind"],
+                "message": f"Đang cài {_install_state['kind']}…",
+            }
+        _install_state.update(
+            running=True,
+            kind=kind,
+            message="Đang cài…",
+            error="",
+            needsRestart=False,
+            result=None,
+        )
+
+    def work() -> None:
+        try:
+            result = fn()
+            changed = "Đã cài" in str(result.get("message", ""))
+            if changed and needs_restart and os.environ.get("VIDEO_CLONE_DESKTOP") == "1":
+                result = {**result, "needsRestart": True}
+            with _install_lock:
+                _install_state["result"] = result
+                _install_state["message"] = str(result.get("message") or "")
+                _install_state["needsRestart"] = bool(result.get("needsRestart"))
+        except Exception as e:
+            with _install_lock:
+                _install_state["error"] = str(e)
+        finally:
+            with _install_lock:
+                _install_state["running"] = False
+
+    threading.Thread(target=work, name=f"install-{kind}", daemon=True).start()
+    return {"ok": True, "running": True, "kind": kind, "message": f"Đang cài {kind}…"}
+
 # Aliases matching original routes_all names
 _spawn = spawn
 _serve_video_file = serve_video_file
@@ -133,62 +199,118 @@ def api_save_config(body: AppConfigIn):
     return public_app_config()
 
 
-@router.get("/api/health")
-def health():
-    return {"ok": True, "data": str(DATA)}
-
-
 @router.get("/api/system/checks")
-def api_system_checks(refresh: bool = False):
-    """Dependency checklist cho tab Thiết lập / first-run."""
+def api_system_checks(refresh: bool = False, deep: bool = False):
+    """Dependency checklist — luôn fast. deep=1 bị bỏ qua (tránh đơ UI/API)."""
     from pipeline.core.system_check import system_checks
 
     try:
-        return system_checks(refresh=refresh)
+        # ponytail: deep probe (torch/demucs import) treo request hàng phút → đơ webview.
+        return system_checks(refresh=refresh, fast=True)
     except Exception as e:
         # Không để exception Python kéo sập UI; native crash vẫn chỉ tránh bằng check nhẹ.
         raise HTTPException(500, f"system checks failed: {e}") from e
 
 
+@router.get("/api/system/install/status")
+def api_install_status():
+    with _install_lock:
+        st = dict(_install_state)
+    out: dict[str, Any] = {
+        "running": bool(st.get("running")),
+        "kind": st.get("kind") or "",
+    }
+    if st.get("error"):
+        out["error"] = st["error"]
+        out["ok"] = False
+        return out
+    if st.get("result") and not st.get("running"):
+        result = st["result"] if isinstance(st["result"], dict) else {}
+        out.update(result)
+        out["running"] = False
+        if st.get("needsRestart"):
+            out["needsRestart"] = True
+        return out
+    if st.get("message"):
+        out["message"] = st["message"]
+    return out
+
+
 @router.post("/api/system/install/ai_runtime")
 def api_install_ai_runtime():
-    from pipeline.core.system_check import install_ai_runtime
+    from pipeline.core.system_check import install_ai_runtime, _runtime_venv_fast
 
-    try:
-        result = install_ai_runtime()
-        if os.environ.get("VIDEO_CLONE_DESKTOP") == "1":
-            subprocess.Popen([sys.executable, "--restart-after", str(os.getpid())])
-            threading.Timer(1.0, lambda: os._exit(0)).start()
-        return result
-    except Exception as e:
-        raise HTTPException(500, str(e)) from e
+    if getattr(sys, "frozen", False):
+        ok, detail = _runtime_venv_fast()
+        if ok:
+            with _install_lock:
+                _install_state.update(
+                    running=False,
+                    kind="",
+                    error="",
+                    message="Gói AI đã sẵn sàng",
+                    needsRestart=False,
+                    result={"ok": True, "message": "Gói AI đã sẵn sàng", "detail": detail},
+                )
+            return {
+                "ok": True,
+                "running": False,
+                "message": "Gói AI đã sẵn sàng",
+                "detail": detail,
+            }
+    return _start_install_job("ai_runtime", install_ai_runtime)
 
 
 @router.post("/api/system/install/ocr_cuda")
 def api_install_ocr_cuda():
-    """Install ONNX Runtime GPU into the backend's Python environment."""
     from pipeline.core.system_check import install_ocr_cuda
 
-    try:
-        result = install_ocr_cuda()
-        desktop = os.environ.get("VIDEO_CLONE_DESKTOP") == "1"
-        if desktop or os.environ.get("VIDEO_CLONE_SUPERVISED") == "1":
-            if desktop:
-                subprocess.Popen([sys.executable, "--restart-after", str(os.getpid())])
-            threading.Timer(1.0, lambda: os._exit(0)).start()
-            result["message"] = "Đã cài GPU tăng tốc — đang tự khởi động lại"
-        return result
-    except Exception as e:
-        raise HTTPException(500, str(e)) from e
+    return _start_install_job("ocr_cuda", install_ocr_cuda)
 
 
 @router.post("/api/system/install/demucs_cuda")
 def api_install_demucs_cuda():
-    """Cài Demucs + PyTorch CUDA (backend/.venv-demucs) — tách lời nhanh."""
     from pipeline.core.system_check import install_demucs_cuda
 
+    return _start_install_job("demucs_cuda", install_demucs_cuda, needs_restart=False)
+
+
+@router.get("/api/system/setup-gate")
+def api_get_setup_gate():
+    """Cổng first-run — lưu file dưới VIDEO_CLONE_HOME (không phụ thuộc port/localStorage)."""
+    return {"passed": _setup_gate_passed()}
+
+
+@router.post("/api/system/setup-gate")
+def api_pass_setup_gate():
+    _mark_setup_gate()
+    return {"passed": True}
+
+
+@router.post("/api/system/restart")
+def api_system_restart():
+    """Khởi động lại bản desktop — gọi sau khi cài xong mọi gói cần reload."""
+    if os.environ.get("VIDEO_CLONE_DESKTOP") != "1":
+        raise HTTPException(400, "Chỉ bản desktop hỗ trợ khởi động lại từ app")
+    subprocess.Popen([sys.executable, "--restart-after", str(os.getpid())])
+    threading.Timer(0.8, lambda: os._exit(0)).start()
+    return {"ok": True, "message": "Đang khởi động lại…"}
+
+
+@router.get("/api/system/logs")
+def api_system_logs(tail: int = 800):
+    """Log app (job lỗi, crash hook) — tab Cấu hình → Log."""
+    from pipeline.core.app_log import read_log
+
     try:
-        return install_demucs_cuda()
+        return read_log(tail=tail)
     except Exception as e:
-        raise HTTPException(500, str(e)) from e
+        raise HTTPException(500, f"log read failed: {e}") from e
+
+
+@router.delete("/api/system/logs")
+def api_system_logs_clear():
+    from pipeline.core.app_log import clear_log
+
+    return clear_log()
 

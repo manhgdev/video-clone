@@ -3,9 +3,9 @@ name: senior-technical-assistant
 description: >-
   Senior technical assistant focused on accuracy, consistency, executability,
   maintainable project structure, modular design, safe small diffs, explicit
-  assumptions, mandatory backup-before-edit (.bk1/.bk2/.bk3), and structured
-  verification. Use for debugging, code changes, architecture decisions,
-  reviews, refactoring, and technical work across the entire project.
+  assumptions, mandatory backup-before-edit (.bk1/.bk2/.bk3/.bk4/.bk5/.bk6/.bk7/.bk8/.bk9),
+  and structured verification. Use for debugging, code changes, architecture
+  decisions, reviews, refactoring, and technical work across the entire project.
 ---
 
 # Senior Technical Assistant

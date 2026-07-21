@@ -12,7 +12,53 @@ import { fetchJson } from '@/shared/api/fetchJson'
 
 const base = '/api'
 
+async function pollInstall(url: string): Promise<{
+  ok: boolean
+  message: string
+  detail: string
+  needsRestart?: boolean
+}> {
+  const kick = await fetchJson<{
+    ok: boolean
+    running?: boolean
+    message?: string
+    detail?: string
+    needsRestart?: boolean
+  }>(url, { method: 'POST' }, 60_000)
+  if (kick.running === false) {
+    return {
+      ok: kick.ok ?? true,
+      message: kick.message || 'Xong',
+      detail: kick.detail || '',
+      needsRestart: kick.needsRestart,
+    }
+  }
+  for (;;) {
+    const st = await fetchJson<{
+      running: boolean
+      ok?: boolean
+      message?: string
+      detail?: string
+      error?: string
+      needsRestart?: boolean
+    }>(`${base}/system/install/status`, undefined, 30_000)
+    if (st.error) throw new Error(st.error)
+    if (!st.running) {
+      return {
+        ok: st.ok ?? true,
+        message: st.message || 'Xong',
+        detail: st.detail || '',
+        needsRestart: st.needsRestart,
+      }
+    }
+    await new Promise((r) => window.setTimeout(r, 2000))
+  }
+}
+
 export const api = {
+  health: () =>
+    fetchJson<{ ok: boolean; app?: string }>(`${base}/health`, undefined, 3_000),
+
   renders: () => fetchJson<{ items: RenderedVideo[]; canReveal: boolean }>(`${base}/renders`, undefined, 30_000),
 
   revealRender: (renderId: string) =>
@@ -30,32 +76,56 @@ export const api = {
 
   hardware: () => fetchJson<HardwareInfo>(`${base}/hardware`, undefined, 8000),
 
-  systemChecks: (refresh = false) =>
+  systemChecks: (refresh = false, _deep = false) =>
     fetchJson<SystemChecks>(
       `${base}/system/checks${refresh ? '?refresh=1' : ''}`,
       undefined,
-      refresh ? 20_000 : 8_000,
+      15_000,
     ),
 
-  installAiRuntime: () =>
-    fetchJson<{ ok: boolean; message: string; detail: string }>(
-      `${base}/system/install/ai_runtime`,
+  getSetupGate: () =>
+    fetchJson<{ passed: boolean }>(`${base}/system/setup-gate`, undefined, 5_000),
+
+  passSetupGate: () =>
+    fetchJson<{ passed: boolean }>(`${base}/system/setup-gate`, { method: 'POST' }, 5_000),
+
+  installStatus: () =>
+    fetchJson<{
+      running: boolean
+      kind?: string
+      ok?: boolean
+      message?: string
+      detail?: string
+      error?: string
+      needsRestart?: boolean
+    }>(`${base}/system/install/status`, undefined, 30_000),
+
+  installAiRuntime: () => pollInstall(`${base}/system/install/ai_runtime`),
+
+  installOcrCuda: () => pollInstall(`${base}/system/install/ocr_cuda`),
+
+  installDemucsCuda: () => pollInstall(`${base}/system/install/demucs_cuda`),
+
+  restartApp: () =>
+    fetchJson<{ ok: boolean; message: string }>(
+      `${base}/system/restart`,
       { method: 'POST' },
-      35 * 60_000,
+      15_000,
     ),
 
-  installOcrCuda: () =>
-    fetchJson<{ ok: boolean; message: string; detail: string }>(
-      `${base}/system/install/ocr_cuda`,
-      { method: 'POST' },
-      15 * 60_000,
+  /** Log app (job lỗi, crash) — tab Cấu hình → Log */
+  getAppLogs: (tail = 800) =>
+    fetchJson<{ path: string; text: string; lines: number; desktop?: boolean }>(
+      `${base}/system/logs?tail=${Math.max(50, Math.min(5000, tail))}`,
+      undefined,
+      15_000,
     ),
 
-  installDemucsCuda: () =>
-    fetchJson<{ ok: boolean; message: string; detail: string }>(
-      `${base}/system/install/demucs_cuda`,
-      { method: 'POST' },
-      40 * 60_000,
+  clearAppLogs: () =>
+    fetchJson<{ ok: boolean; path?: string; error?: string }>(
+      `${base}/system/logs`,
+      { method: 'DELETE' },
+      10_000,
     ),
 
   getConfig: () => fetchJson<AppConfig>(`${base}/config`, undefined, 8000),

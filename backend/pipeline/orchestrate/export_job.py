@@ -13,13 +13,11 @@ from pipeline.export.burn import cover_and_burn
 from pipeline.core.config import PUBLIC_DATA, export_display_path
 from pipeline.core.jobs import Cancelled, begin_job, check_cancel, clear_job, short_cmd_error
 from pipeline.core.media import (
-    crop_export_aspect,
     encode_export_1080,
-
     ensure_preview_clip,
     extract_audio,
     ffprobe_duration,
-    retime_video_segments,
+    resolve_export_crop,
     video_size,
 )
 from pipeline.export.mux import mux_dub, mux_original_audio, separate_no_vocals
@@ -40,7 +38,7 @@ from pipeline.core.project import (
     trans_cache_key,
     video_fingerprint,
 )
-from pipeline.core.resources import adaptive_workers
+from pipeline.core.resources import adaptive_workers, progress_msg
 from pipeline.export.compound import expand_compound_segments
 from pipeline.export.source_video import export_source_video
 from pipeline.ocr.locate import attach_speech_hardsub_boxes
@@ -191,16 +189,6 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
         )
     settings = meta.get("settings") or {}
     match_mode = str(settings.get("matchDuration") or "preferVideo")
-    baked_prefer = bool(meta.get("bakedPreferVideo"))
-    # preferVideo đã bake vào file → không setpts thêm lúc mux
-    # stretch: khớp TTS theo slot — không chậm video
-    prefer_global_slow = (
-        match_mode in ("preferVideo", "none", "natural") and not baked_prefer
-    )
-    manual_video_speed = any(
-        abs(float(segment.get("videoSpeed") or 1) - 1.0) > 0.001
-        for segment in segments
-    )
     out = out_final(project_id)
 
     # cover / burn độc lập; "Không dịch" → không chèn caption
@@ -210,31 +198,10 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
 
     try:
         hint = f"preview {preview_sec}s — " if preview_sec > 0 else ""
-        # TTS dài hơn slot → videoSpeed < 1: kéo dài span câu + đẩy timeline sau
-        # (preferVideo bake 0.80× vẫn retime thêm từng câu khi cần)
-        if manual_video_speed and match_mode != "stretch":
-            set_status(
-                project_id,
-                step="export",
-                progress=10,
-                message=f"{hint}Giãn timeline khớp lồng tiếng…",
-                running=True,
-            )
-            video, segments = retime_video_segments(
-                video, segments, root / "cache", project_id
-            )
-            # Retime hỏng (moov missing…) → bỏ cache, dùng nguồn gốc
-            if ffprobe_duration(video) <= 0:
-                bad = Path(video)
-                if bad.is_file() and "retimed_" in bad.name:
-                    try:
-                        bad.unlink(missing_ok=True)
-                    except OSError:
-                        pass
-                video, _ = export_source_video(project_id, meta)
-            # timeline đã map — mux chỉ đặt TTS full, không cascade cắt
-            meta["segments"] = segments
-            save_meta(project_id, meta)
+        # WYSIWYG: timeline = start/end editor đã xem trước. KHÔNG retime_video_segments
+        # (bước đó encode cả video lại → chậm + lệch preview). TTS khớp slot bằng mux.
+        for segment in segments:
+            segment.pop("videoSpeed", None)
         place = str(settings.get("captionPlacement") or "below").lower()
         if cover and burn:
             msg = f"{hint}Che chữ cũ + chèn bản dịch…"
@@ -258,6 +225,18 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
             place = str(settings.get("captionPlacement") or "below").lower()
             if place not in ("below", "above"):
                 place = "below"
+            exp_w = adaptive_workers(
+                int(settings.get("workers") or 0),
+                kind="cpu",
+                cap=16,
+            )
+            set_status(
+                project_id,
+                step="export",
+                progress=22,
+                message=progress_msg(msg.rstrip("…"), workers=exp_w),
+                running=True,
+            )
             cover_and_burn(
                 video,
                 segments + text_overlays,
@@ -266,7 +245,7 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
                 burn=burn or bool(text_overlays),
                 subtitle_font_size=int(settings.get("subtitleFontSize", 0)),
                 project_id=project_id,
-                workers=int(settings.get("workers") or 0),
+                workers=exp_w,
                 caption_placement=place,
                 cover_mask_style=str(settings.get("coverMaskStyle") or "blur"),
                 cover_mask_color=str(settings.get("coverMaskColor") or "#4c1d95"),
@@ -348,9 +327,8 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
                 original_audio_mode="original" if source_audio else audio_mode,
                 source_audio=source_audio,
                 original_audio_volume=bg_vol,
-                allow_video_slowdown=(
-                    (prefer_global_slow or not manual_video_speed) and not baked_prefer
-                ),
+                # Không chậm cả video lúc mux — timeline editor là chuẩn
+                allow_video_slowdown=False,
                 match=match_mode,
                 # Wav TTS 1× → atempo theo bake (0.8 / 1.23 / 2…) khớp timeline
                 bake_speed=meta_baked_speed(meta),
@@ -381,19 +359,13 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
         else:
             shutil.copy2(burned, out)
 
-        # Cắt khung đúng previewAspectRatio (editor) trước khi scale đầu ra.
+        # Crop khung + encode độ phân giải trong **một** pass (tránh encode 2 lần → chậm)
         aspect = str(settings.get("previewAspectRatio") or "original")
         custom_crop = settings.get("previewCrop")
+        crop_box = None
         if aspect not in ("", "original") and (aspect != "custom" or custom_crop):
-            set_status(
-                project_id,
-                step="export",
-                progress=88,
-                message=f"{hint}Cắt khung {aspect}…",
-                running=True,
-            )
-            check_cancel(project_id)
-            crop_export_aspect(out, out, aspect, custom=custom_crop, project_id=project_id)
+            sw, sh = video_size(out)
+            crop_box = resolve_export_crop(sw, sh, aspect, custom_crop)
 
         resolution = str(settings.get("exportResolution") or "1080").lower()
         allowed_resolutions = {"144", "240", "360", "480", "720", "1080", "1440", "2160"}
@@ -401,16 +373,22 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
             resolution = "1080"
         target_height = None if resolution == "original" else int(resolution)
         resolution_label = "gốc" if target_height is None else f"{target_height}p"
-        # Chuẩn hóa độ phân giải + encode chất lượng (mọi nhánh)
+        aspect_hint = f" · khung {aspect}" if crop_box else ""
         set_status(
             project_id,
             step="export",
-            progress=92,
-            message=f"{hint}Encode {resolution_label}…",
+            progress=90,
+            message=progress_msg(f"Encode {resolution_label}", extra=aspect_hint.strip(" ·") or None),
             running=True,
         )
         check_cancel(project_id)
-        encode_export_1080(out, out, project_id=project_id, target_height=target_height)
+        encode_export_1080(
+            out,
+            out,
+            project_id=project_id,
+            target_height=target_height,
+            crop=crop_box,
+        )
 
         # bản dễ tìm: backend/public/exports/<id>.mp4
         exports = PUBLIC_DATA / "exports"
@@ -461,10 +439,18 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
             running=False,
             error="cancelled",
         )
-        raise
+        if nested:
+            raise
+        return
     except Exception as e:
         # Giữ progress hiện tại — UI thấy dừng ở đâu, không nhảy 0 rồi biến mất
         err = short_cmd_error(e)
+        try:
+            from pipeline.core.app_log import append_exception
+
+            append_exception(f"[export:{project_id}] FAILED", e)
+        except Exception:
+            pass
         set_status(
             project_id,
             step="export",
@@ -472,7 +458,8 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
             running=False,
             error=err,
         )
-        raise
+        if nested:
+            raise
     finally:
         if not nested and job_gen is not None:
             clear_job(project_id, job_gen)

@@ -63,7 +63,11 @@ def run_dub(project_id: str, *, finalize: bool = True, nested: bool = False) -> 
             project_id,
             step="dub",
             progress=5,
-            message="TTS… (bỏ cache, gen lại)" if force_tts else "TTS…",
+            message=(
+                "TTS… chuẩn bị (bỏ cache, gen lại)"
+                if force_tts
+                else "TTS… chuẩn bị luồng…"
+            ),
             running=True,
         )
         default_voice = settings.get("defaultVoice", "system")
@@ -139,6 +143,10 @@ def run_dub(project_id: str, *, finalize: bool = True, nested: bool = False) -> 
             job["segments"].append(seg)
 
         def synthesize(job: dict[str, Any]) -> float:
+            from pipeline.core.jobs import set_job_context
+
+            set_job_context(project_id)
+            check_cancel(project_id)
             wav: Path = job["wav"]
             target = None if soft_match else float(job["target"])
             # Cache cũ dài hơn slot → fit lại (chỉ natural/stretch)
@@ -211,31 +219,70 @@ def run_dub(project_id: str, *, finalize: bool = True, nested: bool = False) -> 
 
         cached = [j for j in pending if j["wav"].exists() and j["wav"].stat().st_size > 128]
         req = int(settings.get("workers") or 0)
-        workers = adaptive_workers(
-            req, kind="network", cap=16, tasks=len(pending)
+        # Auto elastic: rảnh duỗi / bận co (run_with_adaptive_workers)
+        from pipeline.tts.engines import vieneu as _vieneu
+        from pipeline.core.accel import tts_local_workers
+        from pipeline.core.resources import progress_msg, run_with_adaptive_workers, workers_label
+
+        sample_voice = str(
+            next((j.get("voice") for j in pending if j.get("voice")), "") or ""
         )
-        completed = 0
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="tts") as pool:
-            future_jobs = {pool.submit(synthesize, job): job for job in pending}
-            for future in as_completed(future_jobs):
-                check_cancel(project_id)
-                job = future_jobs[future]
-                dur = future.result()
-                for seg in job["segments"]:
-                    seg["audioFile"] = job["name"]
-                    seg["audioUrl"] = f"/api/projects/{project_id}/tts/{job['name']}"
-                    seg["audioDuration"] = dur
-                completed += 1
-                set_status(
-                    project_id,
-                    step="dub",
-                    progress=int(5 + 90 * completed / max(1, len(pending))),
-                    message=(
-                        f"TTS song song {completed}/{len(pending)}"
-                        f" · {len(cached)} cache · {workers} luồng"
-                    ),
-                    running=True,
-                )
+        local_neural = bool(_vieneu.parse_voice(sample_voice)) or any(
+            _vieneu.parse_voice(str(j.get("voice") or "")) for j in pending[:8]
+        )
+        w_kind = "tts" if local_neural else "network"
+        if local_neural:
+            from pipeline.core.accel import _tts_vram_hard_cap
+
+            hard_cap = _tts_vram_hard_cap()
+            workers0 = tts_local_workers(req or None, tasks=len(pending))
+        else:
+            hard_cap = 24
+            workers0 = adaptive_workers(
+                req if req > 0 else None, kind="network", cap=hard_cap, tasks=len(pending)
+            )
+        wbit = workers_label(workers0, kind=w_kind)
+        set_status(
+            project_id,
+            step="dub",
+            progress=8,
+            message=progress_msg("TTS", 0, len(pending), workers=workers0, extra=f"{len(cached)} cache"),
+            running=True,
+        )
+
+        def _tts_one(job: dict[str, Any]) -> tuple[dict[str, Any], float]:
+            return job, float(synthesize(job))
+
+        def _tts_prog(cur: int, total: int, w_now: int) -> None:
+            set_status(
+                project_id,
+                step="dub",
+                progress=int(5 + 90 * cur / max(1, total)),
+                message=progress_msg("TTS", cur, total, workers=w_now, extra=f"{len(cached)} cache"),
+                running=True,
+            )
+
+        try:
+            rows = run_with_adaptive_workers(
+                pending,
+                _tts_one,
+                kind=w_kind,
+                requested=req if req > 0 else None,
+                cap=min(hard_cap, max(1, len(pending))),
+                thread_name_prefix="tts",
+                on_progress=_tts_prog,
+                cancel_check=lambda: check_cancel(project_id),
+            )
+        except Cancelled:
+            raise
+        for row in rows:
+            if not row:
+                continue
+            job, dur = row
+            for seg in job["segments"]:
+                seg["audioFile"] = job["name"]
+                seg["audioUrl"] = f"/api/projects/{project_id}/tts/{job['name']}"
+                seg["audioDuration"] = dur
         # TTS dài hơn cửa sổ câu → videoSpeed < 1 (kéo dài span, đẩy câu sau).
         # Export gọi retime_video_segments — không cascade cắt audio.
         n_stretch = assign_tts_fit_speeds(segments, match=match)
@@ -250,7 +297,7 @@ def run_dub(project_id: str, *, finalize: bool = True, nested: bool = False) -> 
                 project_id,
                 step="dub",
                 progress=100,
-                message=f"Lồng tiếng xong · {len(pending)} đoạn{extra}",
+                message=progress_msg("TTS xong", len(pending), workers=workers0, extra=extra.strip(" ·") or None),
                 running=False,
             )
     except Cancelled:
@@ -262,6 +309,12 @@ def run_dub(project_id: str, *, finalize: bool = True, nested: bool = False) -> 
             reset_client()
         except Exception:
             pass
+        try:
+            from pipeline.tts.engines.vieneu_frozen import shutdown_all_workers
+
+            shutdown_all_workers()
+        except Exception:
+            pass
         set_status(
             project_id,
             step="dub",
@@ -270,11 +323,31 @@ def run_dub(project_id: str, *, finalize: bool = True, nested: bool = False) -> 
             running=False,
             error="cancelled",
         )
-        raise
+        if nested:
+            raise
+        return
     except Exception as e:
-        err = short_cmd_error(e)
-        set_status(project_id, step="dub", progress=0, message=err, running=False, error=err)
-        raise
+        err = short_cmd_error(e) or type(e).__name__
+        # Không ghi error code trần "dub" — UI hiện message
+        if err.strip().lower() in ("dub", "error", "exception"):
+            err = f"Lồng tiếng thất bại: {type(e).__name__}"
+        try:
+            from pipeline.core.app_log import append_exception
+
+            append_exception(f"[dub:{project_id}] FAILED", e)
+        except Exception:
+            pass
+        set_status(
+            project_id,
+            step="dub",
+            progress=0,
+            message=err,
+            running=False,
+            error=err,
+        )
+        # Không re-raise — desktop job thread không được lan exception
+        if nested:
+            raise
     finally:
         if not nested and job_gen is not None:
             clear_job(project_id, job_gen)

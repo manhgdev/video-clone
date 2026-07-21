@@ -1,8 +1,6 @@
 """Hardsub cover + caption burn — ocr_boxes."""
 from __future__ import annotations
 
-"""Cover hardsubs + burn translated captions."""
-
 import hashlib
 import json
 import math
@@ -19,7 +17,7 @@ from pipeline.ocr.extract import _rapidocr_gpu_kwargs
 from pipeline.core.jobs import _job_procs, check_cancel
 from pipeline.core.media import h264_encoder_args, video_size
 from pipeline.core.project import ensure_layout, set_status
-from pipeline.core.resources import adaptive_workers
+from pipeline.core.resources import adaptive_workers, progress_msg
 from pipeline.ocr.extract import _ocr_join_lines, _rapidocr_labels
 from pipeline.ocr.cover_timing import resolve_cover_window
 from pipeline.ocr.labels import (
@@ -368,7 +366,7 @@ def _precompute_cue_boxes(
                     project_id,
                     step="export",
                     progress=12 + int(8 * done / max(1, n)),
-                    message=f"Định vị chữ {done}/{n} ({workers} luồng)",
+                    message=progress_msg("Định vị chữ", done, n, workers=workers),
                     running=True,
                 )
 

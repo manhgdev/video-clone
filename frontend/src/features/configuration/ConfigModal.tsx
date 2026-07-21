@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { AppConfig, CloudProviderId, SystemChecks } from '@/features/project/project.types'
 import { api } from '@/features/project/project.api'
 import ProgressPopup from '@/shared/components/ProgressPopup'
@@ -12,7 +13,29 @@ const PROVIDERS: CloudProviderId[] = [
   'grok',
 ]
 
-type Section = 'setup' | 'cloud' | 'tts'
+type InstallKind = 'ai_runtime' | 'ocr_cuda' | 'demucs_cuda'
+
+const INSTALL_LABELS: Record<InstallKind, string> = {
+  ai_runtime: 'gói AI (Whisper · OCR · VieNeu)',
+  ocr_cuda: 'OCR CUDA',
+  demucs_cuda: 'Demucs',
+}
+
+const INSTALL_ORDER: InstallKind[] = ['ai_runtime', 'ocr_cuda', 'demucs_cuda']
+
+function installLabel(kind: string): string {
+  return INSTALL_LABELS[kind as InstallKind] || kind
+}
+
+function nextAutoInstall(checks: SystemChecks): InstallKind | null {
+  for (const id of INSTALL_ORDER) {
+    const it = checks.items.find((i) => !i.ok && i.install === id)
+    if (it?.required) return id
+  }
+  return null
+}
+
+type Section = 'setup' | 'cloud' | 'tts' | 'logs'
 type CloudTab = CloudProviderId
 
 type CloudDraft = Record<
@@ -95,22 +118,45 @@ export default function ConfigModal({
   const [installing, setInstalling] = useState<string | null>(null)
   const [installProgressMinimized, setInstallProgressMinimized] = useState(false)
   const [installPopupError, setInstallPopupError] = useState('')
+  const [pendingRestart, setPendingRestart] = useState(false)
+  const [restarting, setRestarting] = useState(false)
+  const [logText, setLogText] = useState('')
+  const [logPath, setLogPath] = useState('')
+  const [logLoading, setLogLoading] = useState(false)
+  const [logErr, setLogErr] = useState('')
+  const [logCopied, setLogCopied] = useState(false)
+  const autoSetupLock = useRef(false)
 
-  const loadChecks = useCallback((refresh = false) => {
+  const loadLogs = useCallback(() => {
+    setLogLoading(true)
+    setLogErr('')
+    void api
+      .getAppLogs(1200)
+      .then((r) => {
+        setLogText(r.text || '(trống)')
+        setLogPath(r.path || '')
+      })
+      .catch((e: Error) => {
+        setLogErr(e.message || 'Không đọc được log')
+        setLogText('')
+      })
+      .finally(() => setLogLoading(false))
+  }, [])
+
+  const loadChecks = useCallback((refresh = false, deep = false) => {
     setChecksLoading(true)
     setChecksErr('')
     void api
-      .systemChecks(refresh)
+      .systemChecks(refresh, deep)
       .then((c) => {
         setChecks(c)
-        if (c.ok && forceSetup) onSetupReady?.()
       })
       .catch((e: Error) => {
         setChecksErr(e.message || 'Không kiểm tra được hệ thống')
         setChecks(null)
       })
       .finally(() => setChecksLoading(false))
-  }, [onSetupReady, forceSetup])
+  }, [forceSetup])
 
   useEffect(() => {
     if (!open) return
@@ -149,15 +195,37 @@ export default function ConfigModal({
 
   useEffect(() => {
     if (!open) return
-    if (section === 'setup' || forceSetup) loadChecks()
-  }, [open, section, forceSetup, loadChecks])
+    if (section === 'setup' || forceSetup) loadChecks(false, false)
+    if (section === 'logs') loadLogs()
+  }, [open, section, forceSetup, loadChecks, loadLogs])
 
-  if (!open) return null
+  useEffect(() => {
+    if (!open || section !== 'setup') return
+    let cancelled = false
+    const syncInstall = async () => {
+      try {
+        const st = await api.installStatus()
+        if (cancelled) return
+        if (st.running && st.kind) {
+          setInstalling(st.kind)
+          setMsg(`Đang cài ${installLabel(st.kind)}…`)
+        }
+      } catch {
+        /* backend chưa sẵn sàng */
+      }
+    }
+    void syncInstall()
+    const id = window.setInterval(() => void syncInstall(), 2000)
+    return () => {
+      cancelled = true
+      window.clearInterval(id)
+    }
+  }, [open, section])
 
   const cur = draft[tab]
   const canClose = !forceSetup || !!checks?.ok
 
-  async function installAction(kind: 'ai_runtime' | 'ocr_cuda' | 'demucs_cuda') {
+  const installAction = useCallback(async (kind: InstallKind) => {
     setInstalling(kind)
     setInstallProgressMinimized(false)
     setInstallPopupError('')
@@ -169,7 +237,8 @@ export default function ConfigModal({
           ? await api.installOcrCuda()
           : await api.installDemucsCuda()
       setMsg(result.message + (result.detail ? ` · ${result.detail}` : ''))
-      loadChecks(true)
+      if (result.needsRestart) setPendingRestart(true)
+      loadChecks(true, false)
     } catch (e) {
       const message = e instanceof Error
           ? e.message
@@ -182,8 +251,53 @@ export default function ConfigModal({
       setInstallPopupError(message)
     } finally {
       setInstalling(null)
+      autoSetupLock.current = false
     }
-  }
+  }, [loadChecks])
+
+  const restartApp = useCallback(async () => {
+    setRestarting(true)
+    setChecksErr('')
+    try {
+      await api.restartApp()
+    } catch (e) {
+      setChecksErr(e instanceof Error ? e.message : 'Không khởi động lại được app')
+      autoSetupLock.current = false
+    } finally {
+      setRestarting(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!open || section !== 'setup') return
+    if (checksLoading || installing || restarting || !checks) return
+    if (autoSetupLock.current) return
+    const shouldAuto = forceSetup || !checks.ok
+    if (!shouldAuto) return
+
+    const run = async () => {
+      const next = nextAutoInstall(checks)
+      if (next) {
+        autoSetupLock.current = true
+        await installAction(next)
+        autoSetupLock.current = false
+        return
+      }
+    }
+
+    void run()
+  }, [
+    open,
+    forceSetup,
+    section,
+    checks,
+    checksLoading,
+    installing,
+    restarting,
+    pendingRestart,
+    installAction,
+    onSetupReady,
+  ])
 
   function tryClose() {
     if (!canClose) return
@@ -265,7 +379,9 @@ export default function ConfigModal({
     }
   }
 
-  return (
+  if (!open) return null
+
+  return createPortal(
     <div
       className="cfg-overlay"
       role="presentation"
@@ -282,8 +398,8 @@ export default function ConfigModal({
           <div>
             <h2>Cấu hình</h2>
             <p>
-              {forceSetup && checksLoading
-                ? 'Đang kiểm tra thiết lập…'
+              {installing
+                ? `Đang cài ${installLabel(installing)}…`
                 : forceSetup && !checks?.ok
                   ? 'Cài đủ thành phần bắt buộc để bắt đầu'
                   : 'Thiết lập hệ thống · API dịch · ElevenLabs'}
@@ -326,6 +442,13 @@ export default function ConfigModal({
                 ElevenLabs
                 {elSavedCount > 0 ? <span className="cfg-dot" title="Đã có key" /> : null}
               </button>
+              <button
+                type="button"
+                className={section === 'logs' ? 'active' : undefined}
+                onClick={() => setSection('logs')}
+              >
+                Log
+              </button>
             </>
           ) : null}
         </div>
@@ -346,63 +469,32 @@ export default function ConfigModal({
           </div>
         )}
 
-        {loading && section !== 'setup' ? (
+        {loading && section !== 'setup' && section !== 'logs' ? (
           <p className="cfg-msg">Đang tải…</p>
         ) : section === 'setup' ? (
           <div className="cfg-body cfg-setup">
             <div className="cfg-setup-bar">
-              <div>
-                <strong>{checks?.summary || (checksLoading ? 'Đang kiểm tra…' : '—')}</strong>
+              <div className="cfg-setup-info">
+                <strong>
+                  {installing
+                    ? `Đang cài ${installLabel(installing)}…`
+                    : checks?.summary || (checksLoading ? 'Đang tải…' : '—')}
+                </strong>
                 {checks ? (
                   <span className="cfg-setup-meta">
                     {checks.platform} · Python {checks.python}
+                    {checks.device?.accel
+                      ? ` · ${String(checks.device.accel).toUpperCase()}`
+                      : ''}
+                    {checks.device?.gpuName ? ` · ${checks.device.gpuName}` : ''}
+                    {checks.device?.vramMb ? ` · ${checks.device.vramMb} MB` : ''}
                   </span>
                 ) : null}
               </div>
-              <button
-                type="button"
-                className="cfg-secondary cfg-setup-refresh"
-                disabled={checksLoading || !!installing}
-                onClick={() => loadChecks(true)}
-              >
-                {checksLoading ? 'Đang kiểm tra…' : 'Kiểm tra lại'}
-              </button>
-            </div>
-            {checks?.device ? (
-              <div className="cfg-device-card" role="status">
-                <div className="cfg-device-title">Phát hiện thiết bị</div>
-                <div className="cfg-device-grid">
-                  <div>
-                    <span className="cfg-device-k">Hệ điều hành</span>
-                    <strong>
-                      {checks.device.osLabel}
-                      {checks.device.appleSilicon ? ' · Apple Silicon' : ''}
-                    </strong>
-                  </div>
-                  <div>
-                    <span className="cfg-device-k">Kiến trúc</span>
-                    <strong>{checks.device.arch}</strong>
-                  </div>
-                  <div>
-                    <span className="cfg-device-k">GPU</span>
-                    <strong>
-                      {checks.device.hasGpu
-                        ? checks.device.gpuName || checks.device.gpuKind
-                        : 'Không có (CPU)'}
-                      {checks.device.vramMb ? ` · ${checks.device.vramMb} MB` : ''}
-                    </strong>
-                  </div>
-                  <div>
-                    <span className="cfg-device-k">Tăng tốc</span>
-                    <strong>{String(checks.device.accel).toUpperCase()}</strong>
-                  </div>
-                </div>
-                <p className="cfg-device-plan">{checks.device.install.summary}</p>
-                <p className="cfg-device-hint">{checks.device.install.hint}</p>
-                {(checks.device.install.actions?.length ?? 0) > 0 ? (
-                  <div className="cfg-device-actions">
-                    {checks.device.install.actions!.map((a) => {
-                      const done = (checks.items || []).some(
+              <div className="cfg-setup-actions">
+                {(checks?.device?.install.actions?.length ?? 0) > 0
+                  ? checks?.device?.install.actions!.map((a) => {
+                      const done = (checks?.items || []).some(
                         (it) =>
                           it.ok &&
                           (it.install === a.id ||
@@ -410,28 +502,41 @@ export default function ConfigModal({
                             (a.id === 'ocr_cuda' && it.id === 'ocr_cuda')),
                       )
                       return done ? (
-                        <span key={a.id} className="cfg-check-installed">
+                        <span key={a.id} className="cfg-check-installed cfg-setup-chip">
                           {a.label} ✓
                         </span>
                       ) : (
                         <button
                           key={a.id}
                           type="button"
-                          className="cfg-check-install"
+                          className="cfg-check-install cfg-check-install-sm"
                           disabled={!!installing}
                           onClick={() =>
                             void installAction(a.id as 'ocr_cuda' | 'demucs_cuda')
                           }
                         >
-                          {installing === a.id ? 'Đang cài…' : a.label}
+                          {installing === a.id ? '…' : a.label}
                         </button>
                       )
-                    })}
-                  </div>
-                ) : null}
+                    })
+                  : null}
+                <button
+                  type="button"
+                  className="cfg-secondary cfg-setup-refresh"
+                  disabled={checksLoading || !!installing}
+                  onClick={() => loadChecks(true, false)}
+                >
+                  {checksLoading ? '…' : 'Kiểm tra lại'}
+                </button>
               </div>
-            ) : null}
+            </div>
             {checksErr ? <p className="cfg-msg cfg-msg-err">{checksErr}</p> : null}
+            {pendingRestart ? (
+              <p className="cfg-msg cfg-msg-restart">
+                Đã cài gói cần reload — cài tiếp các mục còn lại rồi bấm{' '}
+                <strong>Khởi động lại</strong>.
+              </p>
+            ) : null}
             {msg && section === 'setup' ? <p className="cfg-msg">{msg}</p> : null}
             <ul className="cfg-check-list">
               {(checks?.items || []).filter((it) => it.id !== 'device').map((it) => (
@@ -498,10 +603,12 @@ export default function ConfigModal({
                 </li>
               ))}
             </ul>
-            <p className="cfg-hint">
-              Mọi mục cài đặt theo thiết bị đã phát hiện (Windows / macOS / Linux + GPU).
-              Link tải và lệnh pip/brew/apt đổi theo OS; NVIDIA → CUDA; Apple Silicon → Metal.
-            </p>
+            <details className="cfg-hint-details">
+              <summary>Ghi chú cài đặt theo thiết bị</summary>
+              <p className="cfg-hint">
+                Link tải và lệnh pip/brew/apt đổi theo OS; NVIDIA → CUDA; Apple Silicon → Metal.
+              </p>
+            </details>
           </div>
         ) : section === 'cloud' ? (
           <div className="cfg-body cfg-body-grid">
@@ -551,7 +658,7 @@ export default function ConfigModal({
               <code>backend/data/app_config.json</code>.
             </p>
           </div>
-        ) : (
+        ) : section === 'tts' ? (
           <div className="cfg-body">
             <div className="cfg-el-grid">
               {elSlots.map((val, i) => {
@@ -593,9 +700,54 @@ export default function ConfigModal({
               Để trống ô đã lưu = giữ nguyên; gõ key mới = thay / thêm.
             </p>
           </div>
-        )}
+        ) : section === 'logs' ? (
+          <div className="cfg-log-panel">
+            <p className="cfg-hint">
+              Lỗi job (Dịch / Lồng tiếng / Xuất), warm-models, crash hook. Copy gửi AI để sửa.
+              {logPath ? (
+                <>
+                  {' '}
+                  File: <code className="cfg-log-path">{logPath}</code>
+                </>
+              ) : null}
+            </p>
+            {logErr ? <p className="cfg-msg cfg-msg-err">{logErr}</p> : null}
+            <pre className="cfg-log-pre" tabIndex={0}>
+              {logLoading ? 'Đang tải…' : logText || '(trống)'}
+            </pre>
+            <div className="cfg-log-actions">
+              <button type="button" className="cfg-secondary" disabled={logLoading} onClick={() => loadLogs()}>
+                {logLoading ? 'Đang tải…' : 'Tải lại'}
+              </button>
+              <button
+                type="button"
+                className="cfg-secondary"
+                disabled={!logText || logLoading}
+                onClick={() => {
+                  void navigator.clipboard.writeText(logText).then(() => {
+                    setLogCopied(true)
+                    window.setTimeout(() => setLogCopied(false), 1600)
+                  })
+                }}
+              >
+                {logCopied ? 'Đã copy' : 'Copy log'}
+              </button>
+              <button
+                type="button"
+                className="cfg-secondary"
+                disabled={logLoading}
+                onClick={() => {
+                  if (!window.confirm('Xóa toàn bộ file log?')) return
+                  void api.clearAppLogs().then(() => loadLogs()).catch((e: Error) => setLogErr(e.message))
+                }}
+              >
+                Xóa log
+              </button>
+            </div>
+          </div>
+        ) : null}
 
-        {msg ? <p className="cfg-msg">{msg}</p> : null}
+        {msg && section !== 'logs' ? <p className="cfg-msg">{msg}</p> : null}
 
         <footer className="cfg-foot">
           {section === 'setup' ? (
@@ -607,22 +759,32 @@ export default function ConfigModal({
               ) : (
                 <span className="cfg-foot-note">Cài đủ mục bắt buộc để tiếp tục</span>
               )}
+              {pendingRestart ? (
+                <button
+                  type="button"
+                  className="cfg-secondary cfg-restart-btn"
+                  disabled={restarting || !!installing}
+                  onClick={() => void restartApp()}
+                >
+                  {restarting ? 'Đang khởi động lại…' : 'Khởi động lại'}
+                </button>
+              ) : null}
               <button
                 type="button"
                 className="cfg-primary"
                 disabled={checksLoading || !checks?.ok}
                 onClick={() => {
-                  if (checks?.ok) {
-                    onSetupReady?.()
-                    onClose()
-                  } else {
-                    loadChecks(true)
-                  }
+                  if (checks?.ok) onSetupReady?.()
+                  else loadChecks(true, false)
                 }}
               >
-                {checks?.ok ? 'Bắt đầu' : checksLoading ? 'Đang kiểm tra…' : 'Kiểm tra lại'}
+                {checks?.ok ? 'Bắt đầu' : checksLoading ? 'Đang tải…' : 'Tải lại'}
               </button>
             </>
+          ) : section === 'logs' ? (
+            <button type="button" className="cfg-secondary" onClick={tryClose} disabled={!canClose}>
+              Đóng
+            </button>
           ) : (
             <>
               <button type="button" className="cfg-secondary" onClick={tryClose} disabled={!canClose}>
@@ -670,6 +832,7 @@ export default function ConfigModal({
           onRestore={() => setInstallProgressMinimized(false)}
         />
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }

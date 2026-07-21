@@ -10,6 +10,7 @@ import httpx
 
 from pipeline.core.jobs import check_cancel
 from pipeline.core.project import set_status
+from pipeline.core.resources import progress_msg
 
 
 from .text import *  # noqa: F403
@@ -49,30 +50,49 @@ def translate_google_free(
                     parts.append(str(chunk[0]))
             return i, "".join(parts).strip() or q
 
-    w = max(1, min(16, int(workers or 8), n))
-    done = 0
-    done_lock = threading.Lock()
+    from pipeline.core.resources import run_with_adaptive_workers
+
     last_t = [0.0]
+    req = int(workers or 0)
+    # workers từ UI: 0=auto (scale giữa chừng); >0=cố định
+    start_w = max(1, min(16, req if req > 0 else 8, n))
+
+    def _job(item: tuple[int, str]) -> str:
+        i, text = item
+        _, tr = _one(i, text)
+        return tr
+
+    def _prog(cur: int, total: int, w_now: int) -> None:
+        _report_mt(
+            project_id,
+            label="Google",
+            cur=cur,
+            total=total,
+            last_t=last_t,
+            force=(cur == total),
+            workers=w_now,
+        )
+
     if project_id:
         set_status(
             project_id,
             step="translate",
             progress=55,
-            message=f"Dịch Google 0/{n} đoạn ({w} luồng) — vẫn chạy…",
+            message=progress_msg("Dịch Google", 0, n, workers=(None if req <= 0 else start_w)),
             running=True,
         )
-    with ThreadPoolExecutor(max_workers=w, thread_name_prefix="gtx") as pool:
-        futs = [pool.submit(_one, i, t) for i, t in enumerate(texts)]
-        for fut in as_completed(futs):
-            check_cancel(project_id)
-            i, tr = fut.result()
-            out[i] = tr
-            with done_lock:
-                done += 1
-                cur = done
-            _report_mt(
-                project_id, label="Google", cur=cur, total=n, last_t=last_t, force=(cur == n)
-            )
+    rows = run_with_adaptive_workers(
+        list(enumerate(texts)),
+        _job,
+        kind="network",
+        requested=req if req > 0 else None,
+        cap=min(16, n),
+        thread_name_prefix="gtx",
+        on_progress=_prog if project_id else None,
+        cancel_check=lambda: check_cancel(project_id),
+    )
+    for i, tr in enumerate(rows):
+        out[i] = tr or ""
     return out
 
 
@@ -117,30 +137,46 @@ def translate_mymemory(
                 return i, q
             return i, tr
 
-    w = max(1, min(12, int(workers or 6), n))
-    done = 0
-    done_lock = threading.Lock()
+    from pipeline.core.resources import run_with_adaptive_workers
+
     last_t = [0.0]
+    req = int(workers or 0)
+
+    def _job(item: tuple[int, str]) -> str:
+        _, tr = _one(item[0], item[1])
+        return tr
+
+    def _prog(cur: int, total: int, w_now: int) -> None:
+        _report_mt(
+            project_id,
+            label="MyMemory",
+            cur=cur,
+            total=total,
+            last_t=last_t,
+            force=(cur == total),
+            workers=w_now,
+        )
+
     if project_id:
         set_status(
             project_id,
             step="translate",
             progress=55,
-            message=f"Dịch MyMemory 0/{n} đoạn — vẫn chạy…",
+            message=progress_msg("Dịch MyMemory", 0, n, workers=(None if req <= 0 else max(1, min(12, req, n)))),
             running=True,
         )
-    with ThreadPoolExecutor(max_workers=w, thread_name_prefix="mymem") as pool:
-        futs = [pool.submit(_one, i, t) for i, t in enumerate(texts)]
-        for fut in as_completed(futs):
-            check_cancel(project_id)
-            i, tr = fut.result()
-            out[i] = tr
-            with done_lock:
-                done += 1
-                cur = done
-            _report_mt(
-                project_id, label="MyMemory", cur=cur, total=n, last_t=last_t, force=(cur == n)
-            )
+    rows = run_with_adaptive_workers(
+        list(enumerate(texts)),
+        _job,
+        kind="network",
+        requested=req if req > 0 else None,
+        cap=min(12, n),
+        thread_name_prefix="mymem",
+        on_progress=_prog if project_id else None,
+        cancel_check=lambda: check_cancel(project_id),
+    )
+    for i, tr in enumerate(rows):
+        out[i] = tr or ""
     return out
 
 
@@ -201,30 +237,46 @@ def translate_tiktok(
             tr = str(data.get("translated_content") or "").strip()
             return i, tr or q
 
-    # TikTok dễ rate-limit — worker vừa phải
-    w = max(1, min(6, int(workers or 4), n))
-    done = 0
-    done_lock = threading.Lock()
+    # TikTok dễ rate-limit — cap thấp; auto vẫn co/duỗi trong 1–6
+    from pipeline.core.resources import run_with_adaptive_workers
+
     last_t = [0.0]
+    req = int(workers or 0)
+
+    def _job(item: tuple[int, str]) -> str:
+        _, tr = _one(item[0], item[1])
+        return tr
+
+    def _prog(cur: int, total: int, w_now: int) -> None:
+        _report_mt(
+            project_id,
+            label="TikTok",
+            cur=cur,
+            total=total,
+            last_t=last_t,
+            force=(cur == total),
+            workers=w_now,
+        )
+
     if project_id:
         set_status(
             project_id,
             step="translate",
             progress=55,
-            message=f"Dịch TikTok 0/{n} đoạn — vẫn chạy…",
+            message=progress_msg("Dịch TikTok", 0, n, workers=(None if req <= 0 else max(1, min(6, req, n)))),
             running=True,
         )
-    with ThreadPoolExecutor(max_workers=w, thread_name_prefix="tt-mt") as pool:
-        futs = [pool.submit(_one, i, t) for i, t in enumerate(texts)]
-        for fut in as_completed(futs):
-            check_cancel(project_id)
-            i, tr = fut.result()
-            out[i] = tr
-            with done_lock:
-                done += 1
-                cur = done
-            _report_mt(
-                project_id, label="TikTok", cur=cur, total=n, last_t=last_t, force=(cur == n)
-            )
+    rows = run_with_adaptive_workers(
+        list(enumerate(texts)),
+        _job,
+        kind="network",
+        requested=req if req > 0 else None,
+        cap=min(6, n),
+        thread_name_prefix="tt-mt",
+        on_progress=_prog if project_id else None,
+        cancel_check=lambda: check_cancel(project_id),
+    )
+    for i, tr in enumerate(rows):
+        out[i] = tr or ""
     return out
 

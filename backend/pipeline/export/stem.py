@@ -883,7 +883,7 @@ def separate_no_vocals(
                     project_id,
                     step="export",
                     progress=66,
-                    message="Demucs đang xóa lời (giữ nhạc/SFX)…",
+                    message="Demucs đang xóa lời (giữ nhạc/SFX) · 1 tiến trình…",
                     running=True,
                 )
             code, demucs_err = _run_demucs_progress(

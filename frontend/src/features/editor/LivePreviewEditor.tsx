@@ -7,6 +7,7 @@ import { cn } from '@/shared/lib/cn'
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle, useDefaultLayout } from '@/shared/ui/resizable'
 import { ScrollArea } from '@/shared/ui/scroll-area'
 import { fitOverlayFontPx, layoutOcrOverlay, midInsideVerticalWatermark } from '@/features/editor/ocrOverlayLayout'
+import { EditorMaskPanel } from '@/features/editor/EditorMaskPanel'
 import { expandCompoundShell } from '@/features/project/expandCompound'
 import { generateLogoKeyframes, logoFrame } from '@/features/editor/lib/logoMotion'
 import {
@@ -22,6 +23,8 @@ import {
   ASSET_TABS,
   AUTO_SUBTITLE_FONT,
   AspectIcon,
+  aspectWindowNorm,
+  centeredAspectCrop,
   BOOKMARK_EPS,
   CAPTION_FONT_PRESETS,
   CAPTION_LANE_DEFS,
@@ -103,6 +106,13 @@ import {
   splitMediaList,
   videoCropStyle,
   withInferredLayout,
+  PanelView,
+  PropLabel,
+  NumField,
+  TrackCtrl,
+  CtxItem,
+  CtxSep,
+  TlButton,
 } from '@/features/editor/lib'
 
 type Props = {
@@ -182,7 +192,7 @@ export default function LivePreviewEditor({
   busy,
   jobStep = '',
   jobProgress = 0,
-  jobMessage = '',
+  jobMessage: _jobMessage = '',
   onDub,
   onBack,
   onChange,
@@ -300,6 +310,8 @@ export default function LivePreviewEditor({
   const [bboxDraft, setBboxDraft] = useState<{ x: number; y: number; w: number; h: number } | null>(null)
   const [draggingBox, setDraggingBox] = useState(false)
   const [snapGuides, setSnapGuides] = useState<SnapGuides>({ h: false, v: false })
+  /** true khi đang kéo pan aspect / crop tự do — hiện tia căn giữa giống bbox */
+  const [panningCrop, setPanningCrop] = useState(false)
   const [selectedOverlayId, setSelectedOverlayId] = useState<string | null>(null)
   /** Track đang focus — click Caption ≠ TTS ≠ Âm gốc ≠ Text */
   const [trackFocus, setTrackFocus] = useState<'video' | 'caption' | 'dub' | 'bg' | 'text'>('video')
@@ -404,6 +416,59 @@ export default function LivePreviewEditor({
     if (pastRef.current.length > HISTORY_MAX) pastRef.current.shift()
     futureRef.current = []
     setHistTick((n) => n + 1)
+  }
+
+  /** Ghi history 1 lần / chuỗi thao tác (kéo pan, kéo bbox…). */
+  function pushHistoryOnce(gate: { current: boolean }) {
+    if (gate.current || historyQuietRef.current) return
+    gate.current = true
+    pushHistory()
+  }
+
+  /** Debounce history khi gõ text liên tục (cùng field). */
+  const textHistRef = useRef<{ key: string; t: number }>({ key: '', t: 0 })
+
+  /** Mọi sửa 1 segment / overlay → undo được (Ctrl+Z). */
+  function editSegment(next: Segment, opts?: { textField?: string }) {
+    if (!historyQuietRef.current) {
+      if (opts?.textField) {
+        const key = `${next.id}:${opts.textField}`
+        const now = Date.now()
+        if (textHistRef.current.key !== key || now - textHistRef.current.t > 600) {
+          pushHistory()
+          textHistRef.current = { key, t: now }
+        }
+      } else {
+        pushHistory()
+        textHistRef.current = { key: '', t: 0 }
+      }
+    }
+    return onChange(next)
+  }
+
+  function editOverlay(overlay: TextOverlay, isNew?: boolean, opts?: { textField?: boolean; skipHistory?: boolean }) {
+    if (!historyQuietRef.current && !opts?.skipHistory) {
+      if (opts?.textField) {
+        const key = `ov:${overlay.id}:text`
+        const now = Date.now()
+        if (textHistRef.current.key !== key || now - textHistRef.current.t > 600) {
+          pushHistory()
+          textHistRef.current = { key, t: now }
+        }
+      } else {
+        pushHistory()
+        textHistRef.current = { key: '', t: 0 }
+      }
+    }
+    return onOverlayChange(overlay, isNew)
+  }
+
+  function editSettings(next: ProjectSettings) {
+    if (!historyQuietRef.current) {
+      pushHistory()
+      textHistRef.current = { key: '', t: 0 }
+    }
+    onSettings(next)
   }
 
   function applySnap(snap: EditorSnap) {
@@ -759,14 +824,34 @@ export default function LivePreviewEditor({
   }
   const cropPortrait = crop.h >= crop.w
 
-  // Video 9:16 gốc + preset landscape (16:9…) → khung preview bị cắt ngang rộng sai
+  // Khi có size video thật: chuẩn hóa previewCrop theo aspect (giữ pan x/y nếu hợp lệ)
   useEffect(() => {
     if (sourceWidth < 8 || sourceHeight < 8) return
-    if (sourceHeight <= sourceWidth * 1.05) return
-    const preset = ASPECT_PRESETS.find((p) => p.id === aspectId)
-    if (!preset || !('orient' in preset) || preset.orient !== 'landscape') return
-    onSettings({ ...settings, previewAspectRatio: 'original' })
-  }, [sourceWidth, sourceHeight, aspectId])
+    const id = settings.previewAspectRatio ?? 'original'
+    if (!id || id === 'original' || id === 'custom') return
+    const win = aspectWindowNorm(sourceWidth, sourceHeight, id)
+    if (!win) return
+    const cur = settings.previewCrop
+    const tol = 0.02
+    const needFix =
+      !cur
+      || Math.abs((cur.w ?? 0) - win.w) > tol
+      || Math.abs((cur.h ?? 0) - win.h) > tol
+    if (!needFix) return
+    const x = cur
+      ? Math.max(0, Math.min(1 - win.w, Number(cur.x) || 0))
+      : Math.max(0, (1 - win.w) / 2)
+    const y = cur
+      ? Math.max(0, Math.min(1 - win.h, Number(cur.y) || 0))
+      : Math.max(0, (1 - win.h) / 2)
+    onSettings({
+      ...settings,
+      previewAspectRatio: id,
+      previewCrop: { x, y, w: win.w, h: win.h },
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- chỉ khi size/aspect đổi
+  }, [sourceWidth, sourceHeight, settings.previewAspectRatio])
+
   const overCoverMode = settings.coverHardsubs && settings.burnSubs
   const overlayBurnOn = overlayTextEnabled(settings)
   // layout trống + bbox giữa → mid (tránh lane ngang + khung đáy bịa)
@@ -784,7 +869,7 @@ export default function LivePreviewEditor({
   )
   // Alt+G: ẩn Caption + Lồng tiếng + Âm gốc (gộp vào shell video) — tháo thì hiện lại
   const compoundMode = compoundShells.length > 0
-  // Track Lồng tiếng: chỉ hiện khi đã có TTS hoặc đang chạy dub
+  // Track Lồng tiếng: chỉ khi đã có file TTS — chưa xong dub thì không hiện ô/track
   const hasDubClips = useMemo(
     () =>
       segments.some(
@@ -796,8 +881,10 @@ export default function LivePreviewEditor({
       ),
     [segments],
   )
-  const showDubTrack =
-    !compoundMode && (hasDubClips || (busy && (jobStep === 'dub' || !jobStep)))
+  const showDubTrack = !compoundMode && hasDubClips
+  /** Đang lồng tiếng: vẫn tua/kéo timeline; chỉ khóa khi job khác (dịch/xuất…). */
+  const timelineNavLocked = busy && jobStep !== 'dub' && jobStep !== ''
+  const timelineEditLocked = busy && jobStep !== 'dub'
   // Preview/export: bung compound → chữ/mask/TTS y như chưa ghép
   const layoutSegs = useMemo(
     () =>
@@ -1428,7 +1515,7 @@ export default function LivePreviewEditor({
    * move/start/end trong [0, timeline]; cho chồng/gap; multi-move cả selection.
    */
   function beginDrag(event: ReactPointerEvent, segment: Segment, mode: 'move' | 'start' | 'end') {
-    if (busy || trackLocked.caption) return
+    if (timelineEditLocked || trackLocked.caption) return
     event.preventDefault()
     event.stopPropagation()
     let moveIds = selectedIds.includes(segment.id)
@@ -1538,7 +1625,7 @@ export default function LivePreviewEditor({
         current?.id === segment.id &&
         (Math.abs(current.start - original.start) > 0.001 || Math.abs(current.end - original.end) > 0.001)
       ) {
-        onChange({ ...segment, start: current.start, end: current.end })
+        editSegment({ ...segment, start: current.start, end: current.end })
       }
     }
     window.addEventListener('pointermove', update)
@@ -1586,7 +1673,7 @@ export default function LivePreviewEditor({
     clip: MediaClip,
     mode: 'move' | 'start' | 'end',
   ) {
-    if (busy || trackLocked[track]) return
+    if (timelineEditLocked || trackLocked[track]) return
     event.preventDefault()
     event.stopPropagation()
     if (track === 'video') focusVideo(clip.id)
@@ -1696,7 +1783,7 @@ export default function LivePreviewEditor({
     overlay: TextOverlay,
     mode: 'move' | 'start' | 'end',
   ) {
-    if (busy || trackLocked.text) return
+    if (timelineEditLocked || trackLocked.text) return
     event.preventDefault()
     event.stopPropagation()
     focusText(overlay.id)
@@ -1732,7 +1819,7 @@ export default function LivePreviewEditor({
         && (Math.abs(current.start - original.start) > 0.001
           || Math.abs(current.end - original.end) > 0.001)
       ) {
-        onOverlayChange({ ...overlay, start: current.start, end: current.end })
+        editOverlay({ ...overlay, start: current.start, end: current.end })
       }
     }
     window.addEventListener('pointermove', update)
@@ -1756,7 +1843,7 @@ export default function LivePreviewEditor({
 
   /** Group clip (giữ từng đoạn) — Ctrl+G. `forceIds` = snapshot menu multi. */
   function groupSelectedCaptions(forceIds?: string[]) {
-    if (busy || groupOpLockRef.current) return
+    if (timelineEditLocked || groupOpLockRef.current) return
     const ids = expandGroupSelection(
       forceIds?.length
         ? forceIds
@@ -1786,7 +1873,7 @@ export default function LivePreviewEditor({
 
   /** Bỏ group — Ctrl+Shift+G. */
   function ungroupSelectedCaptions() {
-    if (busy || groupOpLockRef.current) return
+    if (timelineEditLocked || groupOpLockRef.current) return
     const ids = expandGroupSelection(selectedIds.length ? selectedIds : selectedId ? [selectedId] : [])
     if (!ids.length) return
     const idSet = new Set(ids)
@@ -1815,7 +1902,7 @@ export default function LivePreviewEditor({
    * `forceIds` = snapshot menu multi (không phụ thuộc setState).
    */
   function createCompoundFromSelection(forceIds?: string[]) {
-    if (busy || groupOpLockRef.current) return
+    if (timelineEditLocked || groupOpLockRef.current) return
     // Marquee có thể chọn TTS (selectedDubIds) + caption — gộp id
     const raw = forceIds?.length
       ? forceIds
@@ -1909,7 +1996,7 @@ export default function LivePreviewEditor({
 
   /** Tháo compound (restore children + TTS từng câu). */
   function uncompoundSelected() {
-    if (busy || groupOpLockRef.current) return
+    if (timelineEditLocked || groupOpLockRef.current) return
     const id = selectedId || selectedIds[0]
     if (!id) return
     const shell = segments.find((s) => s.id === id)
@@ -1971,7 +2058,7 @@ export default function LivePreviewEditor({
 
   /** Kéo khung chọn — hit Video + Caption + TTS + Âm gốc + Text (CapCut-style). */
   function beginMarqueeSelect(event: ReactPointerEvent<HTMLElement>) {
-    if (busy || event.button !== 0) return
+    if (timelineEditLocked || event.button !== 0) return
     if ((event.target as HTMLElement).closest(
       '[data-caption-clip],[data-media-clip],[data-dub-clip],[data-text-clip]',
     )) return
@@ -2125,7 +2212,7 @@ export default function LivePreviewEditor({
   }
 
   function beginScrub(event: ReactPointerEvent<HTMLElement>) {
-    if (busy) return
+    if (timelineNavLocked) return
     const scroller = tracksScrollRef.current
     const col = tracksColRef.current
     const video = videoRef.current
@@ -2188,7 +2275,7 @@ export default function LivePreviewEditor({
 
   /** Thanh tiến độ preview / toàn màn hình — tua theo chiều ngang bar. */
   function beginPreviewSeek(event: ReactPointerEvent<HTMLElement>) {
-    if (busy || timelineDuration <= 0) return
+    if (timelineNavLocked || timelineDuration <= 0) return
     const video = videoRef.current
     if (!video) return
     event.preventDefault()
@@ -2231,6 +2318,130 @@ export default function LivePreviewEditor({
     setAspectMenuOpen(false)
   }
 
+  /** Chọn preset tỷ lệ + crop giữa; sau đó kéo preview để pan. */
+  function applyAspectPreset(presetId: string) {
+    if (presetId === 'custom') {
+      beginFreeCrop()
+      return
+    }
+    const curId = settings.previewAspectRatio ?? 'original'
+    if (presetId === curId && presetId !== 'original') {
+      setAspectMenuOpen(false)
+      return
+    }
+    // pushHistory trong editSettings
+    if (presetId === 'original') {
+      editSettings({ ...settings, previewAspectRatio: 'original', previewCrop: null })
+      setCropEditing(false)
+      setAspectMenuOpen(false)
+      return
+    }
+    // Chưa có size video → vẫn lưu preset; pan khi metadata xong
+    const sw = sourceWidth > 8 ? sourceWidth : 1080
+    const sh = sourceHeight > 8 ? sourceHeight : 1920
+    const centered = centeredAspectCrop(sw, sh, presetId)
+    editSettings({
+      ...settings,
+      previewAspectRatio: presetId,
+      previewCrop: centered ?? { x: 0, y: 0, w: 1, h: 1 },
+    })
+    setCropEditing(false)
+    setAspectMenuOpen(false)
+  }
+
+  /**
+   * Kéo pan khung cắt khi đã chọn tỷ lệ (9:16, 16:9…).
+   * Giữ w/h theo aspect; chỉ đổi x/y. Tia giữa hiện suốt lúc kéo, sáng khi snap.
+   */
+  function beginAspectPan(event: ReactPointerEvent) {
+    if (cropEditing || timelineEditLocked || tool === 'text' || tool === 'cover') return
+    const id = settings.previewAspectRatio ?? 'original'
+    if (!id || id === 'original' || id === 'custom') return
+    const sw = sourceWidth > 8 ? sourceWidth : 1080
+    const sh = sourceHeight > 8 ? sourceHeight : 1920
+    const win = aspectWindowNorm(sw, sh, id)
+    if (!win || (win.w >= 0.999 && win.h >= 0.999)) return
+    const canvas = canvasRef.current
+    if (!canvas) return
+    event.preventDefault()
+    event.stopPropagation()
+    const rect = canvas.getBoundingClientRect()
+    const startX = event.clientX
+    const startY = event.clientY
+    const cur =
+      settings.previewCrop
+      && Number.isFinite(settings.previewCrop.x)
+      && Number.isFinite(settings.previewCrop.y)
+        ? settings.previewCrop
+        : centeredAspectCrop(sw, sh, id)
+    if (!cur) return
+    const ox = Math.max(0, Math.min(1 - win.w, Number(cur.x) || 0))
+    const oy = Math.max(0, Math.min(1 - win.h, Number(cur.y) || 0))
+    const ow = win.w
+    const oh = win.h
+    const aspectIdLive = id
+    // Nới snap ~5% cửa sổ pan (dễ dính giữa hơn 2%)
+    const snapTol = Math.max(0.035, Math.min(0.08, Math.min(ow, oh) * 0.12))
+    const centerX = (1 - ow) / 2
+    const centerY = (1 - oh) / 2
+    const settingsSnap = settings
+    let last = { x: ox, y: oy, w: ow, h: oh }
+    const histGate = { current: false }
+    setPanningCrop(true)
+    // Hiện tia ngay từ frame đầu (mờ → sáng khi dính giữa)
+    setSnapGuides({
+      v: Math.abs(ox - centerX) <= snapTol,
+      h: Math.abs(oy - centerY) <= snapTol,
+    })
+    const update = (clientX: number, clientY: number, altKey: boolean) => {
+      // dx theo full frame 0–1 (không nhân ow) — kéo mượt, snap đúng
+      const dx = (clientX - startX) / Math.max(1, rect.width)
+      const dy = (clientY - startY) / Math.max(1, rect.height)
+      let x = Math.max(0, Math.min(1 - ow, ox - dx))
+      let y = Math.max(0, Math.min(1 - oh, oy - dy))
+      let guideV = false
+      let guideH = false
+      if (!altKey) {
+        if (Math.abs(x - centerX) <= snapTol) {
+          x = centerX
+          guideV = true
+        }
+        if (Math.abs(y - centerY) <= snapTol) {
+          y = centerY
+          guideH = true
+        }
+      }
+      last = { x, y, w: ow, h: oh }
+      setSnapGuides({ v: guideV, h: guideH })
+      // 1 history / lần kéo (trước khi đổi settings)
+      if (
+        Math.abs(x - ox) > 0.001
+        || Math.abs(y - oy) > 0.001
+      ) {
+        pushHistoryOnce(histGate)
+      }
+      onSettings({
+        ...settingsSnap,
+        previewAspectRatio: aspectIdLive,
+        previewCrop: last,
+      })
+    }
+    const onMove = (e: PointerEvent) => {
+      e.preventDefault()
+      update(e.clientX, e.clientY, e.altKey)
+    }
+    const onUp = (e: PointerEvent) => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      // commit lần cuối
+      update(e.clientX, e.clientY, e.altKey)
+      setPanningCrop(false)
+      setSnapGuides({ h: false, v: false })
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp, { once: true })
+  }
+
   function beginCropDrag(
     event: ReactPointerEvent,
     mode: 'move' | 'nw' | 'ne' | 'se' | 'sw',
@@ -2244,25 +2455,56 @@ export default function LivePreviewEditor({
     const startY = event.clientY
     const original = { ...cropDraft }
     const min = 0.05
-    const update = (clientX: number, clientY: number) => {
+    const snapTol = 0.02
+    const histGate = { current: false }
+    setPanningCrop(true)
+    setSnapGuides({ h: false, v: false })
+    const update = (clientX: number, clientY: number, altKey: boolean) => {
       const dx = (clientX - startX) / Math.max(1, rect.width)
       const dy = (clientY - startY) / Math.max(1, rect.height)
       let { x, y, w, h } = original
       if (mode === 'move') {
         x = Math.max(0, Math.min(1 - w, x + dx))
         y = Math.max(0, Math.min(1 - h, y + dy))
+        // Snap tâm khung tự do về giữa canvas (0–1)
+        let guideV = false
+        let guideH = false
+        if (!altKey) {
+          const cx = x + w / 2
+          const cy = y + h / 2
+          if (Math.abs(cx - 0.5) <= snapTol) {
+            x = Math.max(0, Math.min(1 - w, 0.5 - w / 2))
+            guideV = true
+          }
+          if (Math.abs(cy - 0.5) <= snapTol) {
+            y = Math.max(0, Math.min(1 - h, 0.5 - h / 2))
+            guideH = true
+          }
+        }
+        setSnapGuides({ v: guideV, h: guideH })
       } else {
         if (mode.includes('w')) { const right = x + w; x = Math.max(0, Math.min(right - min, x + dx)); w = right - x }
         if (mode.includes('e')) w = Math.max(min, Math.min(1 - x, w + dx))
         if (mode.includes('n')) { const bottom = y + h; y = Math.max(0, Math.min(bottom - min, y + dy)); h = bottom - y }
         if (mode.includes('s')) h = Math.max(min, Math.min(1 - y, h + dy))
+        setSnapGuides({ h: false, v: false })
+      }
+      if (
+        Math.abs(x - original.x) > 0.001
+        || Math.abs(y - original.y) > 0.001
+        || Math.abs(w - original.w) > 0.001
+        || Math.abs(h - original.h) > 0.001
+      ) {
+        pushHistoryOnce(histGate)
       }
       setCropDraft({ x, y, w, h })
     }
-    const onMove = (e: PointerEvent) => update(e.clientX, e.clientY)
+    const onMove = (e: PointerEvent) => update(e.clientX, e.clientY, e.altKey)
     const onUp = () => {
       window.removeEventListener('pointermove', onMove)
       window.removeEventListener('pointerup', onUp)
+      setPanningCrop(false)
+      setSnapGuides({ h: false, v: false })
     }
     window.addEventListener('pointermove', onMove)
     window.addEventListener('pointerup', onUp, { once: true })
@@ -2293,6 +2535,7 @@ export default function LivePreviewEditor({
       sourceHeight,
     )
   const minSize = 12
+    const histGate = { current: false }
     setDraggingBox(true)
     setSnapGuides({ h: false, v: false })
 
@@ -2328,6 +2571,14 @@ export default function LivePreviewEditor({
       } else {
         setSnapGuides({ h: false, v: false })
       }
+      if (
+        Math.abs(next.x - original.x) > 1
+        || Math.abs(next.y - original.y) > 1
+        || Math.abs(next.w - original.w) > 1
+        || Math.abs(next.h - original.h) > 1
+      ) {
+        pushHistoryOnce(histGate)
+      }
       bboxDraftRef.current = next; setBboxDraft(next)
     }
 
@@ -2359,7 +2610,7 @@ export default function LivePreviewEditor({
             sourceWidth,
             sourceHeight,
           )
-          onChange(segmentWithLayout({ ...seg, bboxInherited: false }, {
+          editSegment(segmentWithLayout({ ...seg, bboxInherited: false }, {
             cover: norm,
             caption: laid.caption,
             lines: laid.lines,
@@ -2371,10 +2622,10 @@ export default function LivePreviewEditor({
         if (seg.translation.trim() && settings.burnSubs) {
           const fontPx = resolveCaptionFontSize(seg, settings, sourceWidth, sourceHeight)
           const layout = manualCoverLayout(norm, seg.translation, fontPx, sourceWidth, sourceHeight, true)
-          onChange(segmentWithLayout({ ...seg, bboxInherited: false }, { ...layout, cover: norm }, fontPx))
+          editSegment(segmentWithLayout({ ...seg, bboxInherited: false }, { ...layout, cover: norm }, fontPx))
           return
         }
-        onChange({ ...seg, bbox: norm, bboxInherited: false, captionLayout: seg.captionLayout ?? null })
+        editSegment({ ...seg, bbox: norm, bboxInherited: false, captionLayout: seg.captionLayout ?? null })
       }
     }
     window.addEventListener('pointermove', update)
@@ -2382,13 +2633,14 @@ export default function LivePreviewEditor({
   }
 
   function beginOverlayDrag(event: ReactPointerEvent, overlay: TextOverlay) {
-    if (busy || tool === 'text' || trackLocked.text) return
+    if (timelineEditLocked || tool === 'text' || trackLocked.text) return
     const canvas = canvasRef.current
     if (!canvas) return
     event.preventDefault()
     const rect = canvas.getBoundingClientRect()
     const original = { x: overlay.x, y: overlay.y }
     setSelectedOverlayId(overlay.id)
+    const histGate = { current: false }
 
     const update = (move: PointerEvent) => {
       const dx = ((move.clientX - event.clientX) / rect.width) * crop.w
@@ -2398,8 +2650,11 @@ export default function LivePreviewEditor({
         x: Math.round(Math.max(0, Math.min(sourceWidth - overlay.w, original.x + dx))),
         y: Math.round(Math.max(0, Math.min(sourceHeight - overlay.h, original.y + dy))),
       }
+      if (Math.abs(next.x - original.x) > 1 || Math.abs(next.y - original.y) > 1) {
+        pushHistoryOnce(histGate)
+      }
       if (logoDraft?.id === overlay.id) setLogoDraft(next)
-      else onOverlayChange(next)
+      else onOverlayChange(next) // history đã ghi 1 lần
     }
     const commit = () => { window.removeEventListener('pointermove', update); window.removeEventListener('pointerup', commit) }
     window.addEventListener('pointermove', update)
@@ -2439,12 +2694,19 @@ export default function LivePreviewEditor({
       return segmentWithLayout({ ...seg, fontSize: size, captionLayout: null }, layout, fontPx)
     }
     if (scope === 'one') {
-      if (selected) onChange(relayout(selected))
+      if (selected) editSegment(relayout(selected))
       return
     }
+    // «Tất cả» = cùng lane (Caption / CAP-MID / Dọc / Nhãn) — không đụng lane khác
+    const src = selected ?? bboxSeg
+    const lane = src ? captionLaneOf(src, sourceHeight || 1920) : null
     pushHistory()
-    void onSegmentsReplace(segments.map(relayout))
-    if (size > 0) {
+    void onSegmentsReplace(segments.map((seg) => {
+      if (lane && captionLaneOf(seg, sourceHeight || 1920) !== lane) return seg
+      return relayout(seg)
+    }))
+    // Chỉ cập nhật font dự án khi áp lane Caption đáy
+    if (size > 0 && lane === 'horizontal') {
       onSettings({ ...settings, subtitleFontSize: size })
     }
   }
@@ -2499,7 +2761,11 @@ export default function LivePreviewEditor({
     }
     // Ghi history TRƯỚC bake — Undo khôi phục tốc độ + timeline
     pushHistory()
+    // Snapshot text local — merge sau bake (tránh meta đĩa thiếu translation)
+    const localById = new Map(segments.map((s) => [s.id, s] as const))
     try {
+      // Persist caption trước bake — backend load meta từ đĩa
+      await onSegmentsReplace(segments, { persist: true })
       const res = await api.rebakeSpeed(projectId, v)
       const applied =
         typeof res.bakedSpeed === 'number' && res.bakedSpeed > 0
@@ -2515,12 +2781,32 @@ export default function LivePreviewEditor({
         setVideoClips((list) => scaleMediaClips(list, scale))
         setBgClips((list) => scaleMediaClips(list, scale))
       }
-      onPreviewRebaked?.(res)
+      // Merge text/TTS/bbox từ local nếu server trả rỗng
+      const mergedSegs = (Array.isArray(res.segments) ? res.segments : []).map((s, i) => {
+        const loc = localById.get(s.id)
+        if (!loc) return { ...s, index: i }
+        return {
+          ...loc,
+          ...s,
+          index: i,
+          translation: (s.translation || '').trim() || loc.translation || s.translation,
+          source: (s.source || '').trim() || loc.source || s.source,
+          audioUrl: s.audioUrl || loc.audioUrl,
+          audioFile: s.audioFile || loc.audioFile,
+          audioDuration: s.audioDuration ?? loc.audioDuration,
+          bbox: s.bbox ?? loc.bbox,
+          captionLayout: s.captionLayout ?? loc.captionLayout,
+          layout: s.layout ?? loc.layout,
+          voice: s.voice || loc.voice,
+          compoundChildren: s.compoundChildren?.length
+            ? s.compoundChildren
+            : loc.compoundChildren,
+        }
+      })
+      const mergedRes = { ...res, segments: mergedSegs }
+      onPreviewRebaked?.(mergedRes)
       if (!onPreviewRebaked) {
-        void onSegmentsReplace(
-          res.segments.map((s, i) => ({ ...s, index: i })),
-          { persist: false },
-        )
+        void onSegmentsReplace(mergedSegs, { persist: true })
       }
       // Playhead theo trục mới; hardSync stem/TTS
       const nextT = Math.max(0, prevT * scale)
@@ -2582,7 +2868,7 @@ export default function LivePreviewEditor({
         voice,
         lang: settings.targetLang === 'none' ? 'vi' : settings.targetLang,
       })
-      onChange({ ...target, audioUrl: result.audioUrl, audioDuration: result.duration })
+      editSegment({ ...target, audioUrl: result.audioUrl, audioDuration: result.duration })
       audioRef.current?.pause()
       audioRef.current = new Audio(result.audioUrl)
       await audioRef.current.play()
@@ -2624,7 +2910,7 @@ export default function LivePreviewEditor({
     setTool('select')
     setPropTab('overlay')
     pushHistory()
-    onOverlayChange(overlay, true)
+    editOverlay(overlay, true)
   }
 
   function fitTextLogo(logo: TextOverlay, text = logo.text, fontSize = logo.fontSize) {
@@ -2709,7 +2995,7 @@ export default function LivePreviewEditor({
       next.positionKeyframes = generateLogoKeyframes(next, timelineDuration, sourceWidth, sourceHeight, segments, next.positionSeed)
       const exists = overlays.some((o) => o.id === next.id)
       pushHistory()
-      await onOverlayChange(next, !exists)
+      await editOverlay(next, !exists)
       setLogoDraft(next)
       setLogoDraftBase({ ...next })
       setLogoDraftFile(null)
@@ -2775,7 +3061,7 @@ export default function LivePreviewEditor({
     setPropTab('overlay')
     setAssetsTab('effects')
     pushHistory()
-    onOverlayChange(overlay, true)
+    editOverlay(overlay, true)
   }
 
   function beginOverlayResize(
@@ -2783,7 +3069,7 @@ export default function LivePreviewEditor({
     overlay: TextOverlay,
     edge: 'nw' | 'ne' | 'sw' | 'se' | 'e' | 's' | 'w' | 'n',
   ) {
-    if (busy || trackLocked.text) return
+    if (timelineEditLocked || trackLocked.text) return
     const canvas = canvasRef.current
     if (!canvas) return
     event.preventDefault()
@@ -2791,6 +3077,7 @@ export default function LivePreviewEditor({
     const rect = canvas.getBoundingClientRect()
     const orig = { x: overlay.x, y: overlay.y, w: overlay.w, h: overlay.h }
     setSelectedOverlayId(overlay.id)
+    const histGate = { current: false }
 
     const update = (move: PointerEvent) => {
       const dx = ((move.clientX - event.clientX) / rect.width) * crop.w
@@ -2820,6 +3107,14 @@ export default function LivePreviewEditor({
       w = Math.round(Math.min(w, sourceWidth - x))
       h = Math.round(Math.min(h, sourceHeight - y))
       const next = { ...overlay, x, y, w, h }
+      if (
+        Math.abs(next.x - orig.x) > 1
+        || Math.abs(next.y - orig.y) > 1
+        || Math.abs(next.w - orig.w) > 1
+        || Math.abs(next.h - orig.h) > 1
+      ) {
+        pushHistoryOnce(histGate)
+      }
       if (logoDraft?.id === overlay.id) setLogoDraft(next)
       else onOverlayChange(next)
     }
@@ -2984,25 +3279,25 @@ export default function LivePreviewEditor({
     return rangeUnderPlayhead(start, end)
   })()
   const canTrimLeft = (() => {
-    if (!editTarget || busy) return false
+    if (!editTarget || timelineEditLocked) return false
     const { start, end } = clipRange(editTarget)
     return time > start + 0.02 && time <= end - MIN_CLIP_SEC
   })()
   const canTrimRight = (() => {
-    if (!editTarget || busy) return false
+    if (!editTarget || timelineEditLocked) return false
     const { start, end } = clipRange(editTarget)
     return time >= start + MIN_CLIP_SEC && time < end - 0.02
   })()
   const canSplit = Boolean(
     editTarget &&
-      !busy &&
+      !timelineEditLocked &&
       playheadInClip &&
       clipRange(editTarget).end - clipRange(editTarget).start > SPLIT_EDGE * 2 + 0.02,
   )
-  const canDuplicate = Boolean(editTarget && !busy)
+  const canDuplicate = Boolean(editTarget && !timelineEditLocked)
   const canDeleteClip = Boolean(
     editTarget &&
-      !busy &&
+      !timelineEditLocked &&
       !(editTarget.kind === 'media' && (editTarget.track === 'video' ? videoClips : bgClips).length <= 1),
   )
   const bookmarkActive = bookmarks.some((b) => Math.abs(b - time) <= BOOKMARK_EPS)
@@ -3028,8 +3323,8 @@ export default function LivePreviewEditor({
     const t = time
     if (editTarget.kind === 'ov') {
       const ov = editTarget.ov
-      onOverlayChange({ ...ov, end: t })
-      onOverlayChange(
+      editOverlay({ ...ov, end: t })
+      editOverlay(
         { ...ov, id: crypto.randomUUID(), start: t, end: ov.end },
         true,
       )
@@ -3078,7 +3373,7 @@ export default function LivePreviewEditor({
     pushHistory()
     const t = time
     if (editTarget.kind === 'ov') {
-      onOverlayChange({ ...editTarget.ov, start: Math.min(t, editTarget.ov.end - MIN_CLIP_SEC) })
+      editOverlay({ ...editTarget.ov, start: Math.min(t, editTarget.ov.end - MIN_CLIP_SEC) })
       return
     }
     if (editTarget.kind === 'media') {
@@ -3134,7 +3429,7 @@ export default function LivePreviewEditor({
       return
     }
     const seg = editTarget.seg
-    void onChange({ ...seg, start: Math.min(t, seg.end - MIN_CLIP_SEC), captionLayout: null })
+    void editSegment({ ...seg, start: Math.min(t, seg.end - MIN_CLIP_SEC), captionLayout: null })
   }
 
   function trimRightToPlayhead() {
@@ -3142,7 +3437,7 @@ export default function LivePreviewEditor({
     pushHistory()
     const t = time
     if (editTarget.kind === 'ov') {
-      onOverlayChange({ ...editTarget.ov, end: Math.max(t, editTarget.ov.start + MIN_CLIP_SEC) })
+      editOverlay({ ...editTarget.ov, end: Math.max(t, editTarget.ov.start + MIN_CLIP_SEC) })
       return
     }
     if (editTarget.kind === 'media') {
@@ -3160,7 +3455,7 @@ export default function LivePreviewEditor({
       return
     }
     const seg = editTarget.seg
-    void onChange({
+    void editSegment({
       ...seg,
       end: Math.max(t, seg.start + MIN_CLIP_SEC),
       captionLayout: null,
@@ -3177,7 +3472,7 @@ export default function LivePreviewEditor({
       const ov = editTarget.ov
       const dur = ov.end - ov.start
       const start = Math.min(timelineDuration - MIN_CLIP_SEC, ov.end)
-      onOverlayChange(
+      editOverlay(
         { ...ov, id: crypto.randomUUID(), start, end: Math.min(timelineDuration, start + dur) },
         true,
       )
@@ -3644,7 +3939,7 @@ export default function LivePreviewEditor({
         sourceWidth,
         sourceHeight,
       )
-      onChange(segmentWithLayout({ ...selected, bboxInherited: false }, {
+      editSegment(segmentWithLayout({ ...selected, bboxInherited: false }, {
         cover: norm,
         caption: laid.caption,
         lines: laid.lines,
@@ -3662,14 +3957,14 @@ export default function LivePreviewEditor({
         sourceHeight,
         true,
       )
-      onChange(segmentWithLayout(
+      editSegment(segmentWithLayout(
         { ...selected, bboxInherited: false },
         { ...layout, cover: norm },
         selectedFontPx,
       ))
       return
     }
-    onChange({ ...selected, bbox: norm, bboxInherited: false, captionLayout: null })
+    editSegment({ ...selected, bbox: norm, bboxInherited: false, captionLayout: null })
   }
 
   /** Kéo vùng che full ngang (~96% khung), giữ Y/Cao hiện tại. */
@@ -3681,40 +3976,85 @@ export default function LivePreviewEditor({
     commitCoverBox({ x, w, y: cur.y, h: cur.h })
   }
 
-  /** Áp dụng khung che hiện tại cho mọi caption ngang (bỏ label/dọc). */
-  function applyCoverMaskToAll() {
+  /**
+   * Áp **vị trí** khung che (Y) cho clip cùng lane — giữ nguyên W/H/X từng clip.
+   * Không copy bề ngang bbox nguồn.
+   */
+  function applyCoverMaskToAll(
+    range?: { mode: 'full' } | { mode: 'range'; fromSec: number; toSec: number },
+  ) {
     const srcSeg = selected ?? bboxSeg
     if (!srcSeg || sourceWidth <= 0 || sourceHeight <= 0) return
-    const box = clampCoverBox(
-      (selected && selected.id === srcSeg.id ? selectedBox : null)
-        ?? resolveCoverMaskOnly(srcSeg, sourceWidth, sourceHeight, crop)
-        ?? (srcSeg.bbox ? clampCoverBox(srcSeg.bbox, sourceWidth, sourceHeight) : null)
-        ?? selectedBoxSource,
-      sourceWidth,
-      sourceHeight,
-    )
+    const lane = captionLaneOf(srcSeg, sourceHeight || 1920)
+    const t0 = range?.mode === 'range' ? Math.min(range.fromSec, range.toSec) : null
+    const t1 = range?.mode === 'range' ? Math.max(range.fromSec, range.toSec) : null
+    const rawBox =
+      bboxDraft
+      ?? (selected && selected.id === srcSeg.id ? selectedBox : null)
+      ?? resolveCoverMaskOnly(srcSeg, sourceWidth, sourceHeight, crop)
+      ?? (srcSeg.bbox ? clampCoverBox(srcSeg.bbox, sourceWidth, sourceHeight) : null)
+      ?? selectedBoxSource
+    if (!rawBox) return
+    const srcBox = clampCoverBox(rawBox, sourceWidth, sourceHeight)
+    const srcY = srcBox.y
+    pushHistory()
     const next = segments.map((seg) => {
-      if (!seg.translation.trim()) return seg
-      // OCR mid/dọc/nhãn: cùng fixed cover như mid
+      if (!(seg.translation || '').trim()) return seg
+      if (captionLaneOf(seg, sourceHeight || 1920) !== lane) return seg
+      if (t0 != null && t1 != null) {
+        const s0 = floatSegStart(seg)
+        const s1 = floatSegEnd(seg)
+        if (s1 <= t0 || s0 >= t1) return seg
+      }
+      // Giữ W/H/X của clip; chỉ dời Y theo nguồn
+      const own =
+        (seg.id === srcSeg.id ? srcBox : null)
+        ?? resolveCoverMaskOnly(seg, sourceWidth, sourceHeight, crop)
+        ?? (seg.bbox ? clampCoverBox(seg.bbox, sourceWidth, sourceHeight) : null)
+        ?? srcBox
+      const moved = clampCoverBox(
+        { x: own.x, y: srcY, w: own.w, h: own.h },
+        sourceWidth,
+        sourceHeight,
+      )
       if (isOcrOverlayLayout(seg.layout) || effectiveOverlayLayout(seg, sourceHeight)) {
         const lockFs = resolveOverlayFontPreferred(seg)
         const lay =
           effectiveOverlayLayout(seg, sourceHeight)
           ?? (isOcrOverlayLayout(seg.layout) ? seg.layout : 'mid')
-        const laid = layoutOcrOverlay(lay, box, seg.translation, lockFs, sourceWidth, sourceHeight)
-        return segmentWithLayout({ ...seg, bboxInherited: false }, {
-          cover: box,
+        const laid = layoutOcrOverlay(lay, moved, seg.translation, lockFs, sourceWidth, sourceHeight)
+        return segmentWithLayout({ ...seg, bboxInherited: true }, {
+          cover: moved,
           caption: laid.caption,
           lines: laid.lines,
           fontPx: laid.fontPx,
         }, laid.fontPx)
       }
       const fontPx = resolveCaptionFontSize(seg, settings, sourceWidth, sourceHeight)
-      const layout = manualCoverLayout(box, seg.translation, fontPx, sourceWidth, sourceHeight, true)
-      return segmentWithLayout({ ...seg, bboxInherited: false }, layout, fontPx)
+      const layout = manualCoverLayout(moved, seg.translation, fontPx, sourceWidth, sourceHeight, true)
+      return segmentWithLayout(
+        { ...seg, bboxInherited: true },
+        { ...layout, cover: moved },
+        fontPx,
+      )
     })
     void onSegmentsReplace(next)
   }
+
+  function floatSegStart(seg: Segment) {
+    return Math.max(0, Number(seg.start) || 0)
+  }
+  function floatSegEnd(seg: Segment) {
+    const s = floatSegStart(seg)
+    return Math.max(s + 0.05, Number(seg.end) || s)
+  }
+
+  const applyAllLaneLabel = (() => {
+    const src = selected ?? bboxSeg
+    if (!src) return 'lane'
+    const key = captionLaneOf(src, sourceHeight || 1920)
+    return CAPTION_LANE_DEFS.find((l) => l.key === key)?.label ?? key
+  })()
 
   async function handleExport() {
     if (busy) return
@@ -4088,6 +4428,13 @@ export default function LivePreviewEditor({
                       )}
                       style={{
                         aspectRatio: `${crop.w} / ${crop.h}`,
+                        cursor:
+                          !cropEditing
+                          && tool === 'select'
+                          && aspectId !== 'original'
+                          && aspectId !== 'custom'
+                            ? 'grab'
+                            : undefined,
                         ...(previewZoom !== 'fit'
                           ? (() => {
                               const base = 480
@@ -4101,7 +4448,20 @@ export default function LivePreviewEditor({
                           : {}),
                       }}
                       onPointerDown={(event) => {
-                        if (tool === 'text') addTextOverlay(event.clientX, event.clientY)
+                        if (tool === 'text') {
+                          addTextOverlay(event.clientX, event.clientY)
+                          return
+                        }
+                        // Kéo pan khung cắt khi đã chọn tỷ lệ (9:16 / 16:9…)
+                        if (
+                          tool === 'select'
+                          && !cropEditing
+                          && !busy
+                          && aspectId !== 'original'
+                          && aspectId !== 'custom'
+                        ) {
+                          beginAspectPan(event)
+                        }
                       }}
                       onDragOver={(e) => {
                         if (e.dataTransfer.types.includes('application/x-videoclone-effect')) {
@@ -4206,6 +4566,15 @@ export default function LivePreviewEditor({
                           }}
                         />
 
+                        {!cropEditing
+                          && aspectId !== 'original'
+                          && aspectId !== 'custom'
+                          && tool === 'select' && (
+                          <div className="pointer-events-none absolute left-1/2 top-2 z-[25] -translate-x-1/2 rounded-md bg-black/65 px-2 py-1 text-[10px] text-white/90">
+                            Kéo video để chỉnh khung {aspectLabel}
+                          </div>
+                        )}
+
                         {cropEditing && (
                           <div className="absolute inset-0 z-[60] overflow-hidden">
                             <div
@@ -4245,7 +4614,7 @@ export default function LivePreviewEditor({
                                 type="button"
                                 className="rounded-md bg-cyan-500 px-3 py-1.5 text-xs font-medium text-black"
                                 onClick={() => {
-                                  onSettings({ ...settings, previewAspectRatio: 'custom', previewCrop: cropDraft })
+                                  editSettings({ ...settings, previewAspectRatio: 'custom', previewCrop: cropDraft })
                                   setCropEditing(false)
                                 }}
                               >
@@ -4255,18 +4624,31 @@ export default function LivePreviewEditor({
                           </div>
                         )}
 
-                      {/* Snap guides — căn giữa ngang/dọc khi kéo khung (CapCut-style) */}
-                      {draggingBox && (snapGuides.v || snapGuides.h) && (
-                        <div className="absolute inset-0 z-[15] pointer-events-none" aria-hidden>
-                          {snapGuides.v && (
-                            <div className="absolute inset-y-0 left-1/2 w-0 -translate-x-1/2 border-l-[1.5px] border-dashed border-fuchsia-400/95 shadow-[0_0_8px_rgba(232,121,249,0.55)]" />
-                          )}
-                          {snapGuides.h && (
-                            <div className="absolute inset-x-0 top-1/2 h-0 -translate-y-1/2 border-t-[1.5px] border-dashed border-fuchsia-400/95 shadow-[0_0_8px_rgba(232,121,249,0.55)]" />
-                          )}
-                          {(snapGuides.v && snapGuides.h) && (
-                            <div className="absolute left-1/2 top-1/2 size-2 -translate-x-1/2 -translate-y-1/2 rounded-full bg-fuchsia-400/90 ring-2 ring-fuchsia-300/50" />
-                          )}
+                      {/* Snap guides — bbox / pan aspect / crop tự do (CapCut-style) */}
+                      {(draggingBox || panningCrop) && (
+                        <div className="absolute inset-0 z-[80] pointer-events-none overflow-visible" aria-hidden>
+                          {/* Tia dọc — luôn mờ khi pan; sáng khi snap giữa ngang */}
+                          <div
+                            className={cn(
+                              'absolute inset-y-0 left-1/2 w-0 -translate-x-1/2 border-l-2 border-dashed transition-opacity',
+                              snapGuides.v
+                                ? 'border-fuchsia-400 opacity-100 shadow-[0_0_10px_rgba(232,121,249,0.85)]'
+                                : panningCrop
+                                  ? 'border-fuchsia-300/50 opacity-70'
+                                  : 'opacity-0',
+                            )}
+                          />
+                          {/* Tia ngang — luôn mờ khi pan; sáng khi snap giữa dọc */}
+                          <div
+                            className={cn(
+                              'absolute inset-x-0 top-1/2 h-0 -translate-y-1/2 border-t-2 border-dashed transition-opacity',
+                              snapGuides.h
+                                ? 'border-fuchsia-400 opacity-100 shadow-[0_0_10px_rgba(232,121,249,0.85)]'
+                                : panningCrop
+                                  ? 'border-fuchsia-300/50 opacity-70'
+                                  : 'opacity-0',
+                            )}
+                          />
                         </div>
                       )}
 
@@ -4348,7 +4730,8 @@ export default function LivePreviewEditor({
                             'overflow-visible',
                           )}
                           style={sourceToDisplayStyle(
-                            overlayLay === 'vertical' || overlayLay === 'mid' || overlayLay === 'label'
+                            // Horizontal cover mode: bám cover (che + chữ giữa khung tím)
+                            overlayLay || settings.coverHardsubs
                               ? layerLayout.cover
                               : layerLayout.caption,
                             crop,
@@ -4428,28 +4811,29 @@ export default function LivePreviewEditor({
                           ) : (
                             <p
                               className={cn(
-                                'w-full text-center text-white font-bold',
+                                'w-full h-full text-center text-white font-bold flex flex-col items-center justify-center',
                                 layerLayout.lines.length === 1 && 'whitespace-nowrap',
                               )}
                               style={{
                                 ...captionFontStyle(
                                   fontPx,
                                   layerLayout.lines.length === 1
-                                    ? layerLayout.caption.w
-                                    : layerLayout.caption.h,
+                                    ? layerLayout.cover.w
+                                    : layerLayout.cover.h,
                                   layerLayout.lines.length === 1 ? 'w' : 'h',
                                 ),
                                 ...captionChromeStyle(settings),
                                 lineHeight: 1.12,
-                                transform: 'translateY(-0.06em)',
                                 margin: 0,
+                                padding: '0.04em 0.08em',
+                                boxSizing: 'border-box',
                               }}
                             >
-                              {layerLayout.lines.length === 1
-                                ? layerSeg.translation
-                                : layerLayout.lines.map((line, i) => (
-                                  <span key={i} className="whitespace-nowrap">{i > 0 && <br />}{line}</span>
-                                ))}
+                              {lines.map((line, i) => (
+                                <span key={i} className="block w-full text-center whitespace-nowrap">
+                                  {line}
+                                </span>
+                              ))}
                             </p>
                           )}
                         </div>
@@ -4583,7 +4967,7 @@ export default function LivePreviewEditor({
                               value={overlay.text}
                               onPointerDown={(e) => beginOverlayDrag(e, overlay)}
                               onFocus={() => setSelectedOverlayId(overlay.id)}
-                              onChange={(e) => onOverlayChange({ ...overlay, text: e.target.value })}
+                              onChange={(e) => editOverlay({ ...overlay, text: e.target.value })}
                             />
                           </div>
                         )
@@ -4680,11 +5064,7 @@ export default function LivePreviewEditor({
                                   )}
                                   onClick={() => {
                                     if (disabled) return
-                                    if (preset.id === 'custom') beginFreeCrop()
-                                    else {
-                                      onSettings({ ...settings, previewAspectRatio: preset.id })
-                                      setAspectMenuOpen(false)
-                                    }
+                                    applyAspectPreset(preset.id)
                                   }}
                                 >
                                   <span className="w-4 shrink-0 text-primary">
@@ -4703,10 +5083,7 @@ export default function LivePreviewEditor({
                                   'flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-accent',
                                   aspectId === preset.id && 'text-primary',
                                 )}
-                                onClick={() => {
-                                  onSettings({ ...settings, previewAspectRatio: preset.id })
-                                  setAspectMenuOpen(false)
-                                }}
+                                onClick={() => applyAspectPreset(preset.id)}
                               >
                                 <span className="w-4 shrink-0 text-primary">
                                   {aspectId === preset.id ? '✓' : ''}
@@ -4724,10 +5101,7 @@ export default function LivePreviewEditor({
                                   'flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-accent',
                                   aspectId === preset.id && 'text-primary',
                                 )}
-                                onClick={() => {
-                                  onSettings({ ...settings, previewAspectRatio: preset.id })
-                                  setAspectMenuOpen(false)
-                                }}
+                                onClick={() => applyAspectPreset(preset.id)}
                               >
                                 <span className="w-4 shrink-0 text-primary">
                                   {aspectId === preset.id ? '✓' : ''}
@@ -4865,7 +5239,7 @@ export default function LivePreviewEditor({
                                 value={selected.source}
                                 rows={2}
                                 disabled={busy}
-                                onChange={(e) => onChange({ ...selected, source: e.target.value })}
+                                onChange={(e) => editSegment({ ...selected, source: e.target.value }, { textField: 'source' })}
                               />
                             </PropLabel>
                             <PropLabel label="Bản dịch">
@@ -4874,7 +5248,7 @@ export default function LivePreviewEditor({
                                 value={selected.translation}
                                 rows={4}
                                 disabled={busy}
-                                onChange={(e) => onChange({ ...selected, translation: e.target.value, captionLayout: null })}
+                                onChange={(e) => editSegment({ ...selected, translation: e.target.value, captionLayout: null }, { textField: 'translation' })}
                               />
                             </PropLabel>
 
@@ -4884,7 +5258,7 @@ export default function LivePreviewEditor({
                                   type="checkbox"
                                   checked={dubOn}
                                   disabled={busy}
-                                  onChange={(e) => onChange({
+                                  onChange={(e) => editSegment({
                                     ...selected,
                                     dub: e.target.checked,
                                     ...(e.target.checked ? {} : { audioUrl: undefined, audioFile: undefined, audioDuration: undefined }),
@@ -4901,7 +5275,7 @@ export default function LivePreviewEditor({
                                   className="min-w-0 flex-1 rounded-md border border-border bg-input px-2 py-1 text-xs outline-none focus:border-ring"
                                   value={selected.voice || settings.defaultVoice}
                                   disabled={busy || (isOverlaySeg && !dubOn)}
-                                  onChange={(e) => onChange({ ...selected, voice: e.target.value, ...(isOverlaySeg ? { dub: true } : {}) })}
+                                  onChange={(e) => editSegment({ ...selected, voice: e.target.value, ...(isOverlaySeg ? { dub: true } : {}) })}
                                 >
                                   {voices.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
                                 </select>
@@ -4948,10 +5322,11 @@ export default function LivePreviewEditor({
                                 <button
                                   type="button"
                                   className="rounded-md border border-primary/40 bg-primary/10 text-primary hover:bg-primary/20 px-2 py-1.5 text-[11px] transition-colors disabled:opacity-50"
-                                  disabled={busy}
+                                  disabled={busy || !(selected || bboxSeg)}
+                                  title={`Chỉ lane «${applyAllLaneLabel}»`}
                                   onClick={() => applyFontSize('all')}
                                 >
-                                  Áp dụng tất cả
+                                  Áp {applyAllLaneLabel}
                                 </button>
                               </div>
                               {(selected?.fontSize ?? 0) > 0 && (
@@ -5255,14 +5630,14 @@ export default function LivePreviewEditor({
                               <div className="border-t border-border pt-3 flex flex-col gap-3">
                                 <NumField
                                   label="Bắt đầu (s)" value={selected.start} step={0.1} disabled={busy}
-                                  onCommit={(v) => onChange({
+                                  onCommit={(v) => editSegment({
                                     ...selected,
                                     start: Math.max(prevEnd, Math.min(selected.end - minDur, v)),
                                   })}
                                 />
                                 <NumField
                                   label="Kết thúc (s)" value={selected.end} step={0.1} disabled={busy}
-                                  onCommit={(v) => onChange({
+                                  onCommit={(v) => editSegment({
                                     ...selected,
                                     end: Math.min(nextStart, Math.max(selected.start + minDur, v)),
                                   })}
@@ -5405,7 +5780,7 @@ export default function LivePreviewEditor({
                                       const v = e.target.value
                                       setGlobalVoice(v)
                                       if (selected) {
-                                        onChange({
+                                        editSegment({
                                           ...selected,
                                           voice: v,
                                           ...(isOcrOverlayLayout(selected.layout) ? { dub: true } : {}),
@@ -5487,7 +5862,10 @@ export default function LivePreviewEditor({
                               <input type="range" min={0} max={200}
                                 className="w-full accent-primary"
                                 value={selected.ttsVolume ?? 100}
-                                onChange={(e) => onChange({ ...selected, ttsVolume: Number(e.target.value) })}
+                                onChange={(e) => editSegment(
+                                  { ...selected, ttsVolume: Number(e.target.value) },
+                                  { textField: 'ttsVolume' },
+                                )}
                               />
                             </PropLabel>
                             <div className="flex gap-1">
@@ -5501,7 +5879,7 @@ export default function LivePreviewEditor({
                                       ? 'border-primary text-primary bg-primary/10'
                                       : 'border-border text-muted-foreground hover:text-foreground hover:bg-accent',
                                   )}
-                                  onClick={() => onChange({ ...selected, ttsVolume: v })}
+                                  onClick={() => editSegment({ ...selected, ttsVolume: v })}
                                 >
                                   {v === 0 ? 'Tắt' : `${v}%`}
                                 </button>
@@ -5512,7 +5890,10 @@ export default function LivePreviewEditor({
                               <input type="range" min={0.75} max={1.5} step={0.05}
                                 className="w-full accent-primary"
                                 value={selected.ttsSpeed ?? 1}
-                                onChange={(e) => onChange({ ...selected, ttsSpeed: Number(e.target.value) })}
+                                onChange={(e) => editSegment(
+                                  { ...selected, ttsSpeed: Number(e.target.value) },
+                                  { textField: 'ttsSpeed' },
+                                )}
                               />
                             </PropLabel>
                             <div className="flex gap-1">
@@ -5526,7 +5907,7 @@ export default function LivePreviewEditor({
                                       ? 'border-primary text-primary bg-primary/10'
                                       : 'border-border text-muted-foreground hover:text-foreground hover:bg-accent',
                                   )}
-                                  onClick={() => onChange({ ...selected, ttsSpeed: v })}
+                                  onClick={() => editSegment({ ...selected, ttsSpeed: v })}
                                 >
                                   {v}×
                                 </button>
@@ -5536,7 +5917,7 @@ export default function LivePreviewEditor({
                             <button
                               type="button"
                               className="w-full rounded-md border border-border bg-accent hover:bg-muted px-3 py-1.5 text-xs transition-colors"
-                              onClick={() => onChange({ ...selected, ttsVolume: 100, ttsSpeed: 1 })}
+                              onClick={() => editSegment({ ...selected, ttsVolume: 100, ttsSpeed: 1 })}
                             >
                               Reset âm thanh mặc định
                             </button>
@@ -5648,131 +6029,27 @@ export default function LivePreviewEditor({
                         )}
 
                         {effectivePropTab === 'mask' && (
-                          <>
-                            <p className="text-[11px] text-muted-foreground leading-relaxed">
-                              Khung trên preview = vùng che chữ gốc. Xuất video dùng <strong className="text-foreground font-medium">cùng khung + kiểu mặt nạ</strong>.
-                              <strong className="text-foreground font-medium"> Làm mờ</strong> = kính mờ CapCut (blur + tint mỏng);
-                              <strong className="text-foreground font-medium"> Khối</strong> = phủ màu nền + texture (giống xuất);
-                              nếu vẫn lộ chữ cũ, chọn <strong className="text-foreground font-medium">Màu nền</strong> hoặc kéo rộng khung.
-                            </p>
-                            <PropLabel label="Kiểu mặt nạ">
-                              <div className="grid grid-cols-3 gap-1">
-                                {COVER_MASK_STYLES.map(({ id, label }) => (
-                                  <button
-                                    key={id}
-                                    type="button"
-                                    disabled={busy}
-                                    className={cn(
-                                      'rounded-md border px-2 py-1.5 text-[11px] transition-colors disabled:opacity-50',
-                                      coverMaskStyle === id
-                                        ? 'border-violet-400 bg-violet-500/20 text-foreground'
-                                        : 'border-border bg-accent hover:bg-muted text-muted-foreground',
-                                    )}
-                                    onClick={() => onSettings({ ...settings, coverMaskStyle: id })}
-                                  >
-                                    {label}
-                                  </button>
-                                ))}
-                              </div>
-                            </PropLabel>
-                            {coverMaskStyle !== 'mosaic' && (
-                              <PropLabel label="Màu phủ">
-                                <input
-                                  type="color"
-                                  className="h-9 w-full cursor-pointer rounded-md border border-border bg-input"
-                                  value={coverMaskColor}
-                                  disabled={busy}
-                                  onChange={(e) => onSettings({ ...settings, coverMaskColor: e.target.value })}
-                                />
-                              </PropLabel>
-                            )}
-                            {coverMaskStyle === 'mosaic' && (
-                              <p className="text-[10px] text-muted-foreground leading-snug">
-                                Khối lấy màu nền quanh chữ + texture nhẹ — giống khi xuất; không dùng màu phủ.
-                              </p>
-                            )}
-                            {coverMaskStyle === 'blur' && (
-                              <p className="text-[10px] text-muted-foreground leading-snug">
-                                Độ đậm = blur + tint mỏng (CapCut). Preview phải thấy kính mờ trên chữ gốc.
-                              </p>
-                            )}
-                            {coverMaskStyle !== 'mosaic' && (
-                              <PropLabel label={`Độ đậm: ${coverMaskOpacity}%`}>
-                                <input
-                                  type="range"
-                                  min={5}
-                                  max={100}
-                                  step={1}
-                                  className="w-full accent-violet-500"
-                                  value={coverMaskOpacity}
-                                  disabled={busy}
-                                  onChange={(e) => onSettings({ ...settings, coverMaskOpacity: Number(e.target.value) })}
-                                />
-                              </PropLabel>
-                            )}
-                            {selected || bboxSeg ? (
-                              <>
-                            <ul className="text-[10px] text-muted-foreground space-y-1 list-disc pl-4">
-                              <li>Kéo <strong>giữa</strong> khung → di chuyển (Alt = tắt snap giữa)</li>
-                              <li>Kéo <strong>góc/cạnh</strong> (chấm trắng) → phóng to/thu nhỏ tự do</li>
-                              <li>Sau khi thả, khung được <strong>giữ nguyên</strong> — không auto reset</li>
-                              <li>Phụ đề dịch fit trong khung đã kéo</li>
-                            </ul>
-                            <div className="grid grid-cols-2 gap-2">
-                              <NumField label="X" value={selectedBox.x} disabled={busy || !selected}
-                                onCommit={(v) => commitCoverBox({ x: Math.round(Math.max(0, Math.min(sourceWidth - selectedBox.w, v))) })} />
-                              <NumField label="Y" value={selectedBox.y} disabled={busy || !selected}
-                                onCommit={(v) => commitCoverBox({ y: Math.round(Math.max(0, Math.min(sourceHeight - selectedBox.h, v))) })} />
-                              <NumField label="Rộng" value={selectedBox.w} disabled={busy || !selected}
-                                onCommit={(v) => commitCoverBox({ w: Math.round(Math.max(12, Math.min(sourceWidth - selectedBox.x, v))) })} />
-                              <NumField label="Cao" value={selectedBox.h} disabled={busy || !selected}
-                                onCommit={(v) => commitCoverBox({
-                                  h: Math.round(Math.max(12, Math.min(sourceHeight - selectedBox.y, v))),
-                                })} />
-                            </div>
-                            {!selected && (
-                              <p className="text-[10px] text-muted-foreground">
-                                Đang hiện khung tại playhead — chọn đoạn để kéo/sửa số, hoặc Áp dụng tất cả.
-                              </p>
-                            )}
-                            <p className="text-[10px] text-muted-foreground">
-                              Kéo cạnh trên/dưới (hoặc nhập Cao) để chỉnh chiều cao vùng che.
-                            </p>
-                            <div className="grid grid-cols-2 gap-2">
-                              <button
-                                type="button"
-                                className="rounded-md border border-border bg-accent hover:bg-muted px-3 py-1.5 text-xs transition-colors disabled:opacity-50"
-                                disabled={busy || !selected || sourceWidth <= 0}
-                                title="Giữ Y/Cao, kéo ngang ~96% khung"
-                                onClick={stretchCoverFullWidth}
-                              >
-                                Full ngang
-                              </button>
-                              <button
-                                type="button"
-                                className="rounded-md border border-violet-400/60 bg-violet-500/15 hover:bg-violet-500/25 px-3 py-1.5 text-xs transition-colors disabled:opacity-50"
-                                disabled={busy || !(selected || bboxSeg) || segments.length === 0}
-                                title="Chép khung che hiện tại sang mọi đoạn ngang"
-                                onClick={applyCoverMaskToAll}
-                              >
-                                Áp dụng tất cả
-                              </button>
-                            </div>
-                            <button
-                              type="button"
-                              className="w-full rounded-md border border-border bg-accent hover:bg-muted px-3 py-1.5 text-xs transition-colors disabled:opacity-50"
-                              disabled={busy || !selected?.bbox}
-                              onClick={() => selected && onChange({ ...selected, bbox: null, captionLayout: null })}
-                            >
-                              Reset vùng OCR
-                            </button>
-                              </>
-                            ) : (
-                              <p className="text-[11px] text-muted-foreground">
-                                Chưa có vùng che tại playhead — chọn đoạn caption hoặc tua tới chỗ có chữ.
-                              </p>
-                            )}
-                          </>
+                          <EditorMaskPanel
+                            busy={busy}
+                            settings={settings}
+                            onSettings={onSettings}
+                            coverMaskStyle={coverMaskStyle}
+                            coverMaskColor={coverMaskColor}
+                            coverMaskOpacity={coverMaskOpacity}
+                            selected={selected}
+                            bboxSeg={bboxSeg}
+                            selectedBox={selectedBox}
+                            sourceWidth={sourceWidth}
+                            sourceHeight={sourceHeight}
+                            segmentsLen={segments.length}
+                            timelineDuration={timelineDuration}
+                            playheadSec={time}
+                            commitCoverBox={commitCoverBox}
+                            stretchCoverFullWidth={stretchCoverFullWidth}
+                            applyCoverMaskToAll={applyCoverMaskToAll}
+                            applyAllLaneLabel={applyAllLaneLabel}
+                            editSegment={editSegment}
+                          />
                         )}
 
                         {effectivePropTab === 'overlay' && logoDraft && (
@@ -5817,36 +6094,36 @@ export default function LivePreviewEditor({
                                 className="w-full rounded-md border border-border bg-input px-2 py-1.5 text-xs resize-none outline-none focus:border-ring transition-colors"
                                 value={selectedOverlay.text}
                                 rows={3}
-                                onChange={(e) => onOverlayChange({ ...selectedOverlay, text: e.target.value })}
+                                onChange={(e) => editOverlay({ ...selectedOverlay, text: e.target.value })}
                               />
                             </PropLabel>
 
                             <div className="grid grid-cols-2 gap-2">
                               <NumField label="Hiện từ (s)" value={selectedOverlay.start} step={0.1}
-                                onCommit={(v) => onOverlayChange({ ...selectedOverlay, start: Math.max(0, Math.min(selectedOverlay.end - 0.1, v)) })} />
+                                onCommit={(v) => editOverlay({ ...selectedOverlay, start: Math.max(0, Math.min(selectedOverlay.end - 0.1, v)) })} />
                               <NumField label="Đến (s)" value={selectedOverlay.end} step={0.1}
-                                onCommit={(v) => onOverlayChange({ ...selectedOverlay, end: Math.min(timelineDuration, Math.max(selectedOverlay.start + 0.1, v)) })} />
+                                onCommit={(v) => editOverlay({ ...selectedOverlay, end: Math.min(timelineDuration, Math.max(selectedOverlay.start + 0.1, v)) })} />
                               <NumField label="X" value={selectedOverlay.x}
-                                onCommit={(v) => onOverlayChange({ ...selectedOverlay, x: Math.round(Math.max(0, Math.min(sourceWidth - selectedOverlay.w, v))) })} />
+                                onCommit={(v) => editOverlay({ ...selectedOverlay, x: Math.round(Math.max(0, Math.min(sourceWidth - selectedOverlay.w, v))) })} />
                               <NumField label="Y" value={selectedOverlay.y}
-                                onCommit={(v) => onOverlayChange({ ...selectedOverlay, y: Math.round(Math.max(0, Math.min(sourceHeight - selectedOverlay.h, v))) })} />
+                                onCommit={(v) => editOverlay({ ...selectedOverlay, y: Math.round(Math.max(0, Math.min(sourceHeight - selectedOverlay.h, v))) })} />
                               <NumField label="Rộng" value={selectedOverlay.w}
-                                onCommit={(v) => onOverlayChange({ ...selectedOverlay, w: Math.round(Math.max(20, Math.min(sourceWidth - selectedOverlay.x, v))) })} />
+                                onCommit={(v) => editOverlay({ ...selectedOverlay, w: Math.round(Math.max(20, Math.min(sourceWidth - selectedOverlay.x, v))) })} />
                               <NumField label="Cao" value={selectedOverlay.h}
-                                onCommit={(v) => onOverlayChange({ ...selectedOverlay, h: Math.round(Math.max(20, Math.min(sourceHeight - selectedOverlay.y, v))) })} />
+                                onCommit={(v) => editOverlay({ ...selectedOverlay, h: Math.round(Math.max(20, Math.min(sourceHeight - selectedOverlay.y, v))) })} />
                             </div>
 
                             <PropLabel label={`Cỡ chữ: ${selectedOverlay.fontSize}px`}>
                               <input type="range" min={12} max={160} className="w-full accent-primary"
                                 value={selectedOverlay.fontSize}
-                                onChange={(e) => onOverlayChange({ ...selectedOverlay, fontSize: Number(e.target.value) })} />
+                                onChange={(e) => editOverlay({ ...selectedOverlay, fontSize: Number(e.target.value) })} />
                             </PropLabel>
 
                             <PropLabel label="Màu text">
                               <div className="flex items-center gap-1.5">
                                 <input type="color" className="h-7 w-14 rounded cursor-pointer border border-border shrink-0"
                                   value={selectedOverlay.color}
-                                  onChange={(e) => onOverlayChange({ ...selectedOverlay, color: e.target.value })} />
+                                  onChange={(e) => editOverlay({ ...selectedOverlay, color: e.target.value })} />
                                 {['#ffffff', '#ffd166', '#ef476f', '#06d6a0', '#118ab2', '#000000'].map((c) => (
                                   <button
                                     key={c}
@@ -5857,7 +6134,7 @@ export default function LivePreviewEditor({
                                     )}
                                     style={{ backgroundColor: c }}
                                     title={c}
-                                    onClick={() => onOverlayChange({ ...selectedOverlay, color: c })}
+                                    onClick={() => editOverlay({ ...selectedOverlay, color: c })}
                                   />
                                 ))}
                               </div>
@@ -5866,7 +6143,7 @@ export default function LivePreviewEditor({
                             <button
                               type="button"
                               className="w-full rounded-md border border-border bg-accent hover:bg-muted px-3 py-1.5 text-xs transition-colors"
-                              onClick={() => onOverlayChange({
+                              onClick={() => editOverlay({
                                 ...selectedOverlay,
                                 id: crypto.randomUUID(),
                                 start: Math.min(timelineDuration - 0.1, selectedOverlay.end),
@@ -6054,10 +6331,7 @@ export default function LivePreviewEditor({
                       {
                         id: 'dub' as const,
                         h: 'h-10',
-                        label:
-                          busy && jobStep === 'dub'
-                            ? `Lồng tiếng ${Math.max(0, Math.min(100, Math.round(jobProgress || 0)))}%`
-                            : 'Lồng tiếng',
+                        label: 'Lồng tiếng',
                         icon: <IconHeadphones size={13} className="shrink-0" />,
                         mute: true,
                         hide: true,
@@ -6498,7 +6772,7 @@ export default function LivePreviewEditor({
                       </div>
                       ))}
 
-                      {/* Dub / TTS track — chỉ khi đã lồng hoặc đang dub */}
+                      {/* Dub / TTS track — chỉ khi đã có file TTS (chưa xong dub → không hiện) */}
                       {showDubTrack && (
                       <div className={cn('relative h-10 box-border border-b border-border/80 overflow-hidden', trackHidden.dub && 'opacity-30')} style={{ backgroundColor: 'var(--background)' }}>
                         {(() => {
@@ -6506,34 +6780,6 @@ export default function LivePreviewEditor({
                           const dubs = segments.filter(
                             (seg) => !seg.isCompound && segmentHasDub(seg) && seg.audioUrl,
                           )
-                          const dubbing =
-                            busy && (jobStep === 'dub' || (!jobStep && busy && !dubs.length))
-                          const dubPct = Math.max(0, Math.min(100, Math.round(jobProgress || 0)))
-                          // Đang lồng: pill tiến độ (giống «Xóa lời… N%» trên Âm gốc)
-                          if (dubbing) {
-                            const label =
-                              dubPct > 0
-                                ? `Lồng tiếng… ${dubPct}%`
-                                : 'Lồng tiếng… đang chạy'
-                            const w = Math.max(148, Math.min(280, 120 + dubPct))
-                            return (
-                              <button
-                                type="button"
-                                title={jobMessage || label}
-                                disabled
-                                className="absolute top-1.5 h-[calc(100%-12px)] rounded-md text-[11px] text-white whitespace-nowrap overflow-hidden px-2 flex items-center cursor-wait border-0 opacity-95"
-                                style={{
-                                  left: 0,
-                                  width: w,
-                                  boxSizing: 'border-box',
-                                  background: `linear-gradient(90deg, #c2780a ${dubPct}%, #E8A045 ${dubPct}%)`,
-                                }}
-                              >
-                                <IconHeadphones size={11} className="shrink-0 mr-1 opacity-90" />
-                                {label}
-                              </button>
-                            )
-                          }
                           return dubs.map((seg) => {
                             const clipSec = dubClipSeconds(
                               seg,
@@ -6972,13 +7218,13 @@ export default function LivePreviewEditor({
                 <CtxItem onClick={() => { setSelectedId(seg.id); setPropTab('audio'); setCtxMenu(null) }}>Mở Âm thanh</CtxItem>
                 <CtxSep />
                 {[0, 50, 100, 150].map((v) => (
-                  <CtxItem key={v} onClick={() => { onChange({ ...seg, ttsVolume: v }); setCtxMenu(null) }}>
+                  <CtxItem key={v} onClick={() => { editSegment({ ...seg, ttsVolume: v }); setCtxMenu(null) }}>
                     Âm lượng TTS {v === 0 ? 'Tắt' : `${v}%`}{(seg.ttsVolume ?? 100) === v ? ' ✓' : ''}
                   </CtxItem>
                 ))}
                 <CtxSep />
                 {[0.9, 1, 1.15].map((v) => (
-                  <CtxItem key={v} onClick={() => { onChange({ ...seg, ttsSpeed: v }); setCtxMenu(null) }}>
+                  <CtxItem key={v} onClick={() => { editSegment({ ...seg, ttsSpeed: v }); setCtxMenu(null) }}>
                     Tốc độ TTS {v}×{(seg.ttsSpeed ?? 1) === v ? ' ✓' : ''}
                   </CtxItem>
                 ))}
@@ -7003,7 +7249,7 @@ export default function LivePreviewEditor({
                 </CtxItem>
                 <CtxItem
                   onClick={() => {
-                    onChange({
+                    editSegment({
                       ...seg,
                       dub: false,
                       audioUrl: undefined,
@@ -7268,137 +7514,5 @@ export default function LivePreviewEditor({
         document.body,
       )}
     </div>
-  )
-}
-
-/* ── OpenCut PanelView: h-11 header with title + scrollable content ── */
-function PanelView({ title, children, showScrollbar = false }: { title: string; children: React.ReactNode; showScrollbar?: boolean }) {
-  return (
-    <div className="relative flex h-full flex-col">
-      <div className="bg-background h-11 shrink-0 pl-3 pr-2 flex items-center justify-between border-b border-border">
-        <span className="text-muted-foreground text-sm">{title}</span>
-      </div>
-      <div className={cn('w-full min-h-0 flex-1 pt-2', showScrollbar ? 'overflow-y-scroll' : 'overflow-y-auto scrollbar-hidden')}>
-        <div className="w-full flex-1 px-2 pt-0">{children}</div>
-      </div>
-    </div>
-  )
-}
-
-function PropLabel({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <label className="flex flex-col gap-1">
-      <span className="text-[11px] text-muted-foreground font-medium">{label}</span>
-      {children}
-    </label>
-  )
-}
-
-/* Numeric input that commits on blur/Enter (avoids re-render storms while typing).
-   key={value} re-seeds defaultValue whenever the outside value changes. */
-function NumField({ label, value, step = 1, disabled, onCommit }: {
-  label: string
-  value: number
-  step?: number
-  disabled?: boolean
-  onCommit: (value: number) => void
-}) {
-  const commit = (raw: string) => {
-    const parsed = Number(raw)
-    if (Number.isFinite(parsed) && Math.abs(parsed - value) > 1e-9) onCommit(parsed)
-  }
-  return (
-    <PropLabel label={label}>
-      <input
-        key={value}
-        type="number"
-        className="w-full rounded-md border border-border bg-input px-2 py-1 text-xs outline-none focus:border-ring tabular-nums"
-        defaultValue={Number.isInteger(value) ? value : +value.toFixed(2)}
-        step={step}
-        disabled={disabled}
-        onBlur={(e) => commit(e.currentTarget.value)}
-        onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur() }}
-      />
-    </PropLabel>
-  )
-}
-
-function TrackCtrl({
-  title,
-  active,
-  onClick,
-  children,
-}: {
-  title: string
-  active?: boolean
-  onClick: () => void
-  children: React.ReactNode
-}) {
-  return (
-    <button
-      type="button"
-      title={title}
-      className={cn(
-        'w-[18px] h-[18px] rounded-sm flex items-center justify-center shrink-0 transition-colors',
-        active
-          ? 'text-primary bg-primary/15'
-          : 'text-muted-foreground hover:text-foreground hover:bg-accent',
-      )}
-      onClick={(e) => { e.stopPropagation(); onClick() }}
-    >
-      {children}
-    </button>
-  )
-}
-
-function CtxItem({
-  children,
-  onClick,
-  disabled,
-}: {
-  children: React.ReactNode
-  onClick: () => void
-  disabled?: boolean
-}) {
-  return (
-    <button
-      type="button"
-      disabled={disabled}
-      className="w-full text-left px-3 py-1.5 hover:bg-accent disabled:opacity-40 disabled:pointer-events-none"
-      onClick={onClick}
-    >
-      {children}
-    </button>
-  )
-}
-
-function CtxSep() {
-  return <div className="my-1 border-t border-border" role="separator" />
-}
-
-function TlButton({ title, onClick, disabled, active, children }: {
-  title: string
-  onClick?: () => void
-  disabled?: boolean
-  active?: boolean
-  children: React.ReactNode
-}) {
-  return (
-    <button
-      type="button"
-      title={title}
-      aria-label={title}
-      onClick={onClick}
-      disabled={disabled}
-      className={cn(
-        'w-7 h-7 shrink-0 rounded-sm flex items-center justify-center transition-colors',
-        'disabled:opacity-35 disabled:cursor-not-allowed',
-        active
-          ? 'text-primary bg-primary/15 hover:bg-primary/20'
-          : 'text-muted-foreground hover:text-foreground hover:bg-accent disabled:hover:bg-transparent disabled:hover:text-muted-foreground',
-      )}
-    >
-      {children}
-    </button>
   )
 }

@@ -1,3 +1,4 @@
+import pytest
 from pipeline.core import system_check
 from types import SimpleNamespace
 
@@ -77,12 +78,28 @@ def test_ensure_torchaudio_skips_when_ready(monkeypatch):
 
 
 def test_ensure_runtime_transformers_installs_when_missing(monkeypatch):
-    monkeypatch.setattr(system_check, "_mod_ok", lambda name: (name != "transformers", "ok"))
+    monkeypatch.setattr(
+        "pipeline.core.runtime_site.verify_transformers_ok",
+        lambda: (False, "missing"),
+    )
+    monkeypatch.setattr(
+        "pipeline.core.runtime_site.bootstrap_ai_runtime",
+        lambda **_kw: None,
+    )
     calls = []
 
-    monkeypatch.setattr(system_check, "_runtime_pip_install", lambda *pkgs, **_kw: calls.append(pkgs))
-    system_check.ensure_runtime_transformers()
-    assert calls == [("transformers",)]
+    monkeypatch.setattr(
+        "pipeline.core.system_check._runtime_pip_install",
+        lambda *pkgs, **_kw: calls.append(pkgs),
+    )
+
+    from pipeline.core import system_check
+
+    with pytest.raises(RuntimeError, match="transformers"):
+        system_check.ensure_runtime_transformers()
+    assert calls == [
+        ("transformers==4.57.6", "huggingface-hub>=0.34,<1.0", "safetensors"),
+    ]
 
 
 def test_ai_runtime_installs_when_transformers_missing(monkeypatch):

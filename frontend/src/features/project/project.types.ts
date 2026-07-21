@@ -262,6 +262,7 @@ export type SystemChecks = {
   requiredMissing: string[]
   optionalMissing: string[]
   summary: string
+  fast?: boolean
 }
 
 export type JobStatus = {

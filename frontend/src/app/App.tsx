@@ -287,13 +287,14 @@ export default function App() {
     { id: 'system', name: 'Giọng hệ thống (theo ngôn ngữ đích)' },
   ])
   const [settings, setSettings] = useState(loadSettings)
-  const [configOpen, setConfigOpen] = useState(() => !loadSetupGate())
+  const [configOpen, setConfigOpen] = useState(false)
   const [configSection, setConfigSection] = useState<'setup' | 'cloud' | 'tts'>(() =>
     loadSetupGate() ? 'cloud' : 'setup',
   )
   const [setupGatePassed, setSetupGatePassed] = useState(loadSetupGate)
-  const [setupReady, setSetupReady] = useState(loadSetupGate)
-  const [setupChecked, setSetupChecked] = useState(loadSetupGate)
+  /** Backend checks done once — không chặn UI sau khi đã qua cổng thiết lập. */
+  const [setupChecked, setSetupChecked] = useState(false)
+  const [setupMissingRequired, setSetupMissingRequired] = useState(false)
   const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth)
   const sidebarWidthRef = useRef(sidebarWidth)
   const sidebarDrag = useRef<{ startX: number; startW: number } | null>(null)
@@ -359,46 +360,77 @@ export default function App() {
   function passSetupGate() {
     persistSetupGate()
     setSetupGatePassed(true)
-    setSetupReady(true)
+    setSetupMissingRequired(false)
     setConfigSection('cloud')
     setConfigOpen(false)
+    void api.passSetupGate().catch(() => {
+      /* file gate — localStorage vẫn giữ */
+    })
+    const l = settings.targetLang === 'none' ? 'vi' : settings.targetLang
+    void api.voices(l).then(setVoices).catch(() => {})
   }
 
-  // Lần đầu: mở Thiết lập, chặn app nếu thiếu bắt buộc. Lần sau: chỉ kiểm tra nền.
+  // Lần đầu: Thiết lập. Lần sau: đọc gate từ disk (ổn định hơn localStorage theo port).
   useEffect(() => {
     let cancelled = false
 
     async function bootstrapSetup() {
-      if (!setupGatePassed) {
-        setConfigSection('setup')
-        setConfigOpen(true)
-      }
-      for (let attempt = 0; attempt < 40; attempt++) {
+      let gatePassed = loadSetupGate()
+
+      for (let attempt = 0; attempt < 60; attempt++) {
         if (cancelled) return
         try {
-          const c = await api.systemChecks(attempt > 0)
-          if (cancelled) return
-          setSetupChecked(true)
-          if (setupGatePassed) {
-            setSetupReady(true)
-          } else {
-            setSetupReady(c.ok)
-          }
-          return
+          await api.health()
+          break
         } catch {
-          await new Promise((r) => window.setTimeout(r, 250))
+          await new Promise((r) => window.setTimeout(r, 200))
         }
       }
       if (cancelled) return
-      setSetupChecked(true)
-      if (!setupGatePassed) setSetupReady(false)
+
+      try {
+        const g = await api.getSetupGate()
+        if (cancelled) return
+        if (g.passed) {
+          gatePassed = true
+          persistSetupGate()
+          setSetupGatePassed(true)
+        } else if (gatePassed) {
+          // localStorage cũ → đồng bộ lên disk lần này
+          await api.passSetupGate().catch(() => {})
+          setSetupGatePassed(true)
+        }
+      } catch {
+        /* giữ localStorage */
+      }
+
+      if (!gatePassed) {
+        setConfigSection('setup')
+        setConfigOpen(true)
+      }
+
+      try {
+        const c = await api.systemChecks(false, false)
+        if (cancelled) return
+        setSetupChecked(true)
+        setSetupMissingRequired(!c.ok)
+        // Chỉ ép mở Thiết lập khi chưa qua cổng — lần sau vào thẳng app.
+        if (!c.ok && !gatePassed && !loadSetupGate()) {
+          setConfigSection('setup')
+          setConfigOpen(true)
+        }
+      } catch {
+        if (cancelled) return
+        setSetupChecked(true)
+        if (!gatePassed) setSetupMissingRequired(true)
+      }
     }
 
     void bootstrapSetup()
     return () => {
       cancelled = true
     }
-  }, [setupGatePassed])
+  }, [])
 
   // F5 / Vite HMR: mở lại project đang làm (kể cả đang export)
   useEffect(() => {
@@ -449,14 +481,30 @@ export default function App() {
             return next
           })
         }
+        // Không restore popup từ cancel/stale/code trần "dub"
+        const rawErr = st.error && st.error !== 'cancelled' && st.error !== 'stale_job'
+          ? String(st.error)
+          : undefined
+        const errMsg =
+          rawErr === 'dub' || rawErr === 'export'
+            ? (st.message && st.message.length > 3
+                ? st.message
+                : rawErr === 'dub'
+                  ? 'Lồng tiếng thất bại — bấm Lồng tiếng để thử lại'
+                  : 'Xuất thất bại')
+            : rawErr
         setStatus({
           step: st.step || 'video',
           progress: st.progress || 0,
-          message: st.message || 'Đã mở lại project',
+          message:
+            st.message
+            || (errMsg && !st.running ? errMsg : '')
+            || 'Đã mở lại project',
           running: Boolean(st.running),
-          error: st.error,
+          error: errMsg,
           outputRel: st.outputRel,
         })
+        if (!st.running) releaseDubLock()
         if (st.running) busyAt.current = Date.now()
         if (!st.running && st.outputRel && (st.progress || 0) >= 100) {
           setExportUrl(`/api/projects/${id}/output`)
@@ -695,7 +743,7 @@ export default function App() {
       setStatus({
         step: 'video',
         progress: 0,
-        message: e instanceof Error ? e.message : 'Tải video thất bại — kiểm tra server :8787',
+        message: e instanceof Error ? e.message : 'Tải video thất bại — kiểm tra server API',
         running: false,
         error: 'upload',
       })
@@ -708,6 +756,10 @@ export default function App() {
     const wc = Math.max(0, previewSec)
     workClipSecRef.current = wc
     setWorkClipSec(wc)
+    // Đồng bộ settings.previewSec ngay (ô draft đã commit từ sidebar)
+    if (wc > 0 && settings.previewSec !== wc) {
+      setSettings((s) => ({ ...s, previewSec: wc }))
+    }
     // Full: xóa clip timeline local (đang kẹt độ dài preview cũ)
     if (wc <= 0 && typeof localStorage !== 'undefined') {
       try {
@@ -717,6 +769,8 @@ export default function App() {
     }
     // Bust video URL ngay — tránh stream preview_Ns cũ
     setVideoUrl(freshVideoUrl(`/api/projects/${projectId}/video`))
+    // Xóa segments cũ ngay — tránh UI vẫn hiện 5s trong lúc chạy 10s
+    setSegments([])
     busyAt.current = Date.now()
     setStatus({
       step: 'asr',
@@ -725,7 +779,10 @@ export default function App() {
       running: true,
       error: undefined,
     })
-    await api.run(projectId, { ...settings, previewSec })
+    await api.run(projectId, {
+      ...settings,
+      previewSec: wc,
+    })
     setStatus((s) => ({ ...s, running: true }))
   }
 
@@ -772,12 +829,14 @@ export default function App() {
       }, 120_000)
     } catch (e) {
       releaseDubLock()
+      const msg = e instanceof Error ? e.message : 'Lồng tiếng thất bại'
       setStatus({
         step: 'dub',
         progress: 0,
-        message: e instanceof Error ? e.message : 'Lồng tiếng thất bại',
+        message: msg,
         running: false,
-        error: 'dub',
+        // message đầy đủ — không để error='dub' (popup chỉ hiện "dub")
+        error: msg,
       })
     }
   }
@@ -1010,8 +1069,27 @@ export default function App() {
     timeScale?: number
     prevBakedSpeed?: number
   }) {
-    // Segments/overlays đã remap từ baseline 1× — đồng bộ toàn project
-    setSegments(applyDefaultVoice(asSegmentList(res.segments), settings.defaultVoice))
+    // Segments/overlays đã remap — giữ text nếu list server thiếu translation
+    setSegments((prev) => {
+      const incoming = applyDefaultVoice(asSegmentList(res.segments), settings.defaultVoice)
+      if (!prev.length) return incoming
+      const byId = new Map(prev.map((s) => [s.id, s] as const))
+      return incoming.map((s) => {
+        const loc = byId.get(s.id)
+        if (!loc) return s
+        if ((s.translation || '').trim()) return s
+        if (!(loc.translation || '').trim() && !(loc.source || '').trim()) return s
+        return {
+          ...s,
+          translation: loc.translation || s.translation,
+          source: (s.source || '').trim() ? s.source : loc.source,
+          audioUrl: s.audioUrl || loc.audioUrl,
+          audioFile: s.audioFile || loc.audioFile,
+          bbox: s.bbox ?? loc.bbox,
+          captionLayout: s.captionLayout ?? loc.captionLayout,
+        }
+      })
+    })
     if (Array.isArray(res.overlays)) setOverlays(res.overlays)
     const wc = Math.max(0, res.workClipSec)
     workClipSecRef.current = wc
@@ -1186,12 +1264,22 @@ export default function App() {
     setPreviewEditorOpen(true)
   }
 
-  const firstRunBlocked = !setupGatePassed && setupChecked && !setupReady
-  const appUsable = setupGatePassed || (setupChecked && setupReady)
+  // Chỉ sau Bắt đầu / đã lưu cổng — tránh Header+Modal+workspace cùng chiếm CSS grid → trắng.
+  const firstRunBlocked = !setupGatePassed
+  const appUsable = setupGatePassed
   const configModalOpen = configOpen || firstRunBlocked
 
   return (
     <div className={editorOpen && appMode === 'clone' ? 'app app--editor' : 'app'}>
+      {!appUsable ? (
+        <p className="cfg-boot-msg">
+          {setupChecked
+            ? setupMissingRequired
+              ? 'Cài đủ thành phần bắt buộc rồi bấm Bắt đầu'
+              : 'Sẵn sàng — bấm Bắt đầu'
+            : 'Đang kết nối backend…'}
+        </p>
+      ) : null}
       {appUsable && !(editorOpen && appMode === 'clone') && (
       <Header
         hardware={hw}
@@ -1323,8 +1411,8 @@ export default function App() {
           onSettings={onSettings}
           onUpload={onUpload}
           onTranslateAll={() => onTranslateAll(0)}
-          onPreview={() =>
-            onTranslateAll(Math.max(5, Math.min(600, settings.previewSec || 20)))
+          onPreview={(previewSec) =>
+            onTranslateAll(Math.max(5, Math.min(600, previewSec || settings.previewSec || 20)))
           }
           onCancel={onCancel}
         />
@@ -1445,23 +1533,50 @@ export default function App() {
         </div>
       )}
       <ProgressPopup
-        active={status.running || Boolean(status.error && status.error !== 'cancelled')}
+        active={
+          status.running
+          || Boolean(
+            status.error
+            && status.error !== 'cancelled'
+            && status.error !== 'stale_job',
+          )
+        }
         minimized={progressMinimized}
         running={status.running}
         title={
           status.step === 'dub'
-            ? 'Lồng tiếng'
+            ? (
+                status.error && status.error !== 'cancelled'
+                  ? 'Lồng tiếng thất bại'
+                  : status.running
+                    ? 'Đang lồng tiếng'
+                    : 'Lồng tiếng'
+              )
             : status.step === 'export'
               ? (status.error ? 'Xuất video thất bại' : 'Xuất video')
               : status.step === 'translate' || status.step === 'asr'
-                ? 'Dịch / nhận dạng'
+                ? (status.error ? 'Dịch / nhận dạng thất bại' : 'Dịch / nhận dạng')
                 : 'Đang xử lý'
         }
-        message={status.message}
+        message={
+          // error code ngắn ("dub") → đừng thay message; đã xử lý trong ProgressPopup
+          status.message
+          || (
+            status.error && status.error !== 'cancelled' && status.error.length > 24
+              ? status.error
+              : status.error === 'dub'
+                ? 'Lồng tiếng thất bại — xem log backend hoặc thử lại'
+                : undefined
+          )
+        }
         progress={status.progress}
-        error={status.error}
+        error={
+          status.error === 'dub' && !(status.message || '').trim()
+            ? 'Lồng tiếng thất bại'
+            : status.error
+        }
         onMinimize={() => {
-          // Job đang chạy: chỉ thu nhỏ. Lỗi xong: dismiss hẳn (ghi meta).
+          // Job đang chạy: chỉ thu nhỏ (chạy nền). Lỗi xong: dismiss hẳn.
           if (status.running) {
             setProgressMinimized(true)
             return

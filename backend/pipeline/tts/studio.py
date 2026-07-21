@@ -118,12 +118,24 @@ _cancel_flags: dict[str, bool] = {}
 _running: dict[str, bool] = {}
 
 
-def request_cancel(job_id: str) -> bool:
+def mark_cancel(job_id: str) -> None:
+    """Chỉ set flag (gọi từ jobs.request_cancel — tránh đệ quy)."""
     with _jobs_lock:
-        if job_id in _running:
-            _cancel_flags[job_id] = True
-            return True
-        return False
+        _cancel_flags[job_id] = True
+
+
+def request_cancel(job_id: str) -> bool:
+    """Huỷ job studio + kill subprocess TTS đã register dưới job_id."""
+    with _jobs_lock:
+        _cancel_flags[job_id] = True
+        running = job_id in _running
+    try:
+        from pipeline.core.jobs import kill_job_processes
+
+        kill_job_processes(job_id)
+    except Exception:
+        pass
+    return True if running else True
 
 
 def _is_cancelled(job_id: str) -> bool:
@@ -258,6 +270,12 @@ def synth_text_job(
         _running[job_id] = True
         _cancel_flags[job_id] = False
     try:
+        try:
+            from pipeline.core.jobs import set_job_context
+
+            set_job_context(job_id)
+        except Exception:
+            pass
         # auto_split: mỗi câu 1 part TTS + 1 cue SRT (timeline = độ dài audio thật)
         chunks = (
             split_sentences(text, max_chars=240)
@@ -403,6 +421,12 @@ def synth_srt_job(
     out_cues: list[dict] = []
     cursor = 0.0
     try:
+        try:
+            from pipeline.core.jobs import set_job_context
+
+            set_job_context(job_id)
+        except Exception:
+            pass
         match = effective_match if effective_match in ("none", "natural", "stretch", "preferVideo") else "stretch"
         for i, cue in enumerate(cues):
             if _is_cancelled(job_id):

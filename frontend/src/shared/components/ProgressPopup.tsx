@@ -102,7 +102,17 @@ export default function ProgressPopup({
 
   const pct = clampPct(progress)
   const failed = Boolean(error && error !== 'cancelled')
-  const rawBase = error && error !== 'cancelled' ? error : message || title
+  // Ưu tiên message dài; error code ngắn (dub/export) không che message
+  const errStr = error && error !== 'cancelled' ? String(error).trim() : ''
+  const msgStr = (message || '').trim()
+  const rawBase =
+    failed
+      ? (
+          msgStr && errStr && msgStr !== errStr && errStr.length <= 24
+            ? msgStr
+            : errStr || msgStr || title
+        )
+      : msgStr || title
   const base = sanitizeJobMessage(rawBase)
   const compactLine =
     running && !failed
@@ -227,8 +237,9 @@ export default function ProgressPopup({
               {onCancel ? (
                 <button
                   type="button"
-                  className="rounded-md border border-border px-3 py-1.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
+                  className="rounded-md border border-destructive/50 bg-destructive/15 px-3 py-1.5 text-xs font-medium text-destructive hover:bg-destructive/25"
                   onClick={onCancel}
+                  title="Dừng job — kill ffmpeg/TTS/OCR"
                 >
                   Huỷ
                 </button>

@@ -1,11 +1,147 @@
 """OCR định vị hardsub / nhãn / title dọc trên khung (dùng lúc burn)."""
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
 from .extract import _ocr_join_lines, _rapidocr_labels
 from .labels import pick_label_box
+
+
+def _runtime_python() -> Path | None:
+    """Desktop .venv-runtime python — clean OpenCV, unlike frozen parent."""
+    if not getattr(sys, "frozen", False):
+        return None
+    home = (os.environ.get("VIDEO_CLONE_HOME") or "").strip()
+    if not home:
+        return None
+    py = Path(home) / ".venv-runtime" / (
+        "Scripts/python.exe" if sys.platform == "win32" else "bin/python"
+    )
+    return py if py.is_file() else None
+
+
+def _locate_via_runtime_subprocess(
+    video: Path | str,
+    segments: list[dict[str, Any]],
+    *,
+    only_missing: bool,
+    stable: bool,
+    analysis_region: Any,
+) -> int | None:
+    """Chạy attach_speech_hardsub_boxes trong process runtime riêng.
+
+    Crash/native OpenCV recursion chỉ giết worker — app desktop sống.
+    Trả số bbox gắn, hoặc None nếu không spawn được (gọi in-process).
+    """
+    py = _runtime_python()
+    if py is None:
+        return None
+    # Bundle onedir: _MEIPASS/pipeline/… ; dev: backend/
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        pipeline_root = Path(meipass)
+    else:
+        pipeline_root = Path(__file__).resolve().parents[2]
+    if not (pipeline_root / "pipeline" / "ocr" / "locate.py").is_file():
+        return None
+
+    payload = {
+        "video": str(Path(video).resolve()),
+        "segments": segments,
+        "only_missing": only_missing,
+        "stable": stable,
+        "analysis_region": analysis_region,
+    }
+    # Worker script file — tránh quoting -c trên Windows
+    worker_src = '''# vc-locate-worker
+import json, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root))
+raw = Path(sys.argv[2]).read_text(encoding="utf-8-sig")
+data = json.loads(raw)
+from pipeline.ocr.locate import attach_speech_hardsub_boxes_inprocess
+n = attach_speech_hardsub_boxes_inprocess(
+    data["video"],
+    data["segments"],
+    only_missing=bool(data.get("only_missing", True)),
+    project_id=None,
+    stable=bool(data.get("stable", False)),
+    analysis_region=data.get("analysis_region"),
+)
+Path(sys.argv[3]).write_text(
+    json.dumps({"n": int(n), "segments": data["segments"]}, ensure_ascii=False),
+    encoding="utf-8",
+)
+'''
+    try:
+        with tempfile.TemporaryDirectory(prefix="vc-locate-") as td:
+            tdir = Path(td)
+            pin = tdir / "in.json"
+            pout = tdir / "out.json"
+            wpy = tdir / "worker.py"
+            pin.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            wpy.write_text(worker_src, encoding="utf-8")
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(pipeline_root) + os.pathsep + env.get("PYTHONPATH", "")
+            # Worker là python sạch — không frozen
+            env.pop("VIDEO_CLONE_DESKTOP", None)
+            cmd = [str(py), str(wpy), str(pipeline_root), str(pin), str(pout)]
+            kw: dict[str, Any] = {
+                "capture_output": True,
+                "text": True,
+                "timeout": 900,
+                "cwd": str(pipeline_root),
+                "env": env,
+            }
+            if sys.platform == "win32":
+                kw["creationflags"] = int(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
+            proc = subprocess.run(cmd, **kw)
+            if proc.returncode != 0 or not pout.is_file():
+                err = (proc.stderr or proc.stdout or "")[-1500:]
+                try:
+                    from pipeline.core.app_log import append_log
+
+                    append_log(
+                        f"[locate-subprocess] fail code={proc.returncode}\n{err}",
+                    )
+                except Exception:
+                    pass
+                return 0  # fail soft — keep translation, no crash parent
+            out = json.loads(pout.read_text(encoding="utf-8"))
+            segs_out = out.get("segments")
+            if isinstance(segs_out, list) and len(segs_out) == len(segments):
+                for dst, src in zip(segments, segs_out):
+                    if not isinstance(src, dict) or not isinstance(dst, dict):
+                        continue
+                    for k in (
+                        "bbox",
+                        "bboxInherited",
+                        "layout",
+                        "captionLayout",
+                        "coverStart",
+                        "coverEnd",
+                        "_probeAnchored",
+                    ):
+                        if k in src:
+                            dst[k] = src[k]
+                        elif k in dst and k.startswith("_"):
+                            dst.pop(k, None)
+            return int(out.get("n") or 0)
+    except Exception as e:
+        try:
+            from pipeline.core.app_log import append_exception
+
+            append_exception("[locate-subprocess] exception", e)
+        except Exception:
+            pass
+        return 0
 
 
 def _source_matches(text: str, source: str) -> bool:
@@ -657,8 +793,74 @@ def attach_speech_hardsub_boxes(
     stable=False (mặc định, nhanh): 1 frame giữa mỗi mốc.
     stable=True: đầu•giữa•cuối + majority + neo Y (chậm hơn ~3×).
     analysis_region: {x,y,w,h} 0–1 — thu hẹp ROI OCR (nhanh + ít nhiễu).
+
+    Frozen desktop: chạy trong subprocess .venv-runtime — crash OpenCV
+    không kéo tắt VideoClone.exe.
     """
-    import cv2
+    if getattr(sys, "frozen", False):
+        n = _locate_via_runtime_subprocess(
+            video,
+            segments,
+            only_missing=only_missing,
+            stable=stable,
+            analysis_region=analysis_region,
+        )
+        if n is not None:
+            return n
+        # Không fallback in-process trên frozen — cv2 recursion kill cả app.
+        try:
+            from pipeline.core.app_log import append_log
+
+            append_log("[locate] no runtime subprocess — skip OCR boxes (keep translation)")
+        except Exception:
+            pass
+        return 0
+    return attach_speech_hardsub_boxes_inprocess(
+        video,
+        segments,
+        only_missing=only_missing,
+        project_id=project_id,
+        stable=stable,
+        analysis_region=analysis_region,
+    )
+
+
+def attach_speech_hardsub_boxes_inprocess(
+    video: Path | str,
+    segments: list[dict[str, Any]],
+    *,
+    only_missing: bool = True,
+    project_id: str | None = None,
+    stable: bool = False,
+    analysis_region: Any = None,
+) -> int:
+    """In-process locate (dev + runtime worker). Không gọi từ frozen parent nếu tránh được."""
+    # Frozen parent fallback: NEVER bare ``import cv2``.
+    try:
+        from pipeline.core.runtime_site import ensure_cv2, prepare_cv2_import_path
+
+        prepare_cv2_import_path()
+        cv2 = ensure_cv2()
+    except Exception as e:
+        if not getattr(sys, "frozen", False):
+            try:
+                import cv2  # type: ignore
+            except Exception:
+                try:
+                    from pipeline.core.app_log import append_exception
+
+                    append_exception("[locate] ensure_cv2 failed — skip OCR boxes", e)
+                except Exception:
+                    pass
+                return 0
+        else:
+            try:
+                from pipeline.core.app_log import append_exception
+
+                append_exception("[locate] ensure_cv2 failed — skip OCR boxes", e)
+            except Exception:
+                pass
+            return 0
 
     path = Path(video)
     if not path.is_file() or not segments:

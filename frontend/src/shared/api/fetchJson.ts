@@ -1,4 +1,4 @@
-/** fetch + timeout — tránh treo khi backend reload */
+/** fetch + timeout — tránh treo khi backend reload / đang cài gói */
 export async function fetchJson<T>(
   url: string,
   init?: RequestInit,
@@ -15,7 +15,8 @@ export async function fetchJson<T>(
     return res.json() as Promise<T>
   } catch (e) {
     if (e instanceof DOMException && e.name === 'AbortError') {
-      throw new Error('API timeout — backend đang reload?')
+      const sec = Math.round(timeoutMs / 1000)
+      throw new Error(`API timeout (${sec}s) — backend bận hoặc đang cài gói?`)
     }
     throw e
   } finally {

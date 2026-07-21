@@ -14,6 +14,7 @@ import hashlib
 import importlib.metadata
 import logging
 import os
+import sys
 import threading
 import warnings
 from pathlib import Path
@@ -33,11 +34,16 @@ _clone_cache: dict[str, tuple[int, int]] = {}
 
 def _torch_cuda_ready() -> bool:
     try:
-        import torch
+        from pipeline.core.accel import preferred_torch_device
 
-        return bool(torch.cuda.is_available())
+        return preferred_torch_device() == "cuda"
     except Exception:
-        return False
+        try:
+            import torch
+
+            return bool(torch.cuda.is_available())
+        except Exception:
+            return False
 
 
 def _nvidia_present() -> bool:
@@ -53,6 +59,7 @@ def _nvidia_present() -> bool:
             capture_output=True,
             text=True,
             timeout=8,
+            creationflags=int(getattr(subprocess, "CREATE_NO_WINDOW", 0)) if sys.platform == "win32" else 0,
         )
         return r.returncode == 0 and bool((r.stdout or "").strip())
     except Exception:
@@ -60,19 +67,13 @@ def _nvidia_present() -> bool:
 
 
 def _resolve_backend() -> tuple[str, str]:
-    """(backend, device) — auto: CUDA+torch → pytorch/cuda, không thì ONNX/CPU.
+    """(backend, device) — CUDA/MPS → pytorch; không GPU → ONNX/CPU.
 
-    CapCut / ElevenLabs chạy cloud — chỉ VieNeu local mới dùng GPU máy.
+    CapCut / ElevenLabs cloud — chỉ VieNeu local dùng GPU máy.
     """
-    env = (os.environ.get("VIENEU_BACKEND") or "auto").strip().lower()
-    if env in ("onnx", "cpu"):
-        return "onnx", "cpu"
-    if env == "pytorch":
-        return "pytorch", ("cuda" if _torch_cuda_ready() else "cpu")
-    # auto
-    if _torch_cuda_ready():
-        return "pytorch", "cuda"
-    return "onnx", "cpu"
+    from pipeline.core.accel import preferred_vieneu_backend
+
+    return preferred_vieneu_backend()
 
 
 def available() -> bool:
@@ -213,6 +214,16 @@ def _register_vieneu_transformers() -> None:
 def get_client() -> Any:
     """Lazy singleton — only when synth/clone needs the model."""
     global _client, _client_err, _load_state
+    if getattr(sys, "frozen", False):
+        from . import vieneu_frozen
+
+        ok, detail = vieneu_frozen.probe()
+        if not ok:
+            _load_state = "error"
+            _client_err = detail
+            raise RuntimeError(f"Không khởi tạo được VieNeu: {detail}")
+        _load_state = "ready"
+        return None  # synthesize() uses subprocess on frozen builds
     if not available():
         raise RuntimeError(
             "Chưa cài VieNeu-TTS. Trong backend/.venv chạy: pip install vieneu onnxruntime soundfile soxr sea-g2p perth"
@@ -226,7 +237,10 @@ def get_client() -> Any:
         _load_state = "loading"
         try:
             from pipeline.core.system_check import ensure_runtime_torch, ensure_runtime_transformers
+            from pipeline.core.runtime_site import bootstrap_ai_runtime, install_runtime_meta_path
 
+            install_runtime_meta_path()
+            bootstrap_ai_runtime()
             ensure_runtime_torch()
             ensure_runtime_transformers()
             # Prefetch torch cuDNN before any other CUDA package binds the DLL name
@@ -311,41 +325,76 @@ def status() -> dict[str, Any]:
         out["ready"] = False
         out["message"] = "Chưa cài — " + out["installHint"]
         return out
+    if getattr(sys, "frozen", False):
+        from . import vieneu_frozen
+
+        ok, detail = vieneu_frozen.probe()
+        backend, device = vieneu_frozen.resolve_backend()
+        out["ready"] = ok
+        out["loaded"] = ok
+        out["loadState"] = "ready" if ok else "error"
+        if ok:
+            if backend == "pytorch" and device == "cuda":
+                out["device"] = "CUDA (runtime)"
+                out["message"] = "Sẵn sàng — TTS PyTorch/CUDA qua runtime venv"
+            else:
+                out["device"] = "ONNX/CPU (runtime)"
+                out["message"] = "Sẵn sàng — TTS ONNX/CPU qua runtime venv"
+        else:
+            out["message"] = f"Lỗi runtime: {detail[:180]}"
+        return out
     if _load_state == "error" and _client_err:
         out["ready"] = False
         out["message"] = f"Lỗi load: {_client_err[:180]}"
         return out
     if _load_state == "ready" and _client is not None:
         be = str(getattr(_client, "backend", "onnx") or "onnx").lower()
-        if be == "pytorch" and _torch_cuda_ready():
+        if be == "pytorch":
             try:
-                import torch
+                from pipeline.core.accel import preferred_torch_device, accel_label
 
-                name = torch.cuda.get_device_name(0)
-                out["device"] = f"CUDA · {name}"
+                d = preferred_torch_device()
+                if d == "cuda":
+                    try:
+                        import torch
+
+                        out["device"] = f"CUDA · {torch.cuda.get_device_name(0)}"
+                    except Exception:
+                        out["device"] = "CUDA"
+                elif d == "mps":
+                    out["device"] = "Apple GPU (MPS)"
+                else:
+                    out["device"] = "PyTorch/CPU"
             except Exception:
-                out["device"] = "CUDA"
-        elif be == "pytorch":
-            out["device"] = "PyTorch/CPU"
+                out["device"] = "PyTorch"
         else:
             out["device"] = "ONNX/CPU"
         out["message"] = "Sẵn sàng (model đã nạp)"
     elif _load_state == "loading":
         out["message"] = "Đang nạp model…"
     else:
-        if _torch_cuda_ready():
-            out["device"] = "CUDA (lazy)"
-            out["message"] = "Đã cài — lần tạo giọng đầu sẽ nạp PyTorch/CUDA"
-        elif _nvidia_present():
+        try:
+            from pipeline.core.accel import preferred_torch_device
+
+            d = preferred_torch_device()
+            if d == "cuda":
+                out["device"] = "CUDA (lazy)"
+                out["message"] = "Đã cài — lần tạo giọng đầu nạp PyTorch/CUDA"
+            elif d == "mps":
+                out["device"] = "Apple GPU (lazy)"
+                out["message"] = "Đã cài — lần tạo giọng đầu nạp PyTorch/MPS"
+            elif _nvidia_present():
+                out["device"] = "CPU (thiếu torch CUDA)"
+                out["message"] = (
+                    "Có NVIDIA nhưng torch chưa CUDA — vào Thiết lập → Cài gói AI. "
+                    "pip install torch torchaudio --index-url "
+                    "https://download.pytorch.org/whl/cu124"
+                )
+            else:
+                out["device"] = "ONNX/CPU (lazy)"
+                out["message"] = "Không GPU — model nạp CPU khi tạo giọng lần đầu"
+        except Exception:
             out["device"] = "ONNX/CPU"
-            out["message"] = (
-                "Có GPU nhưng chưa PyTorch CUDA — đang chạy CPU. "
-                "Cài: pip install torch torchaudio --index-url "
-                "https://download.pytorch.org/whl/cu124 && pip install transformers"
-            )
-        else:
-            out["device"] = "ONNX/CPU (lazy)"
-            out["message"] = "Đã cài — model nạp khi tạo giọng lần đầu (CPU)"
     return out
 
 
@@ -547,6 +596,44 @@ def synthesize(
     if not parsed:
         raise ValueError(f"Không phải giọng VieNeu: {voice}")
     kind, name = parsed
+    out_wav.parent.mkdir(parents=True, exist_ok=True)
+    text = (text or ".").strip() or "."
+    if style not in ("tu_nhien", "tin_tuc", "doc_truyen"):
+        style = "tu_nhien"
+
+    if getattr(sys, "frozen", False):
+        from . import vieneu_frozen
+
+        if cancel_check and cancel_check():
+            raise RuntimeError("Job đã hủy")
+        backend, device = vieneu_frozen.resolve_backend()
+        clone_ref = None
+        voice_arg = name
+        if kind == "clone":
+            entry = next((x for x in voice_store.load_cloned() if x.get("id") == name), None)
+            ref = entry.get("ref") if entry else None
+            ref_path = voice_store.VIENEU_ROOT / str(ref) if ref else None
+            if not ref_path or not ref_path.is_file():
+                raise RuntimeError(f"Thiếu file clone: {name}")
+            clone_ref = str(ref_path)
+        elif kind == "reference":
+            item = voice_store.get_reference_voice(name)
+            ref_path = voice_store.reference_path(item or {})
+            if not item or not ref_path.is_file():
+                raise RuntimeError(f"Thiếu file reference zmAI: {name}")
+            # ponytail: subprocess add_voice giống clone — encode_reference in-process không chạy được trên frozen.
+            clone_ref = str(ref_path)
+        vieneu_frozen.synthesize(
+            text=text,
+            voice=voice_arg,
+            out_wav=out_wav,
+            style=style,
+            backend=backend,
+            device=device,
+            clone_ref=clone_ref,
+        )
+        return
+
     client = get_client()
     out_wav.parent.mkdir(parents=True, exist_ok=True)
     text = (text or ".").strip() or "."
@@ -671,6 +758,11 @@ def clone_voice(
 
 def warm() -> str:
     try:
+        if getattr(sys, "frozen", False):
+            from . import vieneu_frozen
+
+            ok, detail = vieneu_frozen.probe()
+            return "ready" if ok else f"err:{detail}"
         get_client()
         return str(status().get("device") or "ready")
     except Exception as e:

@@ -125,6 +125,7 @@ const args = [
   '--collect-all', 'webview',
   '--hidden-import', 'timeit',
   '--hidden-import', 'pickletools',
+  '--hidden-import', 'filecmp',
 ]
 
 // Các gói AI được cài vào %LOCALAPPDATA%/VideoClone/.venv-runtime ở lần mở đầu tiên.

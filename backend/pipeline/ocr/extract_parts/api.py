@@ -67,7 +67,7 @@ def asr_paddleocr(
         dur_hint = float(ffprobe_duration(video) or 0.0)
     except Exception:
         dur_hint = 0.0
-    from .overlay_scan import adaptive_bottom_fps
+    from pipeline.ocr.overlay_scan import adaptive_bottom_fps
 
     if need_extract:
         fps = adaptive_bottom_fps(dur_hint if dur_hint > 0 else 120.0)
@@ -171,24 +171,48 @@ def asr_paddleocr(
             lines.append(text)
         return i, _ocr_join_lines(lines)
 
-    with ThreadPoolExecutor(max_workers=w, thread_name_prefix="ocr-asr") as pool:
-        futs = {pool.submit(_ocr_one, i, img): i for i, img in enumerate(jpgs)}
-        for fut in as_completed(futs):
-            check_cancel(project_id)
-            i, text = fut.result()
-            timed[i] = (float(i) / fps, text)
-            with done_lock:
-                done += 1
-                cur = done
-            if project_id and (cur % max(1, w) == 0 or cur == n):
-                pct = 15 + int(22 * cur / total)
-                set_status(
-                    project_id,
-                    step="asr",
-                    progress=pct,
-                    message=f"OCR phụ đề {cur}/{total} ({w} luồng)",
-                    running=True,
-                )
+    from pipeline.core.resources import progress_msg, run_with_adaptive_workers
+
+    def _ocr_job(item: tuple[int, Path]) -> tuple[int, str]:
+        return _ocr_one(item[0], item[1])
+
+    def _ocr_prog(cur: int, tot: int, w_now: int) -> None:
+        if not project_id:
+            return
+        if cur % max(1, w_now) != 0 and cur != tot:
+            return
+        pct = 15 + int(22 * cur / max(1, tot))
+        set_status(
+            project_id,
+            step="asr",
+            progress=pct,
+            message=progress_msg("OCR", cur, tot, workers=w_now),
+            running=True,
+        )
+
+    if project_id:
+        set_status(
+            project_id,
+            step="asr",
+            progress=15,
+            message=progress_msg("OCR", 0, total, workers=w),
+            running=True,
+        )
+    rows = run_with_adaptive_workers(
+        list(enumerate(jpgs)),
+        _ocr_job,
+        kind="gpu" if gpu_ocr else "cpu",
+        requested=w_req if w_req > 0 else None,
+        cap=max(w, gpu_cap if gpu_ocr else min(12, _cpu_budget(0.9))),
+        thread_name_prefix="ocr-asr",
+        on_progress=_ocr_prog,
+        cancel_check=lambda: check_cancel(project_id),
+    )
+    for i, pair in enumerate(rows):
+        if not pair:
+            continue
+        ii, text = pair
+        timed[ii] = (float(ii) / fps, text)
 
     video_end = (len(jpgs) / fps) if jpgs else 0.0
     segs = _ocr_segments_from_timeline(timed, video_end) if any(t for _, t in timed) else []
@@ -212,7 +236,7 @@ def asr_paddleocr(
     sub_w = _ocr_pool_workers(sub_req, cap=sub_cap, gpu=gpu_ocr)
     _limit_onnx_threads()
     try:
-        from .overlay_scan import run_overlay_ocr
+        from pipeline.ocr.overlay_scan import run_overlay_ocr
 
         mid, vert, labels = run_overlay_ocr(
             video,
