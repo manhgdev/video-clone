@@ -84,12 +84,26 @@ def api_run(project_id: str, settings: Settings):
     meta = load_meta(project_id)
     if not meta:
         raise HTTPException(404)
-    # Lưu ngay (giống dub) — tránh mở editor / restore session mất processOriginalAudio
-    meta["settings"] = settings.model_dump()
+    dumped = settings.model_dump()
+    # Tách: ô Preview (UI) ≠ cửa sổ lần chạy (full / Ns)
+    run_raw = dumped.pop("runPreviewSec", None)
+    if run_raw is None:
+        run_sec = max(0, int(dumped.get("previewSec") or 0))
+    else:
+        run_sec = max(0, int(run_raw))
+    ui_prev = max(0, int(dumped.get("previewSec") or 0))
+    if ui_prev <= 0:
+        ui_prev = max(0, int((meta.get("settings") or {}).get("previewSec") or 0)) or 20
+    dumped["previewSec"] = ui_prev
+    meta["settings"] = dumped
+    # Cửa sổ clip làm việc / cache tag — không đụng ô Preview UI
+    meta["previewSec"] = run_sec
     save_meta(project_id, meta)
     arm_job(project_id)
-    set_status(project_id, step="asr", progress=1, message="Queued…", running=True, error=None)
-    _spawn(run_pipeline, project_id, settings.model_dump())
+    hint = f"Preview {run_sec}s…" if run_sec > 0 else "Dịch cả video (full)…"
+    set_status(project_id, step="asr", progress=1, message=hint, running=True, error=None)
+    # Pipeline nhận previewSec = cửa sổ chạy
+    _spawn(run_pipeline, project_id, {**dumped, "previewSec": run_sec})
     return {"ok": True}
 
 

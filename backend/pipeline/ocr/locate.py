@@ -547,13 +547,32 @@ def _apply_caption_box(
     """Gắn bbox OCR; layout tag chỉ theo cy đo được."""
     x0, y0, x1, y1 = box
     cy = (y0 + y1) * 0.5
-    # pad X đủ stroke/glow; Y sát glyph — tránh hộp cao chữ bé
-    # Probe đã có bleed quanh poly OCR; chỉ cộng mép nhỏ cho stroke,
-    # tránh bbox lớn hơn rõ rệt so với chữ cũ.
-    pad_x = max(4, int(round(fw * 0.004)))
-    pad_y = max(3, int(round(fh * 0.002)))
-    seg["bbox"] = _xyxy_to_seg_bbox(x0, y0, x1, y1, fw, fh, pad_x=pad_x, pad_y=pad_y)
-    seg["bboxInherited"] = False
+    ow = max(1, x1 - x0)
+    oh = max(1, y1 - y0)
+    # Pad mỏng ôm chữ — mid không phình H (chữ bé trong hộp cao)
+    pad_x = max(3, int(round(fw * 0.003)), int(round(ow * 0.02)))
+    pad_y = max(2, int(round(fh * 0.0015)), int(round(oh * 0.06)))
+    # Hộp OCR quá cao: cắt H, ưu tiên giữ mép trên (cắt dư dưới — không center)
+    max_h = max(32, min(int(round(fh * 0.065)), int(round(ow * 0.26))))
+    if oh > max_h:
+        y1 = y0 + max_h
+        oh = max_h
+        pad_y = max(2, min(5, int(round(oh * 0.05))))
+    # Pad Y không đối xứng: trên mỏng, dưới vừa stroke (tránh dải vàng dưới chữ)
+    pad_top = max(2, min(pad_y, 4))
+    pad_bot = max(2, min(pad_y + 1, 5))
+    x0p = max(0, x0 - pad_x)
+    y0p = max(0, y0 - pad_top)
+    x1p = min(fw, x1 + pad_x)
+    y1p = min(fh, y1 + pad_bot)
+    seg["bbox"] = {
+        "x": int(x0p),
+        "y": int(y0p),
+        "w": max(8, int(x1p - x0p)),
+        "h": max(8, int(y1p - y0p)),
+    }
+    # True = OCR auto (editor được fit chữ lại). False chỉ khi user kéo/Áp Y.
+    seg["bboxInherited"] = True
     saved = seg["bbox"]
     seg["layout"] = (
         "horizontal"
@@ -573,11 +592,14 @@ def _inherit_caption_bboxes(
         bb = seg.get("bbox")
         lay = str(seg.get("layout") or "")
         cy = _bbox_cy_frac(bb if isinstance(bb, dict) else None, fh)
+        # Donor = có bbox probe/OCR (bboxInherited True|False đều ok; chỉ loại thiếu box)
         if (
             lay in ("mid", "horizontal")
             and isinstance(bb, dict)
             and cy is not None
-            and not bool(seg.get("bboxInherited"))
+            and int(bb.get("w") or 0) > 0
+            and int(bb.get("h") or 0) > 0
+            and not seg.get("_fromInherit")
         ):
             caps.append(
                 {
@@ -637,7 +659,13 @@ def _inherit_caption_bboxes(
             "h": donor["h"],
         }
         seg["bboxInherited"] = True
-        seg["layout"] = "horizontal" if width >= max(1, donor["h"]) * 8 else _layout_from_cy(cy, fh)
+        seg["_fromInherit"] = True
+        # Giữ mid/horizontal theo Y donor — không ép horizontal khi mượn từ mid
+        seg["layout"] = (
+            "horizontal"
+            if width >= max(1, donor["h"]) * 8
+            else _layout_from_cy(cy, fh)
+        )
         seg.pop("captionLayout", None)
         n += 1
     return n
@@ -746,20 +774,25 @@ def _snap_inherited_y(
     anchor_cy: float | None,
     fh: int,
 ) -> None:
-    """Kéo mọi hardsub horizontal/mid về cùng dải Y (median probe) nếu lệch > 6%."""
+    """Neo Y chỉ cho Caption đáy (horizontal) kế thừa — không kéo CAP-MID xuống cuối."""
     if anchor_cy is None or fh <= 0:
+        return
+    # Anchor đáy: chỉ dùng nếu dải neo thực sự gần đáy (tránh mid median kéo horizontal)
+    if anchor_cy < fh * 0.72:
         return
     tol = fh * 0.06
     for seg in segments:
-        lay = str(seg.get("layout") or "")
-        if lay in ("vertical", "label"):
+        lay = str(seg.get("layout") or "horizontal")
+        # mid/vertical/label: giữ Y probe — snap chung sẽ nhảy xuống hardsub đáy
+        if lay in ("vertical", "label", "mid"):
             continue
         bb = seg.get("bbox")
         if not isinstance(bb, dict):
             continue
-        # Không đụng bbox kéo tay (inherited=False và user có thể đã chỉnh)
-        if seg.get("bboxInherited") is False and not seg.get("_probeAnchored"):
-            # probe thật — giữ nguyên
+        # Chỉ snap bản inherit (không có probe riêng)
+        if seg.get("_probeAnchored") or seg.get("bboxInherited") is False:
+            continue
+        if seg.get("bboxInherited") is not True:
             continue
         try:
             y = float(bb["y"])
@@ -767,16 +800,15 @@ def _snap_inherited_y(
         except (KeyError, TypeError, ValueError):
             continue
         cy = y + h * 0.5
+        # Đã ở dải đáy thì thôi; mid-ish cy đừng kéo xuống
+        if cy < fh * 0.70:
+            continue
         if abs(cy - anchor_cy) <= tol:
             continue
         new_y = max(0, min(fh - h, round(anchor_cy - h * 0.5)))
         bb["y"] = int(new_y)
         seg["bbox"] = bb
-        seg["layout"] = (
-            "horizontal"
-            if float(bb.get("w") or 0) >= max(1.0, h) * 8
-            else _layout_from_cy(anchor_cy, fh)
-        )
+        seg["layout"] = "horizontal"
 
 
 def attach_speech_hardsub_boxes(
@@ -1021,10 +1053,20 @@ def attach_speech_hardsub_boxes_inprocess(
         cap.release()
     attached += _inherit_caption_bboxes(segments, fh, fw)
     if stable:
-        # Neo Y chỉ khi bật ổn định — tránh kéo nhầm khi 1 frame lệch
-        _snap_inherited_y(segments, _global_cy_band(anchor_boxes, fh), fh)
+        # Neo Y chỉ Caption đáy inherit — không kéo CAP-MID xuống cuối
+        bottom_boxes = [
+            b
+            for b in anchor_boxes
+            if b and (b[1] + b[3]) * 0.5 >= fh * 0.72
+        ]
+        _snap_inherited_y(
+            segments,
+            _global_cy_band(bottom_boxes or [], fh),
+            fh,
+        )
     _ensure_cover_times(segments, video_end)
     for seg in segments:
         seg.pop("_probeAnchored", None)
+        seg.pop("_fromInherit", None)
         _retag_layout_from_bbox(seg, fh)
     return attached

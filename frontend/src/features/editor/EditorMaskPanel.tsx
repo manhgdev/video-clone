@@ -1,7 +1,14 @@
 import { useEffect, useState } from 'react'
 import type { ProjectSettings, Segment } from '@/features/project/project.types'
 import { cn } from '@/shared/lib/cn'
-import { COVER_MASK_STYLES, NumField, PropLabel, type PixelBox } from '@/features/editor/lib'
+import {
+  COVER_MASK_STYLES,
+  NumField,
+  PropLabel,
+  formatTimecode,
+  parseTimecode,
+  type PixelBox,
+} from '@/features/editor/lib'
 
 export type CoverApplyRange = { mode: 'full' } | { mode: 'range'; fromSec: number; toSec: number }
 
@@ -25,6 +32,8 @@ type Props = {
   commitCoverBox: (patch: Partial<PixelBox>) => void
   stretchCoverFullWidth: () => void
   applyCoverMaskToAll: (range?: CoverApplyRange) => void
+  /** Reset bbox: one = clip đang chọn; all = mọi clip */
+  resetOcrRegion: (scope: 'one' | 'all') => void
   /** Caption | CAP-MID | Dọc | Nhãn — chỉ áp cùng lane */
   applyAllLaneLabel?: string
   editSegment: (seg: Segment) => void
@@ -48,6 +57,7 @@ export function EditorMaskPanel({
   commitCoverBox,
   stretchCoverFullWidth,
   applyCoverMaskToAll,
+  resetOcrRegion,
   applyAllLaneLabel = 'lane',
   editSegment,
 }: Props) {
@@ -114,40 +124,46 @@ export function EditorMaskPanel({
           ))}
         </div>
       </PropLabel>
-      {coverMaskStyle !== 'mosaic' && (
-        <PropLabel label="Màu phủ">
-          <input
-            type="color"
-            className="h-9 w-full cursor-pointer rounded-md border border-border bg-input"
-            value={coverMaskColor}
-            disabled={busy}
-            onChange={(e) => onSettings({ ...settings, coverMaskColor: e.target.value })}
-          />
-        </PropLabel>
-      )}
       {coverMaskStyle === 'mosaic' && (
         <p className="text-[10px] text-muted-foreground leading-snug">
           Khối lấy màu nền quanh chữ + texture nhẹ — giống khi xuất; không dùng màu phủ.
         </p>
       )}
-      {coverMaskStyle === 'blur' && (
-        <p className="text-[10px] text-muted-foreground leading-snug">
-          Độ đậm = blur + tint mỏng (CapCut). Preview phải thấy kính mờ trên chữ gốc.
-        </p>
-      )}
       {coverMaskStyle !== 'mosaic' && (
-        <PropLabel label={`Độ đậm: ${coverMaskOpacity}%`}>
-          <input
-            type="range"
-            min={5}
-            max={100}
-            step={1}
-            className="w-full accent-violet-500"
-            value={coverMaskOpacity}
-            disabled={busy}
-            onChange={(e) => onSettings({ ...settings, coverMaskOpacity: Number(e.target.value) })}
-          />
-        </PropLabel>
+        <div className="space-y-1">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[11px] text-muted-foreground font-medium">Màu phủ</span>
+            <span className="text-[11px] text-muted-foreground tabular-nums">
+              Độ đậm {coverMaskOpacity}%
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <input
+              type="color"
+              className="h-8 w-10 shrink-0 cursor-pointer rounded-md border border-border bg-input p-0.5"
+              value={coverMaskColor}
+              disabled={busy}
+              title="Màu phủ"
+              onChange={(e) => onSettings({ ...settings, coverMaskColor: e.target.value })}
+            />
+            <input
+              type="range"
+              min={0}
+              max={100}
+              step={1}
+              className="min-w-0 flex-1 accent-violet-500"
+              value={coverMaskOpacity}
+              disabled={busy}
+              title={`Độ đậm ${coverMaskOpacity}%`}
+              onChange={(e) => onSettings({ ...settings, coverMaskOpacity: Number(e.target.value) })}
+            />
+          </div>
+          {coverMaskStyle === 'blur' && (
+            <p className="text-[10px] text-muted-foreground leading-snug">
+              Độ đậm = blur + tint mỏng (CapCut).
+            </p>
+          )}
+        </div>
       )}
       {(selected || bboxSeg) && selectedBox ? (
         <>
@@ -157,8 +173,9 @@ export function EditorMaskPanel({
             <li>Sau khi thả, khung được <strong>giữ nguyên</strong> — không auto reset</li>
             <li>Phụ đề dịch fit trong khung đã kéo</li>
           </ul>
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid grid-cols-4 gap-1.5">
             <NumField
+              inline
               label="X"
               value={selectedBox.x}
               disabled={busy || !selected}
@@ -169,6 +186,7 @@ export function EditorMaskPanel({
               }
             />
             <NumField
+              inline
               label="Y"
               value={selectedBox.y}
               disabled={busy || !selected}
@@ -179,6 +197,7 @@ export function EditorMaskPanel({
               }
             />
             <NumField
+              inline
               label="Rộng"
               value={selectedBox.w}
               disabled={busy || !selected}
@@ -189,6 +208,7 @@ export function EditorMaskPanel({
               }
             />
             <NumField
+              inline
               label="Cao"
               value={selectedBox.h}
               disabled={busy || !selected}
@@ -249,34 +269,38 @@ export function EditorMaskPanel({
                 )}
                 onClick={() => setApplyMode('range')}
               >
-                Từ → đến (s)
+                Từ → đến
               </button>
             </div>
             {applyMode === 'range' && (
               <div className="grid grid-cols-2 gap-2">
                 <NumField
-                  label="Từ (s)"
+                  label="Từ"
                   value={fromSec}
                   step={0.1}
                   disabled={busy}
                   onCommit={(v) => setFromSec(Math.max(0, v))}
+                  formatDisplay={formatTimecode}
+                  parseDisplay={parseTimecode}
                 />
                 <NumField
-                  label="Đến (s)"
+                  label="Đến"
                   value={toSec}
                   step={0.1}
                   disabled={busy}
                   onCommit={(v) => setToSec(Math.max(0, v))}
+                  formatDisplay={formatTimecode}
+                  parseDisplay={parseTimecode}
                 />
               </div>
             )}
             {applyMode === 'range' && (
               <p className="text-[10px] text-muted-foreground leading-snug">
-                Chỉ clip lane «{applyAllLaneLabel}» có thời gian chồng khoảng{' '}
-                <strong className="text-foreground font-medium">
-                  {Math.min(fromSec, toSec).toFixed(1)}s – {Math.max(fromSec, toSec).toFixed(1)}s
+                Áp Y cho <strong className="text-foreground font-medium">mọi bbox</strong> chồng khoảng{' '}
+                <strong className="text-foreground font-medium tabular-nums">
+                  {formatTimecode(Math.min(fromSec, toSec))} – {formatTimecode(Math.max(fromSec, toSec))}
                 </strong>
-                {dur > 0 ? ` (video ~${dur.toFixed(1)}s)` : ''}.
+                {dur > 0 ? ` (video ~${formatTimecode(dur)})` : ''} — không lọc lane.
               </p>
             )}
             <button
@@ -286,30 +310,47 @@ export function EditorMaskPanel({
               title={
                 applyMode === 'full'
                   ? `Chỉ dời Y khung che sang mọi clip lane «${applyAllLaneLabel}» — không đổi W/H`
-                  : `Chỉ dời Y trong khoảng thời gian · lane «${applyAllLaneLabel}»`
+                  : 'Dời Y mọi bbox trong khoảng thời gian đã chọn'
               }
               onClick={runApply}
             >
               {applyMode === 'full'
                 ? `Áp vị trí (Y) · full · ${applyAllLaneLabel}`
-                : `Áp vị trí (Y) · ${Math.min(fromSec, toSec).toFixed(1)}s → ${Math.max(fromSec, toSec).toFixed(1)}s`}
+                : `Áp Y · mọi bbox · ${formatTimecode(Math.min(fromSec, toSec))} → ${formatTimecode(Math.max(fromSec, toSec))}`}
             </button>
           </div>
-
-          <button
-            type="button"
-            className="w-full rounded-md border border-border bg-accent hover:bg-muted px-3 py-1.5 text-xs transition-colors disabled:opacity-50"
-            disabled={busy || !selected?.bbox}
-            onClick={() => selected && editSegment({ ...selected, bbox: null, captionLayout: null })}
-          >
-            Reset vùng OCR
-          </button>
         </>
       ) : (
         <p className="text-[11px] text-muted-foreground">
           Chưa có vùng che tại playhead — chọn đoạn caption hoặc tua tới chỗ có chữ.
         </p>
       )}
+
+      <div className="border-t border-border pt-2 space-y-1.5">
+        <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">
+          Reset bbox
+        </p>
+        <div className="grid grid-cols-2 gap-1.5">
+          <button
+            type="button"
+            className="rounded-md border border-border bg-accent hover:bg-muted px-2 py-1.5 text-[11px] transition-colors disabled:opacity-50"
+            disabled={busy || !(selected || bboxSeg)}
+            title="Xóa bbox clip đang chọn"
+            onClick={() => resetOcrRegion('one')}
+          >
+            Reset 1 bbox
+          </button>
+          <button
+            type="button"
+            className="rounded-md border border-violet-400/50 bg-violet-500/10 hover:bg-violet-500/20 px-2 py-1.5 text-[11px] font-medium transition-colors disabled:opacity-50"
+            disabled={busy || segmentsLen === 0}
+            title="Xóa bbox mọi clip trong dự án"
+            onClick={() => resetOcrRegion('all')}
+          >
+            Reset all bbox
+          </button>
+        </div>
+      </div>
     </>
   )
 }

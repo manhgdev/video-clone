@@ -1,4 +1,10 @@
-import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+} from 'react'
 import Header, { type AppMode } from '@/shared/components/Header'
 import LivePreviewEditor from '@/features/editor/LivePreviewEditor'
 import ProgressPopup from '@/shared/components/ProgressPopup'
@@ -314,9 +320,13 @@ export default function App() {
   const [exportUrl, setExportUrl] = useState<string | null>(null)
   const [exportPath, setExportPath] = useState<string | null>(null)
   const [viewExportSrc, setViewExportSrc] = useState<string | null>(null)
+  /** App desktop: file đã trên máy — chỉ Xem / Mở thư mục */
+  const [isDesktopApp, setIsDesktopApp] = useState(false)
   const [previewEditorOpen, setPreviewEditorOpen] = useState(false)
   const [progressMinimized, setProgressMinimized] = useState(false)
   const [ttsSideOpen, setTtsSideOpen] = useState(false)
+  const [clearingCache, setClearingCache] = useState(false)
+  const [cacheToast, setCacheToast] = useState<string | null>(null)
   const pollRef = useRef<number | null>(null)
   const pollInFlight = useRef(false)
   const pollFailStreak = useRef(0)
@@ -352,6 +362,12 @@ export default function App() {
   useEffect(() => {
     persistAppMode(appMode)
   }, [appMode])
+
+  useEffect(() => {
+    api.getConfig()
+      .then((c) => setIsDesktopApp(Boolean(c.desktop)))
+      .catch(() => setIsDesktopApp(false))
+  }, [])
 
   useEffect(() => {
     api.hardware().then(setHw).catch(() => setHw({ label: 'Local', accel: 'cpu' }))
@@ -611,9 +627,10 @@ export default function App() {
               const v = Math.round((seg.audioDuration || 0) * 1000)
               return { ...seg, audioUrl: `${base}?v=${v}` }
             })
-            setSegments(list)
+            // Không xóa list đang hiện nếu server trả rỗng (race / meta lock)
+            if (list.length > 0) setSegments(list)
           } catch {
-            /* status đã xong — segments có thể retry sau */
+            /* status đã xong — giữ segments local */
           }
           if (exportDone) {
             const url = pendingExportUrl.current || `/api/projects/${projectId}/output`
@@ -750,16 +767,104 @@ export default function App() {
     }
   }
 
-  async function onTranslateAll(previewSec = 0) {
+  async function onClearCache(parts: string[]) {
+    if (!projectId || clearingCache || !parts.length) return
+    setClearingCache(true)
+    setCacheToast(null)
+    try {
+      if (status.running) {
+        try {
+          await api.cancel(projectId)
+        } catch {
+          /* best-effort */
+        }
+      }
+      const res = await api.clearProjectCache(projectId, parts)
+      // Reset UI theo phần đã xóa — giữ video nguồn
+      if (res.clearedSegments) {
+        setSegments([])
+        setOverlays([])
+        setPreviewEditorOpen(false)
+      } else {
+        const dropCover = Boolean(res.clearedCovers)
+        const dropTts = Boolean(res.clearedTts)
+        if (dropCover || dropTts) {
+          setSegments((segs) =>
+            (Array.isArray(segs) ? segs : []).map((s) => ({
+              ...s,
+              ...(dropCover
+                ? {
+                    bbox: undefined,
+                    captionLayout: undefined,
+                    bboxInherited: undefined,
+                  }
+                : {}),
+              ...(dropTts
+                ? {
+                    audioFile: undefined,
+                    audioUrl: undefined,
+                    audioDuration: undefined,
+                    videoSpeed: undefined,
+                  }
+                : {}),
+            })),
+          )
+        }
+      }
+      if (res.clearedSegments || parts.includes('render') || parts.includes('preview')) {
+        setExportUrl(null)
+        setExportPath(null)
+        setViewExportSrc(null)
+      }
+      if (parts.includes('preview') || res.clearedSegments) {
+        setWorkClipSec(0)
+        workClipSecRef.current = 0
+        setBakedPreferVideo(false)
+        bakedPreferVideoRef.current = false
+        setBakedSpeed(1)
+        setHasBakedSpeed(false)
+      }
+      if (res.clearedFrontend || parts.includes('frontend')) {
+        try {
+          localStorage.removeItem(`videoclone.videoClips.${projectId}`)
+          localStorage.removeItem(`videoclone.bgClips.${projectId}`)
+        } catch {
+          /* ignore */
+        }
+      }
+      setVideoUrl(freshVideoUrl(`/api/projects/${projectId}/video`))
+      setStatus({
+        step: res.clearedSegments ? 'video' : status.step,
+        progress: 100,
+        message: res.message || 'Đã xóa cache',
+        running: false,
+        error: undefined,
+      })
+      setCacheToast(
+        res.ok
+          ? res.message?.startsWith('Đã xóa toàn bộ')
+            ? '✅ Đã xóa toàn bộ cache.'
+            : `✅ ${res.message || 'Đã xóa cache đã chọn.'}`
+          : 'Một số cache chưa được xóa.',
+      )
+      window.setTimeout(() => setCacheToast(null), 4200)
+    } catch (e) {
+      setCacheToast(
+        e instanceof Error ? e.message : 'Một số cache chưa được xóa.',
+      )
+      window.setTimeout(() => setCacheToast(null), 5200)
+    } finally {
+      setClearingCache(false)
+    }
+  }
+
+  async function onTranslateAll(runWindowSec = 0) {
     if (!projectId || status.running) return
     setExportUrl(null)
-    const wc = Math.max(0, previewSec)
+    // 0 = Dịch cả video (full); >0 = ▶ Preview Ns — tách khỏi ô settings.previewSec
+    const wc = Math.max(0, runWindowSec)
     workClipSecRef.current = wc
     setWorkClipSec(wc)
-    // Đồng bộ settings.previewSec ngay (ô draft đã commit từ sidebar)
-    if (wc > 0 && settings.previewSec !== wc) {
-      setSettings((s) => ({ ...s, previewSec: wc }))
-    }
     // Full: xóa clip timeline local (đang kẹt độ dài preview cũ)
     if (wc <= 0 && typeof localStorage !== 'undefined') {
       try {
@@ -767,26 +872,54 @@ export default function App() {
         localStorage.removeItem(`videoclone.bgClips.${projectId}`)
       } catch { /* ignore */ }
     }
-    // Bust video URL ngay — tránh stream preview_Ns cũ
+    // Bust video URL ngay — tránh stream preview_Ns / full lẫn nhau
     setVideoUrl(freshVideoUrl(`/api/projects/${projectId}/video`))
-    // Xóa segments cũ ngay — tránh UI vẫn hiện 5s trong lúc chạy 10s
+    // Xóa segments UI ngay — tránh hiện bản full trong lúc chạy preview (và ngược lại)
     setSegments([])
     busyAt.current = Date.now()
     setStatus({
       step: 'asr',
       progress: 0,
-      message: previewSec > 0 ? `Preview ${previewSec}s…` : 'Dịch cả video (full)…',
+      message: wc > 0 ? `Preview ${wc}s…` : 'Dịch cả video (full)…',
       running: true,
       error: undefined,
     })
+    // previewSec = ô UI (giữ nguyên); runPreviewSec = cửa sổ lần này
     await api.run(projectId, {
       ...settings,
-      previewSec: wc,
+      runPreviewSec: wc,
     })
     setStatus((s) => ({ ...s, running: true }))
   }
 
   const dubLockRef = useRef(false)
+  const segSaveTimer = useRef<number | null>(null)
+  const segSavePending = useRef<{
+    projectId: string
+    wasTop: boolean
+    seg: Segment
+    nextTree: Segment[]
+  } | null>(null)
+  const projectIdRef = useRef(projectId)
+  projectIdRef.current = projectId
+
+  const flushSegmentSave = useCallback(async () => {
+    if (segSaveTimer.current != null) {
+      window.clearTimeout(segSaveTimer.current)
+      segSaveTimer.current = null
+    }
+    const p = segSavePending.current
+    segSavePending.current = null
+    if (!p) return
+    const { projectId: pid, wasTop, seg, nextTree } = p
+    try {
+      if (wasTop) await api.updateSegment(pid, seg)
+      else await api.replaceSegments(pid, nextTree)
+    } catch {
+      /* keep local */
+    }
+  }, [])
+
   /** Mở khóa lồng tiếng — gọi mọi đường thoát job (huỷ / lỗi / xong / disconnect). */
   function releaseDubLock() {
     dubLockRef.current = false
@@ -804,6 +937,8 @@ export default function App() {
       setSegments((segs) =>
         (Array.isArray(segs) ? segs : []).map((s) => ({
           ...s,
+          source: s.source ?? '',
+          translation: s.translation ?? '',
           audioFile: undefined,
           audioUrl: undefined,
           audioDuration: undefined,
@@ -819,6 +954,8 @@ export default function App() {
       error: undefined,
     })
     try {
+      // Flush bản dịch đang gõ trước khi server đọc meta
+      await flushSegmentSave()
       await api.dub(projectId, { ...settings, forceTts: force })
       setStatus((s) => ({ ...s, running: true }))
       // Safety: nếu poll không về (backend die) — mở khóa sau 2 phút
@@ -888,7 +1025,27 @@ export default function App() {
 
   /** Server hay đóng dấu Adam sau Dịch — đồng bộ về default đang chọn nếu cả loạt cùng 1 giọng */
   function asSegmentList(raw: unknown): Segment[] {
-    return Array.isArray(raw) ? raw : []
+    if (!Array.isArray(raw)) return []
+    return raw.map((s) => {
+      if (!s || typeof s !== 'object') {
+        return {
+          id: '',
+          index: 0,
+          start: 0,
+          end: 0.1,
+          source: '',
+          translation: '',
+          voice: 'system',
+        } as Segment
+      }
+      const o = s as Segment
+      return {
+        ...o,
+        source: o.source ?? '',
+        translation: o.translation ?? '',
+        voice: o.voice ?? 'system',
+      }
+    })
   }
 
   function applyDefaultVoice(segs: Segment[], voice: string): Segment[] {
@@ -998,26 +1155,32 @@ export default function App() {
     }
   }
 
-  async function onSegmentChange(seg: Segment) {
-    // Câu có thể nằm trong compoundChildren (Alt+G) — patch cây
-    let nextTree: Segment[] = []
-    let wasTop = false
+  const onSegmentChange = useCallback((seg: Segment) => {
+    // Normalize text — tránh .length trên null → trắng trang
+    const safe: Segment = {
+      ...seg,
+      source: seg.source ?? '',
+      translation: seg.translation ?? '',
+      voice: seg.voice ?? 'system',
+    }
+    const pid = projectIdRef.current
     setSegments((prev) => {
       const list = Array.isArray(prev) ? prev : []
-      wasTop = list.some((s) => s.id === seg.id)
-      nextTree = wasTop
-        ? list.map((s) => (s.id === seg.id ? seg : s))
-        : patchSegmentInTree(list, seg)
+      const wasTop = list.some((s) => s.id === safe.id)
+      const nextTree = wasTop
+        ? list.map((s) => (s.id === safe.id ? safe : s))
+        : patchSegmentInTree(list, safe)
+      if (pid) {
+        // Debounce PUT — 389 đoạn × mỗi phím trước đây đơ UI + lock meta
+        segSavePending.current = { projectId: pid, wasTop, seg: safe, nextTree }
+        if (segSaveTimer.current != null) window.clearTimeout(segSaveTimer.current)
+        segSaveTimer.current = window.setTimeout(() => {
+          void flushSegmentSave()
+        }, 350)
+      }
       return nextTree
     })
-    if (!projectId) return
-    try {
-      if (wasTop) await api.updateSegment(projectId, seg)
-      else await api.replaceSegments(projectId, nextTree)
-    } catch {
-      /* keep local edit */
-    }
-  }
+  }, [flushSegmentSave])
 
   async function onSegmentsReplace(next: Segment[], opts?: { persist?: boolean }) {
     // UI cập nhật ngay — không đợi network (tránh đơ khi merge group lớn)
@@ -1041,18 +1204,23 @@ export default function App() {
         // Giữ compoundChildren local nếu server strip (schema cũ / race)
         return nextSaved.map((s, i) => {
           const loc = snap[i]
+          let out = s
           if (
             loc?.isCompound
             && loc.compoundChildren?.length
             && (!s.compoundChildren?.length || s.compoundChildren.length < loc.compoundChildren.length)
           ) {
-            return {
-              ...s,
+            out = {
+              ...out,
               isCompound: true,
               compoundChildren: loc.compoundChildren,
             }
           }
-          return s
+          // Reset OCR: local đã xóa bbox — đừng nhận lại bbox cũ từ server preserve
+          if (loc && loc.bbox == null && s.bbox) {
+            out = { ...out, bbox: undefined, captionLayout: undefined, bboxInherited: undefined }
+          }
+          return out
         })
       })
     }).catch(() => { /* keep local */ })
@@ -1411,10 +1579,19 @@ export default function App() {
           onSettings={onSettings}
           onUpload={onUpload}
           onTranslateAll={() => onTranslateAll(0)}
-          onPreview={(previewSec) =>
-            onTranslateAll(Math.max(5, Math.min(600, previewSec || settings.previewSec || 20)))
-          }
+          onPreview={(previewSec) => {
+            const sec = Math.max(5, Math.min(600, previewSec || settings.previewSec || 20))
+            // Chỉ ▶ Preview mới ghi ô settings.previewSec — Dịch cả không đụng
+            if (sec !== settings.previewSec) {
+              const next = { ...settings, previewSec: sec }
+              setSettings(next)
+              void api.saveSettings(projectId!, next).catch(() => {})
+            }
+            void onTranslateAll(sec)
+          }}
           onCancel={onCancel}
+          onClearCache={onClearCache}
+          clearingCache={clearingCache}
         />
         <div
           className="sidebar-resizer"
@@ -1480,13 +1657,15 @@ export default function App() {
                 <button type="button" className="export-dl" onClick={onViewExport}>
                   Xem
                 </button>
-                <a
-                  className="export-dl"
-                  href={`/api/projects/${projectId}/output?download=1`}
-                  download={`video-clone-${projectId}.mp4`}
-                >
-                  Tải xuống
-                </a>
+                {!isDesktopApp && (
+                  <a
+                    className="export-dl"
+                    href={`/api/projects/${projectId}/output?download=1`}
+                    download={`video-clone-${projectId}.mp4`}
+                  >
+                    Tải xuống
+                  </a>
+                )}
                 <button type="button" className="export-reveal" onClick={onRevealOutput}>
                   Mở thư mục
                 </button>
@@ -1508,6 +1687,11 @@ export default function App() {
       </div>
       )
       ) : null}
+      {cacheToast && (
+        <div className="cache-toast" role="status">
+          {cacheToast}
+        </div>
+      )}
       {viewExportSrc && (
         <div
           className="export-modal-backdrop"

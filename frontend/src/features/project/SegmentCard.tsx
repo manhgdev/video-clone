@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import type { ProjectSettings, Segment } from '@/features/project/project.types'
 import { api } from '@/features/project/project.api'
 import { IconPlay, IconRefresh } from '@/shared/components/Icons'
@@ -20,7 +20,6 @@ function fmt(t: number, precise = false) {
   const m = Math.floor(t / 60)
   const sec = t % 60
   if (precise) {
-    // sub-second title dọc: 0:00.0 – 0:00.1
     return `${m}:${sec.toFixed(1).padStart(4, '0')}`
   }
   const s = Math.floor(sec)
@@ -38,7 +37,7 @@ function stopActive() {
   activeMedia = null
 }
 
-export default function SegmentCard({
+function SegmentCard({
   segment,
   voices,
   defaultVoice,
@@ -50,16 +49,77 @@ export default function SegmentCard({
   onChange,
 }: Props) {
   const voice = !segment.voice || segment.voice === 'system' ? defaultVoice : segment.voice
+  const sourceSafe = segment.source ?? ''
+  const translationSafe = segment.translation ?? ''
   const dur = segment.audioDuration ?? Math.max(0.1, segment.end - segment.start)
-  const chars = segment.translation.length || segment.source.length
-  // bbox giữa khung → CAP-MID (không hiện Caption đáy khi layout trống/horizontal sai)
+  // Local draft — gõ không re-render 389 card / không PUT mỗi phím
+  const [draftSource, setDraftSource] = useState(sourceSafe)
+  const [draftTranslation, setDraftTranslation] = useState(translationSafe)
+  const draftSourceRef = useRef(sourceSafe)
+  const draftTranslationRef = useRef(translationSafe)
+  const segmentRef = useRef(segment)
+  const onChangeRef = useRef(onChange)
+  const textTimer = useRef<number | null>(null)
+  segmentRef.current = segment
+  onChangeRef.current = onChange
+
+  useEffect(() => {
+    setDraftSource(sourceSafe)
+    draftSourceRef.current = sourceSafe
+  }, [segment.id, sourceSafe])
+
+  useEffect(() => {
+    setDraftTranslation(translationSafe)
+    draftTranslationRef.current = translationSafe
+  }, [segment.id, translationSafe])
+
+  useEffect(
+    () => () => {
+      if (textTimer.current != null) window.clearTimeout(textTimer.current)
+    },
+    [],
+  )
+
+  function flushText(next?: { source?: string; translation?: string }) {
+    if (textTimer.current != null) {
+      window.clearTimeout(textTimer.current)
+      textTimer.current = null
+    }
+    const src = next?.source ?? draftSourceRef.current
+    const tr = next?.translation ?? draftTranslationRef.current
+    const cur = segmentRef.current
+    if ((cur.source ?? '') === src && (cur.translation ?? '') === tr) return
+    onChangeRef.current({
+      ...cur,
+      source: src,
+      translation: tr,
+      // text đổi → TTS cũ lệch
+      ...(tr !== (cur.translation ?? '')
+        ? { audioUrl: undefined, audioFile: undefined, audioDuration: undefined }
+        : {}),
+    })
+  }
+
+  function scheduleText(patch: { source?: string; translation?: string }) {
+    if (patch.source !== undefined) {
+      draftSourceRef.current = patch.source
+      setDraftSource(patch.source)
+    }
+    if (patch.translation !== undefined) {
+      draftTranslationRef.current = patch.translation
+      setDraftTranslation(patch.translation)
+    }
+    if (textTimer.current != null) window.clearTimeout(textTimer.current)
+    textTimer.current = window.setTimeout(() => flushText(), 450)
+  }
+
+  const chars = draftTranslation.length || draftSource.length
   const layout = (() => {
     const lay = segment.layout
     if (lay === 'mid' || lay === 'vertical' || lay === 'label') return lay
     const b = segment.bbox
     if (b && typeof b.y === 'number' && typeof b.h === 'number') {
       const cy = b.y + b.h / 2
-      // assume 9:16 ~1920; mid cứng 0.18–0.78
       if (cy > 1920 * 0.18 && cy < 1920 * 0.78) return 'mid' as const
       if (cy > 1080 * 0.18 && cy < 1080 * 0.78 && b.y + b.h < 1100) return 'mid' as const
     }
@@ -76,7 +136,6 @@ export default function SegmentCard({
         : layout === 'label'
           ? 'Nhãn trên khung'
           : 'Phụ đề đáy (Caption)'
-  // vertical/label: mặc định tắt lồng tiếng; hardsub/mid: mặc định bật
   const dubOn = isOverlay ? segment.dub === true : segment.dub !== false
   const [busy, setBusy] = useState(false)
   const [reBusy, setReBusy] = useState(false)
@@ -117,16 +176,24 @@ export default function SegmentCard({
     setErr(null)
     stopActive()
     clearStopTimer()
+    flushText()
 
     try {
-      if (projectId && segment.translation.trim()) {
+      const text = draftTranslationRef.current.trim()
+      if (projectId && text) {
         setBusy(true)
         const res = await api.previewTts(projectId, segment.id, {
-          text: segment.translation,
+          text,
           voice,
           lang: targetLang && targetLang !== 'none' ? targetLang : 'vi',
         })
-        const updated = { ...segment, audioUrl: res.audioUrl, audioDuration: res.duration }
+        const updated = {
+          ...segmentRef.current,
+          source: draftSourceRef.current,
+          translation: draftTranslationRef.current,
+          audioUrl: res.audioUrl,
+          audioDuration: res.duration,
+        }
         onChange(updated)
         const a = new Audio(res.audioUrl)
         activeMedia = a
@@ -143,18 +210,22 @@ export default function SegmentCard({
   }
 
   async function retranslate() {
-    if (!projectId || !segment.source.trim() || targetLang === 'none') return
+    if (!projectId || !draftSourceRef.current.trim() || targetLang === 'none') return
     setErr(null)
     setReBusy(true)
+    flushText()
     try {
       const res = await api.retranslate(projectId, segment.id, {
-        text: segment.source,
+        text: draftSourceRef.current,
         sourceLang,
         targetLang,
         translator,
       })
+      draftTranslationRef.current = res.translation
+      setDraftTranslation(res.translation)
       onChange({
-        ...segment,
+        ...segmentRef.current,
+        source: draftSourceRef.current,
         translation: res.translation,
         audioUrl: undefined,
         audioFile: undefined,
@@ -173,10 +244,7 @@ export default function SegmentCard({
         <div className="seg-rail">
           <div className="idx-row">
             <span className="idx">{String(segment.index).padStart(2, '0')}</span>
-            <span
-              className={`seg-badge seg-badge--${layout}`}
-              title={layoutTitle}
-            >
+            <span className={`seg-badge seg-badge--${layout}`} title={layoutTitle}>
               {layoutBadge}
             </span>
           </div>
@@ -205,7 +273,9 @@ export default function SegmentCard({
               type="button"
               className="retranslate"
               onClick={retranslate}
-              disabled={reBusy || busy || !projectId || !segment.source.trim() || targetLang === 'none'}
+              disabled={
+                reBusy || busy || !projectId || !draftSource.trim() || targetLang === 'none'
+              }
               aria-label="Dịch lại"
               title="Tạo lại bản dịch đoạn này"
             >
@@ -218,18 +288,20 @@ export default function SegmentCard({
         <label className="cell">
           <span>Ngôn ngữ gốc</span>
           <textarea
-            value={segment.source}
+            value={draftSource}
             rows={2}
-            onChange={(e) => onChange({ ...segment, source: e.target.value })}
+            onChange={(e) => scheduleText({ source: e.target.value })}
+            onBlur={() => flushText()}
           />
         </label>
 
         <label className="cell">
           <span>Bản dịch</span>
           <textarea
-            value={segment.translation}
+            value={draftTranslation}
             rows={2}
-            onChange={(e) => onChange({ ...segment, translation: e.target.value })}
+            onChange={(e) => scheduleText({ translation: e.target.value })}
+            onBlur={() => flushText()}
           />
         </label>
 
@@ -241,15 +313,18 @@ export default function SegmentCard({
                 <input
                   type="checkbox"
                   checked={dubOn}
-                  onChange={(e) =>
+                  onChange={(e) => {
+                    flushText()
                     onChange({
-                      ...segment,
+                      ...segmentRef.current,
+                      source: draftSourceRef.current,
+                      translation: draftTranslationRef.current,
                       dub: e.target.checked,
                       ...(e.target.checked
                         ? {}
                         : { audioUrl: undefined, audioFile: undefined, audioDuration: undefined }),
                     })
-                  }
+                  }}
                 />
                 Lồng tiếng
               </label>
@@ -257,7 +332,16 @@ export default function SegmentCard({
             {dubOn ? (
               <select
                 value={voices.some((v) => v.id === voice) ? voice : defaultVoice}
-                onChange={(e) => onChange({ ...segment, dub: true, voice: e.target.value })}
+                onChange={(e) => {
+                  flushText()
+                  onChange({
+                    ...segmentRef.current,
+                    source: draftSourceRef.current,
+                    translation: draftTranslationRef.current,
+                    dub: true,
+                    voice: e.target.value,
+                  })
+                }}
               >
                 {voices.map((v) => (
                   <option key={v.id} value={v.id}>
@@ -280,7 +364,15 @@ export default function SegmentCard({
             <span>Giọng đọc</span>
             <select
               value={voices.some((v) => v.id === voice) ? voice : defaultVoice}
-              onChange={(e) => onChange({ ...segment, voice: e.target.value })}
+              onChange={(e) => {
+                flushText()
+                onChange({
+                  ...segmentRef.current,
+                  source: draftSourceRef.current,
+                  translation: draftTranslationRef.current,
+                  voice: e.target.value,
+                })
+              }}
             >
               {voices.map((v) => (
                 <option key={v.id} value={v.id}>
@@ -305,3 +397,5 @@ export default function SegmentCard({
     </article>
   )
 }
+
+export default memo(SegmentCard)

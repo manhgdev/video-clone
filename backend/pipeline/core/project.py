@@ -317,3 +317,310 @@ def set_status(project_id: str, **kwargs: Any) -> None:
         meta["status"] = status
 
     mutate_meta(project_id, apply)
+
+
+def _rm_path(path: Path, errors: list[str], label: str) -> None:
+    try:
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=False)
+        elif path.is_file() or path.is_symlink():
+            path.unlink(missing_ok=True)
+    except OSError as e:
+        errors.append(f"{label}: {e}")
+
+
+def _clear_dir_contents(path: Path, errors: list[str], label: str) -> None:
+    if not path.is_dir():
+        return
+    for child in list(path.iterdir()):
+        _rm_path(child, errors, f"{label}/{child.name}")
+
+
+# Mục xóa cache (user chọn checkbox). Video nguồn không bao giờ xóa.
+CACHE_CLEAR_KEYS = (
+    "ocr",
+    "whisper",
+    "subtitle",
+    "translation",
+    "audio",
+    "tts",
+    "preview",
+    "render",
+    "temp",
+    "backend",
+    "frontend",
+    "jobs",
+    "covers",  # bbox / captionLayout / vùng che
+)
+
+
+def _norm_clear_parts(parts: list[str] | None) -> set[str]:
+    if not parts:
+        return set(CACHE_CLEAR_KEYS)
+    out = {str(p).strip().lower() for p in parts if str(p).strip()}
+    return out & set(CACHE_CLEAR_KEYS) if out else set(CACHE_CLEAR_KEYS)
+
+
+def _clear_cache_dir_matches(
+    cache_dir: Path,
+    pred,
+    errors: list[str],
+    deleted: list[str],
+    label: str,
+) -> None:
+    if not cache_dir.is_dir():
+        return
+    for child in list(cache_dir.iterdir()):
+        try:
+            if pred(child):
+                _rm_path(child, errors, f"{label}/{child.name}")
+                deleted.append(f"{label}/{child.name}")
+        except OSError as e:
+            errors.append(f"{label}/{child.name}: {e}")
+
+
+def clear_project_cache(
+    project_id: str,
+    parts: list[str] | None = None,
+) -> dict[str, Any]:
+    """Xóa cache project — chỉ khi user bấm «Xóa cache». Giữ source video + settings."""
+    from pipeline.core.jobs import clear_job, request_cancel
+
+    want = _norm_clear_parts(parts)
+    all_on = want == set(CACHE_CLEAR_KEYS)
+    errors: list[str] = []
+    deleted: list[str] = []
+    root = project_dir(project_id)
+    if not root.is_dir():
+        return {
+            "ok": False,
+            "deleted": [],
+            "errors": ["project not found"],
+            "partial": True,
+            "parts": sorted(want),
+        }
+
+    if "jobs" in want or all_on:
+        try:
+            request_cancel(project_id)
+            deleted.append("jobs/cancel")
+        except Exception as e:
+            errors.append(f"cancel: {e}")
+        try:
+            clear_job(project_id)
+            deleted.append("jobs")
+        except Exception as e:
+            errors.append(f"clear_job: {e}")
+
+    meta = load_meta(project_id) or {}
+    video_path = str(meta.get("videoPath") or "")
+    source_name = Path(video_path).name if video_path else ""
+    cache_dir = root / "cache"
+
+    if "tts" in want:
+        tts = root / "tts"
+        if tts.exists():
+            _clear_dir_contents(tts, errors, "tts")
+            deleted.append("tts")
+            tts.mkdir(exist_ok=True)
+
+    if "render" in want:
+        out = root / "out"
+        if out.exists():
+            _clear_dir_contents(out, errors, "out")
+            deleted.append("out")
+            out.mkdir(exist_ok=True)
+        for exp_root in (PUBLIC_DATA / "exports", DATA / "exports"):
+            try:
+                if not exp_root.is_dir():
+                    continue
+                easy = exp_root / f"{project_id}.mp4"
+                if easy.is_file():
+                    _rm_path(easy, errors, f"exports/{easy.name}")
+                    deleted.append(f"exports/{easy.name}")
+            except OSError as e:
+                errors.append(f"exports: {e}")
+
+    if cache_dir.is_dir():
+        if "ocr" in want:
+            _clear_cache_dir_matches(
+                cache_dir,
+                lambda p: p.is_dir()
+                and (
+                    "frame" in p.name.lower()
+                    or "ocr" in p.name.lower()
+                )
+                or (
+                    p.is_file()
+                    and (
+                        "ocr" in p.name.lower()
+                        or p.name.lower().startswith("boxes")
+                    )
+                ),
+                errors,
+                deleted,
+                "cache",
+            )
+        if "whisper" in want or "subtitle" in want:
+            _clear_cache_dir_matches(
+                cache_dir,
+                lambda p: p.is_file()
+                and (
+                    p.name.lower().startswith("asr")
+                    or p.suffix.lower() == ".json"
+                    and "asr" in p.name.lower()
+                ),
+                errors,
+                deleted,
+                "cache",
+            )
+        if "audio" in want:
+            _clear_cache_dir_matches(
+                cache_dir,
+                lambda p: p.is_file()
+                and p.suffix.lower() in (".wav", ".mp3", ".m4a", ".aac", ".flac")
+                or (p.is_dir() and "audio" in p.name.lower()),
+                errors,
+                deleted,
+                "cache",
+            )
+        if "preview" in want:
+            _clear_cache_dir_matches(
+                cache_dir,
+                lambda p: p.is_file()
+                and (
+                    "preview" in p.name.lower()
+                    or p.suffix.lower() in (".mp4", ".webm", ".mkv")
+                ),
+                errors,
+                deleted,
+                "cache",
+            )
+        if "backend" in want or all_on:
+            # phần còn lại trong cache/
+            for child in list(cache_dir.iterdir()):
+                _rm_path(child, errors, f"cache/{child.name}")
+                deleted.append(f"cache/{child.name}")
+            cache_dir.mkdir(exist_ok=True)
+
+    if "temp" in want or all_on:
+        keep_names = {"meta.json", "cache", "tts", "out"}
+        if source_name:
+            keep_names.add(source_name)
+        for child in list(root.iterdir()):
+            name = child.name
+            if name in keep_names:
+                continue
+            if name.startswith("source.") or name == "source":
+                continue
+            if name.startswith("meta.json"):
+                continue
+            _rm_path(child, errors, name)
+            deleted.append(name)
+
+    scrub_segments = (
+        all_on
+        or "subtitle" in want
+        or "translation" in want
+        or "covers" in want
+        or "whisper" in want
+        or "ocr" in want
+    )
+    scrub_trans_cache = all_on or "translation" in want or "subtitle" in want
+    scrub_tts_meta = "tts" in want or all_on
+    scrub_covers_only = "covers" in want and not (
+        all_on or "subtitle" in want or "translation" in want or "whisper" in want
+    )
+
+    def scrub(m: dict[str, Any]) -> None:
+        if video_path and Path(video_path).is_file():
+            m["videoPath"] = video_path
+
+        if "backend" in want or all_on:
+            m["cache"] = {}
+        elif "whisper" in want or "ocr" in want or "subtitle" in want:
+            c = dict(m.get("cache") or {})
+            if "whisper" in want or "subtitle" in want:
+                c.pop("asrKey", None)
+            if "translation" in want or "subtitle" in want:
+                c.pop("transKey", None)
+            m["cache"] = c
+
+        if scrub_trans_cache:
+            m.pop("translationCaches", None)
+
+        if scrub_covers_only:
+            segs = m.get("segments") or []
+            for s in segs:
+                if not isinstance(s, dict):
+                    continue
+                s.pop("bbox", None)
+                s.pop("bboxInherited", None)
+                s.pop("captionLayout", None)
+            m["segments"] = segs
+            m.pop("timelineBaseline", None)
+        elif scrub_segments:
+            m["segments"] = []
+            m.pop("timelineBaseline", None)
+
+        if scrub_tts_meta:
+            segs = m.get("segments") or []
+            for s in segs:
+                if not isinstance(s, dict):
+                    continue
+                s.pop("audioFile", None)
+                s.pop("audioUrl", None)
+                s.pop("audioDuration", None)
+                s.pop("videoSpeed", None)
+            if segs:
+                m["segments"] = segs
+
+        if "preview" in want or all_on:
+            m.pop("workVideo", None)
+            m.pop("workDuration", None)
+            m.pop("bakedSpeed", None)
+            m.pop("bakedPreferVideo", None)
+            m.pop("userBake", None)
+
+        m.pop("forceTts", None)
+        m.pop("runCache", None)
+        m.pop("checkpoint", None)
+
+        if "render" in want or all_on:
+            for k in ("outputRel", "outputPath", "exportPath"):
+                m.pop(k, None)
+
+        msg = (
+            "Đã xóa toàn bộ cache — video nguồn giữ nguyên"
+            if all_on
+            else f"Đã xóa: {', '.join(sorted(want))}"
+        )
+        m["status"] = {
+            "step": "video" if scrub_segments and not scrub_covers_only else (m.get("status") or {}).get("step") or "video",
+            "progress": 100,
+            "message": msg,
+            "running": False,
+        }
+
+    try:
+        mutate_meta(project_id, scrub)
+        deleted.append("meta")
+    except Exception as e:
+        errors.append(f"meta: {e}")
+
+    return {
+        "ok": len(errors) == 0,
+        "partial": len(errors) > 0,
+        "deleted": deleted,
+        "errors": errors,
+        "parts": sorted(want),
+        "clearedSegments": scrub_segments and not scrub_covers_only,
+        "clearedCovers": "covers" in want or scrub_segments,
+        "clearedTts": scrub_tts_meta,
+        "clearedFrontend": "frontend" in want or all_on,
+        "message": (
+            ("Đã xóa toàn bộ cache." if all_on else f"Đã xóa {len(want)} mục.")
+            if not errors
+            else "Một số cache chưa được xóa."
+        ),
+    }

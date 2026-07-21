@@ -108,12 +108,14 @@ export function effectiveOverlayLayout(
   seg: Segment,
   frameH: number,
 ): 'vertical' | 'label' | 'mid' | null {
+  // mid/dọc/nhãn đã tag — luôn mid path (keo tay cung khong roi caption day)
   if (isOcrOverlayLayout(seg.layout)) return seg.layout
+  // Caption day keo tay: dung horizontal
   if (seg.bboxInherited === false) return null
   const b = seg.bbox
   if (!b || frameH <= 0) return null
   const cy = b.y + b.h / 2
-  // caption vẫn là caption — tag mid chỉ vì OCR đo được Y lệch đáy cổ điển
+  // horizontal + bbox giua khung → xu ly nhu mid
   if (cy > frameH * 0.18 && cy < frameH * 0.78) return 'mid'
   return null
 }

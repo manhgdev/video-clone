@@ -55,17 +55,21 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
     job_gen = begin_job(project_id)
     source_fp = meta.get("sourceFp") or video_fingerprint(source)
     meta["sourceFp"] = source_fp
+    # settings.previewSec ở đây = cửa sổ LẦN CHẠY (api_run đã tách khỏi ô UI)
     preview_sec = max(0, int(settings.get("previewSec") or 0))
     tag = preview_tag(preview_sec)
-    a_key = asr_cache_key(settings, source_fp)
-    t_key = trans_cache_key(settings)
+    run_settings = {**settings, "previewSec": preview_sec}
+    a_key = asr_cache_key(run_settings, source_fp)
+    t_key = trans_cache_key(run_settings)
     run_caches = meta.get("translationCaches")
     if not isinstance(run_caches, dict):
         run_caches = {}
+    # Checkpoint theo cửa sổ clip đang active (meta.previewSec), không theo ô UI
     current_tag = preview_tag(max(0, int(meta.get("previewSec") or 0)))
     current_segments = meta.get("segments") or []
     current_cache = meta.get("cache") or {}
-    if current_segments:
+    if current_segments and current_tag != tag:
+        # Đổi full↔preview: cất bản đang mở sang tag cũ, không trộn segments
         checkpoint = run_caches.get(current_tag)
         if not isinstance(checkpoint, dict):
             checkpoint = {}
@@ -78,9 +82,15 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
     run_cache = run_caches.get(tag)
     if not isinstance(run_cache, dict):
         run_cache = {}
-    # Nâng cache đơn cũ vào đúng cửa sổ hiện tại nếu key còn khớp.
+    # Chỉ nâng legacy khi cùng cửa sổ (tránh full ăn segments preview)
     legacy_cache = meta.get("cache") or {}
-    if not run_cache and legacy_cache.get("asrKey") == a_key and meta.get("segments"):
+    legacy_ok = (
+        not run_cache
+        and legacy_cache.get("asrKey") == a_key
+        and meta.get("segments")
+        and current_tag == tag
+    )
+    if legacy_ok:
         run_cache = {
             "asrKey": legacy_cache.get("asrKey"),
             "transKey": legacy_cache.get("transKey"),
@@ -441,13 +451,12 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                 )
 
         meta["segments"] = segments
-        # ô Preview trên UI giữ số >0; lần chạy full (0) không được ghi đè thành 0
-        ui_prev = max(0, int(settings.get("previewSec") or 0))
-        if preview_sec <= 0:
-            prev_ui = max(0, int((meta.get("settings") or {}).get("previewSec") or 0))
-            ui_prev = prev_ui if prev_ui > 0 else (ui_prev if ui_prev > 0 else 20)
-        settings = {**settings, "previewSec": ui_prev if preview_sec <= 0 else preview_sec}
-        meta["settings"] = settings
+        # Ô Preview UI (settings.previewSec) giữ số user gõ — không ghi đè bằng 0 (full)
+        prev_settings = meta.get("settings") if isinstance(meta.get("settings"), dict) else {}
+        ui_prev = max(0, int(prev_settings.get("previewSec") or 0))
+        if ui_prev <= 0:
+            ui_prev = 20
+        meta["settings"] = {**prev_settings, **{k: v for k, v in settings.items() if k != "previewSec"}, "previewSec": ui_prev}
         meta["cache"] = cache
         run_caches[tag] = {
             "asrKey": cache.get("asrKey"),
@@ -455,6 +464,7 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
             "segments": copy.deepcopy(segments),
         }
         meta["translationCaches"] = run_caches
+        # Cửa sổ clip lần chạy (0=full) — tách khỏi ô Preview
         meta["previewSec"] = preview_sec
         # clip thật sự đã ASR/dịch — xuất phải dùng đúng file này
         meta["workVideo"] = str(video.resolve())

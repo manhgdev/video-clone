@@ -25,7 +25,7 @@ export function PanelView({
 
 export function PropLabel({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <label className="flex flex-col gap-1">
+    <label className="flex flex-col gap-1 min-w-0">
       <span className="text-[11px] text-muted-foreground font-medium">{label}</span>
       {children}
     </label>
@@ -39,33 +39,58 @@ export function NumField({
   step = 1,
   disabled,
   onCommit,
+  formatDisplay,
+  parseDisplay,
+  /** label trái · input phải — gọn 1 dòng (X Y Rộng Cao) */
+  inline = false,
 }: {
   label: string
   value: number
   step?: number
   disabled?: boolean
   onCommit: (value: number) => void
+  /** Hiện theo timeline (vd. formatTimecode) thay vì số giây thuần */
+  formatDisplay?: (value: number) => string
+  parseDisplay?: (raw: string) => number | null
+  inline?: boolean
 }) {
   const commit = (raw: string) => {
-    const parsed = Number(raw)
-    if (Number.isFinite(parsed) && Math.abs(parsed - value) > 1e-9) onCommit(parsed)
+    const parsed = parseDisplay ? parseDisplay(raw) : Number(raw.replace(',', '.'))
+    if (parsed == null || !Number.isFinite(parsed)) return
+    if (Math.abs(parsed - value) > 1e-9) onCommit(parsed)
   }
-  return (
-    <PropLabel label={label}>
-      <input
-        key={value}
-        type="number"
-        className="w-full rounded-md border border-border bg-input px-2 py-1 text-xs outline-none focus:border-ring tabular-nums"
-        defaultValue={Number.isInteger(value) ? value : +value.toFixed(2)}
-        step={step}
-        disabled={disabled}
-        onBlur={(e) => commit(e.currentTarget.value)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') e.currentTarget.blur()
-        }}
-      />
-    </PropLabel>
+  const shown = formatDisplay
+    ? formatDisplay(value)
+    : String(Number.isInteger(value) ? value : +value.toFixed(2))
+  const input = (
+    <input
+      key={shown}
+      type={formatDisplay ? 'text' : 'number'}
+      className={cn(
+        'min-w-0 rounded-md border border-border bg-input text-xs outline-none focus:border-ring tabular-nums',
+        inline ? 'w-full flex-1 px-1.5 py-1' : 'w-full px-2 py-1',
+      )}
+      defaultValue={shown}
+      step={formatDisplay ? undefined : step}
+      disabled={disabled}
+      spellCheck={false}
+      onBlur={(e) => commit(e.currentTarget.value)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') e.currentTarget.blur()
+      }}
+    />
   )
+  if (inline) {
+    return (
+      <label className="flex min-w-0 items-center gap-1.5">
+        <span className="shrink-0 text-[10px] text-muted-foreground font-medium w-7 truncate" title={label}>
+          {label}
+        </span>
+        {input}
+      </label>
+    )
+  }
+  return <PropLabel label={label}>{input}</PropLabel>
 }
 
 export function TrackCtrl({

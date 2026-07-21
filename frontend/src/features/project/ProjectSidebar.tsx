@@ -22,6 +22,7 @@ import {
   IconPlay,
   IconSpeaker,
   IconTranslate,
+  IconTrash,
   IconType,
 } from '@/shared/components/Icons'
 import './ProjectSidebar.css'
@@ -37,7 +38,27 @@ type Props = {
   /** previewSec = số giây từ ô Preview (đã commit draft) */
   onPreview: (previewSec: number) => void
   onCancel: () => void
+  onClearCache?: (parts: string[]) => void
+  clearingCache?: boolean
 }
+
+export const CACHE_CLEAR_OPTIONS: { id: string; label: string }[] = [
+  { id: 'covers', label: 'Vùng che / bbox OCR' },
+  { id: 'ocr', label: 'OCR cache' },
+  { id: 'whisper', label: 'Whisper / ASR' },
+  { id: 'subtitle', label: 'Subtitle + đoạn thoại' },
+  { id: 'translation', label: 'Translation cache' },
+  { id: 'audio', label: 'Audio extract' },
+  { id: 'tts', label: 'TTS cache' },
+  { id: 'preview', label: 'Preview cache' },
+  { id: 'render', label: 'Render / xuất' },
+  { id: 'temp', label: 'Temp files' },
+  { id: 'backend', label: 'Backend cache' },
+  { id: 'frontend', label: 'Frontend cache' },
+  { id: 'jobs', label: 'Job xử lý tạm' },
+]
+
+const ALL_CACHE_PARTS = CACHE_CLEAR_OPTIONS.map((o) => o.id)
 
 function Field({
   label,
@@ -72,11 +93,15 @@ export default function Sidebar({
   onTranslateAll,
   onPreview,
   onCancel,
+  onClearCache,
+  clearingCache = false,
 }: Props) {
   const inputRef = useRef<HTMLInputElement>(null)
   const previewShellRef = useRef<HTMLDivElement>(null)
   const [portrait, setPortrait] = useState(false)
   const [showCancel, setShowCancel] = useState(false)
+  const [confirmClear, setConfirmClear] = useState(false)
+  const [clearParts, setClearParts] = useState<string[]>(() => [...ALL_CACHE_PARTS])
   const [previewDraft, setPreviewDraft] = useState(
     String(settings.previewSec > 0 ? settings.previewSec : 20),
   )
@@ -662,8 +687,18 @@ export default function Sidebar({
       <div className="run-actions">
         <button
           type="button"
+          className="clear-cache-btn"
+          disabled={!videoUrl || busy || clearingCache || !onClearCache}
+          onClick={() => setConfirmClear(true)}
+          title="Xóa toàn bộ cache dự án (giữ video nguồn)"
+        >
+          <IconTrash size={14} />
+          {clearingCache ? 'Đang xóa…' : 'Xóa cache'}
+        </button>
+        <button
+          type="button"
           className="primary"
-          disabled={busy || !videoUrl}
+          disabled={busy || !videoUrl || clearingCache}
           onClick={onTranslateAll}
           title="Dịch cả video — Xuất bản sẽ ra full (không theo số Preview)"
         >
@@ -683,6 +718,87 @@ export default function Sidebar({
           </button>
         )}
       </div>
+
+      {confirmClear && (
+        <div
+          className="clear-cache-modal-backdrop"
+          role="presentation"
+          onClick={() => !clearingCache && setConfirmClear(false)}
+        >
+          <div
+            className="clear-cache-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="clear-cache-title"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 id="clear-cache-title">Xóa cache dự án</h3>
+            <p>Chọn mục cần xóa. Video nguồn không bao giờ bị xóa.</p>
+            <div className="clear-cache-toolbar">
+              <button
+                type="button"
+                className="clear-cache-link"
+                disabled={clearingCache}
+                onClick={() => setClearParts([...ALL_CACHE_PARTS])}
+              >
+                Chọn tất cả
+              </button>
+              <button
+                type="button"
+                className="clear-cache-link"
+                disabled={clearingCache}
+                onClick={() => setClearParts([])}
+              >
+                Bỏ chọn
+              </button>
+            </div>
+            <div className="clear-cache-checks">
+              {CACHE_CLEAR_OPTIONS.map((opt) => {
+                const on = clearParts.includes(opt.id)
+                return (
+                  <label key={opt.id} className="clear-cache-check">
+                    <input
+                      type="checkbox"
+                      checked={on}
+                      disabled={clearingCache}
+                      onChange={() =>
+                        setClearParts((prev) =>
+                          on ? prev.filter((id) => id !== opt.id) : [...prev, opt.id],
+                        )
+                      }
+                    />
+                    <span>{opt.label}</span>
+                  </label>
+                )
+              })}
+            </div>
+            <p className="clear-cache-note">Không xóa: video nguồn · settings dự án</p>
+            <div className="clear-cache-modal-actions">
+              <button
+                type="button"
+                className="secondary"
+                disabled={clearingCache}
+                onClick={() => setConfirmClear(false)}
+              >
+                Hủy
+              </button>
+              <button
+                type="button"
+                className="clear-cache-confirm"
+                disabled={clearingCache || clearParts.length === 0}
+                onClick={() => {
+                  onClearCache?.(clearParts)
+                  setConfirmClear(false)
+                }}
+              >
+                {clearParts.length === ALL_CACHE_PARTS.length
+                  ? 'Xóa tất cả'
+                  : `Xóa đã chọn (${clearParts.length})`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </aside>
   )
 }

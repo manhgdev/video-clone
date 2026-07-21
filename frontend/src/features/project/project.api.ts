@@ -457,6 +457,29 @@ export const api = {
       5000,
     ),
 
+  /** Chỉ khi user bấm «Xóa cache» + xác nhận — không gọi tự động. parts rỗng = all. */
+  clearProjectCache: (projectId: string, parts?: string[]) =>
+    fetchJson<{
+      ok: boolean
+      partial?: boolean
+      deleted?: string[]
+      errors?: string[]
+      message?: string
+      parts?: string[]
+      clearedSegments?: boolean
+      clearedCovers?: boolean
+      clearedTts?: boolean
+      clearedFrontend?: boolean
+    }>(
+      `${base}/cache/project/${projectId}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parts: parts?.length ? parts : null }),
+      },
+      120_000,
+    ),
+
   /** Đóng popup lỗi — clear meta.status.error (F5 không hiện lại). */
   dismissStatus: (projectId: string) =>
     fetchJson<{ ok: boolean; ignored?: boolean }>(

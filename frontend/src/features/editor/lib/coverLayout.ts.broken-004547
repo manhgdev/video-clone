@@ -14,15 +14,13 @@ export const COVER_SHADOW_BOT = 4
 
 export function coverPad(fontSizePx = AUTO_SUBTITLE_FONT, frameW = 1080) {
   return {
-    x: Math.max(3, Math.round(frameW * 0.003)),
-    // Chỉ chừa đủ viền/stroke; tránh chữ lọt thỏm giữa bbox.
+    x: Math.max(3, Math.round(frameW * 0.0035)),
+    // Thin pad — do not inflate caption bbox H
     top: Math.max(2, Math.round(fontSizePx * 0.04)),
-    // Match export: leave enough room for CJK descenders, outline, and shadow.
-    bottom: Math.max(18, Math.round(fontSizePx * 0.55)),
+    bottom: Math.max(14, Math.round(fontSizePx * 0.42)),
   }
 }
 
-/** Căn giữa khối chữ trong cover (đúng giữa khung tím). */
 export function captionCenterInCover(coverY: number, coverH: number, textBlockH: number) {
   return Math.round(coverY + Math.max(0, (coverH - textBlockH) / 2))
 }
@@ -39,7 +37,7 @@ export function shiftAutoCoverDown(box: PixelBox, fontSizePx: number, frameW: nu
   )
 }
 
-export const CAP_PAD_X = 2
+export const CAP_PAD_X = 4
 
 export function coverInnerWidth(coverW: number, fontSizePx: number, frameW: number) {
   const pad = coverPad(fontSizePx, frameW)
@@ -53,7 +51,8 @@ export function frameMaxInnerWidth(fontSizePx: number, frameW: number) {
 }
 
 /**
- * Ưu tiên 1 dòng (co font) → mới 2 dòng. maxLines mặc định 2.
+ * 1 dòng (co nhẹ) → vẫn tràn thì 2 dòng (giữ font gần gốc).
+ * Không co 1 dòng xuống minFont (sẽ cắt chữ / không bao giờ wrap).
  */
 export function fitCaptionLines(
   text: string,
@@ -66,23 +65,34 @@ export function fitCaptionLines(
   const maxLines = opts?.maxLines ?? 2
   const trimmed = text.trim()
   if (!trimmed) return { lines: [''], fontPx: fontSizePx }
-  let fontPx = Math.max(minFont, Math.round(fontSizePx))
+  const start = Math.max(minFont, Math.round(fontSizePx))
   const inner = Math.max(24, maxInnerW)
+  // Chỉ co 1 dòng ~15% — hết chỗ thì 2 dòng, không nát font
+  const floorOne = Math.max(minFont, Math.round(start * 0.85))
+
+  // Stroke + bold thật rộng hơn canvas — chừa ~12% tránh “vừa” ảo rồi cắt chữ
+  const oneOk = (fs: number) => measureLineWidth(trimmed, fs) <= inner * 0.88
+
   if (preferOneLine) {
-    while (fontPx > minFont && measureLineWidth(trimmed, fontPx) > inner * 1.02) {
+    let fontPx = start
+    while (fontPx > floorOne && !oneOk(fontPx)) {
       fontPx -= 1
     }
-    if (measureLineWidth(trimmed, fontPx) <= inner * 1.06) {
+    if (oneOk(fontPx)) {
       return { lines: [trimmed], fontPx }
     }
   }
-  let lines = wrapCaptionText(trimmed, inner, fontPx, maxLines)
+
+  // 2 dòng từ cỡ gốc — hiện hết chữ dài
+  const wrapW = inner * 0.88
+  let fontPx = start
+  let lines = wrapCaptionText(trimmed, wrapW, fontPx, maxLines)
   while (
     fontPx > minFont
-    && lines.some((line) => measureLineWidth(line, fontPx) > inner * 0.98)
+    && lines.some((line) => measureLineWidth(line, fontPx) > wrapW)
   ) {
     fontPx -= 1
-    lines = wrapCaptionText(trimmed, inner, fontPx, maxLines)
+    lines = wrapCaptionText(trimmed, wrapW, fontPx, maxLines)
   }
   return { lines, fontPx }
 }
@@ -128,17 +138,16 @@ export function fitHardsubCover(
   const w = Math.min(frameW, Math.max(oldW, autoW))
   const cx = seed.x + seed.w / 2
 
-  // Dọc: thu trống trên OCR (ít hơn — tránh kéo phụ đề xuống), nới đáy che stroke
-  const topSlack = Math.round(seed.h * 0.14)
-  const y = Math.max(0, seed.y + topSlack - pad.top)
-  const botExtra = Math.max(pad.bottom, Math.round(seed.h * 0.15), Math.round(fontPx * 0.22))
-  const bottom = seed.y + seed.h + botExtra
-  const h = Math.max(12, Math.min(frameH - y, bottom - y))
+  // H om chu; neo tam dai OCR (chu Trung) — VI can giua
+  const ocrCy = seed.y + seed.h / 2
+  const hText = Math.round(fontPx * 1.28 + pad.top + pad.bottom + COVER_SHADOW_BOT)
+  const h = Math.max(14, Math.min(frameH, hText))
+  const y = Math.round(Math.max(0, Math.min(frameH - h, ocrCy - h / 2)))
 
   return clampCoverBox(
     {
       x: Math.round(Math.max(0, Math.min(frameW - w, cx - w / 2))),
-      y: Math.round(y),
+      y,
       w: Math.round(w),
       h: Math.round(h),
     },
@@ -181,25 +190,48 @@ export function measureLineWidth(text: string, fontSizePx: number) {
       _measureCtx = c.getContext('2d')
     }
     if (_measureCtx) {
+      // Bold + stroke trên video rộng hơn canvas system-ui
       _measureCtx.font = `700 ${fontSizePx}px system-ui, -apple-system, "Segoe UI", sans-serif`
-      return _measureCtx.measureText(text).width
+      return _measureCtx.measureText(text).width * 1.14
     }
   }
-  return text.length * fontSizePx * 0.40
+  return text.length * fontSizePx * 0.55
 }
 
-/** Xuống dòng — đổ ngang tối đa trước, rồi mới cân 2–3 dòng */
+/** Xuống dòng — 2 dòng: cân độ dài (tránh dòng 1 nhồi full + dòng 2 mồ côi). */
 export function wrapCaptionText(text: string, maxInnerW: number, fontSizePx: number, maxLines = 3): string[] {
   const trimmed = text.trim()
   if (!trimmed) return ['']
-  // system-ui đo hơi rộng hơn font burn/preview — chừa ~8% tránh xuống dòng sớm
-  const fits = (s: string) => measureLineWidth(s, fontSizePx) <= maxInnerW * 1.08
+  const fits = (s: string) => measureLineWidth(s, fontSizePx) <= maxInnerW
   if (fits(trimmed)) return [trimmed]
 
   const words = trimmed.split(/\s+/).filter(Boolean)
   if (words.length <= 1) return [trimmed]
 
   const lineWidth = (s: string) => measureLineWidth(s, fontSizePx)
+
+  // Caption 2 dòng: chọn điểm cắt cân bằng (cả 2 dòng vừa width)
+  if (maxLines === 2 && words.length >= 2) {
+    let best: string[] | null = null
+    let bestScore = Infinity
+    for (let i = 1; i < words.length; i++) {
+      const a = words.slice(0, i).join(' ')
+      const b = words.slice(i).join(' ')
+      if (!fits(a) || !fits(b)) continue
+      const wa = lineWidth(a)
+      const wb = lineWidth(b)
+      // Ưu tiên 2 dòng gần bằng; phạt dòng cuối quá ngắn / dòng 1 quá đầy
+      const score =
+        Math.abs(wa - wb)
+        + (wb < maxInnerW * 0.32 ? 40 : 0)
+        + (wa > maxInnerW * 0.92 ? 25 : 0)
+      if (score < bestScore) {
+        bestScore = score
+        best = [a, b]
+      }
+    }
+    if (best) return best
+  }
 
   const lines: string[] = []
   let cur = words[0]
@@ -216,41 +248,7 @@ export function wrapCaptionText(text: string, maxInnerW: number, fontSizePx: num
     }
   }
   if (lines.length < maxLines || !lines.length) lines.push(cur)
-  let out = lines.slice(0, maxLines)
-
-  while (out.length > 1) {
-    const last = out[out.length - 1]
-    const prev = out[out.length - 2]
-    const merged = `${prev} ${last}`
-    if (fits(merged)) out.splice(-2, 2, merged)
-    else break
-  }
-
-  // Tránh dòng cuối mồ côi — chỉ cân 2 dòng khi bắt buộc wrap (không ép 2 dòng khi 1 dòng đủ)
-  if (out.length >= 2 && maxLines >= 2 && !fits(trimmed)) {
-    const last = out[out.length - 1]
-    const lastW = lineWidth(last)
-    const orphan = last.split(/\s+/).length <= 2 && lastW < maxInnerW * 0.28
-    if (orphan || out.length >= 3) {
-      let best: string[] | null = null
-      let bestScore = Infinity
-      for (let i = 1; i < words.length; i++) {
-        const a = words.slice(0, i).join(' ')
-        const b = words.slice(i).join(' ')
-        if (!fits(a) || !fits(b)) continue
-        const wa = lineWidth(a)
-        const wb = lineWidth(b)
-        const score = Math.abs(wa - wb) + (wb < maxInnerW * 0.22 ? 80 : 0)
-        if (score < bestScore) {
-          bestScore = score
-          best = [a, b]
-        }
-      }
-      if (best) out = best
-    }
-  }
-
-  return out
+  return lines.slice(0, maxLines)
 }
 
 /** Layout over: cover full ngang nếu cần; 1 dòng (co font) rồi mới 2 dòng. */
@@ -273,7 +271,7 @@ export function layoutOverMode(
     maxLines: 2,
   })
 
-  const lineH = fontPx * 1.12
+  const lineH = fontPx * 1.2
   const textBlockH = Math.ceil(lines.length * lineH + 4)
   const textW = Math.max(...lines.map((l) => measureLineWidth(l, fontPx)), 1)
 
@@ -286,11 +284,11 @@ export function layoutOverMode(
   // Cover: max(OCR, chữ VI) — được full frameW
   const coverW = Math.min(frameW, Math.max(coverBoxWidth(contentW, frameW), captionW + pad.x * 2))
   const coverX = Math.round(Math.max(0, Math.min(frameW - coverW, cx - coverW / 2)))
-  const coverY = Math.max(0, anchor.y - pad.top)
-  const coverH = Math.min(
-    frameH - coverY,
-    Math.max(anchor.h, textBlockH) + pad.top + pad.bottom + COVER_SHADOW_BOT,
-  )
+  // Cover H = dong chu + pad mong; Y can giua tam OCR (chu Trung)
+  const byText = textBlockH + pad.top + pad.bottom + COVER_SHADOW_BOT
+  const coverH = Math.min(frameH, Math.max(14, byText))
+  const ocrCy = anchor.y + anchor.h / 2
+  const coverY = Math.max(0, Math.min(frameH - coverH, Math.round(ocrCy - coverH / 2)))
 
   const captionX = Math.round(Math.max(0, Math.min(frameW - captionW, cx - captionW / 2)))
   const captionY = captionCenterInCover(coverY, coverH, textBlockH)
@@ -388,7 +386,10 @@ export function toCaptionLayout(caption: PixelBox, lines: string[], fontSize: nu
 export function hasStoredLayout(seg: Segment | undefined, fontPx?: number): boolean {
   const cl = seg?.captionLayout
   const b = seg?.bbox
-  if (!(b && cl?.lines?.length && cl.w > 0 && cl.h > 0)) return false
+  if (!b || b.w <= 0 || b.h <= 0) return false
+  // Kéo tay / Áp Y: chỉ cần bbox — không bắt captionLayout (tránh nhánh normalize co box)
+  if (seg?.bboxInherited === false) return true
+  if (!(cl?.lines?.length && cl.w > 0 && cl.h > 0)) return false
   if (fontPx != null && fontPx > 0 && cl.fontSize > 0 && fontPx !== cl.fontSize) return false
   return true
 }
@@ -397,16 +398,26 @@ export function hasStoredLayout(seg: Segment | undefined, fontPx?: number): bool
 export function storedOverLayout(seg: Segment, frameW: number, frameH: number): OverLayout | null {
   const cl = seg.captionLayout
   const b = seg.bbox
-  if (!b || !cl?.lines?.length || cl.w <= 0 || cl.h <= 0) return null
+  if (!b || b.w <= 0 || b.h <= 0) return null
+  const cover = { x: Math.round(b.x), y: Math.round(b.y), w: Math.round(b.w), h: Math.round(b.h) }
+  if (cl?.lines?.length && cl.w > 0 && cl.h > 0) {
+    return {
+      cover,
+      caption: {
+        x: Math.round(cl.x),
+        y: Math.round(cl.y),
+        w: Math.max(1, Math.round(cl.w)),
+        h: Math.max(1, Math.round(cl.h)),
+      },
+      lines: cl.lines.map(String),
+      fontPx: cl.fontSize > 0 ? cl.fontSize : undefined,
+    }
+  }
+  // Chỉ bbox (Áp Y không có layout): cover nguyên; chữ căn giữa box — không co cover
   return {
-    cover: clampCoverBox(b, frameW, frameH),
-    caption: {
-      x: Math.round(cl.x),
-      y: Math.round(cl.y),
-      w: Math.max(1, Math.round(cl.w)),
-      h: Math.max(1, Math.round(cl.h)),
-    },
-    lines: cl.lines.map(String),
+    cover,
+    caption: { x: cover.x, y: cover.y, w: cover.w, h: cover.h },
+    lines: [(seg.translation || '').trim()].filter(Boolean),
   }
 }
 
@@ -427,6 +438,35 @@ export function resolveOverLayout(
   const overlayLay = effectiveOverlayLayout(seg, frameH)
   if (overlayLay) {
     const preferred = resolveOverlayFontPreferred(seg)
+    // Freeze chỉ khi user chốt (bboxInherited===false) VÀ đã có captionLayout đủ font/lines.
+    // OCR gắn bboxInherited=true — luôn layoutOcrOverlay (CAP-MID 1 dòng khi dư chỗ).
+    if (
+      seg.bboxInherited === false
+      && !coverOverride
+      && hasStoredLayout(seg, undefined)
+      && seg.captionLayout?.lines?.length
+      && (seg.captionLayout.fontSize ?? 0) > 0
+    ) {
+      const frozen = freezeUserCoverLayout(seg, frameW, frameH)
+      if (frozen) {
+        // mid 2 dòng xấu trong khi 1 dòng vừa bbox → fit lại
+        if (
+          overlayLay === 'mid'
+          && frozen.lines.length >= 2
+        ) {
+          const one = layoutOcrOverlay(overlayLay, frozen.cover, seg.translation, 0, frameW, frameH)
+          if (one.lines.length === 1) {
+            return {
+              cover: frozen.cover,
+              caption: one.caption,
+              lines: one.lines,
+              fontPx: one.fontPx,
+            }
+          }
+        }
+        return frozen
+      }
+    }
     if (coverOverride) {
       // Kéo tay: fit theo khung draft (preferred=0 trừ khi user khóa fontSize trên đoạn)
       // Không khóa captionLayout.fontSize cũ — không thì thả chuột chữ tụt bé lại.
@@ -442,11 +482,12 @@ export function resolveOverLayout(
     if (hasStoredLayout(seg, undefined)) {
       const stored = storedOverLayout(seg, frameW, frameH)
       if (stored && !isBadOverlayStoredCover(seg, stored.cover, frameW, frameH)) {
-        // Tin bbox/mask đã lưu; chữ xếp lại trong cover (tránh captionLayout x/y lệch → chữ sai chỗ)
+        if (seg.bboxInherited === false && overlayLay !== 'mid') {
+          const frozen = freezeUserCoverLayout(seg, frameW, frameH)
+          if (frozen) return frozen
+        }
+        // mid: layout + ôm cover sát chữ (layoutMidOverlay có thể thu cover)
         const cover = stored.cover
-        // captionLayout.fontSize là kết quả auto cũ, không phải lựa chọn khóa
-        // của người dùng. Bỏ nó để bbox dài tự tính lại font lớn nhất có thể.
-        // 0 = auto fit bbox; preferred chỉ khi user set fontSize đoạn
         const want = preferred > 0 ? preferred : 0
         const laid = layoutOcrOverlay(overlayLay, cover, seg.translation, want, frameW, frameH)
         return {
@@ -457,12 +498,11 @@ export function resolveOverLayout(
         }
       }
     }
-    // mid/dọc/nhãn: cover = bbox OCR (không nới theo VI); chưa OCR → không bịa khung
+    // mid/dọc/nhãn: seed OCR → layout (mid có thể snug cover theo chữ)
     const seed = overlayCoverSeed(seg, frameW, frameH)
     if (!seed) return null
     const want = preferred > 0 ? preferred : 0
     const laid = layoutOcrOverlay(overlayLay, seed, seg.translation, want, frameW, frameH)
-    // CAP-MID/mid: cover tu layoutMidOverlay (trong seed OCR) — khong doi caption day
     return {
       cover: clampCoverBox(laid.cover, frameW, frameH),
       caption: laid.caption,
@@ -474,17 +514,33 @@ export function resolveOverLayout(
   // Caption đáy/over horizontal — cần chế độ che chữ
   if (!(settings.coverHardsubs && settings.burnSubs)) return null
 
-  // Đang kéo: bám đúng draft (user chỉnh tay)
+  // Đang kéo / sau thả: cùng 1 công thức fit — không nhảy cỡ chữ
   if (coverOverride) {
-    return manualCoverLayout(coverOverride, seg.translation, fontPx, frameW, frameH, true)
+    return fitFixedCoverCaption(coverOverride, seg.translation, frameW, frameH)
   }
 
-  // Đã lưu từ editor (kéo tay) — giữ đúng bbox; chỉ xếp chữ trong cover (như mid)
+  // Đã lưu từ editor (kéo tay / Áp Y) — bbox cố định, không normalize/fitHardsub
   if (hasStoredLayout(seg, fontPx)) {
     const stored = storedOverLayout(seg, frameW, frameH)
     if (!stored) return null
+    if (seg.bboxInherited === false) {
+      const frozen = freezeUserCoverLayout(seg, frameW, frameH)
+      if (frozen) return frozen
+      // Không fit lại — freeze tối thiểu theo bbox (giữ cỡ settings)
+      return {
+        cover: stored.cover,
+        caption: {
+          x: stored.cover.x,
+          y: stored.cover.y,
+          w: stored.cover.w,
+          h: stored.cover.h,
+        },
+        lines: [(seg.translation || '').trim()].filter(Boolean),
+        fontPx,
+      }
+    }
     const laid = manualCoverLayout(stored.cover, seg.translation, fontPx, frameW, frameH, true)
-    return { ...laid, fontPx }
+    return { ...laid, cover: stored.cover, fontPx: laid.fontPx ?? fontPx }
   }
 
   const seedRaw = seg.bbox
@@ -496,20 +552,47 @@ export function resolveOverLayout(
       ?? fallbackCoverBox(frameW, frameH, fontPx)
   const normalizedSeed = normalizeCoverBox(seedRaw, frameW, frameH, fontPx)
   // User-owned bbox: fixed; OCR auto: vẫn có thể shift nhẹ xuống
-  const seed = seg.bbox && seg.bboxInherited !== false
-    ? shiftAutoCoverDown(normalizedSeed, fontPx, frameW, frameH)
-    : normalizedSeed
+  // Keep OCR center — snug H elsewhere (no shiftAutoCoverDown inflate)
+  const seed = normalizedSeed
 
   // Bbox OCR / user: cover cố định như mid — fit chữ trong box, không phình sau drag
   const anchor = coverToAnchor(seed, fontPx, frameW)
   if (seg.bbox) {
     if (seg.bboxInherited === false) {
-      const laid = manualCoverLayout(seed, seg.translation, fontPx, frameW, frameH, true)
-      return { ...laid, fontPx }
+      const frozen = freezeUserCoverLayout(seg, frameW, frameH)
+      if (frozen) return frozen
+      return {
+        cover: seed,
+        caption: { x: seed.x, y: seed.y, w: seed.w, h: seed.h },
+        lines: [(seg.translation || '').trim()].filter(Boolean),
+        fontPx,
+      }
     }
+    // OCR auto: snug H om chu, can giua tam dai Trung
     const autoFontPx = autoFontFromBbox(seed, seg.translation, fontPx)
-    const laid = manualCoverLayout(seed, seg.translation, autoFontPx, frameW, frameH, true)
-    return { ...laid, fontPx: autoFontPx }
+    const padB = coverPad(autoFontPx, frameW)
+    const ocrCyB = seed.y + seed.h / 2
+    const snugH = Math.max(
+      14,
+      Math.round(autoFontPx * 1.28 + padB.top + padB.bottom + COVER_SHADOW_BOT),
+    )
+    const snugCover = clampCoverBox(
+      {
+        x: seed.x,
+        y: Math.round(Math.max(0, Math.min(frameH - snugH, ocrCyB - snugH / 2))),
+        w: seed.w,
+        h: snugH,
+      },
+      frameW,
+      frameH,
+    )
+    const laid = manualCoverLayout(snugCover, seg.translation, autoFontPx, frameW, frameH, true)
+    return {
+      cover: snugCover,
+      caption: laid.caption,
+      lines: laid.lines,
+      fontPx: laid.fontPx ?? autoFontPx,
+    }
   }
 
   const sourceTrim = (seg.source ?? '').trim()
@@ -588,24 +671,16 @@ export function resolvePreviewOverLayout(
 ): PreviewOverLayout | null {
   const base = resolveOverLayout(seg, settings, frameW, frameH, coverOverride)
   if (!base) return null
-  // CAP-MID / dọc / nhãn ONLY — không đụng caption đáy
+  // mid/label/vertical (kể cả horizontal bbox giữa → effective mid): không offsetY
+  const userFixed =
+    Boolean(coverOverride) || seg?.bboxInherited === false
   const overlayLay = seg ? effectiveOverlayLayout(seg, frameH) : null
-  if (overlayLay === 'mid' || overlayLay === 'label' || overlayLay === 'vertical') {
+  if (userFixed || overlayLay === 'mid' || overlayLay === 'label' || overlayLay === 'vertical') {
     return { ...base, cover: base.cover, caption: base.caption, mask: base.cover }
   }
-  // Caption đáy 16:9 — logic HEAD gốc (không sửa mid)
+  // Caption ngang: giữ base — không cộng offsetY (tràn đáy OCR)
   if (crop.w >= crop.h) {
-    const fontPx = base.fontPx ?? 16
-    const padY = Math.max(2, Math.round(fontPx * 0.08))
-    const offsetY = Math.max(3, Math.round(fontPx * 0.25))
-    const caption = {
-      ...base.caption,
-      y: Math.min(crop.y + crop.h - base.caption.h - padY, base.caption.y + offsetY),
-    }
-    const y = Math.max(crop.y, caption.y - padY)
-    const bottom = Math.min(crop.y + crop.h, caption.y + caption.h + padY)
-    const cover = { ...base.cover, y, h: Math.max(4, bottom - y) }
-    return { ...base, cover, caption, mask: cover }
+    return { ...base, cover: base.cover, caption: base.caption, mask: base.cover }
   }
   const fullCrop = cropCoversFull(crop, frameW, frameH)
   const fittedCover = fullCrop ? base.cover : fitBoxToCrop(base.cover, crop)
@@ -630,15 +705,8 @@ export function resolvePreviewOverLayout(
       h: neededHeight,
     }, crop)
   }
-  const offsetY = Math.max(2, Math.round(fontPx * 0.06))
-  const groupBottom = Math.max(
-    fittedCover.y + fittedCover.h,
-    caption.y + caption.h,
-  )
-  const shiftY = Math.max(0, Math.min(offsetY, crop.y + crop.h - groupBottom))
-  const shiftedCover = { ...fittedCover, y: fittedCover.y + shiftY }
-  caption = { ...caption, y: caption.y + shiftY }
-  const union = unionBox(shiftedCover, caption)
+  // Không shiftY — bám cover đã lưu (kéo/áp Y)
+  const union = unionBox(fittedCover, caption)
   const maskSeed = unionBox(fittedCover, caption)
   const maskBottom = Math.min(
     crop.y + crop.h,
@@ -649,8 +717,11 @@ export function resolvePreviewOverLayout(
     h: maskBottom - maskSeed.y,
   }, crop) ?? maskSeed
   const padY = Math.max(2, Math.round(fontPx * 0.08))
-  const coverY = Math.max(crop.y, caption.y - padY)
-  const coverBottom = Math.min(crop.y + crop.h, caption.y + caption.h + padY)
+  const coverY = Math.max(crop.y, Math.min(fittedCover.y, caption.y - padY))
+  const coverBottom = Math.min(
+    crop.y + crop.h,
+    Math.max(fittedCover.y + fittedCover.h, caption.y + caption.h + padY),
+  )
   const cover = fitBoxToCrop({
     x: union.x,
     y: coverY,
@@ -694,6 +765,44 @@ export function segmentWithLayout(seg: Segment, layout: OverLayout, fontPx: numb
     ...seg,
     bbox: { x: layout.cover.x, y: layout.cover.y, w: layout.cover.w, h: layout.cover.h },
     captionLayout: toCaptionLayout(layout.caption, layout.lines, layout.fontPx ?? fontPx),
+  }
+}
+
+/**
+ * Layout đã chốt (kéo tay / Áp Y): cover = bbox, chữ = captionLayout — không fit lại.
+ */
+export function freezeUserCoverLayout(
+  seg: Segment,
+  frameW: number,
+  frameH: number,
+): OverLayout | null {
+  if (!seg.bbox || seg.bbox.w <= 0 || seg.bbox.h <= 0) return null
+  const cover = {
+    x: Math.round(seg.bbox.x),
+    y: Math.round(seg.bbox.y),
+    w: Math.round(seg.bbox.w),
+    h: Math.round(seg.bbox.h),
+  }
+  const cl = seg.captionLayout
+  if (cl?.lines?.length) {
+    const fs = cl.fontSize > 0 ? cl.fontSize : (seg.fontSize || 0)
+    return {
+      cover,
+      caption: {
+        x: Math.round(cl.x ?? cover.x),
+        y: Math.round(cl.y ?? cover.y),
+        w: Math.max(1, Math.round(cl.w > 0 ? cl.w : cover.w)),
+        h: Math.max(1, Math.round(cl.h > 0 ? cl.h : cover.h)),
+      },
+      lines: cl.lines.map(String),
+      fontPx: fs > 0 ? fs : undefined,
+    }
+  }
+  return {
+    cover,
+    caption: { x: cover.x, y: cover.y, w: cover.w, h: cover.h },
+    lines: [(seg.translation || '').trim()].filter(Boolean),
+    fontPx: seg.fontSize && seg.fontSize > 0 ? seg.fontSize : undefined,
   }
 }
 
@@ -811,7 +920,8 @@ export function clampCoverBox(box: PixelBox, frameW: number, frameH: number, min
   return { x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h) }
 }
 
-/** Caption trong cover: 1 dòng (co font) → 2 dòng; căn giữa. */
+
+/** Caption trong cover: 1 dong -> 2 dong; can GIUA bbox; pad L/R nhe; khong phinh H. */
 export function layoutCaptionInCover(
   cover: PixelBox,
   text: string,
@@ -819,31 +929,46 @@ export function layoutCaptionInCover(
   _frameW: number,
 ): Pick<OverLayout, 'caption' | 'lines'> & { fontPx?: number } {
   const trimmed = text.trim()
-  const edge = Math.max(2, Math.round(cover.w * 0.02))
+  // Pad L/R nhe trong bbox (khong doi H cover)
+  const edge = Math.max(6, Math.round(cover.w * 0.028))
   const maxInnerW = Math.max(24, cover.w - edge * 2)
-  const { lines, fontPx } = fitCaptionLines(trimmed, maxInnerW, fontSizePx, {
+  const maxBlockH = Math.max(12, cover.h - 4)
+  let { lines, fontPx } = fitCaptionLines(trimmed, maxInnerW, fontSizePx, {
     preferOneLine: true,
     maxLines: 2,
   })
-  const lineH = fontPx * 1.12
-  const textBlockH = Math.ceil(lines.length * lineH + 4)
-  const textW = Math.max(...lines.map((l) => measureLineWidth(l, fontPx)), 1)
-  const captionW = Math.ceil(
-    lines.length === 1
-      ? Math.min(cover.w, Math.max(textW + CAP_PAD_X * 2, cover.w - edge * 2))
-      : Math.min(cover.w, textW + CAP_PAD_X * 2),
+  while (fontPx > 10) {
+    const needH = Math.ceil(lines.length * fontPx * 1.2 + 4)
+    const overflowW = lines.some((line) => measureLineWidth(line, fontPx) > maxInnerW)
+    if (needH <= maxBlockH && !overflowW) break
+    fontPx -= 1
+    lines = wrapCaptionText(trimmed, maxInnerW, fontPx, 2)
+  }
+  const lineH = fontPx * 1.2
+  const needH = Math.ceil(lines.length * lineH + 4)
+  const textBlockH = Math.min(maxBlockH, needH)
+  const textW = Math.max(...lines.map((ln) => measureLineWidth(ln, fontPx)), 1)
+  const captionW = Math.min(
+    cover.w - edge * 2,
+    Math.ceil(textW + CAP_PAD_X * 2),
   )
   const cx = cover.x + cover.w / 2
-  const captionX = Math.round(Math.max(cover.x, Math.min(cover.x + cover.w - captionW, cx - captionW / 2)))
+  const captionX = Math.round(
+    Math.max(cover.x + edge, Math.min(cover.x + cover.w - edge - captionW, cx - captionW / 2)),
+  )
+  // Can GIUA dung — khong lech len
   const captionY = captionCenterInCover(cover.y, cover.h, textBlockH)
   return {
-    caption: { x: captionX, y: captionY, w: captionW, h: textBlockH },
+    caption: {
+      x: captionX,
+      y: Math.max(cover.y, Math.min(cover.y + cover.h - textBlockH, captionY)),
+      w: Math.max(1, captionW),
+      h: textBlockH,
+    },
     lines,
-    fontPx: fontPx !== fontSizePx ? fontPx : undefined,
+    fontPx,
   }
 }
-
-/** Tự co/giãn cover: full ngang được; 1 dòng (co font) rồi 2 dòng. */
 export function adaptiveCoverLayout(
   cover: PixelBox,
   text: string,
@@ -868,7 +993,7 @@ export function adaptiveCoverLayout(
     const captionW = Math.ceil(textW + CAP_PAD_X * 2)
     const coverW = Math.min(frameW, Math.max(cover.w, captionW + pad.x * 2))
     const byText = textBlockH + pad.top + pad.bottom + COVER_SHADOW_BOT
-    const coverH = Math.min(frameH, Math.max(cover.h, byText))
+    const coverH = Math.min(frameH, Math.max(byText, Math.min(cover.h, byText + Math.round(fs * 0.15))))
     return { lineH, textBlockH, textW, captionW, coverW, coverH }
   }
 
@@ -925,19 +1050,28 @@ export function manualCoverLayout(
   return adaptiveCoverLayout(cover, text, fontSizePx, frameW, frameH)
 }
 
-/** Cover mặc định phụ đề đáy — chỉ khi không phải CJK chờ OCR. */
-
-/** Fit chu trong bbox co dinh — keo/tha caption ngang (khong lien quan mid). */
+/**
+ * Fit chữ trong bbox cố định — dùng chung lúc kéo + thả + render sau lưu.
+ * startFs = theo H bbox (không lấy settings lớn → thả chuột nhảy cỡ).
+ */
 export function fitFixedCoverCaption(
   cover: PixelBox,
   text: string,
   frameW: number,
   frameH: number,
 ): OverLayout {
-  const startFs = autoFontFromBbox(cover, text, 0)
-  return manualCoverLayout(cover, text, startFs, frameW, frameH, true)
+  const box = clampCoverBox(cover, frameW, frameH)
+  const startFs = autoFontFromBbox(box, text, 0)
+  const laid = layoutCaptionInCover(box, text, startFs, frameW)
+  return {
+    cover: box,
+    caption: laid.caption,
+    lines: laid.lines,
+    fontPx: laid.fontPx ?? startFs,
+  }
 }
 
+/** Cover mặc định phụ đề đáy — chỉ khi không phải CJK chờ OCR. */
 export function fallbackCoverBox(frameW: number, frameH: number, fontSizePx = AUTO_SUBTITLE_FONT): PixelBox {
   const h = coverMaxHeight(frameH, fontSizePx)
   const w = Math.round(frameW * 0.4)
@@ -1005,14 +1139,15 @@ export function captionFontStyle(
   axis: 'w' | 'h' = 'h',
 ): React.CSSProperties {
   if (boxSource <= 0) return { fontSize: fontPx }
-  const unit = axis === 'w' ? 'cqw' : 'cqh'
-  return { fontSize: `calc(100${unit} * ${fontPx / boxSource})` }
+  // cqh full hay cắt descender (g/y/p) vì stage overflow-hidden — chừa ~14% đáy
+  if (axis === 'h') {
+    const frac = Math.min(0.86, (fontPx / boxSource) * 0.9)
+    return { fontSize: `calc(100cqh * ${frac})` }
+  }
+  const fracW = Math.min(0.94, fontPx / boxSource)
+  return { fontSize: `calc(100cqw * ${fracW})` }
 }
 
-/**
- * Overlay mid/dọc/nhãn: scale theo fontPx nguồn / kích thước cover
- * (không dùng cqh/n — công thức cũ bỏ qua fontPx nên kéo cỡ không ăn).
- */
 export function overlayDisplayFontStyle(
   layout: 'vertical' | 'label' | 'mid',
   cover: PixelBox,
@@ -1034,12 +1169,12 @@ export function overlayDisplayFontStyle(
       overflow: 'hidden',
     }
   }
-  // mid/label: scale ≤ fontPx/box — không phình cqh (chữ to tràn bbox)
+  // mid/label: chỉ cap theo fontPx/cover — không sàn 0.72 (phình khi cover thấp)
   if (layout === 'mid' || layout === 'label') {
     const n = Math.max(1, _lineCount)
-    const lh = layout === 'mid' ? 1.1 : 1.12
-    const fracH = Math.min(fontPx / h, 0.95 / (n * lh))
-    const fracW = Math.min(0.98, fontPx / w)
+    const lh = 1.12
+    const fracH = Math.min(fontPx / h, 0.88 / (n * lh))
+    const fracW = Math.min(fontPx / w, 0.94)
     return {
       fontSize: `min(calc(100cqw * ${fracW}), calc(100cqh * ${fracH}))`,
       lineHeight: lh,
@@ -1088,21 +1223,32 @@ export function snapBoxToCenter(box: PixelBox, frameW: number, frameH: number): 
 }
 
 /**
- * Font theo bbox che chữ (OCR) — chèn trên/dưới/cover đều bám cỡ dải này.
- * Không sàn 48: chữ to tràn đè hardsub.
+ * Font theo bbox (caption + mid) — lấp ~0.78–0.9 H, kẹp W; không chữ quá bé.
  */
 export function autoFontFromBbox(
   bbox: PixelBox,
   text: string,
   baseFontPx = 0,
 ): number {
-  const compactLen = Math.max(1, text.replace(/\s+/g, '').length)
-  const byH = Math.floor(bbox.h * (compactLen <= 12 ? 0.78 : 0.65))
-  const byW = Math.floor(bbox.w / Math.max(2.5, compactLen * 0.55))
-  const auto = Math.max(10, Math.min(byH, byW, Math.floor(bbox.h * 0.92), 56))
+  const trimmed = (text || '').trim()
+  const compactLen = Math.max(1, trimmed.replace(/\s+/g, '').length)
+  const hRatio = compactLen <= 8 ? 0.88 : compactLen <= 18 ? 0.84 : 0.78
+  const byH = Math.floor(bbox.h * hRatio)
+  let byW = Math.floor(bbox.w / Math.max(2.2, compactLen * 0.48))
+  if (trimmed) {
+    const maxW = Math.max(24, bbox.w * 0.94)
+    let lo = 12
+    let hi = Math.min(72, Math.max(byH, 18))
+    while (lo < hi) {
+      const mid = Math.ceil((lo + hi) / 2)
+      if (measureLineWidth(trimmed, mid) <= maxW) lo = mid
+      else hi = mid - 1
+    }
+    byW = lo
+  }
+  const auto = Math.max(14, Math.min(byH, byW, Math.floor(bbox.h * 0.92), 64))
   if (baseFontPx > 0) {
-    // preferred user: không lớn hơn bbox che
-    return Math.max(10, Math.min(baseFontPx, Math.max(auto, Math.floor(bbox.h * 0.95))))
+    return Math.max(14, Math.min(baseFontPx, Math.max(auto, Math.floor(bbox.h * 0.75)), Math.floor(bbox.h * 0.92)))
   }
   return auto
 }

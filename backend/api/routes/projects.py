@@ -359,3 +359,25 @@ def api_save_settings(project_id: str, settings: Settings):
     save_meta(project_id, meta)
     return {"ok": True, "settings": meta["settings"]}
 
+
+class ClearCacheBody(BaseModel):
+    """parts: danh sách mục checkbox; rỗng/null = tất cả."""
+
+    parts: list[str] | None = None
+
+
+@router.delete("/api/cache/project/{project_id}")
+@router.delete("/api/projects/{project_id}/cache")
+@router.post("/api/cache/project/{project_id}")
+@router.post("/api/projects/{project_id}/cache/clear")
+def api_clear_project_cache(project_id: str, body: ClearCacheBody | None = None):
+    """Xóa cache project — chỉ khi user chủ động bấm «Xóa cache» (+ chọn mục)."""
+    from pipeline.core.project import clear_project_cache
+
+    meta = load_meta(project_id)
+    if not meta:
+        raise HTTPException(404, "Project không tồn tại")
+    parts = body.parts if body else None
+    result = clear_project_cache(project_id, parts=parts)
+    return result
+

@@ -156,13 +156,20 @@ def api_replace_segments(project_id: str, body: list[SegmentIn]):
         }
         ordered = sorted(body, key=lambda s: (s.start, s.end, s.id))
         out: list[dict] = []
+        # Reset OCR gửi bbox/captionLayout=null — không restore từ prev
+        _clearable = ("bbox", "captionLayout", "bboxInherited")
         for i, item in enumerate(ordered):
-            # exclude_none: tránh dub=null (Pydantic optional) → backend bỏ hết TTS
-            dumped = item.model_dump(exclude_none=True)
+            raw = item.model_dump(exclude_none=False)
+            dumped = {k: v for k, v in raw.items() if v is not None}
             dumped["index"] = i
+            explicit_clear = {k for k in _clearable if k in raw and raw[k] is None}
+            for k in explicit_clear:
+                dumped.pop(k, None)
             prev = old_by_id.get(str(dumped.get("id") or ""))
             if prev:
                 for k in _SEG_PRESERVE:
+                    if k in explicit_clear:
+                        continue
                     if k not in dumped and prev.get(k) is not None:
                         dumped[k] = prev[k]
             out.append(dumped)

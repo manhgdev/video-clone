@@ -693,39 +693,52 @@ def _layout_mid_caption(
     def _kept(lines: list[str]) -> bool:
         return re.sub(r"\s+", " ", " ".join(lines)).strip() == re.sub(r"\s+", " ", raw).strip()
 
-    # preferred = max gợi ý — luôn shrink cho vừa bbox OCR (không to tràn)
-    size = (
-        max(8, min(48, int(preferred_fs)))
-        if preferred_fs > 0
-        else max(
-            8,
-            min(
-                max(8, int(inner_h * 0.55)),
-                int(inner_h / line_mul),
-                int(inner_w / max(3, len(re.sub(r"\s+", "", raw)) * 0.58)),
-            ),
-        )
+    # Ưu tiên 1 dòng (binary max fs) — CAP-MID vừa dịch phải giống kéo tay
+    max_one = min(
+        int(preferred_fs) if preferred_fs > 0 else 40,
+        int(inner_h / line_mul),
+        40,
     )
-    lines = _fit(size)
-    while size > 8 and (
-        not _kept(lines)
-        or len(lines) * size * line_mul > inner_h
-        or any(
-            draw.textbbox((0, 0), ln, font=font_getter(size))[2] > inner_w + 2
-            for ln in lines
+    lo, hi, best_one = 8, max(8, max_one), 0
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        one_w = draw.textbbox((0, 0), raw, font=font_getter(mid))[2]
+        if one_w <= inner_w + 2 and mid * line_mul <= inner_h + 0.5:
+            best_one = mid
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    compact = len(re.sub(r"\s+", "", raw))
+    words = [w for w in re.split(r"\s+", raw) if w]
+    prefer_one = len(words) <= 6 or compact <= 24
+    if best_one >= (9 if prefer_one else 11):
+        size, lines = best_one, [raw]
+    else:
+        size = (
+            max(8, min(48, int(preferred_fs)))
+            if preferred_fs > 0
+            else max(
+                8,
+                min(
+                    max(8, int(inner_h * 0.55)),
+                    int(inner_h / line_mul),
+                    int(inner_w / max(3, compact * 0.58)),
+                ),
+            )
         )
-    ):
-        size -= 1
         lines = _fit(size)
-    # Câu ngắn: 1 dòng ngang nếu vừa
-    if len(lines) > 1 and len(re.sub(r"\s+", "", raw)) <= 16:
-        for fs in range(min(size, int(inner_h / line_mul)), 7, -1):
-            if (
-                draw.textbbox((0, 0), raw, font=font_getter(fs))[2] <= inner_w
-                and fs * line_mul <= inner_h
-            ):
-                size, lines = fs, [raw]
-                break
+        while size > 8 and (
+            not _kept(lines)
+            or len(lines) * size * line_mul > inner_h
+            or any(
+                draw.textbbox((0, 0), ln, font=font_getter(size))[2] > inner_w + 2
+                for ln in lines
+            )
+        ):
+            size -= 1
+            lines = _fit(size)
+        if draw.textbbox((0, 0), raw, font=font_getter(size))[2] <= inner_w + 2:
+            lines = [raw]
     font_use = font_getter(size)
     line_boxes = [draw.textbbox((0, 0), ln, font=font_use) for ln in lines]
     line_hs = [max(1, b[3] - b[1]) for b in line_boxes]

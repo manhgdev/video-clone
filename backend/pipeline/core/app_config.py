@@ -175,6 +175,8 @@ def public_app_config() -> dict[str, Any]:
                 "env": "ELEVENLABS_API_KEYS",
             }
         },
+        # Bản đóng gói / launcher — file đã trên máy, không cần «Tải xuống»
+        "desktop": os.environ.get("VIDEO_CLONE_DESKTOP") == "1",
     }
 
 

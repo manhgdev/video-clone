@@ -1,6 +1,7 @@
 """Completed video exports and their cached thumbnails."""
 from __future__ import annotations
 
+import os
 import re
 import json
 import subprocess
@@ -98,7 +99,8 @@ def ensure_thumbnail(render_id: str) -> Path:
 
 @router.get("/api/renders")
 def api_renders():
-    return {"items": list_rendered_videos(), "canReveal": bool(getattr(sys, "frozen", False))}
+    desktop = os.environ.get("VIDEO_CLONE_DESKTOP") == "1" or bool(getattr(sys, "frozen", False))
+    return {"items": list_rendered_videos(), "canReveal": desktop}
 
 
 @router.put("/api/renders/{render_id}")

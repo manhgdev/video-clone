@@ -4,6 +4,15 @@ import SegmentCard from './SegmentCard'
 import { expandSegmentsForList } from './expandCompound'
 import './SegmentList.css'
 
+function safeSeg(s: Segment): Segment {
+  return {
+    ...s,
+    source: s.source ?? '',
+    translation: s.translation ?? '',
+    voice: s.voice ?? 'system',
+  }
+}
+
 type Props = {
   segments: Segment[]
   voices: { id: string; name: string }[]
@@ -29,7 +38,7 @@ export default function SegmentList({
 }: Props) {
   // Alt+G: list vẫn hiện từng câu (không hiện shell [Compound ×N])
   const list = useMemo(
-    () => expandSegmentsForList(Array.isArray(segments) ? segments : []),
+    () => expandSegmentsForList(Array.isArray(segments) ? segments : []).map(safeSeg),
     [segments],
   )
 

@@ -11,6 +11,37 @@ export function formatTimecode(value: number) {
   return `${pad(h)}:${pad(m)}:${pad(s)}:${pad(f)}`
 }
 
+/** Parse HH:MM:SS:FF | MM:SS:FF | số giây thuần. */
+export function parseTimecode(raw: string): number | null {
+  const t = raw.trim().replace(',', '.')
+  if (!t) return null
+  if (/^-?\d+(\.\d+)?$/.test(t)) {
+    const n = Number(t)
+    return Number.isFinite(n) ? n : null
+  }
+  const parts = t.split(':').map((p) => p.trim())
+  if (parts.length < 2 || parts.length > 4) return null
+  const nums = parts.map((p) => Number(p))
+  if (nums.some((n) => !Number.isFinite(n))) return null
+  let h = 0
+  let m = 0
+  let s = 0
+  let f = 0
+  if (parts.length === 4) {
+    ;[h, m, s, f] = nums
+  } else if (parts.length === 3) {
+    // MM:SS:FF (timeline ngắn) hoặc HH:MM:SS
+    if (nums[2] >= 30 && nums[2] % 1 === 0 && nums[1] < 60) {
+      ;[h, m, s] = nums
+    } else {
+      ;[m, s, f] = nums
+    }
+  } else {
+    ;[m, s] = nums
+  }
+  return Math.max(0, h * 3600 + m * 60 + s + f / 30)
+}
+
 export function parseHexColor(hex: string): [number, number, number] {
   const h = (hex || '#4c1d95').replace('#', '')
   if (h.length !== 6) return [76, 29, 149]

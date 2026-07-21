@@ -37,7 +37,10 @@ class Settings(BaseModel):
     processOriginalAudio: bool = False
     originalAudioMode: str = "original"
     originalAudioVolume: int = 100
-    previewSec: int = 0
+    # Ô Preview trên UI (s) — không phải cửa sổ lần dịch
+    previewSec: int = 20
+    # Cửa sổ lần chạy: 0=full, N=preview Ns; None=legacy (dùng previewSec)
+    runPreviewSec: int | None = None
     workers: int = 0
     previewAspectRatio: str = "original"
     previewCrop: dict[str, float] | None = None

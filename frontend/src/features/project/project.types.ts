@@ -145,8 +145,13 @@ export type ProjectSettings = {
   originalAudioMode: 'original' | 'vocals' | 'no_vocals' | 'mute'
   /** Âm lượng track gốc / nền 0–100 (sau lọc) */
   originalAudioVolume: number
-  /** Số giây đầu khi bấm Preview (Dịch toàn bộ vẫn = full) */
+  /** Ô Preview trên sidebar (s) — chỉ dùng khi bấm ▶ Preview, không đổi khi Dịch cả video */
   previewSec: number
+  /**
+   * Cửa sổ lần chạy pipeline (gửi API): 0 = full, N = preview Ns.
+   * Không lưu lâu dài — chỉ payload run.
+   */
+  runPreviewSec?: number
   /** 1–16 luồng định vị OCR + xuất khung + TTS; 0 = tự động theo tài nguyên rảnh */
   workers: number
   /** Tỷ lệ khung preview / xuất: original | 16:9 | 9:16 | … */
@@ -196,6 +201,8 @@ export type AppConfig = {
   tts?: {
     elevenlabs: ElevenLabsConfig
   }
+  /** Bản desktop đóng gói — file đã local, ẩn «Tải xuống» */
+  desktop?: boolean
 }
 
 export type HardwareInfo = {

@@ -41,6 +41,7 @@ import {
   ZOOM_MIN,
   adaptiveCoverLayout,
   autoFontFromBbox,
+  fitFixedCoverCaption,
   buildExportSegments,
   captionChromeStyle,
   captionFontCss,
@@ -62,11 +63,11 @@ import {
   fitTimelineZoom,
   formatTime,
   formatTimecode,
+  parseTimecode,
   fullMediaClip,
   isOcrOverlayLayout,
   loadBookmarks,
   loadMediaClips,
-  manualCoverLayout,
   mapTimeAfterRipple,
   mergeTimeRanges,
   normalizeMediaClips,
@@ -806,7 +807,8 @@ export default function LivePreviewEditor({
     ? { x: 0, y: 0, w: sourceWidth, h: sourceHeight }
     : appliedCrop
   const getCachedPreviewLayout = (s: Segment, override?: PixelBox) => {
-    const key = `v10|${s.id}|${s.translation}|${s.layout}|${s.bbox ? `${s.bbox.x},${s.bbox.y},${s.bbox.w},${s.bbox.h}` : ''}|${settings.subtitleFontSize}|${settings.subtitleFontFamily}|${crop.x},${crop.y},${crop.w},${crop.h}|${override ? `${override.x},${override.y},${override.w},${override.h}` : ''}`
+    const cl = s.captionLayout
+    const key = `v13|${s.id}|${s.translation}|${s.layout}|${s.bboxInherited}|${s.bbox ? `${s.bbox.x},${s.bbox.y},${s.bbox.w},${s.bbox.h}` : ''}|${cl ? `${cl.x},${cl.y},${cl.w},${cl.h},${cl.fontSize},${(cl.lines || []).join('\\n')}` : ''}|${settings.subtitleFontSize}|${settings.subtitleFontFamily}|${crop.x},${crop.y},${crop.w},${crop.h}|${override ? `${override.x},${override.y},${override.w},${override.h}` : ''}`
     const cached = layoutCacheRef.current[s.id]
     if (cached && cached.key === key) {
       return cached.val
@@ -2618,11 +2620,11 @@ export default function LivePreviewEditor({
           }, laid.fontPx))
           return
         }
-        // Caption ngang / cover: luôn fixed cover như mid — không adaptive grow sau thả chuột
+        // Caption ngang: cùng fitFixedCoverCaption lúc kéo — thả không nhảy cỡ
         if (seg.translation.trim() && settings.burnSubs) {
-          const fontPx = resolveCaptionFontSize(seg, settings, sourceWidth, sourceHeight)
-          const layout = manualCoverLayout(norm, seg.translation, fontPx, sourceWidth, sourceHeight, true)
-          editSegment(segmentWithLayout({ ...seg, bboxInherited: false }, { ...layout, cover: norm }, fontPx))
+          const layout = fitFixedCoverCaption(norm, seg.translation, sourceWidth, sourceHeight)
+          const fitFs = layout.fontPx ?? autoFontFromBbox(norm, seg.translation, 0)
+          editSegment(segmentWithLayout({ ...seg, bboxInherited: false }, { ...layout, cover: norm }, fitFs))
           return
         }
         editSegment({ ...seg, bbox: norm, bboxInherited: false, captionLayout: seg.captionLayout ?? null })
@@ -3947,20 +3949,19 @@ export default function LivePreviewEditor({
       }, laid.fontPx))
       return
     }
-    // Ngang: fixed cover như mid (kể cả khi chưa bật coverHardsubs)
+    // Ngang: cùng fit lúc kéo — thả không nhảy cỡ
     if (selected.translation.trim() && settings.burnSubs) {
-      const layout = manualCoverLayout(
+      const layout = fitFixedCoverCaption(
         norm,
         selected.translation,
-        selectedFontPx,
         sourceWidth,
         sourceHeight,
-        true,
       )
+      const fitFs = layout.fontPx ?? autoFontFromBbox(norm, selected.translation, 0)
       editSegment(segmentWithLayout(
         { ...selected, bboxInherited: false },
         { ...layout, cover: norm },
-        selectedFontPx,
+        fitFs,
       ))
       return
     }
@@ -3977,8 +3978,10 @@ export default function LivePreviewEditor({
   }
 
   /**
-   * Áp **vị trí** khung che (Y) cho clip cùng lane — giữ nguyên W/H/X từng clip.
-   * Không copy bề ngang bbox nguồn.
+   * Áp **vị trí** khung che (Y):
+   * - full: cùng lane (Caption / CAP-MID / …)
+   * - range Từ→đến: **mọi bbox** chồng khoảng thời gian (không lọc lane)
+   * Giữ W/H/X từng clip — chỉ dời Y.
    */
   function applyCoverMaskToAll(
     range?: { mode: 'full' } | { mode: 'range'; fromSec: number; toSec: number },
@@ -3986,58 +3989,97 @@ export default function LivePreviewEditor({
     const srcSeg = selected ?? bboxSeg
     if (!srcSeg || sourceWidth <= 0 || sourceHeight <= 0) return
     const lane = captionLaneOf(srcSeg, sourceHeight || 1920)
-    const t0 = range?.mode === 'range' ? Math.min(range.fromSec, range.toSec) : null
-    const t1 = range?.mode === 'range' ? Math.max(range.fromSec, range.toSec) : null
-    const rawBox =
-      bboxDraft
-      ?? (selected && selected.id === srcSeg.id ? selectedBox : null)
-      ?? resolveCoverMaskOnly(srcSeg, sourceWidth, sourceHeight, crop)
-      ?? (srcSeg.bbox ? clampCoverBox(srcSeg.bbox, sourceWidth, sourceHeight) : null)
-      ?? selectedBoxSource
-    if (!rawBox) return
-    const srcBox = clampCoverBox(rawBox, sourceWidth, sourceHeight)
-    const srcY = srcBox.y
+    const byTime = range?.mode === 'range'
+    const t0 = byTime ? Math.min(range!.fromSec, range!.toSec) : null
+    const t1 = byTime ? Math.max(range!.fromSec, range!.toSec) : null
+    // Y nguồn = bbox clip đang chọn (raw) — không resolve layout
+    const srcYRaw =
+      (srcSeg.bbox ? srcSeg.bbox.y : null)
+      ?? (selectedBox ? selectedBox.y : null)
+      ?? (selectedBoxSource ? selectedBoxSource.y : null)
+    if (srcYRaw == null || !Number.isFinite(srcYRaw)) return
+    const srcY = Math.round(srcYRaw)
     pushHistory()
+    let changed = 0
     const next = segments.map((seg) => {
-      if (!(seg.translation || '').trim()) return seg
-      if (captionLaneOf(seg, sourceHeight || 1920) !== lane) return seg
-      if (t0 != null && t1 != null) {
+      if (byTime) {
         const s0 = floatSegStart(seg)
         const s1 = floatSegEnd(seg)
-        if (s1 <= t0 || s0 >= t1) return seg
+        if (s1 <= t0! || s0 >= t1!) return seg
+      } else {
+        if (!(seg.translation || '').trim()) return seg
+        if (captionLaneOf(seg, sourceHeight || 1920) !== lane) return seg
       }
-      // Giữ W/H/X của clip; chỉ dời Y theo nguồn
-      const own =
-        (seg.id === srcSeg.id ? srcBox : null)
-        ?? resolveCoverMaskOnly(seg, sourceWidth, sourceHeight, crop)
-        ?? (seg.bbox ? clampCoverBox(seg.bbox, sourceWidth, sourceHeight) : null)
-        ?? srcBox
-      const moved = clampCoverBox(
-        { x: own.x, y: srcY, w: own.w, h: own.h },
-        sourceWidth,
-        sourceHeight,
-      )
-      if (isOcrOverlayLayout(seg.layout) || effectiveOverlayLayout(seg, sourceHeight)) {
-        const lockFs = resolveOverlayFontPreferred(seg)
-        const lay =
-          effectiveOverlayLayout(seg, sourceHeight)
-          ?? (isOcrOverlayLayout(seg.layout) ? seg.layout : 'mid')
-        const laid = layoutOcrOverlay(lay, moved, seg.translation, lockFs, sourceWidth, sourceHeight)
-        return segmentWithLayout({ ...seg, bboxInherited: true }, {
-          cover: moved,
-          caption: laid.caption,
-          lines: laid.lines,
-          fontPx: laid.fontPx,
-        }, laid.fontPx)
+      if (!seg.bbox || seg.bbox.w <= 0 || seg.bbox.h <= 0) return seg
+      const own = {
+        x: Math.round(seg.bbox.x),
+        y: Math.round(seg.bbox.y),
+        w: Math.round(seg.bbox.w),
+        h: Math.round(seg.bbox.h),
       }
-      const fontPx = resolveCaptionFontSize(seg, settings, sourceWidth, sourceHeight)
-      const layout = manualCoverLayout(moved, seg.translation, fontPx, sourceWidth, sourceHeight, true)
-      return segmentWithLayout(
-        { ...seg, bboxInherited: true },
-        { ...layout, cover: moved },
-        fontPx,
-      )
+      const maxY = Math.max(0, sourceHeight - own.h)
+      const newY = Math.max(0, Math.min(maxY, srcY))
+      const dy = newY - own.y
+      // Freeze chữ trước khi dời Y — không để render path fit lại
+      const prevCl = seg.captionLayout
+      const lines =
+        Array.isArray(prevCl?.lines) && prevCl!.lines!.length
+          ? prevCl!.lines!.map(String)
+          : (seg.translation || '').trim()
+            ? [(seg.translation || '').trim()]
+            : ['']
+      const fontSize =
+        (prevCl && prevCl.fontSize > 0 ? prevCl.fontSize : 0)
+        || (seg.fontSize && seg.fontSize > 0 ? seg.fontSize : 0)
+        || settings.subtitleFontSize
+        || 28
+      const capX = Math.round(prevCl && prevCl.w > 0 ? prevCl.x : own.x)
+      const capY0 = Math.round(prevCl && prevCl.h > 0 ? prevCl.y : own.y)
+      const capW = Math.round(prevCl && prevCl.w > 0 ? prevCl.w : own.w)
+      const capH = Math.round(prevCl && prevCl.h > 0 ? prevCl.h : own.h)
+      if (dy === 0 && seg.bboxInherited === false && prevCl?.fontSize === fontSize) return seg
+      changed += 1
+      return {
+        ...seg,
+        bbox: { x: own.x, y: newY, w: own.w, h: own.h },
+        bboxInherited: false,
+        captionLayout: {
+          x: capX,
+          y: capY0 + dy,
+          w: capW,
+          h: capH,
+          lines,
+          fontSize,
+        },
+      }
     })
+    if (changed === 0) return
+    layoutCacheRef.current = {}
+    void onSegmentsReplace(next)
+  }
+
+  /** Reset bbox: 'one' = clip đang chọn; 'all' = mọi clip có bbox. */
+  function resetOcrRegion(scope: 'one' | 'all') {
+    const clearBbox = (seg: Segment): Segment => ({
+      ...seg,
+      bbox: null,
+      captionLayout: null,
+      bboxInherited: undefined,
+    })
+    if (scope === 'one') {
+      const src = selected ?? bboxSeg
+      if (!src) return
+      pushHistory()
+      layoutCacheRef.current = {}
+      // replace list (không chỉ editSegment) — đảm bảo persist null bbox
+      void onSegmentsReplace(segments.map((s) => (s.id === src.id ? clearBbox(s) : s)))
+      return
+    }
+    pushHistory()
+    layoutCacheRef.current = {}
+    const next = segments.map((seg) =>
+      seg.bbox || seg.captionLayout ? clearBbox(seg) : seg,
+    )
     void onSegmentsReplace(next)
   }
 
@@ -4777,7 +4819,7 @@ export default function LivePreviewEditor({
                             <p
                               className={cn(
                                 'w-full h-full text-center text-white font-bold flex flex-col items-center justify-center',
-                                'overflow-visible',
+                                'overflow-hidden',
                               )}
                               style={{
                                 ...overlayDisplayFontStyle(
@@ -4787,9 +4829,12 @@ export default function LivePreviewEditor({
                                   lines.length,
                                 ),
                                 ...captionChromeStyle(settings),
-                                transform: 'translateY(-0.06em)',
-                                whiteSpace: 'nowrap',
-                                padding: '0.02em 0.04em',
+                                // CAP-MID/label: bỏ bóng chữ (text-shadow) — chỉ chữ trắng trên bbox
+                                textShadow: 'none',
+                                WebkitTextStroke: '0',
+                                // CAP-MID: overflow-hidden, no translateY
+                                whiteSpace: 'normal',
+                                padding: 0,
                                 boxSizing: 'border-box',
                                 margin: 0,
                               }}
@@ -4797,7 +4842,7 @@ export default function LivePreviewEditor({
                               {lines.map((line, i) => (
                                 <span
                                   key={i}
-                                  className="block w-full text-center"
+                                  className="block w-full text-center overflow-hidden"
                                   style={{
                                     whiteSpace: 'nowrap',
                                     textOverflow: 'clip',
@@ -4810,22 +4855,18 @@ export default function LivePreviewEditor({
                             </p>
                           ) : (
                             <p
-                              className={cn(
-                                'w-full h-full text-center text-white font-bold flex flex-col items-center justify-center',
-                                layerLayout.lines.length === 1 && 'whitespace-nowrap',
-                              )}
+                              className="w-full h-full text-center text-white font-bold flex flex-col items-center justify-center overflow-visible"
                               style={{
+                                // boxSource = cover (container), không dùng caption.w — caption hẹp → cqw phình chữ to hơn bbox
                                 ...captionFontStyle(
                                   fontPx,
-                                  layerLayout.lines.length === 1
-                                    ? layerLayout.cover.w
-                                    : layerLayout.cover.h,
-                                  layerLayout.lines.length === 1 ? 'w' : 'h',
+                                  Math.max(1, layerLayout.cover.h),
+                                  'h',
                                 ),
                                 ...captionChromeStyle(settings),
-                                lineHeight: 1.12,
+                                lineHeight: 1.2,
                                 margin: 0,
-                                padding: '0.04em 0.08em',
+                                padding: '0.06em 0.12em',
                                 boxSizing: 'border-box',
                               }}
                             >
@@ -4855,9 +4896,9 @@ export default function LivePreviewEditor({
                             )}
                             style={{
                               fontSize: `min(${Math.max(10, activeCaptionPx)}px, calc(100cqh * 0.92 / ${Math.max(1, Math.ceil((timelineSeg.translation.trim().split(/\s+/).length) / 6))}), calc(100cqw * 0.2))`,
-                              lineHeight: 1.12,
+                              lineHeight: 1.2,
                               ...captionChromeStyle(settings),
-                              transform: 'translateY(-0.06em)',
+                              transform: 'none',
                               backgroundColor: (settings.captionBgStyle || 'none') === 'none'
                                 ? 'transparent'
                                 : undefined,
@@ -5627,23 +5668,37 @@ export default function LivePreviewEditor({
                               </p>
 
                               {selected && (
-                              <div className="border-t border-border pt-3 flex flex-col gap-3">
-                                <NumField
-                                  label="Bắt đầu (s)" value={selected.start} step={0.1} disabled={busy}
-                                  onCommit={(v) => editSegment({
-                                    ...selected,
-                                    start: Math.max(prevEnd, Math.min(selected.end - minDur, v)),
-                                  })}
-                                />
-                                <NumField
-                                  label="Kết thúc (s)" value={selected.end} step={0.1} disabled={busy}
-                                  onCommit={(v) => editSegment({
-                                    ...selected,
-                                    end: Math.min(nextStart, Math.max(selected.start + minDur, v)),
-                                  })}
-                                />
+                              <div className="border-t border-border pt-2 space-y-2">
+                                <div className="grid grid-cols-2 gap-2">
+                                  <NumField
+                                    label="Bắt đầu"
+                                    value={selected.start}
+                                    step={0.1}
+                                    disabled={busy}
+                                    formatDisplay={formatTimecode}
+                                    parseDisplay={parseTimecode}
+                                    onCommit={(v) => editSegment({
+                                      ...selected,
+                                      start: Math.max(prevEnd, Math.min(selected.end - minDur, v)),
+                                    })}
+                                  />
+                                  <NumField
+                                    label="Kết thúc"
+                                    value={selected.end}
+                                    step={0.1}
+                                    disabled={busy}
+                                    formatDisplay={formatTimecode}
+                                    parseDisplay={parseTimecode}
+                                    onCommit={(v) => editSegment({
+                                      ...selected,
+                                      end: Math.min(nextStart, Math.max(selected.start + minDur, v)),
+                                    })}
+                                  />
+                                </div>
                                 <PropLabel label="Thời lượng">
-                                  <span className="text-xs tabular-nums">{(selected.end - selected.start).toFixed(2)}s</span>
+                                  <span className="text-xs tabular-nums font-mono">
+                                    {formatTimecode(selected.end - selected.start)}
+                                  </span>
                                 </PropLabel>
                               </div>
                               )}
@@ -6047,6 +6102,7 @@ export default function LivePreviewEditor({
                             commitCoverBox={commitCoverBox}
                             stretchCoverFullWidth={stretchCoverFullWidth}
                             applyCoverMaskToAll={applyCoverMaskToAll}
+                            resetOcrRegion={resetOcrRegion}
                             applyAllLaneLabel={applyAllLaneLabel}
                             editSegment={editSegment}
                           />
@@ -6071,12 +6127,31 @@ export default function LivePreviewEditor({
                               <div className="grid grid-cols-2 gap-1">{(['fixed', 'random'] as const).map((motion) => <button key={motion} type="button" className={cn('rounded-md border p-1.5 text-xs transition-colors hover:bg-primary/10', logoDraft.motion === motion ? 'border-primary bg-primary/15 text-primary ring-1 ring-primary' : 'border-border')} onClick={() => setLogoDraft({ ...logoDraft, motion })}>{logoDraft.motion === motion ? '✓ ' : ''}{motion === 'fixed' ? 'Cố định' : 'Ngẫu nhiên'}</button>)}</div>
                               <div className="grid grid-cols-2 gap-1">{(['full', 'range'] as const).map((scope) => <button key={scope} type="button" className={cn('rounded-md border p-1.5 text-xs transition-colors hover:bg-primary/10', logoDraft.scope === scope ? 'border-primary bg-primary/15 text-primary ring-1 ring-primary' : 'border-border')} onClick={() => setLogoDraft({ ...logoDraft, scope, ...(scope === 'full' ? { start: 0, end: timelineDuration } : {}) })}>{logoDraft.scope === scope ? '✓ ' : ''}{scope === 'full' ? 'Toàn video' : 'Theo đoạn'}</button>)}</div>
                               <PropLabel label={`Độ mờ: ${logoDraft.opacity ?? 85}%`}><input type="range" min={5} max={100} value={logoDraft.opacity ?? 85} className="w-full accent-primary" onChange={(e) => setLogoDraft({ ...logoDraft, opacity: Number(e.target.value) })} /></PropLabel>
-                              {logoDraft.scope === 'range' && <div className="grid grid-cols-2 gap-2"><NumField label="Hiện từ (s)" value={logoDraft.start} step={.1} onCommit={(v) => setLogoDraft({ ...logoDraft, start: Math.max(0, Math.min(logoDraft.end - .1, v)) })} /><NumField label="Đến (s)" value={logoDraft.end} step={.1} onCommit={(v) => setLogoDraft({ ...logoDraft, end: Math.min(timelineDuration, Math.max(logoDraft.start + .1, v)) })} /></div>}
+                              {logoDraft.scope === 'range' && (
+                                <div className="grid grid-cols-2 gap-2">
+                                  <NumField
+                                    label="Hiện từ"
+                                    value={logoDraft.start}
+                                    step={0.1}
+                                    formatDisplay={formatTimecode}
+                                    parseDisplay={parseTimecode}
+                                    onCommit={(v) => setLogoDraft({ ...logoDraft, start: Math.max(0, Math.min(logoDraft.end - 0.1, v)) })}
+                                  />
+                                  <NumField
+                                    label="Đến"
+                                    value={logoDraft.end}
+                                    step={0.1}
+                                    formatDisplay={formatTimecode}
+                                    parseDisplay={parseTimecode}
+                                    onCommit={(v) => setLogoDraft({ ...logoDraft, end: Math.min(timelineDuration, Math.max(logoDraft.start + 0.1, v)) })}
+                                  />
+                                </div>
+                              )}
                               {logoDraft.motion === 'random' && <div className="grid grid-cols-[auto_1fr_2fr] items-end gap-2"><p className="pb-2 text-[10px] font-medium text-muted-foreground">Tốc độ</p><div className="grid grid-cols-3 gap-1">{[
                                 { label: 'Chậm', visibleSec: 6, hiddenSec: 3 },
                                 { label: 'Vừa', visibleSec: 4, hiddenSec: 2 },
                                 { label: 'Nhanh', visibleSec: 2.5, hiddenSec: 1 },
-                              ].map((preset) => { const active = logoDraft.visibleSec === preset.visibleSec && logoDraft.hiddenSec === preset.hiddenSec; return <button key={preset.label} type="button" className={cn('rounded-md border p-1.5 text-[10px] transition-colors hover:bg-primary/10', active ? 'border-primary bg-primary/15 text-primary ring-1 ring-primary' : 'border-border')} onClick={() => setLogoDraft({ ...logoDraft, visibleSec: preset.visibleSec, hiddenSec: preset.hiddenSec })}>{active ? '✓ ' : ''}{preset.label}</button> })}</div><div className="grid grid-cols-4 gap-1.5"><NumField label="Hiện (s)" value={logoDraft.visibleSec ?? 4} step={.1} onCommit={(v) => setLogoDraft({ ...logoDraft, visibleSec: Math.max(.5, v) })} /><NumField label="Ẩn (s)" value={logoDraft.hiddenSec ?? 2} step={.1} onCommit={(v) => setLogoDraft({ ...logoDraft, hiddenSec: Math.max(0, v) })} /><NumField label="Fade (s)" value={logoDraft.fadeSec ?? .5} step={.1} onCommit={(v) => setLogoDraft({ ...logoDraft, fadeSec: Math.max(0, v) })} /><NumField label="Lề (%)" value={logoDraft.safeMargin ?? 4} step={1} onCommit={(v) => setLogoDraft({ ...logoDraft, safeMargin: Math.max(0, Math.min(20, v)) })} /></div></div>}
+                              ].map((preset) => { const active = logoDraft.visibleSec === preset.visibleSec && logoDraft.hiddenSec === preset.hiddenSec; return <button key={preset.label} type="button" className={cn('rounded-md border p-1.5 text-[10px] transition-colors hover:bg-primary/10', active ? 'border-primary bg-primary/15 text-primary ring-1 ring-primary' : 'border-border')} onClick={() => setLogoDraft({ ...logoDraft, visibleSec: preset.visibleSec, hiddenSec: preset.hiddenSec })}>{active ? '✓ ' : ''}{preset.label}</button> })}</div><div className="grid grid-cols-4 gap-1.5"><NumField label="Hiện" value={logoDraft.visibleSec ?? 4} step={0.1} formatDisplay={formatTimecode} parseDisplay={parseTimecode} onCommit={(v) => setLogoDraft({ ...logoDraft, visibleSec: Math.max(0.5, v) })} /><NumField label="Ẩn" value={logoDraft.hiddenSec ?? 2} step={0.1} formatDisplay={formatTimecode} parseDisplay={parseTimecode} onCommit={(v) => setLogoDraft({ ...logoDraft, hiddenSec: Math.max(0, v) })} /><NumField label="Fade" value={logoDraft.fadeSec ?? 0.5} step={0.1} formatDisplay={formatTimecode} parseDisplay={parseTimecode} onCommit={(v) => setLogoDraft({ ...logoDraft, fadeSec: Math.max(0, v) })} /><NumField label="Lề (%)" value={logoDraft.safeMargin ?? 4} step={1} onCommit={(v) => setLogoDraft({ ...logoDraft, safeMargin: Math.max(0, Math.min(20, v)) })} /></div></div>}
                             </div>
                             {logoError && <p className="col-span-2 text-[10px] text-destructive">{logoError}</p>}
                             <button type="button" disabled={logoToggleDisabled} className={cn('col-span-2 w-full rounded-md px-3 py-2 text-xs font-medium transition-colors disabled:opacity-50', logoToggleRemoves ? 'border border-destructive/50 text-destructive hover:bg-destructive/10' : 'bg-primary text-primary-foreground hover:bg-primary/90')} onClick={() => logoToggleRemoves ? unapplyLogo() : void applyLogoDraft()}>{logoApplying ? 'Đang áp dụng…' : logoToggleRemoves ? 'Hủy áp dụng logo' : 'Áp dụng logo'}</button>
@@ -6099,10 +6174,22 @@ export default function LivePreviewEditor({
                             </PropLabel>
 
                             <div className="grid grid-cols-2 gap-2">
-                              <NumField label="Hiện từ (s)" value={selectedOverlay.start} step={0.1}
-                                onCommit={(v) => editOverlay({ ...selectedOverlay, start: Math.max(0, Math.min(selectedOverlay.end - 0.1, v)) })} />
-                              <NumField label="Đến (s)" value={selectedOverlay.end} step={0.1}
-                                onCommit={(v) => editOverlay({ ...selectedOverlay, end: Math.min(timelineDuration, Math.max(selectedOverlay.start + 0.1, v)) })} />
+                              <NumField
+                                label="Hiện từ"
+                                value={selectedOverlay.start}
+                                step={0.1}
+                                formatDisplay={formatTimecode}
+                                parseDisplay={parseTimecode}
+                                onCommit={(v) => editOverlay({ ...selectedOverlay, start: Math.max(0, Math.min(selectedOverlay.end - 0.1, v)) })}
+                              />
+                              <NumField
+                                label="Đến"
+                                value={selectedOverlay.end}
+                                step={0.1}
+                                formatDisplay={formatTimecode}
+                                parseDisplay={parseTimecode}
+                                onCommit={(v) => editOverlay({ ...selectedOverlay, end: Math.min(timelineDuration, Math.max(selectedOverlay.start + 0.1, v)) })}
+                              />
                               <NumField label="X" value={selectedOverlay.x}
                                 onCommit={(v) => editOverlay({ ...selectedOverlay, x: Math.round(Math.max(0, Math.min(sourceWidth - selectedOverlay.w, v))) })} />
                               <NumField label="Y" value={selectedOverlay.y}

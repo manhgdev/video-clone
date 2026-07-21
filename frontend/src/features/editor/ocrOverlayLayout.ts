@@ -62,13 +62,16 @@ function clampBox(box: OcrCoverBox, frameW: number, frameH: number): OcrCoverBox
 }
 
 function estimateLineW(text: string, fontPx: number): number {
+  // Khớp system-ui bold preview (~0.52em Latin, không 0.62 → wrap sớm CAP-MID)
   let w = 0
   for (const c of text) {
-    if (c >= '\u4e00' && c <= '\u9fff') w += fontPx
-    else if (c === ' ') w += fontPx * 0.33
-    else w += fontPx * 0.62
+    if (c >= '\u4e00' && c <= '\u9fff') w += fontPx * 1.0
+    else if (c === ' ') w += fontPx * 0.28
+    else if (/[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]/i.test(c))
+      w += fontPx * 0.52
+    else w += fontPx * 0.52
   }
-  return Math.max(1, Math.ceil(w * 1.04))
+  return Math.max(1, Math.ceil(w * 1.02))
 }
 
 /** Tách đơn vị xếp dọc: CJK = từng chữ; VI/Latin = từng từ (đứng, không xoay). */
@@ -279,8 +282,8 @@ export function layoutLabelOverlay(
 }
 
 /**
- * Mid = caption ngang trong bbox OCR (không nới 72% frame, không xếp dọc).
- * Cover giữ nguyên; thu font + wrap ≤3 dòng cho vừa.
+ * Mid = chữ + mask trong bbox OCR vàng.
+ * Font co đến khi text+pad ≤ seed; cover ôm chữ (≤ seed) — không tràn khung vàng.
  */
 export function layoutMidOverlay(
   coverIn: OcrCoverBox,
@@ -289,86 +292,106 @@ export function layoutMidOverlay(
   frameW: number,
   frameH: number,
 ): OcrOverlayLayout {
-  const cover = clampBox(coverIn, frameW, frameH)
+  const seed = clampBox(coverIn, frameW, frameH)
   const raw = text.trim() || ' '
-  const LINE = 1.1
-  const MAX_LINES = 3
-  const padX = Math.max(2, Math.round(cover.w * 0.03))
-  const padY = Math.max(2, Math.round(cover.h * 0.05))
-  const innerW = Math.max(10, cover.w - padX * 2)
-  const innerH = Math.max(10, cover.h - padY * 2)
-  const norm = (s: string) => s.replace(/\s+/g, ' ').trim()
-  const allWordsKept = (ls: string[]) => norm(ls.join(' ')) === norm(raw)
+  const LINE = 1.12
+  const MAX_LINES = 2
   const words = raw.split(/\s+/).filter(Boolean)
-  const compactLen = raw.replace(/\s+/g, '').length
 
-  const pack = (fs: number): string[] => {
-    if (estimateLineW(raw, fs) <= innerW) return [raw]
-    return wrapLines(raw, innerW, fs)
-  }
+  const pads = (fs: number) => ({
+    x: Math.max(4, Math.round(fs * 0.14)),
+    top: Math.max(3, Math.round(fs * 0.1)),
+    bot: Math.max(5, Math.round(fs * 0.2)),
+  })
 
-  const fits = (fs: number, lines: string[]) => {
-    if (!lines.length || !allWordsKept(lines)) return false
-    if (lines.length > MAX_LINES) return false
-    if (lines.some((ln) => estimateLineW(ln, fs) > innerW + 1)) return false
-    return lines.length * fs * LINE <= innerH + 0.5
-  }
-
-  let fontPx =
-    fontPxIn > 0
-      ? Math.max(8, Math.min(48, Math.round(fontPxIn)))
-      : Math.min(
-          40,
-          Math.max(8, Math.floor(innerW / Math.max(3, compactLen * 0.58))),
-          Math.floor(innerH / LINE),
-          Math.floor(innerH * 0.55),
-        )
-
-  let lines = pack(fontPx)
-  while (fontPx > 8 && !fits(fontPx, lines)) {
-    fontPx -= 1
-    lines = pack(fontPx)
-  }
-  // Ưu tiên 1–2 dòng ngang (không 1 từ/dòng)
-  if (words.length <= 8 && lines.length > 2) {
-    for (let fs = fontPx; fs >= 8; fs -= 1) {
-      const trial = pack(fs)
-      if (trial.length <= 2 && fits(fs, trial)) {
-        fontPx = fs
-        lines = trial
-        break
-      }
+  const blockSize = (fs: number, lines: string[]) => {
+    const p = pads(fs)
+    const textW = Math.max(...lines.map((ln) => estimateLineW(ln, fs)), 1)
+    const textH = Math.ceil(lines.length * fs * LINE)
+    return {
+      p,
+      needW: Math.ceil(textW + p.x * 2),
+      needH: Math.ceil(textH + p.top + p.bot),
     }
   }
-  if (lines.length > 1 && words.length <= 6) {
-    for (let fs = Math.min(fontPx, Math.floor(innerH / LINE)); fs >= 8; fs -= 1) {
-      if (estimateLineW(raw, fs) <= innerW && fs * LINE <= innerH) {
-        fontPx = fs
-        lines = [raw]
-        break
+
+  const fitsSeed = (fs: number, lines: string[]) => {
+    if (!lines.length || fs < 8) return false
+    const { needW, needH } = blockSize(fs, lines)
+    const maxLineW = seed.w - pads(fs).x * 2
+    return (
+      needW <= seed.w + 0.5
+      && needH <= seed.h + 0.5
+      && lines.every((ln) => estimateLineW(ln, fs) <= maxLineW + 1)
+    )
+  }
+
+  const pack2 = (f: number): string[] => {
+    const maxW = Math.max(8, seed.w - pads(f).x * 2)
+    if (estimateLineW(raw, f) <= maxW) return [raw]
+    if (words.length < 2) return [raw]
+    let best: string[] = wrapLines(raw, maxW, f).slice(0, MAX_LINES)
+    let bestScore = Infinity
+    for (let i = 1; i < words.length; i++) {
+      const a = words.slice(0, i).join(' ')
+      const b = words.slice(i).join(' ')
+      if (estimateLineW(a, f) > maxW + 1 || estimateLineW(b, f) > maxW + 1) continue
+      const score = Math.abs(estimateLineW(a, f) - estimateLineW(b, f))
+      if (score < bestScore) {
+        bestScore = score
+        best = [a, b]
       }
     }
-  }
-  while (fontPx > 8 && lines.some((ln) => estimateLineW(ln, fontPx) > innerW)) {
-    fontPx -= 1
-    lines = pack(fontPx)
-  }
-  while (fontPx > 8 && lines.length * fontPx * LINE > innerH) {
-    fontPx -= 1
-    lines = pack(fontPx)
+    return best
   }
 
-  // caption = inset trong cover — không phình ra ngoài bbox
-  const caption = {
-    x: cover.x + padX,
-    y: cover.y + padY,
-    w: Math.max(6, cover.w - padX * 2),
-    h: Math.max(6, cover.h - padY * 2),
+  const hCap = Math.max(10, Math.floor((seed.h / LINE) * 0.85))
+  let fontPx = Math.min(fontPxIn > 0 ? Math.round(fontPxIn) : hCap, hCap, 56)
+  let lines: string[] = [raw]
+
+  while (fontPx > 8 && !fitsSeed(fontPx, [raw])) fontPx -= 1
+  if (fitsSeed(fontPx, [raw])) {
+    lines = [raw]
+  } else {
+    fontPx = Math.min(fontPx, Math.floor((seed.h / (LINE * 2)) * 0.88), 44)
+    lines = pack2(fontPx)
+    while (fontPx > 8 && !fitsSeed(fontPx, lines)) {
+      fontPx -= 1
+      lines = pack2(fontPx)
+    }
   }
 
-  return { cover, caption, lines, mode: 'mid', fontPx }
+  // Co thêm nếu block vẫn > seed (an toàn)
+  while (fontPx > 8 && !fitsSeed(fontPx, lines)) {
+    fontPx -= 1
+    if (lines.length > 1) lines = pack2(fontPx)
+  }
+
+  // Cover = seed OCR vàng (không snug nhỏ hơn) — chữ co trong khung, không tràn dưới
+  const cover = seed
+  const p2 = pads(fontPx)
+  // Co font lần cuối nếu block > cover thật
+  while (
+    fontPx > 8
+    && (lines.length * fontPx * LINE + p2.top + p2.bot > cover.h + 0.5
+      || lines.some((ln) => estimateLineW(ln, fontPx) > cover.w - p2.x * 2 + 1))
+  ) {
+    fontPx -= 1
+  }
+  const p3 = pads(fontPx)
+  return {
+    cover,
+    caption: {
+      x: cover.x + p3.x,
+      y: cover.y + p3.top,
+      w: Math.max(6, cover.w - p3.x * 2),
+      h: Math.max(6, cover.h - p3.top - p3.bot),
+    },
+    lines,
+    mode: 'mid',
+    fontPx,
+  }
 }
-
 export function layoutOcrOverlay(
   layout: 'vertical' | 'label' | 'mid',
   cover: OcrCoverBox,
@@ -386,18 +409,19 @@ export function layoutOcrOverlay(
 export function __checkOcrOverlayLayout() {
   const midBox = { x: 200, y: 700, w: 240, h: 56 }
   const mid = layoutMidOverlay(midBox, 'Đào hoa quả', 0, 1080, 1920)
-  if (mid.cover.w !== midBox.w || mid.cover.h !== midBox.h) {
-    throw new Error('mid must keep OCR cover size')
+  // Snug: cover ≤ OCR seed (không phình)
+  if (mid.cover.w > midBox.w + 1 || mid.cover.h > midBox.h + 1) {
+    throw new Error('mid must not grow past OCR cover')
   }
-  if (mid.fontPx * 1.1 > mid.caption.h + 1) {
-    throw new Error('mid font must fit caption height, got ' + mid.fontPx)
+  // Font fit trong cover (caption inset có pad đáy)
+  if (mid.fontPx * 1.12 > mid.cover.h - 4) {
+    throw new Error('mid font must fit cover height, got ' + mid.fontPx)
   }
-  if (mid.lines.some((ln) => estimateLineW(ln, mid.fontPx) > mid.caption.w + 2)) {
-    throw new Error('mid line wider than caption')
+  if (mid.lines.some((ln) => estimateLineW(ln, mid.fontPx) > mid.cover.w - 4)) {
+    throw new Error('mid line wider than cover')
   }
-  // preferred to vẫn shrink
   const forced = layoutMidOverlay(midBox, 'Đào hoa quả', 64, 1080, 1920)
-  if (forced.fontPx > Math.floor(forced.caption.h / 1.05)) {
+  if (forced.fontPx > Math.floor(forced.cover.h / 1.12) + 4) {
     throw new Error('preferred mid must shrink into bbox')
   }
   const longMid = layoutMidOverlay(
@@ -407,11 +431,58 @@ export function __checkOcrOverlayLayout() {
     1080,
     1920,
   )
-  if (longMid.cover.w !== 420) throw new Error('long mid must not widen cover')
-  if (longMid.lines.length > 3) throw new Error('mid max 3 lines')
-  if (longMid.lines.length * longMid.fontPx * 1.1 > longMid.caption.h + 2) {
-    throw new Error('long mid block taller than caption')
+  if (longMid.cover.w > 420 + 1) throw new Error('long mid must not widen cover')
+  if (longMid.cover.h > 90 + 1) throw new Error('long mid must not grow past seed h')
+  if (longMid.lines.length > 2) throw new Error('mid max 2 lines')
+  if (longMid.lines.length * longMid.fontPx * 1.12 > longMid.cover.h - 2) {
+    throw new Error('long mid block taller than cover')
   }
+  // Câu dài 2 dòng trong box hẹp: font*lines*lh + pad ≤ cover ≤ seed
+  const overflowMid = layoutMidOverlay(
+    { x: 200, y: 1100, w: 380, h: 72 },
+    'Tôi đã hạ từ trên núi xuống',
+    0,
+    1080,
+    1920,
+  )
+  if (overflowMid.cover.w > 380 + 1 || overflowMid.cover.h > 72 + 1) {
+    throw new Error('overflow mid cover must stay ≤ seed')
+  }
+  if (overflowMid.lines.length * overflowMid.fontPx * 1.12 > overflowMid.cover.h + 1) {
+    throw new Error('overflow mid text taller than cover')
+  }
+  if (overflowMid.lines.some((ln) => estimateLineW(ln, overflowMid.fontPx) > overflowMid.cover.w - 4)) {
+    throw new Error('overflow mid line wider than cover')
+  }
+  // Câu ngắn CAP-MID: 1 dòng ngang (không xếp 2 dòng dọc)
+  const shortNice = layoutMidOverlay(
+    { x: 400, y: 500, w: 200, h: 120 },
+    'Ngoài ra còn có tre',
+    0,
+    1080,
+    1920,
+  )
+  if (shortNice.lines.length !== 1) {
+    throw new Error('short mid should prefer 1 line, got ' + shortNice.lines.join('|'))
+  }
+  // Bbox OCR cao/rộng: snug ôm chữ (cover nhỏ hơn seed)
+  const tall = layoutMidOverlay(
+    { x: 309, y: 1111, w: 463, h: 136 },
+    'Ngoài ra còn có tre',
+    0,
+    1080,
+    1920,
+  )
+  if (tall.lines.length !== 1) throw new Error('project mid must be 1 line')
+  if (tall.fontPx < 36) throw new Error('mid font too small: ' + tall.fontPx)
+  // Pad đáy đủ che stroke; không dải thừa lớn
+  if (tall.cover.h < tall.fontPx * 1.2) {
+    throw new Error('mid cover too short for glyph bottom: ' + tall.cover.h)
+  }
+  if (tall.cover.h > tall.fontPx * 1.75) {
+    throw new Error('mid excess height: h=' + tall.cover.h + ' fs=' + tall.fontPx)
+  }
+  if (tall.cover.w > 463 + 2) throw new Error('mid must not widen past OCR')
 
   const vBox = { x: 40, y: 120, w: 48, h: 220 }
   const v = layoutVerticalOverlay(vBox, 'Cây màu tím', 0, 1080, 1920)
@@ -432,7 +503,8 @@ export function __checkOcrOverlayLayout() {
   if (L.fontPx > 40) throw new Error('label font must fit height')
 
   const short = layoutMidOverlay({ x: 196, y: 912, w: 136, h: 72 }, 'Đào hoa quả', 0, 1080, 1920)
-  if (short.cover.w !== 136) throw new Error('short mid cover fixed')
+  if (short.cover.w > 136 + 1) throw new Error('short mid must not widen')
+  if (short.lines.length !== 1) throw new Error('short mid 1 line')
   // 1 từ Latin
   const name = layoutMidOverlay({ x: 400, y: 900, w: 88, h: 64 }, 'Shaqin', 0, 1080, 1920)
   if (name.lines[0] !== 'Shaqin') throw new Error('latin word intact')
