@@ -13,15 +13,17 @@ const PROVIDERS: CloudProviderId[] = [
   'grok',
 ]
 
-type InstallKind = 'ai_runtime' | 'ocr_cuda' | 'demucs_cuda'
+type InstallKind = 'ai_runtime' | 'ai_runtime_ocr' | 'ai_runtime_vieneu' | 'ocr_cuda' | 'demucs_cuda'
 
 const INSTALL_LABELS: Record<InstallKind, string> = {
-  ai_runtime: 'gói AI (Whisper · OCR · VieNeu)',
+  ai_runtime: 'gói AI',
+  ai_runtime_ocr: 'gói AI',
+  ai_runtime_vieneu: 'gói AI',
   ocr_cuda: 'OCR CUDA',
   demucs_cuda: 'Demucs',
 }
 
-const INSTALL_ORDER: InstallKind[] = ['ai_runtime', 'ocr_cuda', 'demucs_cuda']
+const INSTALL_ORDER: InstallKind[] = ['ai_runtime', 'ai_runtime_ocr', 'ai_runtime_vieneu', 'ocr_cuda', 'demucs_cuda']
 
 function installLabel(kind: string): string {
   return INSTALL_LABELS[kind as InstallKind] || kind
@@ -118,6 +120,7 @@ export default function ConfigModal({
   const [installing, setInstalling] = useState<string | null>(null)
   const [installProgressMinimized, setInstallProgressMinimized] = useState(false)
   const [installPopupError, setInstallPopupError] = useState('')
+  const [installLog, setInstallLog] = useState('')
   const [pendingRestart, setPendingRestart] = useState(false)
   const [restarting, setRestarting] = useState(false)
   const [logText, setLogText] = useState('')
@@ -202,23 +205,33 @@ export default function ConfigModal({
   useEffect(() => {
     if (!open || section !== 'setup') return
     let cancelled = false
+    let errCount = 0
+    let timerId: number
+
     const syncInstall = async () => {
       try {
         const st = await api.installStatus()
         if (cancelled) return
+        errCount = 0  // reset on success
         if (st.running && st.kind) {
           setInstalling(st.kind)
           setMsg(`Đang cài ${installLabel(st.kind)}…`)
         }
       } catch {
-        /* backend chưa sẵn sàng */
+        /* backend chưa sẵn sàng — backoff */
+        errCount++
       }
+      if (cancelled) return
+      // backoff: 2s → 4s → 8s → dừng sau 5 lỗi liên tiếp
+      if (errCount >= 5) return
+      const delay = errCount > 0 ? Math.min(2000 * Math.pow(2, errCount - 1), 16000) : 2000
+      timerId = window.setTimeout(() => void syncInstall(), delay)
     }
+
     void syncInstall()
-    const id = window.setInterval(() => void syncInstall(), 2000)
     return () => {
       cancelled = true
-      window.clearInterval(id)
+      window.clearTimeout(timerId)
     }
   }, [open, section])
 
@@ -229,16 +242,19 @@ export default function ConfigModal({
     setInstalling(kind)
     setInstallProgressMinimized(false)
     setInstallPopupError('')
+    setInstallLog('')
     setChecksErr('')
+    const onLog = (log: string) => setInstallLog(log)
     try {
       const result = kind === 'ai_runtime'
-        ? await api.installAiRuntime()
+        ? await api.installAiRuntime(onLog)
         : kind === 'ocr_cuda'
-          ? await api.installOcrCuda()
-          : await api.installDemucsCuda()
-      setMsg(result.message + (result.detail ? ` · ${result.detail}` : ''))
+          ? await api.installOcrCuda(onLog)
+          : await api.installDemucsCuda(onLog)
+      setMsg(result.detail || result.message)
       if (result.needsRestart) setPendingRestart(true)
       loadChecks(true, false)
+      autoSetupLock.current = false
     } catch (e) {
       const message = e instanceof Error
           ? e.message
@@ -249,9 +265,10 @@ export default function ConfigModal({
             : 'Cài Demucs thất bại'
       setChecksErr(message)
       setInstallPopupError(message)
+      // ponytail: giữ lock=true khi fail — tránh auto-retry vô tận.
+      // User phải bấm nút thủ công để thử lại.
     } finally {
       setInstalling(null)
-      autoSetupLock.current = false
     }
   }, [loadChecks])
 
@@ -280,7 +297,6 @@ export default function ConfigModal({
       if (next) {
         autoSetupLock.current = true
         await installAction(next)
-        autoSetupLock.current = false
         return
       }
     }
@@ -492,8 +508,8 @@ export default function ConfigModal({
                 ) : null}
               </div>
               <div className="cfg-setup-actions">
-                {(checks?.device?.install.actions?.length ?? 0) > 0
-                  ? checks?.device?.install.actions!.map((a) => {
+                {(checks?.device?.install?.actions?.length ?? 0) > 0
+                  ? checks?.device?.install?.actions!.map((a) => {
                       const done = (checks?.items || []).some(
                         (it) =>
                           it.ok &&
@@ -511,9 +527,10 @@ export default function ConfigModal({
                           type="button"
                           className="cfg-check-install cfg-check-install-sm"
                           disabled={!!installing}
-                          onClick={() =>
+                          onClick={() => {
+                            autoSetupLock.current = false
                             void installAction(a.id as 'ocr_cuda' | 'demucs_cuda')
-                          }
+                          }}
                         >
                           {installing === a.id ? '…' : a.label}
                         </button>
@@ -539,7 +556,7 @@ export default function ConfigModal({
             ) : null}
             {msg && section === 'setup' ? <p className="cfg-msg">{msg}</p> : null}
             <ul className="cfg-check-list">
-              {(checks?.items || []).filter((it) => it.id !== 'device').map((it) => (
+              {(checks?.items || []).filter((it) => it.id !== 'device' && it.id !== 'httpx').map((it) => (
                 <li
                   key={it.id}
                   className={`cfg-check-item ${it.ok ? 'ok' : it.required ? 'bad' : 'warn'}`}
@@ -561,26 +578,31 @@ export default function ConfigModal({
                       {!it.ok ? <div className="cfg-check-hint">{it.hint}</div> : null}
                     </div>
                     {it.ok ? (
-                      ['ai_runtime', 'ocr_cuda', 'demucs_cuda'].includes(it.install) ? (
+                      ['ai_runtime', 'ai_runtime_ocr', 'ai_runtime_vieneu', 'ocr_cuda', 'demucs_cuda'].includes(it.install) ? (
                         <span className="cfg-check-installed">Đã cài</span>
                       ) : null
-                    ) : ['ai_runtime', 'ocr_cuda', 'demucs_cuda'].includes(it.install) ? (
+                    ) : ['ai_runtime', 'ai_runtime_ocr', 'ai_runtime_vieneu', 'ocr_cuda', 'demucs_cuda'].includes(it.install) ? (
                       <button
                         type="button"
                         className="cfg-check-install"
                         disabled={!!installing}
-                        onClick={() =>
-                          void installAction(it.install as 'ai_runtime' | 'ocr_cuda' | 'demucs_cuda')
-                        }
+                        onClick={() => {
+                          autoSetupLock.current = false
+                          // ai_runtime_ocr / ai_runtime_vieneu → cùng endpoint ai_runtime
+                          const kind = it.install.startsWith('ai_runtime')
+                            ? 'ai_runtime'
+                            : it.install as 'ocr_cuda' | 'demucs_cuda'
+                          void installAction(kind)
+                        }}
                       >
-                        {installing === it.install
+                        {installing === it.install || (it.install.startsWith('ai_runtime') && installing === 'ai_runtime')
                           ? 'Đang cài…'
                           : it.installLabel ||
-                            (it.install === 'ai_runtime'
+                            (it.install.startsWith('ai_runtime')
                               ? 'Cài gói AI'
                               : it.install === 'demucs_cuda'
-                              ? checks?.device?.install.demucsLabel || 'Cài Demucs GPU'
-                              : checks?.device?.install.ocrLabel || 'Cài OCR CUDA')}
+                              ? checks?.device?.install?.demucsLabel || 'Cài Demucs GPU'
+                              : checks?.device?.install?.ocrLabel || 'Cài OCR CUDA')}
                       </button>
                     ) : it.install ? (
                       it.install.startsWith('http') ? (
@@ -817,14 +839,13 @@ export default function ConfigModal({
                   : 'Đang cài Demucs'
           }
           message={
-            installing === 'ai_runtime'
-              ? 'Đang tải Whisper, OCR, zmAI và VieNeu Local. Vui lòng không tắt ứng dụng.'
-              : installing
-                ? 'Đang tải và cài các thành phần cần thiết. Vui lòng chờ.'
-                : installPopupError
+            installing
+              ? `Đang cài ${installLabel(installing)}. Vui lòng không tắt ứng dụng.`
+              : installPopupError || undefined
           }
           progress={installing ? 35 : 0}
           error={installPopupError || null}
+          log={installLog || undefined}
           onMinimize={() => {
             if (installing) setInstallProgressMinimized(true)
             else setInstallPopupError('')

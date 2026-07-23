@@ -23,10 +23,17 @@ _cache: dict[str, object] = {}
 
 def _nvidia_smi() -> bool:
     try:
-        if not shutil.which("nvidia-smi"):
-            return False
+        cmd = "nvidia-smi"
+        if not shutil.which("nvidia-smi") and sys.platform == "win32":
+            for cand in (
+                r"C:\Windows\System32\nvidia-smi.exe",
+                r"C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe",
+            ):
+                if os.path.isfile(cand):
+                    cmd = cand
+                    break
         r = subprocess.run(
-            ["nvidia-smi", "-L"],
+            [cmd, "-L"],
             capture_output=True,
             text=True,
             timeout=8,
@@ -84,9 +91,9 @@ def _probe_torch_device_in(python: str) -> TorchDevice:
 
 
 def preferred_torch_device(*, refresh: bool = False) -> TorchDevice:
-    """Best torch device for this machine right now."""
+    """Best torch device for this machine right now — LUÔN dùng CUDA nếu máy có GPU NVIDIA."""
     with _lock:
-        if not refresh and "torch_device" in _cache:
+        if not refresh and "torch_device" in _cache and _cache["torch_device"] in ("cuda", "mps"):
             return _cache["torch_device"]  # type: ignore[return-value]
 
     # Env override (debug / force)
@@ -101,18 +108,28 @@ def preferred_torch_device(*, refresh: bool = False) -> TorchDevice:
         py = _runtime_python()
         if py:
             device = _probe_torch_device_in(py)
+            if device == "cpu" and _nvidia_smi():
+                device = "cuda"
         elif _nvidia_smi():
-            device = "cuda"  # expect install path to fix torch
+            device = "cuda"
         elif _apple_silicon():
             device = "mps"
     else:
         try:
+            try:
+                from pipeline.ocr.extract_parts.runtime import prepare_cuda_dlls
+                prepare_cuda_dlls()
+            except Exception:
+                pass
+
             import torch
 
             if torch.cuda.is_available():
                 device = "cuda"
             elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
                 device = "mps"
+            elif _nvidia_smi():
+                device = "cuda"
             else:
                 device = "cpu"
         except Exception:

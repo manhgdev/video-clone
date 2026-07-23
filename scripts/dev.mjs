@@ -179,7 +179,14 @@ if (!py) {
     const opts = {
       cwd,
       stdio: 'inherit',
-      env: label === 'api' ? { ...process.env, VIDEO_CLONE_SUPERVISED: '1' } : process.env,
+      env: label === 'api'
+        ? {
+            ...process.env,
+            VIDEO_CLONE_SUPERVISED: '1',
+            PYTHONOPTIMIZE: '1',      // bỏ docstring/assert bytecode → startup ~10% nhanh hơn
+            PYTHONUNBUFFERED: '1',    // log realtime
+          }
+        : process.env,
       // Windows: tách khỏi job object của terminal khi có thể
       detached: false,
     }
@@ -259,14 +266,8 @@ if (!py) {
         'uvicorn',
         'main:app',
         '--reload',
-        '--reload-dir',
-        backendDir,
-        '--reload-exclude',
-        '.venv/*',
-        '--reload-exclude',
-        'data/*',
-        '--reload-exclude',
-        'public/*',
+        '--reload-dir', path.join(backendDir, 'api'),
+        '--reload-dir', path.join(backendDir, 'pipeline'),
         '--host',
         '127.0.0.1',
         '--port',

@@ -7,10 +7,11 @@ import {
   IconLogo,
   IconMic,
   IconVideo,
+  IconWand,
 } from '@/shared/components/Icons'
 import './Header.css'
 
-export type AppMode = 'clone' | 'tts' | 'download' | 'film' | 'batch' | 'renders'
+export type AppMode = 'clone' | 'tts' | 'download' | 'film' | 'batch' | 'renders' | 'cleaner'
 
 function IconSun({ size = 16 }: { size?: number }) {
   return (
@@ -37,6 +38,7 @@ const NAV: {
 }[] = [
   { id: 'clone', label: 'Clone Video', Icon: IconCam, mode: 'clone' },
   { id: 'renders', label: 'Đã render', Icon: IconVideo, mode: 'renders' },
+  { id: 'cleaner', label: 'Làm sạch video', Icon: IconWand, mode: 'cleaner' },
   // ponytail: Film/Batch chỉ ẩn khỏi nav; giữ page để bật lại khi hai luồng hoàn thiện.
   // { id: 'film', label: 'Clone Phim', Icon: IconFilm, mode: 'film' },
   // { id: 'batch', label: 'Clone Hàng loạt', Icon: IconBatch, mode: 'batch' },

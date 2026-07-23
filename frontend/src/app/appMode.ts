@@ -2,7 +2,7 @@ import type { AppMode } from '@/shared/components/Header'
 
 export const APP_MODE_LS = 'videoclone.appMode'
 
-export const APP_MODES = ['clone', 'renders', 'download', 'tts'] as const satisfies readonly AppMode[]
+export const APP_MODES = ['clone', 'renders', 'cleaner', 'download', 'tts'] as const satisfies readonly AppMode[]
 
 /** Validate raw storage — invalid/corrupt/missing → Clone Video. */
 export function parseAppMode(raw: string | null | undefined): AppMode {

@@ -15,9 +15,78 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
+# Callback do routes/system.py gán khi start install job — nhận 1 dòng log pip.
+# ponytail: Callable thay vì import tránh circular dep.
+_install_log_fn: Any = None  # Callable[[str], None] | None
+
+
 
 def _which(name: str) -> str | None:
     return shutil.which(name)
+
+
+def _clean_corrupted_dists(site: Path | None = None) -> None:
+    """Xóa các thư mục ~* do pip để lại khi uninstall bị ngắt giữa chừng (WinError 32).
+    Ví dụ: ~orch (từ torch), ~okenizers (từ tokenizers).
+    """
+    if site is None:
+        try:
+            import site as _site
+            dirs = _site.getsitepackages() or []
+            site = Path(dirs[-1]) if dirs else None
+        except Exception:
+            return
+    if not site or not site.is_dir():
+        return
+    for p in site.iterdir():
+        if p.name.startswith("~") and (p.is_dir() or p.suffix in (".dist-info", ".data")):
+            try:
+                shutil.rmtree(p, ignore_errors=True)
+            except Exception:
+                pass
+
+
+def _pip_stream(cmd: list[str], *, timeout: float = 1800) -> subprocess.CompletedProcess:
+    """Chạy pip, stream stdout+stderr. Reader thread riêng đọc stdout → không block
+    GIL của thread install → uvicorn event loop vẫn xử lý request bình thường.
+    """
+    import queue as _queue
+    buf: list[str] = []
+    q: _queue.Queue[str | None] = _queue.Queue()
+    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+
+    def _reader(stdout) -> None:  # chạy trong thread riêng
+        try:
+            for line in stdout:
+                q.put(line)
+        finally:
+            q.put(None)  # sentinel
+
+    with subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+    ) as proc:
+        assert proc.stdout
+        t = threading.Thread(target=_reader, args=(proc.stdout,), daemon=True)
+        t.start()
+        while True:
+            line = q.get()
+            if line is None:
+                break
+            buf.append(line)
+            if _install_log_fn is not None:
+                try:
+                    _install_log_fn(line)
+                except Exception:
+                    pass
+        t.join(timeout=5)
+        proc.wait(timeout=timeout)
+    return subprocess.CompletedProcess(cmd, proc.returncode, "".join(buf), "")
 
 
 def _run_ver(cmd: list[str], *, timeout: float = 4.0) -> str:
@@ -113,7 +182,8 @@ def _pkg_distributions() -> dict[str, list[str]]:
 
 
 _CHECKS_CACHE: tuple[float, bool, dict[str, Any]] | None = None
-_CHECKS_TTL = 45.0
+_CHECKS_TTL = 90.0  # 90s — checks không đổi thường xuyên
+_checks_lock = threading.Lock()  # tránh thundering herd khi cache miss đồng thời
 _RUNTIME_FAST_DIST = (
     "faster-whisper",
     "rapidocr-onnxruntime",
@@ -163,18 +233,31 @@ _AI_RUNTIME_PACKAGES = (
     "rapidocr-onnxruntime>=1.2.0",
     "pillow",
     "opencv-python-headless",
-    "huggingface-hub>=0.34,<1.0",
+    "huggingface-hub>=0.34",   # bỏ <1.0 — hub 1.x đang có, không cần downgrade
     "perth",
     "pyyaml",
     "sea-g2p",
     "soundfile",
     "soxr",
+    "httpx",
     "tokenizers",
-    "transformers==4.57.6",
+    "transformers>=4.46.0",
+)
+
+# 3 nhóm riêng — mỗi nhóm cài 1 pip call với --no-deps, có header log riêng.
+_PKG_WHISPER = ("faster-whisper>=1.1.0", "soundfile", "soxr", "tokenizers")
+_PKG_OCR     = ("rapidocr-onnxruntime>=1.2.0", "pillow", "opencv-python-headless<5.0")
+_PKG_VIENEU  = (
+    "huggingface-hub>=0.34", "httpx", "pyyaml",
+    "perth", "sea-g2p",
+    # transformers cài riêng --no-deps (conflict tokenizers)
 )
 _VIENEU_PACKAGE = "vieneu>=3.2.0"
 _TORCH_CUDA_INDEX = "https://download.pytorch.org/whl/cu124"
 _TORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
+# onnxruntime-gpu cho CUDA 12.x (torch cu124) — bản 1.27+ yêu cầu CUDA 13
+_ORT_GPU_CUDA12_INDEX = "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/"
+_ORT_GPU_PKG = "onnxruntime-gpu==1.19.2"
 _AI_RUNTIME_MODULES = (
     "faster_whisper",
     "rapidocr_onnxruntime",
@@ -185,6 +268,18 @@ _AI_RUNTIME_MODULES = (
     "transformers",
     "vieneu",
 )
+# ponytail: chỉ dùng trong dev mode — map module → package spec để chỉ
+# cài đúng gói thiếu (không --upgrade cả lô). Frozen dùng base_cmd đủ bộ.
+_MODULE_TO_PACKAGE: dict[str, str] = {
+    "faster_whisper": "faster-whisper>=1.1.0",
+    "rapidocr_onnxruntime": "rapidocr-onnxruntime>=1.2.0",
+    "PIL": "pillow",
+    "cv2": "opencv-python-headless",
+    "torch": "torch",
+    "torchaudio": "torchaudio",
+    "transformers": "transformers>=4.46.0",
+    "vieneu": "vieneu>=3.2.0",
+}
 
 
 def _nvidia_present() -> bool:
@@ -221,7 +316,7 @@ def _torch_cuda_ready() -> bool:
 
 def _runtime_python() -> Path:
     if getattr(sys, "frozen", False):
-        home = Path(os.environ["VIDEO_CLONE_HOME"])
+        home = _video_clone_home()
         venv = home / ".venv-runtime"
         return venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
     return Path(sys.executable)
@@ -229,9 +324,13 @@ def _runtime_python() -> Path:
 
 def _ocr_python() -> Path:
     if getattr(sys, "frozen", False):
-        home = Path(os.environ["VIDEO_CLONE_HOME"])
-        venv = home / ".venv-ocr"
-        return venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+        home = Path(os.environ.get("VIDEO_CLONE_HOME") or "")
+        for venv_name in (".venv-runtime", ".venv-ocr"):
+            venv = home / venv_name
+            py = venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+            if py.is_file():
+                return py
+        return home / ".venv-runtime" / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
     return Path(sys.executable)
 
 
@@ -239,10 +338,8 @@ def _video_clone_home() -> Path:
     home = os.environ.get("VIDEO_CLONE_HOME", "").strip()
     if home:
         return Path(home)
-    if getattr(sys, "frozen", False):
-        raise RuntimeError("VIDEO_CLONE_HOME missing")
     if sys.platform == "win32":
-        return Path(os.environ.get("LOCALAPPDATA", "")) / "VideoClone"
+        return Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "VideoClone"
     if sys.platform == "darwin":
         return Path.home() / "Library" / "Application Support" / "VideoClone"
     return Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "VideoClone"
@@ -290,18 +387,21 @@ def _ocr_venv_fast() -> tuple[bool, str]:
 
 
 def _demucs_venv_fast() -> tuple[bool, str]:
-    from pipeline.export.stem import _demucs_install_root, _demucs_py_in
+    from pipeline.export.stem import _demucs_py_in, _demucs_root_candidates
 
-    py = _demucs_py_in(_demucs_install_root())
-    if not py.is_file():
-        return False, "chưa cài"
-    sp = _venv_site_packages(py.parent.parent)
-    if _apple_silicon():
-        if _site_has_dist(sp, "demucs-mlx") or _site_has_dist(sp, "demucs_mlx"):
-            return True, "đã cài · Apple Metal"
+    apple = _apple_silicon()
+    for root in _demucs_root_candidates():
+        py = _demucs_py_in(root)
+        if not py.is_file():
+            continue
+        sp = _venv_site_packages(py.parent.parent)
+        if apple:
+            if _site_has_dist(sp, "demucs-mlx") or _site_has_dist(sp, "demucs_mlx"):
+                return True, "đã cài · Apple Metal"
+        elif _site_has_dist(sp, "demucs"):
+            return True, "đã cài"
+    if apple:
         return False, "thiếu demucs-mlx"
-    if _site_has_dist(sp, "demucs"):
-        return True, "đã cài"
     return False, "thiếu demucs"
 
 
@@ -319,7 +419,7 @@ def _clear_torch_modules() -> None:
 
 def _runtime_pip_cmd(*extra: str) -> list[str]:
     if getattr(sys, "frozen", False):
-        home = Path(os.environ["VIDEO_CLONE_HOME"])
+        home = _video_clone_home()
         venv = home / ".venv-runtime"
         py = venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
         uv = shutil.which("uv")
@@ -331,7 +431,7 @@ def _runtime_pip_cmd(*extra: str) -> list[str]:
 
 def _runtime_pip_uninstall_cmd(*packages: str) -> list[str]:
     if getattr(sys, "frozen", False):
-        home = Path(os.environ["VIDEO_CLONE_HOME"])
+        home = _video_clone_home()
         venv = home / ".venv-runtime"
         py = venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
         uv = shutil.which("uv")
@@ -395,6 +495,17 @@ def _runtime_torch_needs_install() -> bool:
 def _torch_dll_locked() -> bool:
     """True nếu torch đã load trong process này — pip đụng _C.pyd → WinError 5."""
     return "torch" in sys.modules or any(k.startswith("torch.") for k in sys.modules)
+
+
+def _torch_broken() -> bool:
+    """True nếu torch cài xong nhưng import bị lỗi — dấu hiệu file bị mix version."""
+    if not importlib.util.find_spec("torch"):
+        return False  # chưa cài, không phải broken
+    try:
+        import torch  # noqa: F401  # pylint: disable=import-outside-toplevel
+        return False
+    except (AttributeError, ImportError):
+        return True
 
 
 def ensure_runtime_torch() -> None:
@@ -463,8 +574,8 @@ def ensure_runtime_transformers() -> None:
     if ok:
         return
     _runtime_pip_install(
-        "transformers==4.57.6",
-        "huggingface-hub>=0.34,<1.0",
+        "transformers>=4.46.0",
+        "huggingface-hub>=0.34",  # bỏ <1.0 — không downgrade hf-hub 1.x đang có
         "safetensors",
         timeout=1200,
     )
@@ -513,6 +624,15 @@ def install_ai_runtime() -> dict[str, Any]:
         missing = list(_AI_RUNTIME_MODULES)
         needs_torch = _nvidia_present()
     else:
+        # Phát hiện torch bị corrupt (file mix version) — phải reinstall khi dừng backend.
+        if _torch_broken():
+            idx = _TORCH_CUDA_INDEX if _nvidia_present() else _TORCH_CPU_INDEX
+            raise RuntimeError(
+                "torch bị hỏng (AttributeError khi import). "
+                "Dừng backend rồi chạy:\n"
+                f"pip install --force-reinstall --no-deps torch torchaudio "
+                f"--index-url {idx}"
+            )
         missing = [name for name in _AI_RUNTIME_MODULES if not _mod_ok(name)[0]]
         needs_torch = _runtime_torch_needs_install()
     if not missing and not needs_torch:
@@ -523,7 +643,7 @@ def install_ai_runtime() -> dict[str, Any]:
         }
 
     if getattr(sys, "frozen", False):
-        home = Path(os.environ["VIDEO_CLONE_HOME"])
+        home = _video_clone_home()
         venv = home / ".venv-runtime"
         py = venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
         uv = shutil.which("uv")
@@ -545,26 +665,145 @@ def install_ai_runtime() -> dict[str, Any]:
             timeout=120,
         )
         base_cmd = [uv, "pip", "install", "--python", str(py), "--upgrade", *_AI_RUNTIME_PACKAGES]
+        if _nvidia_present():
+            base_cmd.append(_ORT_GPU_PKG)
+            base_cmd += ["--extra-index-url", _ORT_GPU_CUDA12_INDEX]
         vieneu_cmd = [
             uv, "pip", "install", "--python", str(py), "--upgrade", "--no-deps", _VIENEU_PACKAGE
         ]
     else:
-        base_cmd = [sys.executable, "-m", "pip", "install", "--upgrade", *_AI_RUNTIME_PACKAGES]
-        vieneu_cmd = [
-            sys.executable, "-m", "pip", "install", "--upgrade", "--no-deps", _VIENEU_PACKAGE
-        ]
+        # ponytail: LUÔN --no-deps — pip scan dist-info khi resolve thấy ~orch corrupt
+        # → reinstall torch → WinError 32. --no-deps bỏ qua resolve hoàn toàn.
+        _clean_corrupted_dists()
+
+        # pkg spec → module name để kiểm tra trước khi pip (tránh lock .pyd đang dùng)
+        _PKG_MOD: dict[str, str] = {
+            "faster-whisper": "faster_whisper",
+            "soundfile": "soundfile",
+            "soxr": "soxr",
+            "tokenizers": "tokenizers",
+            "rapidocr-onnxruntime": "rapidocr_onnxruntime",
+            "pillow": "PIL",
+            "opencv-python-headless": "cv2",
+            "huggingface-hub": "huggingface_hub",
+            "httpx": "httpx",
+            "pyyaml": "yaml",
+            "perth": "perth",
+            "sea-g2p": "sea_g2p",
+            "transformers": "transformers",
+            "vieneu": "vieneu",
+        }
+
+        def _pkg_base(spec: str) -> str:
+            """'faster-whisper>=1.1.0' → 'faster-whisper'"""
+            return spec.split(">=")[0].split("==")[0].split("<")[0].strip()
+
+        def _need_install(spec: str) -> bool:
+            mod = _PKG_MOD.get(_pkg_base(spec))
+            if mod is None:
+                return True  # không biết → cài cho chắc
+            return not _mod_ok(mod)[0]
+
+        def _pip_group(label: str, *pkgs: str) -> None:
+            """Cài các pkg chưa import được, --no-deps, in header vào log."""
+            needed = [p for p in pkgs if _need_install(p)]
+            if not needed:
+                if _install_log_fn:
+                    _install_log_fn(f"\n=== {label} — đã có, bỏ qua ===\n")
+                return
+            if _install_log_fn:
+                _install_log_fn(f"\n=== {label} ===\n")
+            proc = _pip_stream([sys.executable, "-m", "pip", "install", "--no-deps", *needed])
+            if proc.returncode:
+                raise RuntimeError(f"[{label}] " + (proc.stderr or proc.stdout)[-2000:])
+
+        # Nhóm 1 — Whisper
+        _pip_group("Whisper (ASR)", *_PKG_WHISPER)
+
+        # Nhóm 2 — OCR
+        _pip_group("OCR", *_PKG_OCR)
+        if _nvidia_present():
+            if _install_log_fn:
+                _install_log_fn("\n=== OCR GPU (onnxruntime-gpu) ===\n")
+            _pip_stream([sys.executable, "-m", "pip", "uninstall", "-y", "onnxruntime"])
+            proc_gpu = _pip_stream([sys.executable, "-m", "pip", "install", _ORT_GPU_PKG, "--index-url", _ORT_GPU_CUDA12_INDEX])
+            if proc_gpu.returncode:
+                raise RuntimeError("[OCR GPU] " + (proc_gpu.stderr or proc_gpu.stdout)[-2000:])
+
+        # Nhóm 3 — zmAI + VieNeu
+        _pip_group("zmAI + VieNeu", *_PKG_VIENEU)
+
+        # transformers riêng --no-deps (conflict tokenizers với mọi version)
+        if _need_install("transformers"):
+            if _install_log_fn:
+                _install_log_fn("\n=== Transformers ===\n")
+            proc_t = _pip_stream([
+                sys.executable, "-m", "pip", "install", "--no-deps", "transformers>=4.46.0"
+            ])
+            if proc_t.returncode:
+                raise RuntimeError("[Transformers] " + (proc_t.stderr or proc_t.stdout)[-2000:])
+
+        # VieNeu package
+        if _need_install("vieneu"):
+            if _install_log_fn:
+                _install_log_fn("\n=== VieNeu Local ===\n")
+            proc_v = _pip_stream([sys.executable, "-m", "pip", "install", "--no-deps", _VIENEU_PACKAGE])
+            if proc_v.returncode:
+                raise RuntimeError("[VieNeu] " + (proc_v.stderr or proc_v.stdout)[-2000:])
+
+        return {
+            "ok": True,
+            "message": "Đã cài thành công",
+            "detail": _ai_runtime_detail(),
+        }
 
     if missing:
-        proc = subprocess.run(base_cmd, capture_output=True, text=True, timeout=1800)
-        if proc.returncode:
-            raise RuntimeError((proc.stderr or proc.stdout)[-3000:])
+        if not base_cmd:
+            pass  # tất cả gói cần thiết đều đã có, bỏ qua
+        else:
+            _clean_corrupted_dists()  # dọn ~orch / ~okenizers trước pip
+            proc = _pip_stream(base_cmd)
+            if proc.returncode:
+                raise RuntimeError((proc.stderr or proc.stdout)[-3000:])
+            if getattr(sys, "frozen", False) and _nvidia_present():
+                _pip_stream([uv, "pip", "uninstall", "--python", str(py), "-y", "onnxruntime"])
+            # transformers cài riêng --no-deps — tránh conflict tokenizers (không có version nào
+            # hỗ trợ tokenizers>=0.23.1; --no-deps bỏ qua dep resolution hoàn toàn).
+            if "transformers" in missing:
+                proc2 = _pip_stream([
+                    sys.executable, "-m", "pip", "install", "--no-deps", "transformers>=4.46.0"
+                ])
+                if proc2.returncode:
+                    raise RuntimeError((proc2.stderr or proc2.stdout)[-3000:])
     if "vieneu" in missing or not _mod_ok("vieneu")[0]:
-        proc = subprocess.run(vieneu_cmd, capture_output=True, text=True, timeout=1800)
+        proc = _pip_stream(vieneu_cmd)
         if proc.returncode:
             raise RuntimeError((proc.stderr or proc.stdout)[-3000:])
     if needs_torch:
-        _install_runtime_torch()
-        _clear_torch_modules()
+        if not getattr(sys, "frozen", False) and _torch_dll_locked():
+            # torch đã load → chỉ có thể cài torchaudio nếu đó là thứ duy nhất thiếu
+            torch_ok = _mod_ok("torch")[0]
+            torchaudio_missing = not _mod_ok("torchaudio")[0]
+            need_cuda_swap = _nvidia_present() and torch_ok and not _torch_cuda_ready_cached()
+            if torchaudio_missing and torch_ok and not need_cuda_swap:
+                # ponytail: torchaudio chưa load → .pyd không bị lock → cài an toàn.
+                # --no-deps: tránh pip kéo torch theo → đụng torch._C.pyd đang locked.
+                idx = _TORCH_CUDA_INDEX if _nvidia_present() else _TORCH_CPU_INDEX
+                proc = _pip_stream(
+                    [sys.executable, "-m", "pip", "install", "--no-deps", "torchaudio", "--index-url", idx],
+                )
+                if proc.returncode:
+                    raise RuntimeError((proc.stderr or proc.stdout)[-2000:])
+            else:
+                raise RuntimeError(
+                    "torch đang được load bởi backend đang chạy — không thể cài/nâng cấp.\n"
+                    "Dừng backend, rồi chạy tay:\n"
+                    f"  pip install torch torchaudio --index-url "
+                    f"{_TORCH_CUDA_INDEX if _nvidia_present() else _TORCH_CPU_INDEX}"
+                )
+        else:
+            _install_runtime_torch()
+            _clear_torch_modules()
     _invalidate_checks_cache()
     return {
         "ok": True,
@@ -623,8 +862,8 @@ def install_ocr_cuda() -> dict[str, Any]:
     if ok:
         return {"ok": True, "message": "GPU tăng tốc đã được cài", "detail": detail}
     if getattr(sys, "frozen", False):
-        home = Path(os.environ["VIDEO_CLONE_HOME"])
-        venv = home / ".venv-ocr"
+        home = Path(os.environ.get("VIDEO_CLONE_HOME") or "")
+        venv = home / ".venv-runtime"
         py = venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
         uv = shutil.which("uv")
         if not uv:
@@ -644,8 +883,9 @@ def install_ocr_cuda() -> dict[str, Any]:
                 "install",
                 "--python",
                 str(py),
-                "--upgrade",
-                "onnxruntime-gpu[cuda,cudnn]>=1.23,<1.24",
+                _ORT_GPU_PKG,
+                "--index-url",
+                _ORT_GPU_CUDA12_INDEX,
             ],
             capture_output=True,
             text=True,
@@ -676,27 +916,13 @@ def install_ocr_cuda() -> dict[str, Any]:
                 "install",
                 "--progress-bar",
                 "off",
-                "onnxruntime-gpu[cuda,cudnn]>=1.23,<1.24",
+                _ORT_GPU_PKG,
+                "--index-url",
+                _ORT_GPU_CUDA12_INDEX,
             ],
             capture_output=True,
             text=True,
             timeout=900,
-        )
-        if proc.returncode:
-            raise RuntimeError((proc.stderr or proc.stdout)[-2000:])
-        proc = subprocess.run(
-            pip
-            + [
-                "install",
-                "--force-reinstall",
-                "--no-deps",
-                "--progress-bar",
-                "off",
-                "onnxruntime-gpu>=1.23,<1.24",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=300,
         )
         if proc.returncode:
             raise RuntimeError((proc.stderr or proc.stdout)[-2000:])
@@ -919,14 +1145,19 @@ def system_checks(*, refresh: bool = False, fast: bool = True) -> dict[str, Any]
     global _CHECKS_CACHE
     if refresh:
         _invalidate_checks_cache()
-    elif (
-        _CHECKS_CACHE
-        and _CHECKS_CACHE[1] == fast
-        and time.monotonic() - _CHECKS_CACHE[0] < _CHECKS_TTL
-    ):
-        return _CHECKS_CACHE[2]
+    else:
+        with _checks_lock:
+            if (
+                _CHECKS_CACHE
+                and _CHECKS_CACHE[1] == fast
+                and time.monotonic() - _CHECKS_CACHE[0] < _CHECKS_TTL
+            ):
+                return _CHECKS_CACHE[2]
+    # ponytail: _checks_lock giữ trong uncached gây serialize requests → chỉ guard write.
+    # Thundering herd tệ nhất = N requests chạy uncached cùng lúc, đều write cache→ok.
     result = _system_checks_uncached(fast=fast)
-    _CHECKS_CACHE = (time.monotonic(), fast, result)
+    with _checks_lock:
+        _CHECKS_CACHE = (time.monotonic(), fast, result)
     return result
 
 
@@ -937,7 +1168,26 @@ def _system_checks_uncached(*, fast: bool = True) -> dict[str, Any]:
     items: list[dict[str, Any]] = []
     system = platform.system()
     machine = platform.machine()
-    device = detect_device()
+
+    # ponytail: detect_device (nvidia-smi) + _run_ver subprocesses chạy song song để tránh
+    # tổng ~15-20s tuần tự → timeout 15s của frontend. detect_device đã @lru_cache nên
+    # submit thừa cũng nhanh từ lần 2 trở đi.
+    ff = _which("ffmpeg")
+    fp = _which("ffprobe")
+    ol = _which("ollama")
+    node = _which("node")
+    with ThreadPoolExecutor(max_workers=6) as _pool:
+        _fut_device = _pool.submit(detect_device)
+        _fut_ff = _pool.submit(_run_ver, ["ffmpeg", "-version"]) if ff else None
+        _fut_fp = _pool.submit(_run_ver, ["ffprobe", "-version"]) if fp else None
+        _fut_ol = _pool.submit(_run_ver, ["ollama", "--version"]) if ol else None
+        _fut_nd = _pool.submit(_run_ver, ["node", "-v"]) if node else None
+        device = _fut_device.result()
+        ff_ver = _fut_ff.result() if _fut_ff else "không có trên PATH"
+        fp_ver = _fut_fp.result() if _fut_fp else "không có trên PATH"
+        ol_ver = _fut_ol.result() if _fut_ol else "chưa cài"
+        node_ver = _fut_nd.result() if _fut_nd else "không có (chỉ cần khi dev UI)"
+
     plan = device.get("install") or {}
 
     # ── Thiết bị (luôn hiện đầu) — quyết định path cài ──
@@ -977,7 +1227,6 @@ def _system_checks_uncached(*, fast: bool = True) -> dict[str, Any]:
     )
 
     # ffmpeg / ffprobe
-    ff = _which("ffmpeg")
     ff_inst, ff_lab, ff_hint = _install_from_plan(plan, "ffmpeg")
     items.append(
         _item(
@@ -985,13 +1234,12 @@ def _system_checks_uncached(*, fast: bool = True) -> dict[str, Any]:
             name="ffmpeg",
             ok=bool(ff),
             required=True,
-            detail=_run_ver(["ffmpeg", "-version"]) if ff else "không có trên PATH",
+            detail=ff_ver,
             hint=ff_hint or "Bắt buộc để cắt audio, cover/burn, mux xuất video.",
             install=ff_inst,
             installLabel=ff_lab,
         )
     )
-    fp = _which("ffprobe")
     fp_inst, fp_lab, fp_hint = _install_from_plan(plan, "ffprobe")
     items.append(
         _item(
@@ -999,7 +1247,7 @@ def _system_checks_uncached(*, fast: bool = True) -> dict[str, Any]:
             name="ffprobe",
             ok=bool(fp),
             required=True,
-            detail=_run_ver(["ffprobe", "-version"]) if fp else "không có trên PATH",
+            detail=fp_ver,
             hint=fp_hint or "Thường đi kèm ffmpeg (cùng package).",
             install=fp_inst,
             installLabel=fp_lab,
@@ -1047,21 +1295,64 @@ def _system_checks_uncached(*, fast: bool = True) -> dict[str, Any]:
             if not runtime_missing
             else f"thiếu: {', '.join(runtime_missing)}"
         )
+    # === 3 nhóm riêng thay vì 1 item gộp ===
+
+    # Nhóm 1 — Whisper ASR
+    _whisper_mods = ("faster_whisper",)
+    _whisper_missing = [m for m in _whisper_mods if m in runtime_missing]
     items.append(
         _item(
-            id="ai_runtime",
-            name="Gói AI · Whisper + OCR + VieNeu",
-            ok=not runtime_missing and not runtime_torch_cuda,
+            id="ai_runtime",   # cùng install id → bấm Cài chạy cả 3 nhóm
+            name="Whisper (ASR)",
+            ok=not _whisper_missing,
             required=True,
-            detail=runtime_detail,
+            detail="đã cài" if not _whisper_missing else f"thiếu: {', '.join(_whisper_missing)}",
+            hint="Bộ nhận dạng giọng nói Faster-Whisper · soundfile · soxr.",
+            install="ai_runtime",
+            installLabel="Cài gói AI",
+        )
+    )
+
+    # Nhóm 2 — OCR
+    _ocr_mods = ("rapidocr_onnxruntime", "PIL", "cv2")
+    _ocr_missing = [m for m in _ocr_mods if m in runtime_missing]
+    items.append(
+        _item(
+            id="ai_runtime_ocr",
+            name="OCR (nhận dạng chữ)",
+            ok=not _ocr_missing,
+            required=True,
+            detail="đã cài" if not _ocr_missing else f"thiếu: {', '.join(_ocr_missing)}",
+            hint="RapidOCR · Pillow · OpenCV — đọc phụ đề từ video.",
+            install="ai_runtime",
+            installLabel="Cài gói AI",
+        )
+    )
+
+    # Nhóm 3 — zmAI + VieNeu
+    _vieneu_mods = ("transformers", "vieneu")
+    _vieneu_missing = [m for m in _vieneu_mods if m in runtime_missing]
+    _vieneu_torch_bad = runtime_torch_cuda if not getattr(sys, "frozen", False) else False
+    items.append(
+        _item(
+            id="ai_runtime_vieneu",
+            name="zmAI + VieNeu Local",
+            ok=not _vieneu_missing and not _vieneu_torch_bad,
+            required=True,
+            detail=(
+                f"đã cài · VieNeu ONNX/CPU (cần PyTorch CUDA)" if (_vieneu_torch_bad and not _vieneu_missing)
+                else "đã cài" if not _vieneu_missing
+                else f"thiếu: {', '.join(_vieneu_missing)}"
+            ),
             hint=(
-                "Cài một lần để dùng Whisper, OCR, zmAI và VieNeu Local. "
-                "Có NVIDIA: VieNeu dùng GPU khi PyTorch CUDA đã cài (vài phút)."
+                "Transformers · VieNeu TTS · huggingface-hub. "
+                "Có NVIDIA: dùng GPU khi PyTorch CUDA đã cài."
             ),
             install="ai_runtime",
             installLabel="Cài gói AI",
         )
     )
+
 
     for mid, title, req in (("httpx", "httpx", True),):
         ok, detail = _mod_ok_fast(mid) if fast else _mod_ok(mid, dist_map=dist)
@@ -1150,11 +1441,9 @@ def _system_checks_uncached(*, fast: bool = True) -> dict[str, Any]:
         )
 
     # Ollama
-    ol = _which("ollama")
     ol_ok = False
-    ol_detail = "chưa cài"
+    ol_detail = ol_ver
     if ol:
-        ol_detail = _run_ver(["ollama", "--version"])
         if fast:
             ol_ok = True
         else:
@@ -1165,12 +1454,12 @@ def _system_checks_uncached(*, fast: bool = True) -> dict[str, Any]:
                 ol_ok = r.status_code < 500
                 if ol_ok:
                     n = len((r.json() or {}).get("models") or [])
-                    ol_detail = f"{ol_detail} · server OK · {n} model"
+                    ol_detail = f"{ol_ver} · server OK · {n} model"
                 else:
-                    ol_detail = f"{ol_detail} · server HTTP {r.status_code}"
+                    ol_detail = f"{ol_ver} · server HTTP {r.status_code}"
             except Exception:
                 ol_ok = True
-                ol_detail = f"{ol_detail} · binary OK (chưa ping được server)"
+                ol_detail = f"{ol_ver} · binary OK (chưa ping được server)"
     ol_inst, ol_lab, ol_hint = _install_from_plan(plan, "ollama")
     items.append(
         _item(
@@ -1186,7 +1475,6 @@ def _system_checks_uncached(*, fast: bool = True) -> dict[str, Any]:
     )
 
     # Node
-    node = _which("node")
     nd_inst, nd_lab, nd_hint = _install_from_plan(plan, "node")
     items.append(
         _item(
@@ -1194,7 +1482,7 @@ def _system_checks_uncached(*, fast: bool = True) -> dict[str, Any]:
             name="Node.js",
             ok=bool(node),
             required=False,
-            detail=_run_ver(["node", "-v"]) if node else "không có (chỉ cần khi dev UI)",
+            detail=node_ver,
             hint=nd_hint,
             install=nd_inst,
             installLabel=nd_lab,

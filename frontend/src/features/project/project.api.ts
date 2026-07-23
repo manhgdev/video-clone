@@ -12,7 +12,10 @@ import { fetchJson } from '@/shared/api/fetchJson'
 
 const base = '/api'
 
-async function pollInstall(url: string): Promise<{
+async function pollInstall(
+  url: string,
+  onLog?: (log: string) => void,
+): Promise<{
   ok: boolean
   message: string
   detail: string
@@ -33,6 +36,7 @@ async function pollInstall(url: string): Promise<{
       needsRestart: kick.needsRestart,
     }
   }
+  let pollMs = 2000
   for (;;) {
     const st = await fetchJson<{
       running: boolean
@@ -41,8 +45,10 @@ async function pollInstall(url: string): Promise<{
       detail?: string
       error?: string
       needsRestart?: boolean
+      log?: string
     }>(`${base}/system/install/status`, undefined, 30_000)
     if (st.error) throw new Error(st.error)
+    if (st.log && onLog) onLog(st.log)
     if (!st.running) {
       return {
         ok: st.ok ?? true,
@@ -51,7 +57,9 @@ async function pollInstall(url: string): Promise<{
         needsRestart: st.needsRestart,
       }
     }
-    await new Promise((r) => window.setTimeout(r, 2000))
+    await new Promise((r) => window.setTimeout(r, pollMs))
+    // Backoff: 2s → 3s → 4s → 5s cap — pip không cần feedback liên tục
+    pollMs = Math.min(pollMs + 1000, 5000)
   }
 }
 
@@ -74,13 +82,13 @@ export const api = {
   deleteRender: (renderId: string) =>
     fetchJson<{ ok: boolean }>(`${base}/renders/${renderId}`, { method: 'DELETE' }),
 
-  hardware: () => fetchJson<HardwareInfo>(`${base}/hardware`, undefined, 8000),
+  hardware: () => fetchJson<HardwareInfo>(`${base}/hardware`, undefined, 40_000),
 
   systemChecks: (refresh = false, _deep = false) =>
     fetchJson<SystemChecks>(
       `${base}/system/checks${refresh ? '?refresh=1' : ''}`,
       undefined,
-      15_000,
+      40_000,
     ),
 
   getSetupGate: () =>
@@ -100,11 +108,11 @@ export const api = {
       needsRestart?: boolean
     }>(`${base}/system/install/status`, undefined, 30_000),
 
-  installAiRuntime: () => pollInstall(`${base}/system/install/ai_runtime`),
+  installAiRuntime: (onLog?: (log: string) => void) => pollInstall(`${base}/system/install/ai_runtime`, onLog),
 
-  installOcrCuda: () => pollInstall(`${base}/system/install/ocr_cuda`),
+  installOcrCuda: (onLog?: (log: string) => void) => pollInstall(`${base}/system/install/ocr_cuda`, onLog),
 
-  installDemucsCuda: () => pollInstall(`${base}/system/install/demucs_cuda`),
+  installDemucsCuda: (onLog?: (log: string) => void) => pollInstall(`${base}/system/install/demucs_cuda`, onLog),
 
   restartApp: () =>
     fetchJson<{ ok: boolean; message: string }>(
@@ -128,7 +136,7 @@ export const api = {
       10_000,
     ),
 
-  getConfig: () => fetchJson<AppConfig>(`${base}/config`, undefined, 8000),
+  getConfig: () => fetchJson<AppConfig>(`${base}/config`, undefined, 20_000),
 
   saveConfig: (body: {
     cloud?: Record<

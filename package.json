@@ -1,15 +1,16 @@
 {
   "name": "video-clone",
   "private": true,
-  "version": "2.5.0",
+  "version": "2.8.3",
   "type": "module",
   "scripts": {
     "setup": "node scripts/setup.mjs",
     "dev": "vite --config frontend/vite.config.ts",
     "build": "tsc -b frontend/tsconfig.json && vite build --config frontend/vite.config.ts",
     "build:app": "node build_app/build.mjs",
+    "check:build": "node build_app/check_build.mjs",
     "preview": "vite preview --config frontend/vite.config.ts",
-    "server": "cd backend && python -m uvicorn main:app --reload --port 8787",
+    "server": "cd backend && .venv/Scripts/python.exe -m uvicorn main:app --reload --reload-dir api --reload-dir pipeline --port 8787",
     "dev:all": "node scripts/dev.mjs",
     "start": "node scripts/dev.mjs"
   },

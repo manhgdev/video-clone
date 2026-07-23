@@ -10,6 +10,17 @@ export default defineConfig({
   build: {
     outDir: resolve(__dirname, 'dist'),
     emptyOutDir: true,
+    sourcemap: false,
+    minify: 'esbuild',
+    chunkSizeWarningLimit: 600,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'react-vendor': ['react', 'react-dom'],
+          'ui-panels': ['react-resizable-panels'],
+        },
+      },
+    },
   },
   server: {
     // Windows: mặc định đôi khi chỉ ::1 → 127.0.0.1 fail → @vite/client hủy env.mjs

@@ -17,6 +17,7 @@ import DownloadPage from '@/pages/DownloadPage'
 import FilmPage from '@/pages/FilmPage'
 import BatchPage from '@/pages/BatchPage'
 import RendersPage from '@/pages/RendersPage'
+import VideoCleanerPage from '@/pages/VideoCleanerPage'
 import { api } from '@/features/project/project.api'
 import { expandSegmentsForList, patchSegmentInTree } from '@/features/project/expandCompound'
 import type { HardwareInfo, JobStatus, ProjectSettings, Segment, Step, TextOverlay } from '@/features/project/project.types'
@@ -1534,6 +1535,8 @@ export default function App() {
         <FilmPage />
       ) : appMode === 'batch' ? (
         <BatchPage />
+      ) : appMode === 'cleaner' ? (
+        <VideoCleanerPage />
       ) : appMode === 'renders' ? (
         <RendersPage onEdit={editRenderedProject} />
       ) : editorOpen ? (

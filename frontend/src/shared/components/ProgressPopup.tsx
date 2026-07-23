@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { cn } from '@/lib/cn'
 
 export type ProgressPopupProps = {
@@ -13,7 +13,9 @@ export type ProgressPopupProps = {
   error?: string | null
   /** Job còn chạy (khác lỗi đã xong) — bật đồng hồ / heartbeat */
   running?: boolean
-  /** Chỉ “Chạy nền” ẩn popup, job vẫn chạy */
+  /** Log stream (pip output, v.v.) hiện terminal nhỏ trong popup */
+  log?: string
+  /** Chỉ "Chạy nền" ẩn popup, job vẫn chạy */
   onMinimize: () => void
   /** Click pill → mở lại popup */
   onRestore: () => void
@@ -68,7 +70,7 @@ function fmtElapsed(sec: number) {
 /**
  * Popup tiến độ tái sử dụng: % + X hủy + nút chạy nền.
  * Parent giữ state `minimized`; job không phụ thuộc vào việc đóng popup.
- * % đứng lâu vẫn hiện đồng hồ + “vẫn đang chạy” — tránh tưởng UI đơ.
+ * % đứng lâu vẫn hiện đồng hồ + "vẫn đang chạy" — tránh tưởng UI đơ.
  */
 export default function ProgressPopup({
   active,
@@ -78,6 +80,7 @@ export default function ProgressPopup({
   progress,
   error,
   running = false,
+  log,
   onMinimize,
   onRestore,
   onCancel,
@@ -85,6 +88,7 @@ export default function ProgressPopup({
 }: ProgressPopupProps) {
   const [elapsed, setElapsed] = useState(0)
   const [copied, setCopied] = useState(false)
+  const logRef = useRef<HTMLPreElement>(null)
 
   useEffect(() => {
     if (!active || !running) {
@@ -97,6 +101,13 @@ export default function ProgressPopup({
     }, 1000)
     return () => window.clearInterval(id)
   }, [active, running])
+
+  // Auto-scroll log terminal to bottom on new output
+  useEffect(() => {
+    if (logRef.current && log) {
+      logRef.current.scrollTop = logRef.current.scrollHeight
+    }
+  }, [log])
 
   if (!active) return null
 
@@ -205,6 +216,12 @@ export default function ProgressPopup({
               style={{ width: `${Math.max(pct, running && !failed ? 4 : 0)}%` }}
             />
           </div>
+          {log && (
+            <pre
+              ref={logRef}
+              className="mt-1 max-h-40 overflow-y-auto rounded bg-black/85 p-2 text-[10px] leading-relaxed text-green-400 font-mono whitespace-pre-wrap break-all"
+            >{log}</pre>
+          )}
         </div>
 
         <div className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">

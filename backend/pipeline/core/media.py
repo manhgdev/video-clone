@@ -158,20 +158,68 @@ def detect_device() -> dict[str, Any]:
         except (FileNotFoundError, subprocess.SubprocessError, OSError):
             pass
 
+        # Fallback: non-NVIDIA GPU → wmic (Windows) / lspci (Linux)
+        if gpu_kind == "none":
+            if system == "Windows":
+                try:
+                    out = subprocess.check_output(
+                        ["wmic", "path", "win32_VideoController",
+                         "get", "Name,AdapterRAM", "/format:csv"],
+                        text=True, stderr=subprocess.DEVNULL, timeout=4,
+                    ).strip()
+                    for row in out.splitlines():
+                        cols = [c.strip() for c in row.split(",")]
+                        # csv: Node,AdapterRAM,Name
+                        if len(cols) < 3 or not cols[-1] or cols[-1].lower() == "name":
+                            continue
+                        gpu_name = cols[-1]
+                        gpu_kind = "other"
+                        accel = "directml"
+                        try:
+                            ram = int(cols[1])
+                            if ram > 0:
+                                vram_mb = ram // (1024 * 1024)
+                        except (ValueError, IndexError):
+                            pass
+                        break
+                except (FileNotFoundError, subprocess.SubprocessError, OSError):
+                    pass
+            elif system == "Linux":
+                try:
+                    out = subprocess.check_output(
+                        ["lspci", "-mm"], text=True, stderr=subprocess.DEVNULL, timeout=3,
+                    )
+                    for line in out.splitlines():
+                        if any(k in line for k in ("VGA", "Display", "3D controller")):
+                            parts = line.split('"')
+                            gpu_name = (f"{parts[3]} {parts[5]}".strip()
+                                        if len(parts) >= 6 else line.split()[-1])
+                            gpu_kind = "other"
+                            break
+                except (FileNotFoundError, subprocess.SubprocessError, OSError):
+                    pass
+
     if gpu_kind == "nvidia":
         demucs_label = "Cài Demucs CUDA"
         demucs_backend = "cuda"
         ocr_action = "ocr_cuda"
         ocr_label = "Cài OCR CUDA"
-        install_summary = f"{os_label} + {gpu_name} -> OCR CUDA + Demucs CUDA"
+        install_summary = f"{os_label} + {gpu_name} → OCR CUDA + Demucs CUDA"
         install_hint = "Máy có NVIDIA — nên cài GPU tăng tốc OCR và Demucs CUDA."
     elif gpu_kind == "apple":
         demucs_label = "Cài Demucs (Apple Metal)"
         demucs_backend = "mlx"
         ocr_action = ""
         ocr_label = ""
-        install_summary = f"{os_label} Apple Silicon ({gpu_name}) -> Demucs-MLX (Metal)"
+        install_summary = f"{os_label} Apple Silicon ({gpu_name}) → Demucs-MLX (Metal)"
         install_hint = "Mac Apple Silicon — OCR chạy CPU/ANE; tách lời dùng demucs-mlx (Metal)."
+    elif gpu_kind == "other":
+        demucs_label = "Cài Demucs (CPU)"
+        demucs_backend = "cpu"
+        ocr_action = ""
+        ocr_label = ""
+        install_summary = f"{os_label} + {gpu_name} — CUDA chưa hỗ trợ loại GPU này"
+        install_hint = f"GPU: {gpu_name}. Chạy CPU mode; CUDA chỉ hỗ trợ NVIDIA."
     else:
         demucs_label = "Cài Demucs (CPU)"
         demucs_backend = "cpu"

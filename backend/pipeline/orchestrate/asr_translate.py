@@ -184,6 +184,8 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
             frames_ok = any(cache_frames(project_id, tag).glob("*.jpg"))
             if use_ocr:
                 ocr_req = int(settings.get("workers") or 0)
+                analysis_region = settings.get("analysisRegion")
+                stable = bool(settings.get("stableCaptionLocate", False))
                 # Message chi tiết (N luồng) do asr_paddleocr/_report cập nhật
                 set_status(
                     project_id,
@@ -199,6 +201,8 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                     tag=tag,
                     workers=ocr_req,
                     source_lang=str(settings.get("sourceLang") or "auto"),
+                    analysis_region=analysis_region,
+                    stable=stable,
                 )
                 if not segments:
                     raise RuntimeError(
@@ -309,10 +313,10 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                 seg["voice"] = inherit_voice(seg.get("voice"), voice)
         else:
             if cache.get("transKey") != t_key:
-                need_idx = list(range(len(segments)))
+                need_idx = [i for i, s in enumerate(segments) if not s.get("maskOnly")]
             else:
                 need_idx = [
-                    i for i, s in enumerate(segments) if not (s.get("translation") or "").strip()
+                    i for i, s in enumerate(segments) if not (s.get("translation") or "").strip() and not s.get("maskOnly")
                 ]
 
             translations: list[str] = []

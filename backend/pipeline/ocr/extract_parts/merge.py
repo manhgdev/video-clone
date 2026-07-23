@@ -247,7 +247,7 @@ def _ocr_segments_from_timeline(
         if (
             merged
             and _ocr_same(merged[-1]["source"], seg["source"])
-            and float(seg["start"]) - float(merged[-1]["end"]) <= 0.55
+            and float(seg["start"]) - float(merged[-1]["end"]) <= 0.85
         ):
             prev = merged[-1]
             prev["end"] = max(float(prev["end"]), float(seg["end"]))

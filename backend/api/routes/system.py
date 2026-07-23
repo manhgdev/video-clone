@@ -80,8 +80,16 @@ _install_state: dict[str, Any] = {
     "error": "",
     "needsRestart": False,
     "result": None,
+    "log": "",
 }
 _install_lock = threading.Lock()
+
+
+def _append_install_log(text: str) -> None:
+    """Thread-safe append to install log, keep last 200 lines."""
+    with _install_lock:
+        lines = (_install_state["log"] + text).splitlines()
+        _install_state["log"] = "\n".join(lines[-200:])
 
 
 def _setup_gate_path() -> Path:
@@ -117,9 +125,12 @@ def _start_install_job(kind: str, fn, *, needs_restart: bool = True) -> dict[str
             error="",
             needsRestart=False,
             result=None,
+            log="",
         )
 
     def work() -> None:
+        import pipeline.core.system_check as _sc
+        _sc._install_log_fn = _append_install_log
         try:
             result = fn()
             changed = "Đã cài" in str(result.get("message", ""))
@@ -133,8 +144,19 @@ def _start_install_job(kind: str, fn, *, needs_restart: bool = True) -> dict[str
             with _install_lock:
                 _install_state["error"] = str(e)
         finally:
+            _sc._install_log_fn = None
             with _install_lock:
                 _install_state["running"] = False
+
+        def _warm_checks() -> None:
+            """Pre-warm _CHECKS_CACHE ngay khi server ready — request đầu tiên trả cache thay vì block."""
+            try:
+                from pipeline.core.system_check import system_checks
+                system_checks(fast=True)
+            except Exception:
+                pass
+
+        threading.Thread(target=_warm_checks, name="warm-checks", daemon=True).start()
 
     threading.Thread(target=work, name=f"install-{kind}", daemon=True).start()
     return {"ok": True, "running": True, "kind": kind, "message": f"Đang cài {kind}…"}
@@ -201,14 +223,27 @@ def api_save_config(body: AppConfigIn):
 
 @router.get("/api/system/checks")
 def api_system_checks(refresh: bool = False, deep: bool = False):
-    """Dependency checklist — luôn fast. deep=1 bị bỏ qua (tránh đơ UI/API)."""
-    from pipeline.core.system_check import system_checks
+    """Dependency checklist. Trả loading:true ngay nếu cache chưa có — không block request."""
+    from pipeline.core import system_check as _sc
 
     try:
-        # ponytail: deep probe (torch/demucs import) treo request hàng phút → đơ webview.
-        return system_checks(refresh=refresh, fast=True)
+        with _install_lock:
+            installing = _install_state.get("running", False)
+
+        # Cache có rồi — trả ngay, không tính toán gì thêm.
+        if not refresh and not installing:
+            with _sc._checks_lock:
+                cached = _sc._CHECKS_CACHE
+            if cached is not None:
+                return cached[2]
+
+        # Cache rỗng HOẶC install đang chạy — trả loading ngay,
+        # background thread (warm-checks) sẽ điền cache.
+        if _sc._CHECKS_CACHE is None:
+            return {"items": [], "loading": True, "device": {}}
+
+        return _sc.system_checks(refresh=refresh and not installing, fast=True)
     except Exception as e:
-        # Không để exception Python kéo sập UI; native crash vẫn chỉ tránh bằng check nhẹ.
         raise HTTPException(500, f"system checks failed: {e}") from e
 
 
@@ -233,6 +268,9 @@ def api_install_status():
         return out
     if st.get("message"):
         out["message"] = st["message"]
+    if st.get("log"):
+        # Trả 30 dòng cuối để tránh payload quá lớn
+        out["log"] = "\n".join(st["log"].splitlines()[-30:])
     return out
 
 

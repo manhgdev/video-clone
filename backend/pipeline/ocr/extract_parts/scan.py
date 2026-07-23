@@ -233,20 +233,25 @@ def _ocr_scan_stamps(
 
     w = min(_ocr_pool_workers(workers, cap=min(4, _cpu_budget(0.9))), len(stamps))
     out: list[tuple[float, str] | None] = [None] * len(stamps)
+    _scan_engine_lock = threading.Lock()
     _tls = threading.local()
     sem = _ocr_semaphore()
 
-    def _job(idx: int, t: float, frame: Any) -> tuple[int, float, str]:
+    def _worker(item: tuple[int, float, Any]) -> tuple[int, float, str]:
+        idx, t, frame = item
         check_cancel(project_id)
         with sem:
             check_cancel(project_id)
             if getattr(_tls, "ocr", None) is None:
-                _tls.ocr = _rapidocr_labels()
+                with _scan_engine_lock:
+                    if getattr(_tls, "ocr", None) is None:
+                        try:
+                            _tls.ocr = _rapidocr_labels()
+                        except Exception:
+                            _tls.ocr = _rapidocr_labels(use_cuda=False)
             try:
                 text = reader(frame, _tls.ocr, vw, vh)
             except Exception:
-                # CUDA/CUDNN có thể lỗi sau nhiều phút với ROI lớn. Chỉ worker
-                # đó chuyển sang CPU và thử lại, không làm mất toàn bộ pass.
                 _tls.ocr = _rapidocr_labels(use_cuda=False)
                 text = reader(frame, _tls.ocr, vw, vh)
             return idx, t, text or ""
@@ -429,7 +434,7 @@ def _ocr_mid_item_from_frame(
         confidence = float(row[2]) if len(row) > 2 else 1.0
         if cjk < 1 or cjk > 32:
             continue
-        if confidence < (0.85 if cjk == 1 else 0.55):
+        if confidence < (0.45 if cjk == 1 else 0.25):
             continue
         if cjk < len(compact) * 0.55:
             continue
@@ -511,13 +516,11 @@ def _classify_overlay_detections(
     ) -> bool:
         if bw > vw * 0.28 or bh > vh * 0.55:
             return False
-        edge = min(cx / max(1.0, vw), 1.0 - cx / max(1.0, vw))
-        if edge >= 0.28:
-            return False
         tall = bh > bw * 1.15
         short_stack = cjk >= 2 and cjk <= 10 and bh >= bw * 0.85
         # RapidOCR hay tách từng glyph cột — seed 1 chữ hẹp mép
-        glyph_seed = cjk == 1 and bw < vw * 0.14 and bh < vh * 0.14
+        edge = min(cx / vw, 1.0 - cx / vw)
+        glyph_seed = cjk == 1 and bw < vw * 0.14 and bh < vh * 0.14 and edge < 0.28
         return tall or short_stack or glyph_seed
 
     vert_raw = [it for it in items if _is_vert_shape(it[6], it[7], it[8], it[9], it[10])]
@@ -598,21 +601,30 @@ def _classify_overlay_detections(
 
     mids: list[tuple[str, dict[str, int]]] = []
     if mid_cands:
-        best = max(mid_cands, key=lambda x: x[0])[1]
-        nearby = [
-            it
-            for _, it in mid_cands
-            if abs(it[7] - best[7]) <= vh * 0.06
-            and abs(it[6] - best[6]) <= vw * 0.28
-        ]
-        nearby.sort(key=lambda x: (x[7], x[6]))
-        tx = _ocr_join_lines([x[0] for x in nearby])
-        bx0 = min(x[2] for x in nearby)
-        by0 = min(x[3] for x in nearby)
-        bx1 = max(x[4] for x in nearby)
-        by1 = max(x[5] for x in nearby)
-        mids.append((tx, _xyxy_to_bbox(bx0, by0, bx1, by1, vw, vh, pad=3)))
-        used = set(id(x) for x in nearby)
+        # Gom theo vị trí: mỗi cụm riêng biệt (cách nhau >8% height hoặc >30% width)
+        # → 1 mid riêng với bbox chính xác của cụm đó.
+        mid_cands_sorted = sorted(mid_cands, key=lambda x: (x[1][7], x[1][6]))  # sort by cy, cx
+        mid_groups: list[list[tuple]] = []
+        for _score, it in mid_cands_sorted:
+            placed = False
+            for g in mid_groups:
+                g_cx = sum(x[6] for x in g) / len(g)
+                g_cy = sum(x[7] for x in g) / len(g)
+                if abs(it[7] - g_cy) <= vh * 0.08 and abs(it[6] - g_cx) <= vw * 0.30:
+                    g.append(it)
+                    placed = True
+                    break
+            if not placed:
+                mid_groups.append([it])
+        for g in mid_groups:
+            g.sort(key=lambda x: (x[7], x[6]))
+            tx = _ocr_join_lines([x[0] for x in g])
+            bx0 = min(x[2] for x in g)
+            by0 = min(x[3] for x in g)
+            bx1 = max(x[4] for x in g)
+            by1 = max(x[5] for x in g)
+            mids.append((tx, _xyxy_to_bbox(bx0, by0, bx1, by1, vw, vh, pad=3)))
+        used = set(id(x) for _, x in mid_cands)
         remain = [it for it in remain if id(it) not in used]
 
     # label: cạnh / graphic giữa (không đụng mid đã lấy)
@@ -784,7 +796,7 @@ def _ocr_label_items_from_frame(
             continue
         compact = re.sub(r"\s+", "", text)
         confidence = float(row[2]) if len(row) > 2 else 1.0
-        if confidence < (0.75 if cjk == 1 else 0.45):
+        if confidence < (0.45 if cjk == 1 else 0.25):
             continue
         if cjk < max(1, len(compact) * 0.5):
             continue

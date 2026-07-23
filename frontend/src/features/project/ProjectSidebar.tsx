@@ -521,7 +521,7 @@ export default function Sidebar({
         >
           <span className="field-label">
             <IconLayers size={14} />
-            Định vị chữ ổn định
+            Khung định vị ổn định (chỉ dịch chữ trong khung này)
           </span>
           <input
             type="checkbox"

@@ -85,31 +85,47 @@ def _layout_caption_over(
     text_w = 0
     text_h = font_size
     text_block_h = font_size
-    while size >= 12:
+    min_one_line = max(12, int(round(font_size * 0.8)))
+    while size > min_one_line:
         try:
             font = ImageFont.truetype(font_path, size)
         except OSError:
             font = ImageFont.load_default()
         one_w = draw.textbbox((0, 0), trimmed, font=font)[2] if trimmed else 0
-        if one_w <= int(max_inner * 1.05):
-            lines = [trimmed] if trimmed else [""]
-        else:
-            # Co font trước khi wrap 2 dòng
-            if size > 12 and one_w > max_inner:
-                size -= 1
-                continue
+        if one_w <= int(max_inner * 1.02):
+            break
+        size -= 1
+
+    try:
+        font = ImageFont.truetype(font_path, size)
+    except OSError:
+        font = ImageFont.load_default()
+    one_w = draw.textbbox((0, 0), trimmed, font=font)[2] if trimmed else 0
+    
+    if one_w <= int(max_inner * 1.06):
+        lines = [trimmed] if trimmed else [""]
+        line_boxes = [draw.textbbox((0, 0), ln, font=font) for ln in lines]
+    else:
+        size = font_size
+        while size >= 12:
+            try:
+                font = ImageFont.truetype(font_path, size)
+            except OSError:
+                font = ImageFont.load_default()
             lines = _wrap_text(draw, trimmed, font, max_inner)
             if len(lines) > 2:
                 lines = _merge_to_n_lines(lines, 2)
-        line_boxes = [draw.textbbox((0, 0), ln, font=font) for ln in lines]
-        line_hs = [max(1, b[3] - b[1]) for b in line_boxes]
-        gap_line = max(2, size // 8)
-        text_w = max((b[2] - b[0]) for b in line_boxes) if line_boxes else one_w
-        text_h = sum(line_hs) + gap_line * max(0, len(lines) - 1)
-        text_block_h = int(math.ceil(len(lines) * size * 1.12 + 4))
-        if text_w <= max_inner * 1.02 or size <= 12:
-            break
-        size -= 1
+            line_boxes = [draw.textbbox((0, 0), ln, font=font) for ln in lines]
+            tw = max((b[2] - b[0]) for b in line_boxes) if line_boxes else 0
+            if tw <= max_inner * 1.02 or size <= 12:
+                break
+            size -= 1
+
+    line_hs = [max(1, b[3] - b[1]) for b in line_boxes]
+    gap_line = max(2, size // 8)
+    text_w = max((b[2] - b[0]) for b in line_boxes) if line_boxes else one_w
+    text_h = sum(line_hs) + gap_line * max(0, len(lines) - 1)
+    text_block_h = int(math.ceil(len(lines) * size * 1.12 + 4))
     font_size = size
     line_h = (max(line_hs) if line_hs else font_size) + gap_line
 
@@ -129,7 +145,7 @@ def _layout_caption_over(
 
     orig_w = max(src_w, ocr_w) if src else ocr_w
     content_w = max(orig_w, text_w)
-    cap_pad_x = 2
+    cap_pad_x = 1
     cap_w = int(text_w + cap_pad_x * 2)
     # Cover full ngang được (frame_w)
     auto_w = min(frame_w, max(_fit_cover_width(content_w, cap_w, frame_w), cap_w))
@@ -194,10 +210,29 @@ def _preview_caption_layout(
         return None
     from PIL import Image, ImageDraw
 
+    mode = (layout_mode or str(segment.get("layout") or "")).lower()
+    is_vertical = mode == "vertical"
+
     font = font_getter(fs)
     probe = Image.new("RGB", (8, 8))
     draw = ImageDraw.Draw(probe)
     line_boxes = [draw.textbbox((0, 0), ln, font=font) for ln in lines]
+
+    if is_vertical:
+        # Vertical text: bw is determined by font size and lines, bh is determined by text length
+        th = sum(b[2] - b[0] for b in line_boxes) if line_boxes else 0
+        if th > bh - 2:
+            diff = (th + 2) - bh
+            bh = th + 2
+            y = max(0, y - diff // 2)
+    else:
+        # Horizontal text: bw is determined by text width
+        tw = max((b[2] - b[0]) for b in line_boxes) if line_boxes else 0
+        if tw > bw - 2:
+            diff = (tw + 2) - bw
+            bw = tw + 2
+            x = max(0, x - diff // 2)
+
     line_hs = [max(1, b[3] - b[1]) for b in line_boxes]
     gap_line = max(2, fs // 8)
     text_h = sum(line_hs) + gap_line * max(0, len(lines) - 1)
@@ -703,7 +738,7 @@ def _layout_mid_caption(
     while lo <= hi:
         mid = (lo + hi) // 2
         one_w = draw.textbbox((0, 0), raw, font=font_getter(mid))[2]
-        if one_w <= inner_w + 2 and mid * line_mul <= inner_h + 0.5:
+        if one_w <= inner_w and mid * line_mul <= inner_h + 0.5:
             best_one = mid
             lo = mid + 1
         else:
@@ -731,13 +766,13 @@ def _layout_mid_caption(
             not _kept(lines)
             or len(lines) * size * line_mul > inner_h
             or any(
-                draw.textbbox((0, 0), ln, font=font_getter(size))[2] > inner_w + 2
+                draw.textbbox((0, 0), ln, font=font_getter(size))[2] > inner_w
                 for ln in lines
             )
         ):
             size -= 1
             lines = _fit(size)
-        if draw.textbbox((0, 0), raw, font=font_getter(size))[2] <= inner_w + 2:
+        if draw.textbbox((0, 0), raw, font=font_getter(size))[2] <= inner_w:
             lines = [raw]
     font_use = font_getter(size)
     line_boxes = [draw.textbbox((0, 0), ln, font=font_use) for ln in lines]
@@ -745,7 +780,12 @@ def _layout_mid_caption(
     gap_line = max(2, size // 8)
     line_h = (max(line_hs) if line_hs else size) + gap_line
     text_h = sum(line_hs) + gap_line * max(0, len(lines) - 1)
-    box_w = min(frame_w, cw)
+    # ponytail: nới rộng bbox ngang nếu chữ dịch vẫn dài hơn bbox gốc
+    max_line_w = max(
+        (draw.textbbox((0, 0), ln, font=font_use)[2] for ln in lines), default=0
+    )
+    need_w = max_line_w + pad_x * 2
+    box_w = min(frame_w, max(cw, need_w))
     box_h = ch
     cx = (ox0 + ox1) // 2
     x0 = max(0, min(frame_w - box_w, cx - box_w // 2))
@@ -816,7 +856,10 @@ def _layout_caption_vertical(
         words = [w for w in re.split(r"[\s·・/|]+", raw) if w]
         if not words:
             words = [raw]
-        if len(words) == 1 and len(words[0]) > 10:
+        # ponytail: all-caps single word (brand/abbreviation) → 1 char per line
+        if len(words) == 1 and re.fullmatch(r"[A-Z]+", words[0]):
+            units = list(words[0])
+        elif len(words) == 1 and len(words[0]) > 10:
             w0 = words[0]
             mid = max(1, len(w0) // 2)
             cut = -1
@@ -825,12 +868,19 @@ def _layout_caption_vertical(
                     cut = i
                     break
             words = [w0[:cut], w0[cut:]] if cut > 0 else [w0]
-        units = []
-        for w in words:
-            if any("\u4e00" <= c <= "\u9fff" for c in w):
-                units.append(w)
-            else:
-                units.append(w[:1].upper() + w[1:] if len(w) > 1 else w.upper())
+            units = []
+            for w in words:
+                if any("\u4e00" <= c <= "\u9fff" for c in w):
+                    units.append(w)
+                else:
+                    units.append(w[:1].upper() + w[1:] if len(w) > 1 else w.upper())
+        else:
+            units = []
+            for w in words:
+                if any("\u4e00" <= c <= "\u9fff" for c in w):
+                    units.append(w)
+                else:
+                    units.append(w[:1].upper() + w[1:] if len(w) > 1 else w.upper())
     if not units:
         return _layout_caption(text, font, fontsize, ocr_box, frame_w, frame_h)
 

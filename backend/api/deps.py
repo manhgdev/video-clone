@@ -45,6 +45,14 @@ class Settings(BaseModel):
     previewAspectRatio: str = "original"
     previewCrop: dict[str, float] | None = None
     exportResolution: str = "1080"
+    exportVideo: bool = True
+    exportVideoFormat: str = "mp4"
+    exportAudio: bool = False
+    exportAudioFormat: str = "mp3"
+    exportSrt: bool = False
+    exportSrtFormat: str = "srt"
+    exportGif: bool = False
+    exportGifRes: str = "240"
     forceTts: bool = False
 
 

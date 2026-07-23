@@ -26,7 +26,37 @@ from pipeline.core.resources import adaptive_workers
 _ocr_sem: threading.Semaphore | None = None
 _ocr_sem_n: int = 0
 
-
+def _ocr_seg(
+    index: int,
+    start: float,
+    end: float,
+    text: str,
+    *,
+    layout: str = "horizontal",
+    bbox: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    lay = layout if layout in ("horizontal", "vertical", "label", "mid") else "horizontal"
+    min_dur = 0.04 if lay in ("vertical", "label", "mid") else 0.35
+    dub_default = False if lay in ("vertical", "label") else True
+    seg: dict[str, Any] = {
+        "id": str(uuid.uuid4()),
+        "index": index,
+        "start": float(start),
+        "end": float(max(end, start + min_dur)),
+        "source": text,
+        "translation": "",
+        "voice": "",
+        "layout": lay,
+        "dub": dub_default,
+    }
+    if bbox and isinstance(bbox, dict):
+        seg["bbox"] = {
+            "x": int(bbox.get("x", 0)),
+            "y": int(bbox.get("y", 0)),
+            "w": int(bbox.get("w", 0)),
+            "h": int(bbox.get("h", 0)),
+        }
+    return seg
 
 def _is_cjk(ch: str) -> bool:
     o = ord(ch)
@@ -38,24 +68,25 @@ def _is_cjk(ch: str) -> bool:
 
 
 def _hardsub_line_keep(text: str, source_lang: str) -> bool:
-    """Hardsub đáy: bỏ Latin/số thuần + mảnh CJK (mid/nhãn hay lọt)."""
+    """Giữ các dòng chữ hợp lệ (kể cả phụ đề ngắn 1-3 chữ, Tiếng Anh, Tiếng Việt, CJK)."""
     raw = (text or "").strip()
     if not raw:
         return False
-    cjk = sum(1 for c in raw if _is_cjk(c))
     compact = re.sub(r"\s+", "", raw)
-    lang = (source_lang or "").lower()
-    reject_ascii = lang.startswith("zh") or lang in ("auto", "", "zh-cn", "zh-tw")
-    if reject_ascii and cjk < 1:
+    if not compact or len(compact) < 1:
         return False
-    if cjk < 1 and re.fullmatch(r"[A-Za-z0-9._:/-]+", compact or ""):
-        return False
-    # đáy: câu ≥4 CJK — 2–3 chữ hay là mid flash / nhiễu (意力)
-    if cjk < 4:
-        return False
-    if cjk < 1 and len(raw) < 2:
-        return False
-    return True
+    cjk = sum(1 for c in raw if _is_cjk(c))
+    lang = (source_lang or "auto").lower()
+    # Nếu có chữ CJK → giữ từ 1 chữ trở lên (VD: "好", "你好", "没问题")
+    if cjk >= 1:
+        return True
+    # Nếu là chữ Latinh / Tiếng Anh / Tiếng Việt / Số → giữ từ 2 ký tự hợp lệ trở lên
+    if len(compact) >= 2:
+        # Bỏ các dòng rác chỉ chứa ký tự đặc biệt thuẫn như "...", "---"
+        if re.fullmatch(r"[._:/\-\\~*#@!+=|\(\)\[\]{}]+", compact):
+            return False
+        return True
+    return False
 
 
 def _ocr_join_lines(lines: list[str]) -> str:
@@ -122,11 +153,16 @@ def _ocr_sim(a: str, b: str) -> float:
         return 0.0
     if na == nb:
         return 1.0
-    # partial: khung chỉ đọc được nửa dòng
+    # partial / containment: một bên là chuỗi con của bên kia
     if na in nb or nb in na:
         short, long = (na, nb) if len(na) <= len(nb) else (nb, na)
-        if len(short) >= 3 and len(short) / len(long) >= 0.55:
-            return 0.92
+        if len(short) >= 2:
+            return 0.95
+    # Token CJK chung (VD: "花木紫 HUAMUI" vs "花木紫 HUAMUN")
+    cjk_a = {c for c in na if _is_cjk(c)}
+    cjk_b = {c for c in nb if _is_cjk(c)}
+    if cjk_a and cjk_b and len(cjk_a & cjk_b) >= min(len(cjk_a), len(cjk_b), 2):
+        return 0.90
     return SequenceMatcher(None, na, nb).ratio()
 
 
@@ -136,12 +172,9 @@ def _ocr_same(a: str, b: str) -> bool:
     na, nb = _ocr_norm(a), _ocr_norm(b)
     if na == nb:
         return True
-    # quá lệch độ dài → câu khác (trừ containment đã xử lý trong _ocr_sim)
-    if abs(len(na) - len(nb)) > max(4, int(0.35 * max(len(na), len(nb)))):
-        if not (na in nb or nb in na):
-            return False
-    thr = 0.78 if max(len(na), len(nb)) >= 6 else 0.88
-    return _ocr_sim(a, b) >= thr
+    if na in nb or nb in na:
+        return True
+    return _ocr_sim(a, b) >= 0.55
 
 
 def _ocr_pick_best(texts: list[str]) -> str:
@@ -247,6 +280,7 @@ def _join_whisper_sources(a: str, b: str) -> str:
 __all__ = [
     '_ocr_sem',
     '_ocr_sem_n',
+    '_ocr_seg',
     '_is_cjk',
     '_hardsub_line_keep',
     '_ocr_join_lines',

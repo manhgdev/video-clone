@@ -1,9 +1,8 @@
 import type { ProjectSettings, Segment } from '@/features/project/project.types'
 import {
   layoutOcrOverlay,
-  ocrFallbackCover,
 } from '@/features/editor/ocrOverlayLayout'
-import { resolveCropRect, type PixelBox, type CropRect } from './previewStyles'
+import { resolveCropRect, captionFontCss, type PixelBox, type CropRect } from './previewStyles'
 import { isOcrOverlayLayout, effectiveOverlayLayout } from './segmentQuery'
 
 export const AUTO_SUBTITLE_FONT = 48
@@ -39,7 +38,7 @@ export function shiftAutoCoverDown(box: PixelBox, fontSizePx: number, frameW: nu
   )
 }
 
-export const CAP_PAD_X = 2
+export const CAP_PAD_X = 1
 
 export function coverInnerWidth(coverW: number, fontSizePx: number, frameW: number) {
   const pad = coverPad(fontSizePx, frameW)
@@ -69,17 +68,20 @@ export function fitCaptionLines(
   let fontPx = Math.max(minFont, Math.round(fontSizePx))
   const inner = Math.max(24, maxInnerW)
   if (preferOneLine) {
-    while (fontPx > minFont && measureLineWidth(trimmed, fontPx) > inner * 1.02) {
+    const minOneLineFont = Math.max(minFont, Math.round(fontSizePx * 0.8))
+    while (fontPx > minOneLineFont && measureLineWidth(trimmed, fontPx) > inner) {
       fontPx -= 1
     }
-    if (measureLineWidth(trimmed, fontPx) <= inner * 1.06) {
+    if (measureLineWidth(trimmed, fontPx) <= inner) {
       return { lines: [trimmed], fontPx }
     }
   }
+  
+  fontPx = Math.max(minFont, Math.round(fontSizePx))
   let lines = wrapCaptionText(trimmed, inner, fontPx, maxLines)
   while (
     fontPx > minFont
-    && lines.some((line) => measureLineWidth(line, fontPx) > inner * 0.98)
+    && lines.some((line) => measureLineWidth(line, fontPx) > inner)
   ) {
     fontPx -= 1
     lines = wrapCaptionText(trimmed, inner, fontPx, maxLines)
@@ -174,6 +176,15 @@ export function coverBoxWidth(contentW: number, frameW: number) {
 export type OverLayout = { cover: PixelBox; caption: PixelBox; lines: string[]; fontPx?: number }
 
 let _measureCtx: CanvasRenderingContext2D | null = null
+let _measureFontFamily = 'system-ui, -apple-system, "Segoe UI", sans-serif'
+
+/** ponytail: sync measurement font with the CSS render font */
+export function setMeasureFontFamily(css: string) {
+  if (css && css !== _measureFontFamily) {
+    _measureFontFamily = css
+  }
+}
+
 export function measureLineWidth(text: string, fontSizePx: number) {
   if (typeof document !== 'undefined') {
     if (!_measureCtx) {
@@ -181,8 +192,9 @@ export function measureLineWidth(text: string, fontSizePx: number) {
       _measureCtx = c.getContext('2d')
     }
     if (_measureCtx) {
-      _measureCtx.font = `700 ${fontSizePx}px system-ui, -apple-system, "Segoe UI", sans-serif`
-      return _measureCtx.measureText(text).width
+      _measureCtx.font = `700 ${fontSizePx}px ${_measureFontFamily}`
+      // ponytail: 1.05 safety — small margin for sub-pixel rounding
+      return _measureCtx.measureText(text).width * 1.05
     }
   }
   return text.length * fontSizePx * 0.40
@@ -192,8 +204,8 @@ export function measureLineWidth(text: string, fontSizePx: number) {
 export function wrapCaptionText(text: string, maxInnerW: number, fontSizePx: number, maxLines = 3): string[] {
   const trimmed = text.trim()
   if (!trimmed) return ['']
-  // system-ui đo hơi rộng hơn font burn/preview — chừa ~8% tránh xuống dòng sớm
-  const fits = (s: string) => measureLineWidth(s, fontSizePx) <= maxInnerW * 1.08
+  // ponytail: measureLineWidth already has 1.15x safety — no extra tolerance needed
+  const fits = (s: string) => measureLineWidth(s, fontSizePx) <= maxInnerW
   if (fits(trimmed)) return [trimmed]
 
   const words = trimmed.split(/\s+/).filter(Boolean)
@@ -354,18 +366,8 @@ export function resolveSegmentCover(
 
 /** Seed khung che overlay: chỉ fallback đúng layout; không bbox CJK → null (đừng bịa cột dọc). */
 export function overlayCoverSeed(seg: Segment, frameW: number, frameH: number): PixelBox | null {
-  const layout: 'vertical' | 'label' | 'mid' | 'horizontal' =
-    seg.layout === 'label'
-      ? 'label'
-      : seg.layout === 'mid'
-        ? 'mid'
-        : seg.layout === 'vertical'
-          ? 'vertical'
-          : 'horizontal'
   if (!seg.bbox) {
-    // CJK chờ OCR thật — không đoán cột trái / giữa (gây caption “từ trên trời”)
-    if (layout === 'horizontal' || isCjkHardsubSource(seg.source)) return null
-    return clampCoverBox(ocrFallbackCover(frameW, frameH, layout), frameW, frameH)
+    return null
   }
   const box = clampCoverBox(seg.bbox, frameW, frameH)
   // mid: chỉ bỏ khung gần full-frame (lưới đáy nhầm). 2 dòng hardsub giữa/đáy vẫn giữ.
@@ -420,6 +422,8 @@ export function resolveOverLayout(
 ): OverLayout | null {
   if (!seg?.translation.trim()) return null
   if (!settings.burnSubs) return null
+  // ponytail: sync measurement font with CSS render font — prevents text overflow
+  setMeasureFontFamily(captionFontCss(settings.subtitleFontFamily || 'system'))
   const fontPx = resolveCaptionFontSize(seg, settings, frameW, frameH)
 
   // Overlay OCR mid / dọc / nhãn — hoặc horizontal có bbox giữa khung
@@ -484,7 +488,7 @@ export function resolveOverLayout(
     const stored = storedOverLayout(seg, frameW, frameH)
     if (!stored) return null
     const laid = manualCoverLayout(stored.cover, seg.translation, fontPx, frameW, frameH, true)
-    return { ...laid, fontPx }
+    return laid
   }
 
   const seedRaw = seg.bbox
@@ -588,11 +592,23 @@ export function resolvePreviewOverLayout(
 ): PreviewOverLayout | null {
   const base = resolveOverLayout(seg, settings, frameW, frameH, coverOverride)
   if (!base) return null
-  // CAP-MID / dọc / nhãn ONLY — không đụng caption đáy
+  // Nếu segment có bbox (OCR hoặc user kéo) HOẶC thuộc layout mid/label/vertical
+  // -> GIỮ NGUYÊN tọa độ đè đúng chỗ. Không tự động shift/fallback xuống đáy màn hình.
   const overlayLay = seg ? effectiveOverlayLayout(seg, frameH) : null
-  if (overlayLay === 'mid' || overlayLay === 'label' || overlayLay === 'vertical') {
-    return { ...base, cover: base.cover, caption: base.caption, mask: base.cover }
+  if (
+    overlayLay === 'mid' ||
+    overlayLay === 'label' ||
+    overlayLay === 'vertical' ||
+    seg?.bbox
+  ) {
+    const fullCrop = cropCoversFull(crop, frameW, frameH)
+    const cover = fullCrop ? base.cover : fitBoxToCrop(base.cover, crop)
+    const caption = fullCrop ? base.caption : fitBoxToCrop(base.caption, crop)
+    return { ...base, cover, caption, mask: base.cover }
   }
+
+  // Dưới đây là logic dành cho Whisper (dịch giọng nói, KHÔNG CÓ BBOX)
+  // -> tự động fallback căn lề dưới cùng của vùng video (crop).
   // Caption đáy 16:9 — logic HEAD gốc (không sửa mid)
   if (crop.w >= crop.h) {
     const fontPx = base.fontPx ?? 16
@@ -821,17 +837,49 @@ export function layoutCaptionInCover(
   const trimmed = text.trim()
   const edge = Math.max(2, Math.round(cover.w * 0.02))
   const maxInnerW = Math.max(24, cover.w - edge * 2)
-  const { lines, fontPx } = fitCaptionLines(trimmed, maxInnerW, fontSizePx, {
+  // Check 1-line font size
+  const fit1 = fitCaptionLines(trimmed, maxInnerW, fontSizePx, {
     preferOneLine: true,
+    maxLines: 1,
+  })
+  const font1 = fit1.fontPx
+
+  // Check 2-line font size (don't force one line)
+  const fit2 = fitCaptionLines(trimmed, maxInnerW, fontSizePx, {
+    preferOneLine: false,
     maxLines: 2,
   })
+  // However, fitCaptionLines doesn't check cover.h!
+  // We need to ensure that the 2-line layout fits within cover.h.
+  let font2 = fit2.fontPx
+  let lines2 = fit2.lines
+  while (font2 > 8 && lines2.length > 1 && Math.ceil(lines2.length * font2 * 1.12 + 4) > cover.h) {
+    font2 -= 1
+    const refit = fitCaptionLines(trimmed, maxInnerW, font2, { preferOneLine: false, maxLines: 2 })
+    font2 = refit.fontPx
+    lines2 = refit.lines
+  }
+  if (Math.ceil(lines2.length * font2 * 1.12 + 4) > cover.h) {
+    font2 = 0 // Does not fit vertically
+  }
+
+  let fontPx: number
+  let lines: string[]
+  if (font2 > font1 && lines2.length > 1) {
+    fontPx = font2
+    lines = lines2
+  } else {
+    fontPx = font1
+    lines = fit1.lines
+  }
+
   const lineH = fontPx * 1.12
   const textBlockH = Math.ceil(lines.length * lineH + 4)
   const textW = Math.max(...lines.map((l) => measureLineWidth(l, fontPx)), 1)
   const captionW = Math.ceil(
     lines.length === 1
-      ? Math.min(cover.w, Math.max(textW + CAP_PAD_X * 2, cover.w - edge * 2))
-      : Math.min(cover.w, textW + CAP_PAD_X * 2),
+      ? Math.max(textW + CAP_PAD_X * 2, cover.w - edge * 2)
+      : textW + CAP_PAD_X * 2,
   )
   const cx = cover.x + cover.w / 2
   const captionX = Math.round(Math.max(cover.x, Math.min(cover.x + cover.w - captionW, cx - captionW / 2)))
@@ -911,10 +959,23 @@ export function manualCoverLayout(
   fixed = false,
 ): OverLayout {
   if (fixed) {
-    // A manually edited bbox is authoritative. Never grow or recenter it to
-    // accommodate text; doing so made the box snap back immediately on release.
     const box = clampCoverBox(cover, frameW, frameH)
     const laid = layoutCaptionInCover(box, text, fontSizePx, frameW)
+    
+    if (laid.caption.w > box.w) {
+      const cx = box.x + box.w / 2
+      let newW = Math.min(frameW, laid.caption.w)
+      let newX = Math.round(Math.max(0, Math.min(frameW - newW, cx - newW / 2)))
+      const expandedBox = clampCoverBox({ ...box, x: newX, w: newW }, frameW, frameH)
+      const laid2 = layoutCaptionInCover(expandedBox, text, fontSizePx, frameW)
+      return {
+        cover: expandedBox,
+        caption: laid2.caption,
+        lines: laid2.lines,
+        fontPx: laid2.fontPx ?? fontSizePx,
+      }
+    }
+    
     return {
       cover: box,
       caption: laid.caption,
@@ -1047,6 +1108,8 @@ export function overlayDisplayFontStyle(
       width: '100%',
       height: '100%',
       overflow: 'hidden',
+      padding: '0 1px',
+      boxSizing: 'border-box' as const,
     }
   }
   return {

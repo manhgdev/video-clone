@@ -8,6 +8,7 @@ import { ResizablePanelGroup, ResizablePanel, ResizableHandle, useDefaultLayout 
 import { ScrollArea } from '@/shared/ui/scroll-area'
 import { fitOverlayFontPx, layoutOcrOverlay, midInsideVerticalWatermark } from '@/features/editor/ocrOverlayLayout'
 import { EditorMaskPanel } from '@/features/editor/EditorMaskPanel'
+import { ExportModal, type ExportModalOptions } from '@/features/editor/ExportModal'
 import { expandCompoundShell } from '@/features/project/expandCompound'
 import { generateLogoKeyframes, logoFrame } from '@/features/editor/lib/logoMotion'
 import {
@@ -4098,12 +4099,27 @@ export default function LivePreviewEditor({
     return CAPTION_LANE_DEFS.find((l) => l.key === key)?.label ?? key
   })()
 
-  async function handleExport() {
+  const [isExportModalOpen, setIsExportModalOpen] = useState(false)
+
+  async function handleConfirmExport(options: ExportModalOptions) {
     if (busy) return
-    const payload = buildExportSegments(segments, settings, sourceWidth, sourceHeight)
+    const updatedSettings: ProjectSettings = {
+      ...settings,
+      exportResolution: options.exportResolution,
+      exportVideo: options.exportVideo,
+      exportVideoFormat: options.exportVideoFormat,
+      exportAudio: options.exportAudio,
+      exportAudioFormat: options.exportAudioFormat,
+      exportSrt: options.exportSrt,
+      exportSrtFormat: options.exportSrtFormat,
+      exportGif: options.exportGif,
+      exportGifRes: options.exportGifRes,
+    }
+    onSettings(updatedSettings)
+    const payload = buildExportSegments(segments, updatedSettings, sourceWidth, sourceHeight)
     const exportEndSec = Math.max(0, ...videoClips.map((clip) => clip.end))
     const exportStartSec = videoClips.length === 1 ? (videoClips[0].sourceStart ?? 0) : 0
-    await Promise.resolve(onExport(payload, exportEndSec, exportStartSec))
+    await Promise.resolve(onExport(payload, exportEndSec, exportStartSec, options.renderName))
   }
 
   const PROP_TABS: { key: PropTab; label: string; icon: React.ReactNode; hidden?: boolean }[] = [
@@ -4200,8 +4216,8 @@ export default function LivePreviewEditor({
           </label>
           <button
             type="button"
-            className="h-8 px-4 rounded-md bg-primary text-primary-foreground text-xs font-medium hover:opacity-90 transition-opacity disabled:opacity-50"
-            onClick={handleExport}
+            className="h-8 px-4 rounded-md bg-[#00c4cc] hover:bg-[#00b3ba] text-black font-semibold text-xs transition-colors disabled:opacity-50 cursor-pointer shadow-sm"
+            onClick={() => setIsExportModalOpen(true)}
             disabled={busy}
           >
             Xuất bản
@@ -4819,7 +4835,7 @@ export default function LivePreviewEditor({
                             <p
                               className={cn(
                                 'w-full h-full text-center text-white font-bold flex flex-col items-center justify-center',
-                                'overflow-hidden',
+                                'overflow-visible',
                               )}
                               style={{
                                 ...overlayDisplayFontStyle(
@@ -4842,11 +4858,9 @@ export default function LivePreviewEditor({
                               {lines.map((line, i) => (
                                 <span
                                   key={i}
-                                  className="block w-full text-center overflow-hidden"
+                                  className="block w-full text-center overflow-visible"
                                   style={{
                                     whiteSpace: 'nowrap',
-                                    textOverflow: 'clip',
-                                    maxWidth: '100%',
                                   }}
                                 >
                                   {line}
@@ -7599,6 +7613,15 @@ export default function LivePreviewEditor({
         </div>,
         document.body,
       )}
+      <ExportModal
+        isOpen={isExportModalOpen}
+        onClose={() => setIsExportModalOpen(false)}
+        onConfirmExport={handleConfirmExport}
+        projectTitle={projectId}
+        settings={settings}
+        videoCoverUrl={videoUrl}
+        durationSec={duration}
+      />
     </div>
   )
 }

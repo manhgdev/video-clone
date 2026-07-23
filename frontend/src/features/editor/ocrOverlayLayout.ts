@@ -71,7 +71,7 @@ function estimateLineW(text: string, fontPx: number): number {
       w += fontPx * 0.52
     else w += fontPx * 0.52
   }
-  return Math.max(1, Math.ceil(w * 1.02))
+  return Math.max(1, Math.ceil(w * 1.12))
 }
 
 /** Tách đơn vị xếp dọc: CJK = từng chữ; VI/Latin = từng từ (đứng, không xoay). */
@@ -83,6 +83,8 @@ export function verticalTextUnits(text: string): string[] {
   if (cjk >= Math.max(2, compact.length * 0.5)) return [...compact]
   const words = raw.split(/[\s·・/|]+/).filter(Boolean)
   if (!words.length) return [raw]
+  // ponytail: all-caps single word (brand/abbreviation) → 1 char per line
+  if (words.length === 1 && /^[A-Z]+$/.test(words[0])) return [...words[0]]
   if (words.length === 1 && words[0].length > 10) {
     const w0 = words[0]
     const mid = Math.max(1, Math.floor(w0.length / 2))
@@ -320,9 +322,9 @@ export function layoutMidOverlay(
     const { needW, needH } = blockSize(fs, lines)
     const maxLineW = seed.w - pads(fs).x * 2
     return (
-      needW <= seed.w + 0.5
-      && needH <= seed.h + 0.5
-      && lines.every((ln) => estimateLineW(ln, fs) <= maxLineW + 1)
+      needW <= seed.w
+      && needH <= seed.h
+      && lines.every((ln) => estimateLineW(ln, fs) <= maxLineW)
     )
   }
 
@@ -330,7 +332,11 @@ export function layoutMidOverlay(
     const maxW = Math.max(8, seed.w - pads(f).x * 2)
     if (estimateLineW(raw, f) <= maxW) return [raw]
     if (words.length < 2) return [raw]
-    let best: string[] = wrapLines(raw, maxW, f).slice(0, MAX_LINES)
+    // ponytail: merge overflow lines into last line — never drop text
+    const wrapped = wrapLines(raw, maxW, f)
+    let best: string[] = wrapped.length <= MAX_LINES
+      ? wrapped
+      : [...wrapped.slice(0, MAX_LINES - 1), wrapped.slice(MAX_LINES - 1).join(' ')]
     let bestScore = Infinity
     for (let i = 1; i < words.length; i++) {
       const a = words.slice(0, i).join(' ')
@@ -346,19 +352,25 @@ export function layoutMidOverlay(
   }
 
   const hCap = Math.max(10, Math.floor((seed.h / LINE) * 0.85))
-  let fontPx = Math.min(fontPxIn > 0 ? Math.round(fontPxIn) : hCap, hCap, 56)
-  let lines: string[] = [raw]
+  let font1 = Math.min(fontPxIn > 0 ? Math.round(fontPxIn) : hCap, hCap, 56)
+  while (font1 > 8 && !fitsSeed(font1, [raw])) font1 -= 1
 
-  while (fontPx > 8 && !fitsSeed(fontPx, [raw])) fontPx -= 1
-  if (fitsSeed(fontPx, [raw])) {
-    lines = [raw]
+  const hCap2 = Math.floor((seed.h / (LINE * 2)) * 0.88)
+  let font2 = Math.min(fontPxIn > 0 ? Math.round(fontPxIn) : hCap2, hCap2, 44)
+  let lines2 = pack2(font2)
+  while (font2 > 8 && !fitsSeed(font2, lines2)) {
+    font2 -= 1
+    lines2 = pack2(font2)
+  }
+
+  let fontPx: number
+  let lines: string[]
+  if (font2 > font1) {
+    fontPx = font2
+    lines = lines2
   } else {
-    fontPx = Math.min(fontPx, Math.floor((seed.h / (LINE * 2)) * 0.88), 44)
-    lines = pack2(fontPx)
-    while (fontPx > 8 && !fitsSeed(fontPx, lines)) {
-      fontPx -= 1
-      lines = pack2(fontPx)
-    }
+    fontPx = font1
+    lines = [raw]
   }
 
   // Co thêm nếu block vẫn > seed (an toàn)
@@ -367,17 +379,28 @@ export function layoutMidOverlay(
     if (lines.length > 1) lines = pack2(fontPx)
   }
 
-  // Cover = seed OCR vàng (không snug nhỏ hơn) — chữ co trong khung, không tràn dưới
-  const cover = seed
+  // Cover = seed OCR vàng — nhưng cho phép nới ngang nếu chữ dịch dài hơn
+  let cover = { ...seed }
   const p2 = pads(fontPx)
-  // Co font lần cuối nếu block > cover thật
+  // Co font lần cuối nếu block > cover chiều cao
   while (
     fontPx > 8
-    && (lines.length * fontPx * LINE + p2.top + p2.bot > cover.h + 0.5
-      || lines.some((ln) => estimateLineW(ln, fontPx) > cover.w - p2.x * 2 + 1))
+    && lines.length * fontPx * LINE + p2.top + p2.bot > cover.h + 0.5
   ) {
     fontPx -= 1
   }
+
+  // ponytail: nới rộng cover ngang nếu chữ dịch tràn bbox gốc
+  const p2b = pads(fontPx)
+  const maxLineW = Math.max(...lines.map((ln) => estimateLineW(ln, fontPx)), 0)
+  const needW = Math.ceil(maxLineW + p2b.x * 2)
+  if (needW > cover.w) {
+    const cx = cover.x + cover.w / 2
+    const newW = Math.min(frameW, needW)
+    const newX = Math.max(0, Math.min(frameW - newW, Math.round(cx - newW / 2)))
+    cover = { ...cover, x: newX, w: newW }
+  }
+
   const p3 = pads(fontPx)
   return {
     cover,
@@ -409,9 +432,9 @@ export function layoutOcrOverlay(
 export function __checkOcrOverlayLayout() {
   const midBox = { x: 200, y: 700, w: 240, h: 56 }
   const mid = layoutMidOverlay(midBox, 'Đào hoa quả', 0, 1080, 1920)
-  // Snug: cover ≤ OCR seed (không phình)
-  if (mid.cover.w > midBox.w + 1 || mid.cover.h > midBox.h + 1) {
-    throw new Error('mid must not grow past OCR cover')
+  // Height locked to seed
+  if (mid.cover.h > midBox.h + 1) {
+    throw new Error('mid must not grow past OCR cover height')
   }
   // Font fit trong cover (caption inset có pad đáy)
   if (mid.fontPx * 1.12 > mid.cover.h - 4) {
@@ -431,13 +454,12 @@ export function __checkOcrOverlayLayout() {
     1080,
     1920,
   )
-  if (longMid.cover.w > 420 + 1) throw new Error('long mid must not widen cover')
   if (longMid.cover.h > 90 + 1) throw new Error('long mid must not grow past seed h')
   if (longMid.lines.length > 2) throw new Error('mid max 2 lines')
   if (longMid.lines.length * longMid.fontPx * 1.12 > longMid.cover.h - 2) {
     throw new Error('long mid block taller than cover')
   }
-  // Câu dài 2 dòng trong box hẹp: font*lines*lh + pad ≤ cover ≤ seed
+  // Câu dài 2 dòng trong box hẹp: font*lines*lh + pad ≤ cover h
   const overflowMid = layoutMidOverlay(
     { x: 200, y: 1100, w: 380, h: 72 },
     'Tôi đã hạ từ trên núi xuống',
@@ -445,8 +467,8 @@ export function __checkOcrOverlayLayout() {
     1080,
     1920,
   )
-  if (overflowMid.cover.w > 380 + 1 || overflowMid.cover.h > 72 + 1) {
-    throw new Error('overflow mid cover must stay ≤ seed')
+  if (overflowMid.cover.h > 72 + 1) {
+    throw new Error('overflow mid cover height must stay ≤ seed')
   }
   if (overflowMid.lines.length * overflowMid.fontPx * 1.12 > overflowMid.cover.h + 1) {
     throw new Error('overflow mid text taller than cover')
@@ -462,8 +484,8 @@ export function __checkOcrOverlayLayout() {
     1080,
     1920,
   )
-  if (shortNice.lines.length !== 1) {
-    throw new Error('short mid should prefer 1 line, got ' + shortNice.lines.join('|'))
+  if (shortNice.lines.length > 2) {
+    throw new Error('short mid max 2 lines, got ' + shortNice.lines.join('|'))
   }
   // Bbox OCR cao/rộng: snug ôm chữ (cover nhỏ hơn seed)
   const tall = layoutMidOverlay(
@@ -473,16 +495,13 @@ export function __checkOcrOverlayLayout() {
     1080,
     1920,
   )
-  if (tall.lines.length !== 1) throw new Error('project mid must be 1 line')
-  if (tall.fontPx < 36) throw new Error('mid font too small: ' + tall.fontPx)
+  if (tall.lines.length > 2) throw new Error('project mid max 2 lines')
+  if (tall.fontPx < 28) throw new Error('mid font too small: ' + tall.fontPx)
   // Pad đáy đủ che stroke; không dải thừa lớn
   if (tall.cover.h < tall.fontPx * 1.2) {
     throw new Error('mid cover too short for glyph bottom: ' + tall.cover.h)
   }
-  if (tall.cover.h > tall.fontPx * 1.75) {
-    throw new Error('mid excess height: h=' + tall.cover.h + ' fs=' + tall.fontPx)
-  }
-  if (tall.cover.w > 463 + 2) throw new Error('mid must not widen past OCR')
+  // Cover height = seed height (locked)
 
   const vBox = { x: 40, y: 120, w: 48, h: 220 }
   const v = layoutVerticalOverlay(vBox, 'Cây màu tím', 0, 1080, 1920)
@@ -503,8 +522,7 @@ export function __checkOcrOverlayLayout() {
   if (L.fontPx > 40) throw new Error('label font must fit height')
 
   const short = layoutMidOverlay({ x: 196, y: 912, w: 136, h: 72 }, 'Đào hoa quả', 0, 1080, 1920)
-  if (short.cover.w > 136 + 1) throw new Error('short mid must not widen')
-  if (short.lines.length !== 1) throw new Error('short mid 1 line')
+  if (short.lines.length > 2) throw new Error('short mid max 2 lines')
   // 1 từ Latin
   const name = layoutMidOverlay({ x: 400, y: 900, w: 88, h: 64 }, 'Shaqin', 0, 1080, 1920)
   if (name.lines[0] !== 'Shaqin') throw new Error('latin word intact')

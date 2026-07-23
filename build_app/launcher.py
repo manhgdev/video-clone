@@ -38,6 +38,16 @@ os.environ.setdefault("OMP_NUM_THREADS", "2")
 os.environ.setdefault("MKL_NUM_THREADS", "2")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "2")
 os.environ.setdefault("NUMEXPR_NUM_THREADS", "2")
+# Tắt async FFmpeg frame decoding — tránh "Assertion fctx->async_lock failed"
+# (libavcodec/pthread_frame.c:173) khi VideoCapture mở video với multi-thread decoder.
+# Không có env var này: cv2 dùng thread_type=FRAME theo mặc định → assertion abort().
+os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "threads;1")
+# Windows: ưu tiên MSMF (Media Foundation) thay FFmpeg làm VideoCapture backend.
+# MSMF không dùng pthread frame-threading → không bao giờ gây assertion abort.
+# H264/H265/VP8/VP9, seek theo frame, CAP_PROP_FPS/FRAME_COUNT đều được hỗ trợ.
+if sys.platform == "win32":
+    os.environ.setdefault("OPENCV_VIDEOIO_PRIORITY_MSMF", "200")
+    os.environ.setdefault("OPENCV_VIDEOIO_PRIORITY_FFMPEG", "0")
 try:
     from pipeline.core.accel import apply_gpu_process_env
 
@@ -60,6 +70,23 @@ if getattr(sys, "frozen", False) and sys.stdout is None:
 
 if runtime_site.is_dir():
     sys.path.insert(0, str(runtime_site))
+    # CUDA DLL từ .venv-runtime/nvidia/*/bin — cần cho torch GPU (cudnn_cnn64_9.dll, v.v.)
+    _rt_nvidia = runtime_site / "nvidia"
+    _rt_cuda_bins: list[str] = []
+    if _rt_nvidia.is_dir():
+        _rt_cuda_bins.extend([str(p) for p in _rt_nvidia.glob("*/bin") if p.is_dir()])
+    _tlib = runtime_site / "torch" / "lib"
+    if _tlib.is_dir():
+        _rt_cuda_bins.append(str(_tlib))
+    if _rt_cuda_bins:
+        os.environ["PATH"] = os.pathsep.join(_rt_cuda_bins + [os.environ.get("PATH", "")])
+        _add_dll = getattr(os, "add_dll_directory", None)
+        if _add_dll and sys.platform == "win32":
+            for _b in _rt_cuda_bins:
+                try:
+                    _add_dll(_b)
+                except OSError:
+                    pass
     if getattr(sys, "frozen", False):
         try:
             from pipeline.core.runtime_site import (
@@ -135,13 +162,16 @@ bundle = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
 os.environ["PATH"] = os.pathsep.join((str(bundle), os.environ.get("PATH", "")))
 
 # Seed giọng zmAI đi kèm; không ghi đè giọng hoặc metadata người dùng đã sửa.
+# ponytail: kiểm tra mtime — không copy nếu target mới hơn source (tránh chậm startup mỗi lần).
 bundled_voice_refs = bundle / "resources" / "voice-ref"
 user_voice_refs = home / "resources" / "voice-ref"
 if bundled_voice_refs.is_dir():
     user_voice_refs.mkdir(parents=True, exist_ok=True)
     for source in bundled_voice_refs.iterdir():
+        if not source.is_file():
+            continue
         target = user_voice_refs / source.name
-        if source.is_file() and not target.exists():
+        if not target.exists() or source.stat().st_mtime > target.stat().st_mtime:
             shutil.copy2(source, target)
 
 # Ẩn cửa sổ console đen khi app GUI spawn ffmpeg / demucs / nvidia-smi
@@ -320,13 +350,15 @@ def run_desktop() -> int:
     base = api_base(port)
     print(f"VideoClone API → {base}", flush=True)
 
-    config = uvicorn.Config(app, host=API_HOST, port=port, log_level="warning")
+    config = uvicorn.Config(app, host=API_HOST, port=port, log_level="error")
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, name="videoclone-api", daemon=True)
     thread.start()
+    _t0 = time.monotonic()
+    print(f"VideoClone v{APP_VERSION} — chờ API...", flush=True)
     try:
         if not wait_for_server(port):
-            print(f"[desktop] API did not start on {base}", flush=True)
+            print(f"[desktop] API không khởi được sau {time.monotonic()-_t0:.1f}s", flush=True)
             # Giữ cửa sổ thông báo thay vì im lặng exit
             try:
                 webview.create_window(
@@ -344,6 +376,7 @@ def run_desktop() -> int:
             except Exception:
                 traceback.print_exc()
             return 1
+        print(f"[desktop] API sẵn sàng sau {time.monotonic()-_t0:.1f}s tại {base}", flush=True)
         win_w, win_h = 1440, 900
         x, y = centered_xy(win_w, win_h)
         icon = None
@@ -376,11 +409,14 @@ def run_desktop() -> int:
             )
         # webview.start() chặn đến khi user đóng cửa sổ — không thoát vì lỗi job nền
         try:
-            webview.start()
+            webview.start(gui="edgechromium", debug=False)
         except Exception:
-            traceback.print_exc()
-            print("[desktop] webview.start failed — xem app.log", flush=True)
-            return 1
+            try:
+                webview.start(debug=False)
+            except Exception:
+                traceback.print_exc()
+                print("[desktop] webview.start failed — xem app.log", flush=True)
+                return 1
         return 0
     finally:
         server.should_exit = True

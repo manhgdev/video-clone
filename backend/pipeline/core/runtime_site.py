@@ -12,6 +12,9 @@ from importlib.machinery import PathFinder
 from importlib.util import module_from_spec
 from pathlib import Path
 
+# add_dll_directory() trả handle — phải giữ sống hoặc GC sẽ xóa dir khỏi DLL search path!
+_dll_handles: list = []
+
 _RUNTIME_ROOTS = frozenset(
     {
         "accelerate",
@@ -93,7 +96,9 @@ def prepare_runtime_torch_dlls(site: Path) -> None:
     add_dir = getattr(os, "add_dll_directory", None)
     if add_dir and sys.platform == "win32":
         try:
-            add_dir(lib_s)
+            handle = add_dir(lib_s)
+            if handle is not None:
+                _dll_handles.append(handle)
         except OSError:
             pass
 
@@ -190,6 +195,9 @@ def ensure_cv2():
     prepare_cv2_import_path(root)
     import cv2 as _cv2  # noqa: F401
 
+    # OpenCV bootstrap có thể thêm site-packages/cv2 vào path; dọn lại.
+    _sanitize_cv2_sys_path()
+
     if not getattr(_cv2, "VideoCapture", None):
         raise ImportError("cv2 loaded without VideoCapture")
     return _cv2
@@ -225,10 +233,20 @@ def install_runtime_meta_path(site: Path | None = None) -> None:
         return
     prepare_cv2_import_path(root)
     prepare_runtime_torch_dlls(root)
+    # CUDA DLL paths phải được đăng ký TRƯỚC khi onnxruntime/rapidocr được import qua meta-path.
+    # Reset để re-scan sau khi prepare_cv2_import_path đã thêm .venv-runtime vào sys.path[0].
+    try:
+        from pipeline.ocr.extract_parts.runtime import _reset_cuda_dlls, prepare_cuda_dlls
+        _reset_cuda_dlls()  # force re-scan — sys.path vừa có .venv-runtime
+        prepare_cuda_dlls()
+    except Exception:
+        pass
     _purge_external_modules(root)
     site_s = str(root)
     if not any(isinstance(f, _RuntimeSiteFinder) for f in sys.meta_path):
         sys.meta_path.insert(0, _RuntimeSiteFinder(site_s))
+    # Sau khi purge, preload cv2 ngay từ .venv-runtime — tránh recursion khi rapidocr import cv2
+    preload_cv2()
 
 
 def _load_from_site(name: str, site: Path) -> None:

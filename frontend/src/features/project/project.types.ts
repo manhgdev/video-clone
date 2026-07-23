@@ -160,6 +160,14 @@ export type ProjectSettings = {
   previewCrop?: { x: number; y: number; w: number; h: number } | null
   /** Độ phân giải cạnh chuẩn khi xuất; original = giữ kích thước sau crop. */
   exportResolution: '144' | '240' | '360' | '480' | '720' | '1080' | '1440' | '2160' | 'original'
+  exportVideo?: boolean
+  exportVideoFormat?: string
+  exportAudio?: boolean
+  exportAudioFormat?: string
+  exportSrt?: boolean
+  exportSrtFormat?: string
+  exportGif?: boolean
+  exportGifRes?: string
   /**
    * Setting riêng theo engine (Whisper / OCR).
    * matchDuration + lọc âm không dùng chung — đổi nhận dạng nhớ từng bộ.

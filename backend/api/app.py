@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+import time
 import threading
 from contextlib import asynccontextmanager
 
@@ -15,6 +16,19 @@ from pipeline.core.config import PUBLIC_DATA
 
 
 def create_app() -> FastAPI:
+    try:
+        from pipeline.core.accel import apply_gpu_process_env
+
+        apply_gpu_process_env()
+    except Exception:
+        pass
+    try:
+        from pipeline.ocr.extract_parts.runtime import prepare_cuda_dlls
+
+        prepare_cuda_dlls()
+    except Exception:
+        pass
+
     # Windows: hide subprocess console windows (cheap)
     try:
         from pipeline.core.winproc import apply_subprocess_no_window
@@ -57,6 +71,9 @@ def create_app() -> FastAPI:
         def _run() -> None:
             # Frozen + dev warm: không pip torch (DLL lock / WinError 5). Chỉ warm model đã cài.
             if getattr(sys, "frozen", False):
+                # ponytail: delay 5s → uvicorn ready + webview mở trước khi torch chiếm CPU.
+                # Không delay trong dev (reload nhanh không cần).
+                time.sleep(5)
                 return
             try:
                 from pipeline.core.system_check import ensure_runtime_torch
@@ -91,6 +108,15 @@ def create_app() -> FastAPI:
             except Exception:
                 pass
 
+        def _warm_checks() -> None:
+            """Pre-warm _CHECKS_CACHE ngay sau server start — request đầu tiên trả cache ~<1s."""
+            try:
+                from pipeline.core.system_check import system_checks
+                system_checks(fast=True)
+            except Exception:
+                pass
+
+        threading.Thread(target=_warm_checks, name="warm-checks", daemon=True).start()
         threading.Thread(target=_run, name="warm-models", daemon=True).start()
         yield
 

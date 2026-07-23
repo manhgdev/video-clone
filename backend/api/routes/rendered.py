@@ -124,9 +124,17 @@ def api_delete_render(render_id: str):
     path = _render_path(render_id)
     if path is None:
         raise HTTPException(404, "Khong tim thay file render")
+    exports = PUBLIC_DATA / "exports"
     path.unlink()
     path.with_suffix(".json").unlink(missing_ok=True)
-    (PUBLIC_DATA / "exports" / "thumbnails" / f"{render_id}.jpg").unlink(missing_ok=True)
+    (exports / "thumbnails" / f"{render_id}.jpg").unlink(missing_ok=True)
+    # Bản "dễ tìm" <project>.mp4 chỉ bị ẩn khi còn bản lưu trữ <project>-*.mp4;
+    # xóa bản lưu trữ cuối cùng thì dọn luôn để video không hiện lại trong tab.
+    project_id = render_id.split("-", 1)[0]
+    if "-" in render_id and not any(exports.glob(f"{project_id}-*.mp4")):
+        (exports / f"{project_id}.mp4").unlink(missing_ok=True)
+        (exports / f"{project_id}.json").unlink(missing_ok=True)
+        (exports / "thumbnails" / f"{project_id}.jpg").unlink(missing_ok=True)
     return {"ok": True}
 
 

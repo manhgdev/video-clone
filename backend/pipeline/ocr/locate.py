@@ -3,27 +3,55 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 from typing import Any
 
+import threading
+
 from .extract import _ocr_join_lines, _rapidocr_labels
 from .labels import pick_label_box
 
+# Lock: chỉ một request được chạy OCR in-process — native ext crash khi song song.
+_inprocess_lock = threading.Lock()
 
-def _runtime_python() -> Path | None:
-    """Desktop .venv-runtime python — clean OpenCV, unlike frozen parent."""
+
+def _uv_run_cmd() -> list[str] | None:
+    """Trả prefix command [uv, run, --python, venv_path] để chạy worker
+    trong .venv-runtime mà không phụ thuộc vào system Python đã cài.
+    """
     if not getattr(sys, "frozen", False):
         return None
     home = (os.environ.get("VIDEO_CLONE_HOME") or "").strip()
     if not home:
+        if sys.platform == "win32":
+            home = str(Path(os.environ.get("LOCALAPPDATA", "")) / "VideoClone")
+        else:
+            home = str(Path.home() / ".local" / "share" / "VideoClone")
+    venv = Path(home) / ".venv-runtime"
+    if not venv.is_dir():
         return None
-    py = Path(home) / ".venv-runtime" / (
-        "Scripts/python.exe" if sys.platform == "win32" else "bin/python"
-    )
-    return py if py.is_file() else None
+    meipass = getattr(sys, "_MEIPASS", None)
+    exe_dir = Path(sys.executable).parent if getattr(sys, "frozen", False) else None
+    uv_name = "uv.exe" if sys.platform == "win32" else "uv"
+    uv: Path | None = None
+    for candidate in filter(None, [
+        exe_dir / uv_name if exe_dir else None,
+        Path(meipass) / uv_name if meipass else None,
+        exe_dir / "_internal" / uv_name if exe_dir else None,
+    ]):
+        if candidate.is_file():
+            uv = candidate
+            break
+    if uv is None:
+        uv_path = shutil.which("uv")
+        uv = Path(uv_path) if uv_path else None
+    if uv is None:
+        return None
+    return [str(uv), "run", "--no-config", "--no-python-downloads", "--python", str(venv)]
 
 
 def _locate_via_runtime_subprocess(
@@ -39,16 +67,24 @@ def _locate_via_runtime_subprocess(
     Crash/native OpenCV recursion chỉ giết worker — app desktop sống.
     Trả số bbox gắn, hoặc None nếu không spawn được (gọi in-process).
     """
-    py = _runtime_python()
-    if py is None:
+    uv_cmd = _uv_run_cmd()
+    if uv_cmd is None:
         return None
     # Bundle onedir: _MEIPASS/pipeline/… ; dev: backend/
     meipass = getattr(sys, "_MEIPASS", None)
-    if meipass:
-        pipeline_root = Path(meipass)
-    else:
-        pipeline_root = Path(__file__).resolve().parents[2]
-    if not (pipeline_root / "pipeline" / "ocr" / "locate.py").is_file():
+    exe_dir = Path(sys.executable).parent if getattr(sys, "frozen", False) else None
+    pipeline_root: Path | None = None
+    for cand in [
+        Path(meipass) if meipass else None,
+        exe_dir / "_internal" if exe_dir else None,
+        exe_dir if exe_dir else None,
+        Path(__file__).resolve().parents[2],
+    ]:
+        if cand and (cand / "pipeline" / "ocr" / "locate.py").is_file():
+            pipeline_root = cand
+            break
+
+    if pipeline_root is None:
         return None
 
     payload = {
@@ -90,9 +126,13 @@ Path(sys.argv[3]).write_text(
             wpy.write_text(worker_src, encoding="utf-8")
             env = os.environ.copy()
             env["PYTHONPATH"] = str(pipeline_root) + os.pathsep + env.get("PYTHONPATH", "")
-            # Worker là python sạch — không frozen
+            if not env.get("VIDEO_CLONE_HOME"):
+                if sys.platform == "win32":
+                    env["VIDEO_CLONE_HOME"] = str(Path(os.environ.get("LOCALAPPDATA", "")) / "VideoClone")
+                else:
+                    env["VIDEO_CLONE_HOME"] = str(Path.home() / ".local" / "share" / "VideoClone")
             env.pop("VIDEO_CLONE_DESKTOP", None)
-            cmd = [str(py), str(wpy), str(pipeline_root), str(pin), str(pout)]
+            cmd = [*uv_cmd, str(wpy), str(pipeline_root), str(pin), str(pout)]
             kw: dict[str, Any] = {
                 "capture_output": True,
                 "text": True,
@@ -109,11 +149,11 @@ Path(sys.argv[3]).write_text(
                     from pipeline.core.app_log import append_log
 
                     append_log(
-                        f"[locate-subprocess] fail code={proc.returncode}\n{err}",
+                        f"[locate-subprocess] fail code={proc.returncode} cmd={cmd[0]}\n{err}",
                     )
                 except Exception:
                     pass
-                return 0  # fail soft — keep translation, no crash parent
+                return -1  # spawn ok nhưng lỗi — phân biệt với None (không tìm được python)
             out = json.loads(pout.read_text(encoding="utf-8"))
             segs_out = out.get("segments")
             if isinstance(segs_out, list) and len(segs_out) == len(segments):
@@ -131,9 +171,14 @@ Path(sys.argv[3]).write_text(
                     ):
                         if k in src:
                             dst[k] = src[k]
-                        elif k in dst and k.startswith("_"):
-                            dst.pop(k, None)
-            return int(out.get("n") or 0)
+            n_res = int(out.get("n") or 0)
+            try:
+                from pipeline.core.app_log import append_log
+
+                append_log(f"[locate-subprocess] ok n={n_res}")
+            except Exception:
+                pass
+            return n_res
     except Exception as e:
         try:
             from pipeline.core.app_log import append_exception
@@ -141,7 +186,7 @@ Path(sys.argv[3]).write_text(
             append_exception("[locate-subprocess] exception", e)
         except Exception:
             pass
-        return 0
+        return -1  # exception khi spawn — phân biệt với None
 
 
 def _source_matches(text: str, source: str) -> bool:
@@ -370,6 +415,7 @@ def _probe_mid_hardsub(
     ocr: Any,
     source: str = "",
     analysis_region: Any = None,
+    layout: str = "horizontal",
 ) -> tuple[float, tuple[int, int, int, int], str] | None:
     """Trả (score, xyxy, text) — score cao = khớp source + đủ bề ngang."""
     h, w = frame_bgr.shape[:2]
@@ -399,10 +445,13 @@ def _probe_mid_hardsub(
         if not text:
             continue
         cjk = sum(1 for c in text if 0x4E00 <= ord(c) <= 0x9FFF)
+        is_sub = bool(src and len(text) >= 2 and text.lower() in src.lower())
+        
         if cjk < 1 or cjk > 28:
-            continue
+            if not is_sub:
+                continue
         # mảnh quá thiếu so với Whisper — bỏ; dòng dài hơn thì GIỮ (Whisper cắt nửa hardsub)
-        if src_cjk >= 3 and cjk < max(2, int(src_cjk * 0.55)):
+        if not is_sub and src_cjk >= 3 and cjk < max(2, int(src_cjk * 0.55)):
             continue
         try:
             xs = [float(p[0]) for p in box]
@@ -419,14 +468,15 @@ def _probe_mid_hardsub(
             continue
         if bh > h * 0.24:
             continue
-        if bh > bw * 1.35:
-            continue
-        cy = (by0 + by1) * 0.5
-        if not (h * 0.12 < cy < h * 0.92):
-            continue
-        # quá hẹp so với Whisper — bỏ; rộng hơn OK (che full dòng trên khung)
-        if src_cjk >= 3 and bw < src_cjk * max(28, int(w * 0.028)):
-            continue
+        if layout != "vertical":
+            if bh > bw * 1.35:
+                continue
+            cy = (by0 + by1) * 0.5
+            if not (h * 0.12 < cy < h * 0.92):
+                continue
+            # quá hẹp so với Whisper — bỏ; rộng hơn OK (che full dòng trên khung)
+            if not is_sub and src_cjk >= 3 and bw < src_cjk * max(28, int(w * 0.028)):
+                continue
         bb = (max(0, bx0), max(0, by0), min(w, bx1), min(h, by1))
         score = float(cjk) + (bw / max(1, w)) * 4
         if src:
@@ -452,7 +502,21 @@ def _probe_mid_hardsub(
     if not cands:
         return None
     cands.sort(key=lambda x: -x[0])
-    return cands[0]
+    best_score, best_bb, best_text = cands[0]
+    
+    # Gom (union) bbox của các mảnh khác cũng thuộc về source (ví dụ chữ tiếng Anh kế bên chữ Hán)
+    if src:
+        ux0, uy0, ux1, uy1 = best_bb
+        for score, bb, text in cands[1:]:
+            if len(text) >= 1 and text.lower() in src.lower():
+                bx0, by0, bx1, by1 = bb
+                ux0 = min(ux0, bx0)
+                uy0 = min(uy0, by0)
+                ux1 = max(ux1, bx1)
+                uy1 = max(uy1, by1)
+        best_bb = (ux0, uy0, ux1, uy1)
+        
+    return best_score, best_bb, best_text
 
 
 def _bbox_fits_source(bb: dict[str, Any], source: str, fw: int) -> bool:
@@ -549,18 +613,17 @@ def _apply_caption_box(
     cy = (y0 + y1) * 0.5
     ow = max(1, x1 - x0)
     oh = max(1, y1 - y0)
-    # Pad mỏng ôm chữ — mid không phình H (chữ bé trong hộp cao)
-    pad_x = max(3, int(round(fw * 0.003)), int(round(ow * 0.02)))
-    pad_y = max(2, int(round(fh * 0.0015)), int(round(oh * 0.06)))
-    # Hộp OCR quá cao: cắt H, ưu tiên giữ mép trên (cắt dư dưới — không center)
-    max_h = max(32, min(int(round(fh * 0.065)), int(round(ow * 0.26))))
-    if oh > max_h:
-        y1 = y0 + max_h
-        oh = max_h
-        pad_y = max(2, min(5, int(round(oh * 0.05))))
-    # Pad Y không đối xứng: trên mỏng, dưới vừa stroke (tránh dải vàng dưới chữ)
-    pad_top = max(2, min(pad_y, 4))
-    pad_bot = max(2, min(pad_y + 1, 5))
+    lay = str(seg.get("layout") or "")
+    if lay == "vertical":
+        pad_x = max(12, int(round(fw * 0.015)), int(round(ow * 0.15)))
+        pad_top = max(12, int(round(fh * 0.015)), int(round(oh * 0.05)))
+        pad_bot = max(12, int(round(fh * 0.015)), int(round(oh * 0.05)))
+    else:
+        pad_x = max(8, int(round(fw * 0.008)), int(round(ow * 0.04)))
+        pad_y = max(6, int(round(fh * 0.004)), int(round(oh * 0.08)))
+        pad_y = max(4, min(10, int(round(oh * 0.08))))
+        pad_top = max(4, min(pad_y, 10))
+        pad_bot = max(6, min(pad_y + 3, 14))
     x0p = max(0, x0 - pad_x)
     y0p = max(0, y0 - pad_top)
     x1p = min(fw, x1 + pad_x)
@@ -574,11 +637,13 @@ def _apply_caption_box(
     # True = OCR auto (editor được fit chữ lại). False chỉ khi user kéo/Áp Y.
     seg["bboxInherited"] = True
     saved = seg["bbox"]
-    seg["layout"] = (
-        "horizontal"
-        if saved["w"] >= max(1, saved["h"]) * 8
-        else _layout_from_cy(cy, fh)
-    )
+    old_lay = str(seg.get("layout") or "")
+    if old_lay not in ("vertical", "label"):
+        seg["layout"] = (
+            "horizontal"
+            if saved["w"] >= max(1, saved["h"]) * 8
+            else _layout_from_cy(cy, fh)
+        )
     seg.pop("captionLayout", None)
 
 
@@ -826,8 +891,9 @@ def attach_speech_hardsub_boxes(
     stable=True: đầu•giữa•cuối + majority + neo Y (chậm hơn ~3×).
     analysis_region: {x,y,w,h} 0–1 — thu hẹp ROI OCR (nhanh + ít nhiễu).
 
-    Frozen desktop: chạy trong subprocess .venv-runtime — crash OpenCV
-    không kéo tắt VideoClone.exe.
+    Frozen desktop: chạy trong subprocess .venv-runtime — crash OpenCV/RapidOCR
+    không kéo tắt VideoClone.exe. Không fallback in-process — native ext crash
+    trong frozen parent kill cả app, không bắt được bằng try/except.
     """
     if getattr(sys, "frozen", False):
         n = _locate_via_runtime_subprocess(
@@ -837,12 +903,11 @@ def attach_speech_hardsub_boxes(
             stable=stable,
             analysis_region=analysis_region,
         )
-        if n is not None:
+        if n is not None and n >= 0:
             return n
-        # Không fallback in-process trên frozen — cv2 recursion kill cả app.
+        # subprocess không chạy được — skip an toàn thay vì crash
         try:
             from pipeline.core.app_log import append_log
-
             append_log("[locate] no runtime subprocess — skip OCR boxes (keep translation)")
         except Exception:
             pass
@@ -910,27 +975,17 @@ def attach_speech_hardsub_boxes_inprocess(
     video_end = (frame_total / fps) if frame_total > 0 else None
     roi = _normalize_analysis_region(analysis_region)
 
-    # Migration cho project cũ: trước đây bbox của ba mốc bị copy cho gần như
-    # toàn bộ câu và chưa có cờ provenance. Xóa một lần để tạo lại đúng anchor
-    # OCR thật + bbox ước lượng; không đụng project chỉ có vài bbox kéo tay.
-    legacy = [
-        seg
-        for seg in segments
-        if isinstance(seg.get("bbox"), dict) and "bboxInherited" not in seg
-    ]
-    if len(legacy) >= max(4, len(segments) // 2):
-        for seg in legacy:
-            seg.pop("bbox", None)
-            seg.pop("captionLayout", None)
-
+    # Nếu segment đã có bbox từ nhận dạng OCR chuẩn (asr_paddleocr_inprocess),
+    # GIỮ NGUYÊN 100% vị trí x, y, w, h thực tế, không pop/xóa hay ép y đáy.
     for seg in segments:
-        _retag_layout_from_bbox(seg, fh)
+        bb = seg.get("bbox")
+        if isinstance(bb, dict) and bb.get("w") and bb.get("h"):
+            seg["bboxInherited"] = False
+            _retag_layout_from_bbox(seg, fh)
 
     filtered: list[dict[str, Any]] = []
     for seg in segments:
         lay = str(seg.get("layout") or "horizontal")
-        if lay in ("vertical", "label"):
-            continue
         src = str(seg.get("source") or "")
         if _cjk_len(src) < 1:
             continue
@@ -956,7 +1011,7 @@ def attach_speech_hardsub_boxes_inprocess(
         return n
 
     def _read_probe(
-        t: float, src: str
+        t: float, src: str, lay: str
     ) -> tuple[float, float, tuple[int, int, int, int], str] | None:
         cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, t) * 1000.0)
         ok, frame = cap.read()
@@ -969,6 +1024,7 @@ def attach_speech_hardsub_boxes_inprocess(
             analysis_region=(
                 {"x": roi[0], "y": roi[1], "w": roi[2], "h": roi[3]} if roi else None
             ),
+            layout=lay,
         )
         if not hit:
             return None
@@ -1000,7 +1056,7 @@ def attach_speech_hardsub_boxes_inprocess(
     from .cover_timing import attach_cover_times
 
     attached = 0
-    probes = _three_point_segments(filtered)
+    probes = filtered  # Đo trực tiếp từng phân đoạn để đè đúng vị trí chữ gốc
     total = len(probes)
     anchor_boxes: list[tuple[int, int, int, int]] = []
     try:
@@ -1013,10 +1069,10 @@ def attach_speech_hardsub_boxes_inprocess(
             src = str(seg.get("source") or "").strip()
             dur = max(0.2, e0 - s0)
             if stable:
-                # 3 frame × majority — chậm hơn, ít nhảy
+                # 3 frame × majority — chống OCR nhảy lung tung
                 hits: list[tuple[float, float, tuple[int, int, int, int], str]] = []
                 for t in _sample_times_in_cue(s0, e0):
-                    hit = _read_probe(t, src)
+                    hit = _read_probe(t, src, seg.get("layout") or "horizontal")
                     if not hit:
                         continue
                     box = hit[2]
@@ -1025,13 +1081,13 @@ def attach_speech_hardsub_boxes_inprocess(
                         hits.append(hit)
                 if not hits:
                     for t in _sample_times_in_cue(s0, e0):
-                        hit = _read_probe(t, src)
+                        hit = _read_probe(t, src, seg.get("layout") or "horizontal")
                         if hit:
                             hits.append(hit)
                 stable_box = _stable_box_from_hits(hits, fw=fw, fh=fh)
             else:
-                # Nhanh: 1 frame giữa cue
-                hit = _read_probe(s0 + dur * 0.5, src)
+                # 1 frame giữa cue
+                hit = _read_probe(s0 + dur * 0.5, src, seg.get("layout") or "horizontal")
                 stable_box = None
                 if hit:
                     box = hit[2]
@@ -1053,7 +1109,7 @@ def attach_speech_hardsub_boxes_inprocess(
         cap.release()
     attached += _inherit_caption_bboxes(segments, fh, fw)
     if stable:
-        # Neo Y chỉ Caption đáy inherit — không kéo CAP-MID xuống cuối
+        # Neo Y chỉ Caption đáy inherit — không kéo CAP-MID / tiêu đề dọc xuống đáy
         bottom_boxes = [
             b
             for b in anchor_boxes

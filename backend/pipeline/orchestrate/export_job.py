@@ -404,6 +404,56 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
         )
         shutil.copy2(out, easy)
 
+        # Xuất Âm thanh (MP3/WAV) nếu người dùng chọn
+        if bool(settings.get("exportAudio", False)):
+            try:
+                from pipeline.core.media import _cmd
+                fmt = str(settings.get("exportAudioFormat") or "mp3").lower()
+                audio_out = exports / f"{project_id}.{fmt}"
+                audio_archive = exports / f"{render_id}.{fmt}"
+                acodec = "libmp3lame" if fmt == "mp3" else "pcm_s16le" if fmt == "wav" else "aac"
+                _cmd(["ffmpeg", "-y", "-i", str(out), "-vn", "-acodec", acodec, str(audio_out)])
+                if audio_out.is_file():
+                    shutil.copy2(audio_out, audio_archive)
+            except Exception as ae:
+                print(f"[export] Audio export error: {ae}", flush=True)
+
+        # Xuất Chú thích (SRT) nếu người dùng chọn
+        if bool(settings.get("exportSrt", False)):
+            try:
+                from pipeline.export.srt import write_srt
+                srt_out = exports / f"{project_id}.srt"
+                srt_archive = exports / f"{render_id}.srt"
+                cues = []
+                for s in segments:
+                    if s.get("maskOnly"):
+                        continue
+                    txt = (str(s.get("translation") or s.get("source") or "")).strip()
+                    if txt:
+                        cues.append({
+                            "start": float(s.get("start") or 0),
+                            "end": float(s.get("end") or 0),
+                            "text": txt,
+                        })
+                if cues:
+                    write_srt(srt_out, cues, capcut=False)
+                    write_srt(srt_archive, cues, capcut=False)
+            except Exception as se:
+                print(f"[export] SRT export error: {se}", flush=True)
+
+        # Xuất GIF nếu người dùng chọn
+        if bool(settings.get("exportGif", False)):
+            try:
+                from pipeline.core.media import _cmd
+                gif_out = exports / f"{project_id}.gif"
+                gif_archive = exports / f"{render_id}.gif"
+                gif_res = str(settings.get("exportGifRes") or "240")
+                _cmd(["ffmpeg", "-y", "-i", str(out), "-vf", f"fps=12,scale={gif_res}:-1:flags=lanczos", str(gif_out)])
+                if gif_out.is_file():
+                    shutil.copy2(gif_out, gif_archive)
+            except Exception as ge:
+                print(f"[export] GIF export error: {ge}", flush=True)
+
         out_dur = ffprobe_duration(out)
         ow, oh = video_size(out)
         rel = export_display_path(out)

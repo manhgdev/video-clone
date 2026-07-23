@@ -40,3 +40,11 @@ def test_render_list_keeps_versions_and_thumbnail_cache(tmp_path, monkeypatch):
     assert not (exports / "project-200.mp4").exists()
     assert not (exports / "project-200.json").exists()
     assert not first.exists()
+    # còn project-100 nên bản dễ tìm project.mp4 vẫn được giữ (đang bị ẩn)
+    assert (exports / "project.mp4").exists()
+
+    # xóa bản lưu trữ cuối cùng phải dọn luôn project.mp4, tránh video "hiện lại"
+    assert rendered.api_delete_render("project-100") == {"ok": True}
+    assert not (exports / "project-100.mp4").exists()
+    assert not (exports / "project.mp4").exists()
+    assert rendered.list_rendered_videos() == []

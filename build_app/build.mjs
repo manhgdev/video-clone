@@ -101,6 +101,18 @@ if (
 }
 run(npmCommand, npmArgs('run', 'build'))
 
+// Pre-build validation
+const distIndex = path.join(root, 'frontend', 'dist', 'index.html')
+if (!existsSync(distIndex)) {
+  console.error('Thiếu frontend/dist/index.html — chạy npm run build trước.')
+  process.exit(1)
+}
+
+const ffmpegCheck = spawnSync(isWin ? 'where.exe' : 'which', ['ffmpeg'], { encoding: 'utf8', shell: false })
+if (ffmpegCheck.status !== 0) {
+  console.warn('Cảnh báo: ffmpeg không tìm thấy trên PATH — bản EXE thiếu ffmpeg.')
+}
+
 // Chỉ cài khi thiếu — không reinstall mỗi lần
 ensurePip(['pyinstaller', 'uv', 'pywebview'])
 
@@ -117,32 +129,55 @@ const args = [
   '--workpath', path.join(root, 'build_app', '.work'),
   '--specpath', path.join(root, 'build_app'),
   '--paths', path.join(root, 'backend'),
+  // ── Cross-platform data ────────────────────────────────────────────────────
   '--add-data', `${path.join(root, 'frontend', 'dist')}${dataSep}dist`,
-  '--add-data', `${path.join(root, 'backend', 'pipeline', 'tts', 'voices_capcut.json')}${dataSep}pipeline/tts`,
+  '--add-data', `${path.join(root, 'backend', 'pipeline')}${dataSep}pipeline`,
   '--add-data', `${path.join(root, 'backend', 'resources', 'voice-ref')}${dataSep}resources/voice-ref`,
   '--add-data', `${versionFilePath}${dataSep}.`,
-  ...(existsSync(iconIco) ? ['--add-data', `${iconIco}${dataSep}.`] : []),
   '--collect-all', 'webview',
+  // Hidden imports: stdlib + third-party hay bị PyInstaller miss
   '--hidden-import', 'timeit',
   '--hidden-import', 'pickletools',
   '--hidden-import', 'filecmp',
+  '--hidden-import', 'multiprocessing.synchronize',
+  '--hidden-import', 'multiprocessing.pool',
+  '--hidden-import', 'email.mime.text',
+  '--hidden-import', 'email.mime.multipart',
+  '--hidden-import', 'email.mime.base',
+  '--hidden-import', 'email.encoders',
+  '--hidden-import', 'httpx',
+  '--hidden-import', 'setuptools',
+  '--hidden-import', 'pkg_resources',
 ]
 
 // Các gói AI được cài vào %LOCALAPPDATA%/VideoClone/.venv-runtime ở lần mở đầu tiên.
+// Exclude thêm dev-only packages để giảm kích thước bundle.
 for (const mod of [
   'faster_whisper', 'ctranslate2', 'tokenizers', 'huggingface_hub',
   'rapidocr_onnxruntime', 'onnxruntime', 'cv2', 'PIL', 'numpy',
   'torch', 'torchaudio', 'transformers', 'datasets', 'accelerate',
   'pandas', 'scipy', 'sklearn', 'tensorflow', 'soundfile', 'librosa',
-  'pytest', 'lxml', 'pyarrow', 'matplotlib', 'sympy', 'numba', 'llvmlite',
+  'pytest', 'unittest', 'doctest', 'pdb', 'profile', 'cProfile',
+  'lxml', 'pyarrow', 'matplotlib', 'sympy', 'numba', 'llvmlite',
   'vieneu', 'perth', 'sea_g2p', 'soxr',
+  'webview.platforms.android', 'pycparser.lextab', 'pycparser.yacctab',
+  'IPython', 'ipykernel', 'notebook', 'jupyterlab',
 ]) args.push('--exclude-module', mod)
 
-if (isWin && existsSync(iconIco)) args.push('--icon', iconIco)
-else if (isMac && existsSync(iconIcns)) args.push('--icon', iconIcns)
+// ── Icon ──────────────────────────────────────────────────────────────────────
+if (isWin && existsSync(iconIco)) {
+  args.push('--icon', iconIco)
+  args.push('--add-data', `${iconIco}${dataSep}.`)  // dùng trong webview tray
+} else if (isMac && existsSync(iconIcns)) {
+  args.push('--icon', iconIcns)
+}
 
+// ── Windowed (ẩn terminal) ────────────────────────────────────────────────────
 if (isWin || isMac) args.push('--windowed')
+
+// ── WINDOWS-SPECIFIC ─────────────────────────────────────────────────────────
 if (isWin) {
+  // pythonnet / clr_loader — Windows COM interop (không có trên macOS/Linux)
   const sitePackages = spawnSync(python, ['-c', 'import site; print(site.getsitepackages()[-1])'], {
     encoding: 'utf8', shell: false,
   }).stdout.trim()
@@ -152,8 +187,37 @@ if (isWin) {
     '--collect-all', 'clr_loader',
     '--hidden-import', 'clr',
   )
+
+  // python3.dll (stable ABI) — cần cho cv2.pyd trong .venv-runtime.
+  // PyInstaller chỉ bundle python312.dll; cv2.pyd link với python3.dll.
+  // _internal/ đã được bootloader đăng ký add_dll_directory → cv2 tìm thấy.
+  // Trên macOS, dylib được resolve qua @rpath → không cần bước này.
+  const whereResult = spawnSync('where.exe', ['python3.dll'], { encoding: 'utf8', shell: false })
+  let py3dll = whereResult.status === 0 ? whereResult.stdout.trim().split(/\r?\n/)[0].trim() : ''
+  if (!py3dll || !existsSync(py3dll)) {
+    const basePy = spawnSync(python, [
+      '-c', 'import sys, os; exe=getattr(sys,"_base_executable",sys.executable); print(os.path.join(os.path.dirname(exe),"python3.dll"))'
+    ], { encoding: 'utf8', shell: false }).stdout.trim()
+    if (basePy && existsSync(basePy)) py3dll = basePy
+  }
+  if (py3dll && existsSync(py3dll)) {
+    args.push('--add-binary', `${py3dll}${dataSep}.`)
+    console.log(`[win] Bundling python3.dll: ${py3dll}`)
+  } else {
+    console.warn('[win] Cảnh báo: không tìm thấy python3.dll — cv2.pyd có thể fail trong APP.')
+  }
 }
 
+// ── MACOS-SPECIFIC ───────────────────────────────────────────────────────────
+if (isMac) {
+  // Bundle identifier cho .app (macOS yêu cầu reverse-DNS)
+  args.push('--osx-bundle-identifier', 'com.videoclone.app')
+  // Universal2: build cho cả Apple Silicon + Intel (nếu cross-compile được)
+  // Bỏ comment dòng dưới nếu build trên máy hỗ trợ universal2:
+  // args.push('--target-arch', 'universal2')
+}
+
+// ── Cross-platform: uv + ffmpeg/ffprobe ──────────────────────────────────────
 const uv = path.join(path.dirname(python), isWin ? 'uv.exe' : 'uv')
 if (!existsSync(uv)) {
   console.error(`Không tìm thấy uv: ${uv}`)
@@ -202,7 +266,7 @@ if (packageTarget && !skipArchive) {
   if (existsSync(archivePath)) rmSync(archivePath, { force: true })
   await new Promise((resolve, reject) => {
     const output = createWriteStream(archivePath)
-    const archive = archiver('zip', { zlib: { level: 9 } })
+    const archive = archiver('zip', { zlib: { level: 6 } })  // level 6: ~85% của 9 nhưng 3x nhanh
     output.on('close', resolve)
     output.on('error', reject)
     archive.on('error', reject)

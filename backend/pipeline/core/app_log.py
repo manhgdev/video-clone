@@ -124,6 +124,27 @@ def install_process_hooks() -> None:
         except Exception:
             pass
 
+    if sys.platform == "win32":
+        try:
+            from asyncio.proactor_events import _ProactorBasePipeTransport
+
+            _orig_call_conn_lost = _ProactorBasePipeTransport._call_connection_lost
+
+            def _patched_call_connection_lost(self, exc=None):
+                try:
+                    _orig_call_conn_lost(self, exc)
+                except ConnectionResetError:
+                    pass
+                except OSError as e:
+                    if getattr(e, "winerror", None) == 10054:
+                        pass
+                    else:
+                        raise
+
+            _ProactorBasePipeTransport._call_connection_lost = _patched_call_connection_lost
+        except Exception:
+            pass
+
     try:
         threading.excepthook = _thread_hook  # type: ignore[attr-defined]
     except Exception:

@@ -42,8 +42,6 @@ def whisper_loaded() -> bool:
 def get_whisper(workers: int = 2):
     """Load 1 lần / process — không reload khi đổi workers."""
     global _whisper, _whisper_threads
-    from faster_whisper import WhisperModel
-
     thr = _resolve_asr_workers(workers)
     with _whisper_lock:
         if _whisper is not None:
@@ -57,7 +55,7 @@ def get_whisper(workers: int = 2):
 
             if ctranslate2.get_cuda_device_count() > 0:
                 device, compute = "cuda", "float16"
-        except (ImportError, RuntimeError):
+        except (ImportError, RuntimeError, OSError):
             pass
         # Fallback: torch CUDA sẵn nhưng ctranslate2 chưa thấy GPU
         if device == "cpu":
@@ -74,6 +72,15 @@ def get_whisper(workers: int = 2):
                         pass
             except Exception:
                 pass
+
+        try:
+            from faster_whisper import WhisperModel
+        except OSError:
+            # torch không load được CUDA DLL (cudnn v.v.) — ép CPU mode
+            import os as _osenv
+            _osenv.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+            device, compute = "cpu", "int8"
+            from faster_whisper import WhisperModel  # noqa: F811
 
         # CUDA: ít CPU thread + num_workers>1 (batch decode). CPU: thr theo auto.
         if device == "cuda":

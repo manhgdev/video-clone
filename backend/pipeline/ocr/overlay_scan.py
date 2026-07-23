@@ -7,6 +7,7 @@ Không lưới refine 0.12s. Hardsub đáy crop riêng (extract).
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 from pathlib import Path
 from typing import Any, Callable
 
@@ -32,6 +33,8 @@ from .extract import (
 # Fallback 1 probe giữa khoảng nếu mốc ngoài lưới. Mục tiêu nhanh; lệch ~½ step coarse.
 _EDGE_EPS = 0.20
 _CLUSTER_GAP = 1.5
+# Gap rất ngắn cho text hoàn toàn khác — tránh gộp 2 caption riêng chỉ vì gap sát nhau
+_CLUSTER_GAP_DIFF = 0.5
 # Sticky dọc xuyên clip: ≥3 hit và span ≥5s → 1 segment + tối đa 2 biên
 _STICKY_VERT_HITS = 3
 _STICKY_VERT_SPAN = 5.0
@@ -94,21 +97,47 @@ def _cluster_hits_overlay(
     coarse_step: float,
     layout: str,
 ) -> list[list[Hit]]:
-    """Gom hit — cùng chữ được nới gap tới ~1.8× coarse (chữ giữ màn liên tục)."""
+    """Gom hit — cùng chữ được nới gap; bbox xa nhau → cluster riêng dù cùng t."""
     if not hits:
         return []
     ordered = sorted(hits, key=lambda h: float(h[0]))
     out: list[list[Hit]] = [[ordered[0]]]
     same_gap = max(gap, coarse_step * 1.8)
     for row in ordered[1:]:
-        prev = out[-1][-1]
-        dt = float(row[0]) - float(prev[0])
-        same = _ocr_same(prev[1], row[1]) or _ocr_sim(prev[1], row[1]) >= 0.72
-        if not same and layout == "label":
-            same = _ocr_label_overlap(prev[1], row[1]) >= 0.5
-        if dt <= (same_gap if same else gap):
-            out[-1].append(row)
-        else:
+        # Tìm cluster gần nhất về bbox (không được theo cluster cuối mà theo bbox lộn)
+        placed = False
+        dt = float(row[0]) - float(out[-1][-1][0])
+        for cluster in reversed(out):  # ưu tiên cluster gần nhất (thường là cuối)
+            prev = cluster[-1]
+            dt = float(row[0]) - float(prev[0])
+            same_text = _ocr_same(prev[1], row[1]) or _ocr_sim(prev[1], row[1]) >= 0.72
+            if not same_text and layout == "label":
+                same_text = _ocr_label_overlap(prev[1], row[1]) >= 0.5
+            # Kiểm tra khoảng cách bbox: nếu 2 hit đều có bbox, và tâm cách xa thì là chữ khác chỗ
+            bb_row, bb_prev = row[2], prev[2]
+            bbox_far = False
+            if bb_row and bb_prev:
+                cx_r = bb_row.get("x", 0) + bb_row.get("w", 0) / 2
+                cy_r = bb_row.get("y", 0) + bb_row.get("h", 0) / 2
+                cx_p = bb_prev.get("x", 0) + bb_prev.get("w", 0) / 2
+                cy_p = bb_prev.get("y", 0) + bb_prev.get("h", 0) / 2
+                # Dùng 1080x1920 như chuẩn; bbox đã được normalize
+                if abs(cx_r - cx_p) > 216 or abs(cy_r - cy_p) > 192:  # >20% W hoặc >10% H
+                    bbox_far = True
+            if bbox_far:
+                # Bbox cách xa: chờ cluster cùng bbox vùng
+                continue
+            if same_text:
+                max_gap_allow = same_gap
+            elif _ocr_sim(prev[1], row[1]) < 0.30:
+                max_gap_allow = _CLUSTER_GAP_DIFF  # text hoàn toàn khác: gap cực ngắn
+            else:
+                max_gap_allow = gap
+            if dt <= max_gap_allow:
+                cluster.append(row)
+                placed = True
+                break
+        if not placed:
             out.append([row])
     return out
 
@@ -282,6 +311,7 @@ class _OverlayProbe:
         self._w = max(1, int(workers or 1))
         self._tls: Any = type("T", (), {})()
         self._sem = _ocr_semaphore()
+        self._init_lock = threading.Lock()
         # Probe kích thước 1 lần
         cap0 = cv2.VideoCapture(str(self.video))
         self.ok = cap0.isOpened()
@@ -301,8 +331,14 @@ class _OverlayProbe:
     def _engine(self):
         eng = getattr(self._tls, "ocr", None)
         if eng is None:
-            self._tls.ocr = _rapidocr_labels()
-            eng = self._tls.ocr
+            with self._init_lock:
+                eng = getattr(self._tls, "ocr", None)
+                if eng is None:
+                    try:
+                        eng = _rapidocr_labels()
+                    except Exception:
+                        eng = _rapidocr_labels(use_cuda=False)
+                    self._tls.ocr = eng
         return eng
 
     def _thread_cap(self):

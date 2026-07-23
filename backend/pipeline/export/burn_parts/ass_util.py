@@ -86,6 +86,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     lines = [header]
     for seg in segments:
+        if seg.get("maskOnly"):
+            continue
         text = (seg.get("translation") or seg.get("source") or "").strip()
         if not text:
             continue
