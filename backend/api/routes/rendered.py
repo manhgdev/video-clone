@@ -42,12 +42,12 @@ def list_rendered_videos() -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for output in paths:
         render_id = output.stem
-        project_id = render_id.split("-", 1)[0]
-        if render_id == project_id and project_id in archived_projects:
-            continue
         try:
             sidecar = output.with_suffix(".json")
             saved = json.loads(sidecar.read_text(encoding="utf-8")) if sidecar.is_file() else {}
+            project_id = saved.get("projectId") or render_id.split("-", 1)[0]
+            if render_id == project_id and project_id in archived_projects:
+                continue
             name = str(saved.get("name") or "").strip() or f"Render {project_id}"
             width, height = video_size(output)
             duration = ffprobe_duration(output)

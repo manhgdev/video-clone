@@ -42,12 +42,12 @@ export const CAP_PAD_X = 1
 
 export function coverInnerWidth(coverW: number, fontSizePx: number, frameW: number) {
   const pad = coverPad(fontSizePx, frameW)
-  return Math.max(24, coverW - pad.x * 2 - CAP_PAD_X * 2)
+  return Math.max(4, coverW - pad.x * 2 - CAP_PAD_X * 2)
 }
 
 export function frameMaxInnerWidth(fontSizePx: number, frameW: number) {
   // Full ngang video (trừ pad mép) — bbox được full width
-  const maxCoverW = Math.max(24, frameW - 4)
+  const maxCoverW = Math.max(12, frameW - 4)
   return coverInnerWidth(maxCoverW, fontSizePx, frameW)
 }
 
@@ -66,7 +66,7 @@ export function fitCaptionLines(
   const trimmed = text.trim()
   if (!trimmed) return { lines: [''], fontPx: fontSizePx }
   let fontPx = Math.max(minFont, Math.round(fontSizePx))
-  const inner = Math.max(24, maxInnerW)
+  const inner = Math.max(4, maxInnerW)
   if (preferOneLine) {
     const minOneLineFont = Math.max(minFont, Math.round(fontSizePx * 0.8))
     while (fontPx > minOneLineFont && measureLineWidth(trimmed, fontPx) > inner) {
@@ -204,6 +204,8 @@ export function measureLineWidth(text: string, fontSizePx: number) {
 export function wrapCaptionText(text: string, maxInnerW: number, fontSizePx: number, maxLines = 3): string[] {
   const trimmed = text.trim()
   if (!trimmed) return ['']
+  if (maxLines <= 1) return [trimmed]
+
   // ponytail: measureLineWidth already has 1.15x safety — no extra tolerance needed
   const fits = (s: string) => measureLineWidth(s, fontSizePx) <= maxInnerW
   if (fits(trimmed)) return [trimmed]
@@ -722,17 +724,19 @@ export function resolveBelowAboveLayout(
   settings: ProjectSettings,
   frameW: number,
   frameH: number,
+  crop: CropRect,
   placement: 'below' | 'above',
 ): OverLayout | null {
   if (!seg.translation.trim()) return null
-  const fontPx = resolveCaptionFontSize(seg, settings, frameW, frameH)
+  const preferred = resolveCaptionFontSize(seg, settings, frameW, frameH)
   const ocr =
     (seg.bbox ? clampCoverBox(seg.bbox, frameW, frameH) : null)
-    ?? seedCoverBox(seg, frameW, frameH, fontPx)
-    ?? fallbackCoverBox(frameW, frameH, fontPx)
+    ?? seedCoverBox(seg, frameW, frameH, preferred)
+    ?? fallbackCoverBox(frameW, frameH, preferred)
+  const fontPx = autoFontFromBbox(ocr, seg.translation, preferred)
   const innerW = Math.min(frameW, Math.round(frameW * 0.88))
   const lines = wrapCaptionText(seg.translation, innerW, fontPx, 3)
-  const caption = estimateCaptionBox(ocr, seg.translation, fontPx, frameW, frameH, placement)
+  const caption = estimatePreviewCaptionBox(ocr, seg.translation, fontPx, frameW, frameH, crop, placement)
   return { cover: ocr, caption, lines, fontPx }
 }
 
@@ -759,7 +763,7 @@ export function buildExportSegments(
       && seg.layout !== 'vertical'
       && seg.layout !== 'label'
     ) {
-      const baked = resolveBelowAboveLayout(seg, settings, frameW, frameH, place)
+      const baked = resolveBelowAboveLayout(seg, settings, frameW, frameH, crop, place)
       if (baked) {
         return segmentWithLayout(seg, baked, baked.fontPx ?? resolveCaptionFontSize(seg, settings, frameW, frameH))
       }
@@ -836,9 +840,10 @@ export function layoutCaptionInCover(
 ): Pick<OverLayout, 'caption' | 'lines'> & { fontPx?: number } {
   const trimmed = text.trim()
   const edge = Math.max(2, Math.round(cover.w * 0.02))
-  const maxInnerW = Math.max(24, cover.w - edge * 2)
+  const maxInnerW = Math.max(4, cover.w - edge * 2)
   // Check 1-line font size
   const fit1 = fitCaptionLines(trimmed, maxInnerW, fontSizePx, {
+    minFont: 1,
     preferOneLine: true,
     maxLines: 1,
   })
@@ -846,6 +851,7 @@ export function layoutCaptionInCover(
 
   // Check 2-line font size (don't force one line)
   const fit2 = fitCaptionLines(trimmed, maxInnerW, fontSizePx, {
+    minFont: 1,
     preferOneLine: false,
     maxLines: 2,
   })
@@ -855,7 +861,7 @@ export function layoutCaptionInCover(
   let lines2 = fit2.lines
   while (font2 > 8 && lines2.length > 1 && Math.ceil(lines2.length * font2 * 1.12 + 4) > cover.h) {
     font2 -= 1
-    const refit = fitCaptionLines(trimmed, maxInnerW, font2, { preferOneLine: false, maxLines: 2 })
+    const refit = fitCaptionLines(trimmed, maxInnerW, font2, { preferOneLine: false, maxLines: 2, minFont: 1 })
     font2 = refit.fontPx
     lines2 = refit.lines
   }
@@ -869,8 +875,12 @@ export function layoutCaptionInCover(
     fontPx = font2
     lines = lines2
   } else {
-    fontPx = font1
-    lines = fit1.lines
+    // If 2-lines didn't fit, we fallback to 1 line.
+    // The previous fit1 might have aborted early due to preferOneLine's 20% limit.
+    // We force it to shrink all the way down to minFont to guarantee it fits.
+    const forcedFit = fitCaptionLines(trimmed, maxInnerW, fontSizePx, { minFont: 1, preferOneLine: false, maxLines: 1 })
+    fontPx = forcedFit.fontPx
+    lines = forcedFit.lines
   }
 
   const lineH = fontPx * 1.12

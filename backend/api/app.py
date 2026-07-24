@@ -16,28 +16,14 @@ from pipeline.core.config import PUBLIC_DATA
 
 
 def create_app() -> FastAPI:
-    try:
-        from pipeline.core.accel import apply_gpu_process_env
-
-        apply_gpu_process_env()
-    except Exception:
-        pass
-    try:
-        from pipeline.ocr.extract_parts.runtime import prepare_cuda_dlls
-
-        prepare_cuda_dlls()
-    except Exception:
-        pass
-
-    # Windows: hide subprocess console windows (cheap)
+    # ponytail: do NOT import torch/GPU stuff here — blocks main thread 2–10s on Windows.
+    # apply_gpu_process_env runs in warm-models thread below.
+    # Windows: hide subprocess console windows (cheap, 1ms)
     try:
         from pipeline.core.winproc import apply_subprocess_no_window
-
         apply_subprocess_no_window()
     except Exception:
         pass
-    # ponytail: do NOT import torch here — blocks worker 10–40s on Windows;
-    # cuDNN path fix runs in warm-models thread after listen.
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -75,6 +61,17 @@ def create_app() -> FastAPI:
                 # Không delay trong dev (reload nhanh không cần).
                 time.sleep(5)
                 return
+            # GPU env vars phải set TRƯỚC khi any child process spawn
+            try:
+                from pipeline.core.accel import apply_gpu_process_env
+                apply_gpu_process_env()
+            except Exception:
+                pass
+            try:
+                from pipeline.ocr.extract_parts.runtime import prepare_cuda_dlls
+                prepare_cuda_dlls()
+            except Exception:
+                pass
             try:
                 from pipeline.core.system_check import ensure_runtime_torch
 

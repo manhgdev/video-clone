@@ -399,39 +399,34 @@ def _caption_overlay(layout: dict[str, Any]) -> tuple[Any, int, int] | None:
     ty = m + max(0, (box_h - text_h) // 2) - int(round(metric_h * 0.06))
     thick = False  # ponytail: preview dùng soft shadow cho mọi layout; thick outline khác preview
     outline_thick = (
-        (-3, 0),
-        (3, 0),
-        (0, -3),
-        (0, 3),
-        (-2, -2),
-        (2, -2),
-        (-2, 2),
-        (2, 2),
-        (-3, -1),
-        (3, -1),
-        (-3, 1),
-        (3, 1),
-        (-1, -3),
-        (1, -3),
-        (-1, 3),
-        (1, 3),
-        (-2, -3),
-        (2, -3),
-        (-2, 3),
-        (2, 3),
+        (-3, 0), (3, 0), (0, -3), (0, 3), (-2, -2), (2, -2), (-2, 2), (2, 2),
+        (-3, -1), (3, -1), (-3, 1), (3, 1), (-1, -3), (1, -3), (-1, 3), (1, 3),
+        (-2, -3), (2, -3), (-2, 3), (2, 3),
     )
-    soft_shadow = (
-        (0, 1, 120),
-        (0, 2, 200),
-        (0, 3, 140),
-        (0, 4, 80),
-        (1, 2, 110),
-        (-1, 2, 110),
-        (2, 3, 70),
-        (-2, 3, 70),
-        (1, 1, 60),
-        (-1, 1, 60),
-    )
+    
+    if stroke_on and not thick:
+        from PIL import ImageFilter
+        shadow_layer = Image.new("RGBA", overlay.size, (0, 0, 0, 0))
+        shadow_draw = ImageDraw.Draw(shadow_layer)
+        # CSS drop-shadow: 0 2px 4px (relative to 48px base font in preview)
+        scale_f = max(0.5, font.size / 48.0)
+        dy_off = int(round(2 * scale_f))
+        blur_rad = max(1.0, 3.0 * scale_f)
+        
+        ty_s = ty
+        for i, line in enumerate(lines):
+            bb = draw.textbbox((0, 0), line, font=font)
+            tw = bb[2] - bb[0]
+            th = line_hs[i] if i < len(line_hs) else (bb[3] - bb[1])
+            tx = m + (box_w - tw) // 2
+            top = bb[1]
+            gy = ty_s - top
+            shadow_draw.text((tx, gy + dy_off), line, font=font, fill=(0, 0, 0, 230))
+            ty_s += th + (gap_line if i + 1 < len(lines) else 0)
+            
+        shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(blur_rad))
+        overlay.alpha_composite(shadow_layer)
+
     for i, line in enumerate(lines):
         bb = draw.textbbox((0, 0), line, font=font)
         tw = bb[2] - bb[0]
@@ -439,13 +434,9 @@ def _caption_overlay(layout: dict[str, Any]) -> tuple[Any, int, int] | None:
         tx = m + (box_w - tw) // 2
         top = bb[1]
         gy = ty - top
-        if stroke_on:
-            if thick:
-                for dx, dy in outline_thick:
-                    draw.text((tx + dx, gy + dy), line, font=font, fill=(0, 0, 0, 250))
-            else:
-                for dx, dy, aa in soft_shadow:
-                    draw.text((tx + dx, gy + dy), line, font=font, fill=(0, 0, 0, aa))
+        if stroke_on and thick:
+            for dx, dy in outline_thick:
+                draw.text((tx + dx, gy + dy), line, font=font, fill=(0, 0, 0, 250))
         draw.text((tx, gy), line, font=font, fill=fill)
         ty += th + (gap_line if i + 1 < len(lines) else 0)
     rgba = np.asarray(overlay)

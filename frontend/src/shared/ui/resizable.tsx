@@ -28,7 +28,7 @@ const ResizablePanel = ({ defaultSize, minSize, maxSize, ...props }: PanelProps)
   />
 )
 
-/* OpenCut-style: thin visible line + wide invisible ::after hit target (~10px) */
+/* Invisible handle: 6px transparent — dễ grab, không tốn diện tích thị giác */
 const ResizableHandle = ({
   withHandle: _withHandle,
   className,
@@ -36,14 +36,11 @@ const ResizableHandle = ({
 }: SeparatorProps & { withHandle?: boolean }) => (
   <Separator
     className={cn(
-      'relative z-20 flex shrink-0 items-center justify-center bg-border/40 transition-colors',
-      'hover:bg-primary/50 data-[separator=active]:bg-primary',
-      /* col-resize handle (horizontal panel group) */
-      'aria-[orientation=vertical]:w-px aria-[orientation=vertical]:self-stretch aria-[orientation=vertical]:cursor-col-resize',
-      'aria-[orientation=vertical]:after:content-[""] aria-[orientation=vertical]:after:absolute aria-[orientation=vertical]:after:inset-y-0 aria-[orientation=vertical]:after:left-1/2 aria-[orientation=vertical]:after:w-2.5 aria-[orientation=vertical]:after:-translate-x-1/2',
-      /* row-resize handle (vertical panel group) */
-      'aria-[orientation=horizontal]:h-px aria-[orientation=horizontal]:w-full aria-[orientation=horizontal]:cursor-row-resize',
-      'aria-[orientation=horizontal]:after:content-[""] aria-[orientation=horizontal]:after:absolute aria-[orientation=horizontal]:after:inset-x-0 aria-[orientation=horizontal]:after:top-1/2 aria-[orientation=horizontal]:after:h-2.5 aria-[orientation=horizontal]:after:w-full aria-[orientation=horizontal]:after:-translate-y-1/2 aria-[orientation=horizontal]:after:translate-x-0',
+      'relative z-20 shrink-0 bg-transparent transition-colors hover:bg-border/40 data-[separator=active]:bg-primary/50',
+      /* horizontal group → vertical separator (col-resize) */
+      'aria-[orientation=vertical]:w-0.5 aria-[orientation=vertical]:self-stretch aria-[orientation=vertical]:cursor-col-resize',
+      /* vertical group → horizontal separator (row-resize) */
+      'aria-[orientation=horizontal]:h-0.5 aria-[orientation=horizontal]:w-full aria-[orientation=horizontal]:cursor-row-resize',
       className,
     )}
     {...props}

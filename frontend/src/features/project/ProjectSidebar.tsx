@@ -608,17 +608,17 @@ export default function Sidebar({
                 value={
                   settings.originalAudioMode === 'mute'
                     ? 0
-                    : Math.max(0, Math.min(100, settings.originalAudioVolume ?? 100))
+                    : Math.max(0, Math.min(200, settings.originalAudioVolume ?? 100))
                 }
                 disabled={busy || settings.originalAudioMode === 'mute'}
                 onChange={(e) =>
-                  set('originalAudioVolume', Math.max(0, Math.min(100, Number(e.target.value) || 0)))
+                  set('originalAudioVolume', Math.max(0, Math.min(200, Number(e.target.value) || 0)))
                 }
               />
               <em className="audio-volume-pct">
                 {settings.originalAudioMode === 'mute'
                   ? 0
-                  : Math.max(0, Math.min(100, settings.originalAudioVolume ?? 100))}
+                  : Math.max(0, Math.min(200, settings.originalAudioVolume ?? 100))}
                 %
               </em>
             </label>

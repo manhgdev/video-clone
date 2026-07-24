@@ -496,13 +496,13 @@ export const api = {
       5000,
     ),
 
-  export: (projectId: string, settings: ProjectSettings, segments: Segment[] | undefined, exportEndSec: number | undefined, exportStartSec: number | undefined, renderName: string) =>
+  export: (projectId: string, settings: ProjectSettings, segments: Segment[] | undefined, exportEndSec: number | undefined, exportStartSec: number | undefined, renderName: string, coverDataUrl?: string) =>
     fetchJson<{ ok: boolean; url: string; path?: string; exports?: string }>(
       `${base}/projects/${projectId}/export`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...settings, renderName, ...(segments ? { segments } : {}), ...(exportEndSec && exportEndSec > 0 ? { exportEndSec } : {}), ...(exportStartSec && exportStartSec > 0 ? { exportStartSec } : {}) }),
+        body: JSON.stringify({ ...settings, renderName, ...(segments ? { segments } : {}), ...(exportEndSec && exportEndSec > 0 ? { exportEndSec } : {}), ...(exportStartSec && exportStartSec > 0 ? { exportStartSec } : {}), ...(coverDataUrl ? { coverDataUrl } : {}) }),
       },
     ),
 

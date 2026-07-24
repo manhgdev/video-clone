@@ -168,6 +168,7 @@ export type ProjectSettings = {
   exportSrtFormat?: string
   exportGif?: boolean
   exportGifRes?: string
+  exportOutputDir?: string
   /**
    * Setting riêng theo engine (Whisper / OCR).
    * matchDuration + lọc âm không dùng chung — đổi nhận dạng nhớ từng bộ.

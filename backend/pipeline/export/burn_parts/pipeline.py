@@ -576,7 +576,7 @@ def cover_and_burn(
                     force_vertical=label_tall,
                     source=src_s,
                 )
-            elif lay is None and layout_place == "over" and paint is not None:
+            elif lay is None and (layout_place == "over" or has_manual_bbox) and paint is not None:
                 # Overlay OCR không có captionLayout → classic / manual / auto-over
                 from pipeline.ocr.overlay_cover import (
                     classic_cover_fit,

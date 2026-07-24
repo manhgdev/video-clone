@@ -17,7 +17,7 @@ _LOCK = threading.Lock()
 _JOBS: dict[str, dict[str, Any]] = {}
 _PROCS: dict[str, subprocess.Popen] = {}
 
-CLEANER_TEMP_DIR = DATA / "cleaner_temp"
+CLEANER_TEMP_DIR = PUBLIC_DATA / "upload"
 CLEANER_OUT_DIR = DATA / "cleaner_out"
 
 def ensure_dirs():

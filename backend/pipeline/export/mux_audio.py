@@ -184,9 +184,9 @@ def _tts_clip_plan(
         else:
             # câu cuối / sau retime: đủ chỗ full TTS
             slot0 = max(0.15, ad + 0.15 if ad > 0.05 else end - start + 0.12)
-        # Lồng tiếng giữ nguyên 1x, không nhân với bake speed
+        # Lồng tiếng: manual * bake (khớp frontend dubPlaybackSpeed)
         manual = max(0.75, min(1.5, _num(seg.get("ttsSpeed"), 1)))
-        manual = max(0.5, min(2.0, manual))
+        manual = max(0.5, min(2.0, manual * bake))
         raw.append(
             (
                 wav,
@@ -427,7 +427,7 @@ def mux_dub(
         bake_speed=bake_speed,
     )
     out_dur = duration * video_factor
-    vol_mul = max(0.0, min(1.0, float(original_audio_volume)))
+    vol_mul = max(0.0, min(2.0, float(original_audio_volume)))
     inputs = ["-i", str(video)]
     filters: list[str] = []
     source_audio_index = 0
@@ -588,7 +588,7 @@ def mux_original_audio(
 ) -> Path:
     """Xuất video chỉ với track gốc đã lọc, hoặc bỏ hoàn toàn track âm thanh."""
     out = out_final(project_id)
-    vol_mul = max(0.0, min(1.0, float(original_audio_volume)))
+    vol_mul = max(0.0, min(2.0, float(original_audio_volume)))
     use_preseparated = (
         source_audio is not None
         and source_audio.exists()

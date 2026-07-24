@@ -352,3 +352,24 @@ def api_system_logs_clear():
 
     return clear_log()
 
+
+@router.post("/api/system/pick-folder")
+def api_pick_folder():
+    """Mở native folder picker dialog, trả về path user chọn."""
+    import platform
+
+    system = platform.system()
+    try:
+        # tkinter: có sẵn trong Python standard lib
+        import tkinter as tk
+        from tkinter import filedialog
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        folder = filedialog.askdirectory(title="Chọn thư mục xuất")
+        root.destroy()
+        if not folder:
+            return {"ok": False, "path": ""}
+        return {"ok": True, "path": str(Path(folder).resolve())}
+    except Exception as e:
+        raise HTTPException(500, f"Không mở được folder dialog: {e}") from e

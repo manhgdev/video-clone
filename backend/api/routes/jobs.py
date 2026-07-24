@@ -274,21 +274,62 @@ def api_reveal_output(project_id: str):
     import platform
     import subprocess
 
-    path = out_final(project_id)
-    if not path.exists():
-        easy = PUBLIC_DATA / "exports" / f"{project_id}.mp4"
-        path = easy if easy.exists() else path
-    if not path.exists():
+    exports = PUBLIC_DATA / project_id / "exports"
+    _meta = {}
+    try:
+        from pipeline.core.project import load_meta
+        _meta = load_meta(project_id) or {}
+        _custom = str(_meta.get("exportOutputDir") or "").strip()
+        if _custom and Path(_custom).is_dir():
+            exports = Path(_custom)
+            try:
+                from pipeline.orchestrate.export_job import _project_slug
+                exports = exports / _project_slug(_meta)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    import re
+    render_name = str(_meta.get("lastRenderName") or _meta.get("pendingRenderName") or "").strip() or f"Render {project_id}"
+    safe_name = re.sub(r'[^\w\s-]', '', render_name).strip()
+    safe_name = re.sub(r'[-\s]+', '-', safe_name)
+    if not safe_name:
+        safe_name = project_id
+
+    candidates = [
+        exports / f"{safe_name}.mp4",
+        exports / f"{safe_name}.mp3",
+        exports / f"{safe_name}.wav",
+        exports / f"{safe_name}.aac",
+        exports / f"{safe_name}.srt",
+        exports / f"{safe_name}.gif",
+        exports / f"{project_id}.mp4",
+    ]
+    path = next((p for p in candidates if p.exists()), None)
+
+    # Fallback: mở thư mục exports
+    if path is None:
+        path = exports if exports.exists() else None
+    if path is None:
         raise HTTPException(404, "Chưa có file xuất")
+
     system = platform.system()
     try:
         if system == "Darwin":
-            subprocess.Popen(["open", "-R", str(path)])
+            if path.is_dir():
+                subprocess.Popen(["open", str(path)])
+            else:
+                subprocess.Popen(["open", "-R", str(path)])
         elif system == "Windows":
-            subprocess.Popen(["explorer", "/select,", str(path)])
+            if path.is_dir():
+                subprocess.Popen(["explorer", str(path)])
+            else:
+                # /select, và path phải là 1 arg — không có space giữa
+                subprocess.Popen(["explorer", f"/select,{path}"])
         else:
-            subprocess.Popen(["xdg-open", str(path.parent)])
+            target = path if path.is_dir() else path.parent
+            subprocess.Popen(["xdg-open", str(target)])
     except OSError as e:
         raise HTTPException(500, str(e)) from e
     return {"ok": True, "path": str(path.resolve())}
-

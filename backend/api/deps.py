@@ -88,6 +88,7 @@ class ExportPayload(Settings):
     exportEndSec: float | None = None
     exportStartSec: float | None = None
     renderName: str = Field(min_length=1, max_length=120)
+    coverDataUrl: str | None = None
 
 
 class TextOverlayIn(BaseModel):

@@ -183,7 +183,7 @@ def prepare_cuda_dlls() -> None:
                         seen_bins.add(str(libs_dir))
                         bins.append(libs_dir)
         # Frozen APP (PyInstaller): thêm _MEIPASS/onnxruntime/capi/ và _MEIPASS/torch/lib/
-        meipass = getattr(sys, "_MEIPASS", None)
+        meipass = getattr(sys, "_MEIPASS", os.environ.get("VIDEO_CLONE_MEIPASS"))
         if meipass:
             for sub in ("onnxruntime/capi", "torch/lib"):
                 d = Path(meipass) / sub

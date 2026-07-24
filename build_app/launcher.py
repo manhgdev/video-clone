@@ -42,12 +42,12 @@ os.environ.setdefault("NUMEXPR_NUM_THREADS", "2")
 # (libavcodec/pthread_frame.c:173) khi VideoCapture mở video với multi-thread decoder.
 # Không có env var này: cv2 dùng thread_type=FRAME theo mặc định → assertion abort().
 os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "threads;1")
-# Windows: ưu tiên MSMF (Media Foundation) thay FFmpeg làm VideoCapture backend.
-# MSMF không dùng pthread frame-threading → không bao giờ gây assertion abort.
-# H264/H265/VP8/VP9, seek theo frame, CAP_PROP_FPS/FRAME_COUNT đều được hỗ trợ.
+# Windows: KHÔNG dùng MSMF vì MSMF tự động chèn viền đen (letterboxing) hoặc bóp méo 
+# khung hình video dọc làm lệch tọa độ Bbox của OCR.
+# Sử dụng FFmpeg với threads=1 đã khắc phục được lỗi pthread_frame.c.
 if sys.platform == "win32":
-    os.environ.setdefault("OPENCV_VIDEOIO_PRIORITY_MSMF", "200")
-    os.environ.setdefault("OPENCV_VIDEOIO_PRIORITY_FFMPEG", "0")
+    os.environ.setdefault("OPENCV_VIDEOIO_PRIORITY_MSMF", "0")
+    os.environ.setdefault("OPENCV_VIDEOIO_PRIORITY_FFMPEG", "100")
 try:
     from pipeline.core.accel import apply_gpu_process_env
 

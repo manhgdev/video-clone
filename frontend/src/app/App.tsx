@@ -18,6 +18,7 @@ import FilmPage from '@/pages/FilmPage'
 import BatchPage from '@/pages/BatchPage'
 import RendersPage from '@/pages/RendersPage'
 import VideoCleanerPage from '@/pages/VideoCleanerPage'
+import { ExportSuccessModal } from '@/features/editor/ExportSuccessModal'
 import { api } from '@/features/project/project.api'
 import { expandSegmentsForList, patchSegmentInTree } from '@/features/project/expandCompound'
 import type { HardwareInfo, JobStatus, ProjectSettings, Segment, Step, TextOverlay } from '@/features/project/project.types'
@@ -160,7 +161,7 @@ function loadSettings(): ProjectSettings {
     if (typeof s.originalAudioVolume !== 'number' || Number.isNaN(s.originalAudioVolume)) {
       s.originalAudioVolume = 100
     } else {
-      s.originalAudioVolume = Math.max(0, Math.min(100, s.originalAudioVolume))
+      s.originalAudioVolume = Math.max(0, Math.min(200, s.originalAudioVolume))
     }
     const okTr = [
       'google',
@@ -321,6 +322,8 @@ export default function App() {
   const [exportUrl, setExportUrl] = useState<string | null>(null)
   const [exportPath, setExportPath] = useState<string | null>(null)
   const [viewExportSrc, setViewExportSrc] = useState<string | null>(null)
+  const [exportSuccessOpen, setExportSuccessOpen] = useState(false)
+  const [lastExportedTypes, setLastExportedTypes] = useState({ video: true, audio: false, srt: false, gif: false })
   /** App desktop: file đã trên máy — chỉ Xem / Mở thư mục */
   const [isDesktopApp, setIsDesktopApp] = useState(false)
   const [previewEditorOpen, setPreviewEditorOpen] = useState(false)
@@ -643,9 +646,16 @@ export default function App() {
             )
             pendingExportUrl.current = null
             pendingExportPath.current = null
-            // Xuất xong → về trang chủ + hiện bản xuất
-            setPreviewEditorOpen(false)
-            setViewExportSrc(`${url}?t=${Date.now()}`)
+            // Hiện popup xuất xong thay vì auto-play video
+            const msg = s.message || ''
+            setLastExportedTypes({
+              video: /video/i.test(msg),
+              audio: /audio|âm thanh|mp3|wav/i.test(msg),
+              srt: /srt|chú thích/i.test(msg),
+              gif: /gif/i.test(msg),
+            })
+            setViewExportSrc(s.outputRel ? `${url}?t=${Date.now()}` : null)
+            setExportSuccessOpen(true)
           }
         }
       } catch {
@@ -1062,35 +1072,48 @@ export default function App() {
     })
   }
 
-  async function onExport(exportSegments?: Segment[], exportEndSec?: number, exportStartSec?: number, renderName = '') {
+  async function onExport(exportSegments?: Segment[], exportEndSec?: number, exportStartSec?: number, renderName = '', settingsOverride?: Partial<ProjectSettings>, coverDataUrl?: string) {
     if (!projectId || status.running) return
     setExportUrl(null)
     setExportPath(null)
     setViewExportSrc(null)
     setProgressMinimized(false)
     busyAt.current = Date.now()
-    // độ dài xuất = lần dịch gần nhất (status đã nói Preview Ns / full), không theo ô số khi đã Dịch cả video
+    // Tính effectiveSettings trước để message phản ánh đúng loại xuất
+    const effectiveSettings = settingsOverride ? { ...settings, ...settingsOverride } : settings
+    const doVideo = effectiveSettings.exportVideo !== false
+    const doAudio = effectiveSettings.exportAudio === true
+    const doSrt = effectiveSettings.exportSrt === true
+    const doGif = effectiveSettings.exportGif === true
     const audioHint =
-      settings.processOriginalAudio && settings.originalAudioMode === 'no_vocals'
+      effectiveSettings.processOriginalAudio && effectiveSettings.originalAudioMode === 'no_vocals'
         ? ' · xóa lời'
-        : settings.processOriginalAudio && settings.originalAudioMode === 'vocals'
+        : effectiveSettings.processOriginalAudio && effectiveSettings.originalAudioMode === 'vocals'
           ? ' · giữ lời'
-          : settings.processOriginalAudio && settings.originalAudioMode === 'mute'
+          : effectiveSettings.processOriginalAudio && effectiveSettings.originalAudioMode === 'mute'
             ? ' · tắt âm gốc'
+            : ''
+    // Message rõ ràng theo loại xuất được chọn
+    const typeParts: string[] = []
+    if (doVideo) typeParts.push('Video')
+    if (doAudio) typeParts.push('Audio')
+    if (doSrt) typeParts.push('SRT')
+    if (doGif) typeParts.push('GIF')
+    const typeLabel = typeParts.join(' + ') || 'Video'
+    const videoDetail =
+      doVideo && effectiveSettings.coverHardsubs && effectiveSettings.burnSubs && effectiveSettings.targetLang !== 'none'
+        ? ' (che chữ cũ + chèn bản dịch)'
+        : doVideo && effectiveSettings.burnSubs && effectiveSettings.targetLang !== 'none'
+          ? effectiveSettings.captionPlacement === 'above'
+            ? ' (chèn bản dịch phía trên)'
+            : ' (chèn bản dịch phía dưới)'
+          : doVideo && effectiveSettings.coverHardsubs
+            ? ' (che chữ cũ)'
             : ''
     setStatus({
       step: 'export',
       progress: 0,
-      message:
-        (settings.coverHardsubs && settings.burnSubs && settings.targetLang !== 'none'
-          ? 'Đang xuất (che chữ cũ + chèn bản dịch)'
-          : settings.burnSubs && settings.targetLang !== 'none'
-            ? settings.captionPlacement === 'above'
-              ? 'Đang xuất (chèn bản dịch phía trên)'
-              : 'Đang xuất (chèn bản dịch phía dưới)'
-            : settings.coverHardsubs
-              ? 'Đang xuất (che chữ cũ)'
-              : 'Đang xuất') + `${audioHint}…`,
+      message: `Đang xuất ${typeLabel}${videoDetail}${audioHint}…`,
       running: true,
       error: undefined,
     })
@@ -1099,7 +1122,7 @@ export default function App() {
       setSegments(exportSegments)
     }
     const finalRenderName = renderName.trim() || `Render ${projectId}`
-    const res = await api.export(projectId, settings, segs, exportEndSec, exportStartSec, finalRenderName)
+    const res = await api.export(projectId, effectiveSettings, segs, exportEndSec, exportStartSec, finalRenderName, coverDataUrl)
     pendingExportUrl.current = res.url
     pendingExportPath.current = res.exports || res.path || null
     setStatus((s) => ({ ...s, running: true }))
@@ -1121,10 +1144,7 @@ export default function App() {
   function onViewExport() {
     if (!projectId) return
     setViewExportSrc(`/api/projects/${projectId}/output?t=${Date.now()}`)
-  }
-
-  function onCloseViewExport() {
-    setViewExportSrc(null)
+    setExportSuccessOpen(true)
   }
 
   async function onCancel() {
@@ -1695,30 +1715,18 @@ export default function App() {
           {cacheToast}
         </div>
       )}
-      {viewExportSrc && (
-        <div
-          className="export-modal-backdrop"
-          role="presentation"
-          onClick={onCloseViewExport}
-          onKeyDown={(e) => e.key === 'Escape' && onCloseViewExport()}
-        >
-          <div
-            className="export-modal"
-            role="dialog"
-            aria-modal="true"
-            aria-label="Xem video đã xuất"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="export-modal-head">
-              <strong>Video đã xuất</strong>
-              <button type="button" className="export-modal-close" onClick={onCloseViewExport}>
-                Đóng
-              </button>
-            </div>
-            <video className="export-modal-video" src={viewExportSrc} controls autoPlay playsInline />
-          </div>
-        </div>
-      )}
+      <ExportSuccessModal
+        isOpen={exportSuccessOpen}
+        onClose={() => setExportSuccessOpen(false)}
+        onRevealFolder={() => {
+          void onRevealOutput()
+        }}
+        onOpenProject={() => { setExportSuccessOpen(false); setPreviewEditorOpen(true) }}
+        videoSrc={viewExportSrc}
+        message={status.message || ''}
+        exportedTypes={lastExportedTypes}
+        renderName={exportPath?.split('/').pop()?.replace(/\.[^.]+$/i, '') || undefined}
+      />
       <ProgressPopup
         active={
           status.running

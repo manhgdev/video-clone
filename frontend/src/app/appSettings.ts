@@ -137,7 +137,7 @@ export function loadSettings(): ProjectSettings {
     if (typeof s.originalAudioVolume !== 'number' || Number.isNaN(s.originalAudioVolume)) {
       s.originalAudioVolume = 100
     } else {
-      s.originalAudioVolume = Math.max(0, Math.min(100, s.originalAudioVolume))
+      s.originalAudioVolume = Math.max(0, Math.min(200, s.originalAudioVolume))
     }
     const okTr = [
       'google',

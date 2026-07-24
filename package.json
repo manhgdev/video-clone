@@ -1,7 +1,7 @@
 {
   "name": "video-clone",
   "private": true,
-  "version": "2.8.3",
+  "version": "2.9.0",
   "type": "module",
   "scripts": {
     "setup": "node scripts/setup.mjs",
@@ -15,6 +15,9 @@
     "start": "node scripts/dev.mjs"
   },
   "dependencies": {
+    "@dnd-kit/core": "^6.3.1",
+    "@dnd-kit/sortable": "^10.0.0",
+    "@dnd-kit/utilities": "^3.2.2",
     "clsx": "^2.1.1",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",

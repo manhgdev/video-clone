@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import type { ProjectSettings } from '../project/project.types'
+import { CoverPickerModal } from './CoverPickerModal'
 
 export interface ExportModalOptions {
   renderName: string
-  exportResolution: ProjectSettings['exportResolution']
+  exportResolution: string
   exportVideo: boolean
   exportVideoFormat: string
   exportAudio: boolean
@@ -13,6 +14,8 @@ export interface ExportModalOptions {
   exportSrtFormat: string
   exportGif: boolean
   exportGifRes: string
+  exportOutputDir: string
+  coverDataUrl?: string
 }
 
 interface ExportModalProps {
@@ -84,7 +87,6 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   const [codec, setCodec] = useState<'h264' | 'h265' | 'av1'>('h264')
   const [videoFormat, setVideoFormat] = useState<'mp4' | 'mov'>('mp4')
   const [fps, setFps] = useState<string>('30fps')
-  const [aiUhd, setAiUhd] = useState(false)
 
   // Audio Section
   const [exportAudio, setExportAudio] = useState(false)
@@ -103,14 +105,68 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
   // Copyright check
   const [copyrightCheck, setCopyrightCheck] = useState(false)
-  const [syncSpace, setSyncSpace] = useState(false)
+
+  // Thư mục xuất — lưu localStorage để nhớ qua các lần mở modal
+  const [exportDir, setExportDir] = useState(
+    () => localStorage.getItem('exportOutputDir') || ''
+  )
+
+  async function pickFolder() {
+    try {
+      const res = await fetch('/api/system/pick-folder', { method: 'POST' })
+      const data = await res.json() as { ok: boolean; path: string }
+      if (data.ok && data.path) {
+        setExportDir(data.path)
+        localStorage.setItem('exportOutputDir', data.path)
+      }
+    } catch {
+      // user cancel hoặc backend lỗi — ignore
+    }
+  }
+
+  // ponytail: capture frame video qua canvas — <img> không render được video URL
+  const [coverDataUrl, setCoverDataUrl] = useState<string | null>(null)
+  const [isCoverPickerOpen, setIsCoverPickerOpen] = useState(false)
 
   useEffect(() => {
     if (isOpen) {
       setRenderName((projectTitle || '0720').replace(/\.[^/.]+$/, ''))
       setExportRes(settings.exportResolution || '1080')
+      // mặc định: chỉ tích Video; reset mỗi lần mở modal
+      setExportVideo(settings.exportVideo ?? true)
+      setExportAudio(settings.exportAudio ?? false)
+      setExportGif(settings.exportGif ?? false)
+      setExportSrt(settings.exportSrt ?? false)
     }
   }, [isOpen, projectTitle, settings.exportResolution])
+
+  useEffect(() => {
+    if (!isOpen || !videoCoverUrl) {
+      setCoverDataUrl(null)
+      return
+    }
+    const vid = document.createElement('video')
+    vid.crossOrigin = 'anonymous'
+    vid.src = videoCoverUrl
+    vid.preload = 'metadata'
+    vid.muted = true
+    const capture = () => {
+      try {
+        const canvas = document.createElement('canvas')
+        canvas.width = vid.videoWidth || 320
+        canvas.height = vid.videoHeight || 180
+        canvas.getContext('2d')?.drawImage(vid, 0, 0, canvas.width, canvas.height)
+        setCoverDataUrl(canvas.toDataURL('image/jpeg', 0.85))
+      } catch {
+        setCoverDataUrl(null)
+      }
+    }
+    vid.addEventListener('seeked', capture, { once: true })
+    vid.addEventListener('loadedmetadata', () => { vid.currentTime = Math.min(0.5, (vid.duration || 1) * 0.1) }, { once: true })
+    vid.addEventListener('error', () => setCoverDataUrl(null), { once: true })
+    vid.load()
+    return () => { vid.src = '' }
+  }, [isOpen, videoCoverUrl])
 
   if (!isOpen) return null
 
@@ -128,6 +184,8 @@ export const ExportModal: React.FC<ExportModalProps> = ({
       exportSrtFormat: srtFormat,
       exportGif,
       exportGifRes: gifRes,
+      exportOutputDir: exportDir,
+      coverDataUrl: coverDataUrl || undefined,
     })
     onClose()
   }
@@ -177,8 +235,15 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                 borderColor: 'var(--border, #27272a)',
               }}
             >
-              {videoCoverUrl ? (
-                <img src={videoCoverUrl} alt="Video Cover" className="w-full h-full object-contain bg-black" />
+              {coverDataUrl ? (
+                <img src={coverDataUrl} alt="Video Cover" className="w-full h-full object-contain bg-black" />
+              ) : videoCoverUrl ? (
+                <video
+                  src={videoCoverUrl}
+                  className="w-full h-full object-contain bg-black"
+                  muted
+                  preload="metadata"
+                />
               ) : (
                 <div className="flex flex-col items-center justify-center gap-2 opacity-50">
                   <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
@@ -190,22 +255,42 @@ export const ExportModal: React.FC<ExportModalProps> = ({
               )}
 
               {/* Top-Left Cover Badge */}
-              <button
-                type="button"
-                className="absolute top-2.5 left-2.5 flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-medium backdrop-blur-md border transition-all shadow cursor-pointer"
-                style={{
-                  backgroundColor: 'rgba(0, 0, 0, 0.65)',
-                  color: '#ffffff',
-                  borderColor: 'rgba(255, 255, 255, 0.15)',
-                }}
-                onClick={() => alert('Đang sử dụng khung hình xem trước hiện tại làm ảnh bìa.')}
-              >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M12 20h9" />
-                  <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
-                </svg>
-                Sửa ảnh bìa
-              </button>
+              <div className="absolute top-2.5 left-2.5 flex items-center gap-1.5">
+                <button
+                  type="button"
+                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-medium backdrop-blur-md border transition-all shadow cursor-pointer"
+                  style={{
+                    backgroundColor: 'rgba(0, 0, 0, 0.65)',
+                    color: '#ffffff',
+                    borderColor: 'rgba(255, 255, 255, 0.15)',
+                  }}
+                  onClick={() => setIsCoverPickerOpen(true)}
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M12 20h9" />
+                    <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
+                  </svg>
+                  {coverDataUrl ? 'Đổi ảnh bìa' : 'Sửa ảnh bìa'}
+                </button>
+                {coverDataUrl && (
+                  <button
+                    type="button"
+                    title="Đặt lại về frame tự động"
+                    className="flex items-center justify-center w-6 h-6 rounded-md backdrop-blur-md border transition-all shadow cursor-pointer"
+                    style={{
+                      backgroundColor: 'rgba(0, 0, 0, 0.65)',
+                      color: '#a1a1aa',
+                      borderColor: 'rgba(255, 255, 255, 0.15)',
+                    }}
+                    onClick={() => setCoverDataUrl(null)}
+                  >
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                      <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                      <path d="M3 3v5h5" />
+                    </svg>
+                  </button>
+                )}
+              </div>
             </div>
           </div>
 
@@ -247,26 +332,31 @@ export const ExportModal: React.FC<ExportModalProps> = ({
               <div className="flex gap-2">
                 <input
                   type="text"
-                  readOnly
-                  value="server/data/exports/"
-                  className="flex-1 rounded-md px-3 py-1.5 outline-none cursor-default truncate"
+                  value={exportDir}
+                  onChange={(e) => {
+                    setExportDir(e.target.value)
+                    localStorage.setItem('exportOutputDir', e.target.value)
+                  }}
+                  className="flex-1 rounded-md px-3 py-1.5 outline-none transition-colors truncate"
                   style={{
                     backgroundColor: 'var(--input, #24252a)',
-                    color: 'var(--muted-foreground, #a1a1aa)',
+                    color: exportDir ? 'var(--foreground, #ffffff)' : 'var(--muted-foreground, #a1a1aa)',
                     borderColor: 'var(--border, #383940)',
                     borderWidth: '1px',
                   }}
+                  placeholder="Mặc định: Thư mục dự án"
                 />
                 <button
                   type="button"
-                  className="px-2.5 py-1.5 rounded-md transition-colors"
+                  onClick={pickFolder}
+                  className="px-2.5 py-1.5 rounded-md transition-colors hover:opacity-80"
                   style={{
                     backgroundColor: 'var(--input, #24252a)',
                     borderColor: 'var(--border, #383940)',
                     borderWidth: '1px',
                     color: 'var(--foreground, #ffffff)',
                   }}
-                  title="Thư mục xuất"
+                  title="Chọn thư mục xuất"
                 >
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                     <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
@@ -275,24 +365,8 @@ export const ExportModal: React.FC<ExportModalProps> = ({
               </div>
             </div>
 
-            {/* Đồng bộ video đã xuất vào không gian */}
-            <div className="pt-2 border-t" style={{ borderColor: 'var(--border, #27272a)' }}>
-              <label
-                className="flex items-center gap-2 cursor-pointer select-none"
-                style={{ color: 'var(--muted-foreground, #a1a1aa)' }}
-              >
-                <input
-                  type="checkbox"
-                  checked={syncSpace}
-                  onChange={(e) => setSyncSpace(e.target.checked)}
-                  className="accent-[#00c4cc] w-4 h-4 rounded"
-                />
-                <span>Đồng bộ video đã xuất vào không gian</span>
-                <span title="Tự động đồng bộ bản render vào bộ nhớ cloud">❓</span>
-              </label>
-            </div>
-
             {/* ── 1. Group Video ── */}
+
             <div className="pt-3 border-t" style={{ borderColor: 'var(--border, #27272a)' }}>
               <div
                 className="flex items-center justify-between py-1 cursor-pointer select-none font-medium hover:opacity-90 transition-colors"
@@ -324,30 +398,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
               {videoSectionOpen && (
                 <div className={`pl-6 pt-3 space-y-3 ${!exportVideo ? 'opacity-40 pointer-events-none' : ''}`}>
-                  {/* AI UHD Toggle */}
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-1.5">
-                      <span>AI UHD</span>
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-600/30 text-purple-300 font-bold border border-purple-500/30">
-                        PRO 💎
-                      </span>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setAiUhd(!aiUhd)}
-                      className={`w-9 h-5 rounded-full transition-colors relative flex items-center px-0.5 ${
-                        aiUhd ? 'bg-[#00c4cc]' : 'bg-[#383940]'
-                      }`}
-                    >
-                      <div
-                        className={`w-4 h-4 rounded-full bg-white transition-transform ${
-                          aiUhd ? 'translate-x-4' : 'translate-x-0'
-                        }`}
-                      />
-                    </button>
-                  </div>
 
-                  {/* Độ phân giải */}
                   <div className="flex items-center justify-between">
                     <span style={{ color: 'var(--muted-foreground, #a1a1aa)' }}>Độ phân giải</span>
                     <select
@@ -583,25 +634,20 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                 className="flex items-center justify-between py-1 cursor-pointer select-none font-medium hover:opacity-90 transition-colors"
                 onClick={() => setSrtSectionOpen(!srtSectionOpen)}
               >
-                <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
-                  <input
-                    type="checkbox"
-                    checked={exportSrt}
-                    onChange={(e) => {
-                      setExportSrt(e.target.checked)
-                      if (e.target.checked) setSrtSectionOpen(true)
-                    }}
-                    className="accent-[#00c4cc] w-4 h-4 rounded cursor-pointer"
-                  />
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                    <input
+                      type="checkbox"
+                      checked={exportSrt}
+                      onChange={(e) => {
+                        setExportSrt(e.target.checked)
+                        if (e.target.checked) setSrtSectionOpen(true)
+                      }}
+                      className="accent-[#00c4cc] w-4 h-4 rounded cursor-pointer"
+                    />
                     <span className="text-sm font-medium" style={{ color: 'var(--foreground, #ffffff)' }}>
                       Chú thích
                     </span>
-                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-600/30 text-purple-300 font-bold border border-purple-500/30">
-                      PRO 💎
-                    </span>
                   </div>
-                </div>
                 <svg
                   width="14"
                   height="14"
@@ -727,5 +773,15 @@ export const ExportModal: React.FC<ExportModalProps> = ({
     </div>
   )
 
-  return createPortal(modalContent, document.body)
+  return (
+    <>
+      {createPortal(modalContent, document.body)}
+      <CoverPickerModal
+        isOpen={isCoverPickerOpen}
+        onClose={() => setIsCoverPickerOpen(false)}
+        onConfirm={(dataUrl) => setCoverDataUrl(dataUrl)}
+        videoUrl={videoCoverUrl}
+      />
+    </>
+  )
 }

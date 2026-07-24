@@ -1,3 +1,4 @@
+import ProgressPopup from '@/shared/components/ProgressPopup'
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { createPortal } from 'react-dom'
 import type { ProjectSettings, Segment, TextOverlay } from '@/features/project/project.types'
@@ -5,12 +6,17 @@ import { api } from '@/features/project/project.api'
 import { IconHeadphones } from '@/shared/components/Icons'
 import { cn } from '@/shared/lib/cn'
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle, useDefaultLayout } from '@/shared/ui/resizable'
+import { DndContext, closestCenter, PointerSensor, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core'
+import { SortableContext, useSortable, arrayMove, horizontalListSortingStrategy } from '@dnd-kit/sortable'
+import { CSS as DndCSS } from '@dnd-kit/utilities'
+import { Panel } from 'react-resizable-panels'
 import { ScrollArea } from '@/shared/ui/scroll-area'
 import { fitOverlayFontPx, layoutOcrOverlay, midInsideVerticalWatermark } from '@/features/editor/ocrOverlayLayout'
 import { EditorMaskPanel } from '@/features/editor/EditorMaskPanel'
 import { ExportModal, type ExportModalOptions } from '@/features/editor/ExportModal'
 import { expandCompoundShell } from '@/features/project/expandCompound'
 import { generateLogoKeyframes, logoFrame } from '@/features/editor/lib/logoMotion'
+import { AudioWaveformBg, VolumeSlider } from './timeline/AudioWaveformBg'
 import {
   type AssetsTab,
   type CtxMenu,
@@ -160,7 +166,7 @@ type Props = {
   }) => void
   /** Undo bake: chỉ đổi workVideo/URL, giữ segments từ history */
   onRestoreBakedSpeed?: (speed: number) => void | Promise<void>
-  onExport: (segments?: Segment[], exportEndSec?: number, exportStartSec?: number, renderName?: string) => void | Promise<void>
+  onExport: (segments?: Segment[], exportEndSec?: number, exportStartSec?: number, renderName?: string, settingsOverride?: Partial<ProjectSettings>, coverDataUrl?: string) => void | Promise<void>
   onSettings: (settings: ProjectSettings) => void
   overlays: TextOverlay[]
   onOverlayChange: (overlay: TextOverlay, isNew?: boolean) => void
@@ -177,6 +183,71 @@ function loadTimelineTool(name: 'mainTrackMagnet' | 'autoSnapping' | 'mediaLinke
   } catch {
     return true
   }
+}
+
+type PanelId = 'tools' | 'preview' | 'properties'
+
+const PANEL_SIZES: Record<PanelId, { defaultSize: number; minSize?: number; maxSize?: number; className: string }> = {
+  tools:      { defaultSize: 25, minSize: 12, maxSize: 45, className: 'min-w-0' },
+  preview:    { defaultSize: 50, minSize: 25,               className: 'min-h-0 min-w-0' },
+  properties: { defaultSize: 25, minSize: 15, maxSize: 45, className: 'min-w-0' },
+}
+
+
+function SortablePanel({
+  id, children, defaultSize, minSize, maxSize, className,
+}: { id: PanelId; children: React.ReactNode; defaultSize: number; minSize?: number; maxSize?: number; className?: string }) {
+  const { setNodeRef, attributes, listeners, transform, transition, isDragging } = useSortable({ id })
+  const asPct = (v?: number) => v == null ? undefined : String(v)
+  return (
+    <Panel
+      id={id}
+      defaultSize={asPct(defaultSize)}
+      minSize={asPct(minSize)}
+      maxSize={asPct(maxSize)}
+      className={className}
+    >
+      {/* wrapper captures sortable ref + shows grip */}
+      <div
+        ref={setNodeRef}
+        className="relative h-full w-full"
+        style={{
+          transform: DndCSS.Transform.toString(transform),
+          transition: isDragging ? undefined : transition,
+          zIndex: isDragging ? 50 : undefined,
+        }}
+      >
+        {/* Grip handles — 4 góc, hiện khi hover trực tiếp vào icon */}
+        {(['tl','tr','bl','br'] as const).map((corner) => (
+          <div
+            key={corner}
+            {...attributes}
+            {...listeners}
+            title="Kéo để đổi vị trí panel"
+            className={cn(
+              'absolute z-50 w-5 h-5 rounded-sm',
+              'flex items-center justify-center',
+              'cursor-grab active:cursor-grabbing select-none',
+              'opacity-0 hover:opacity-100 transition-opacity duration-100',
+              'bg-background/90 border border-border shadow-sm',
+              corner === 'tl' && 'top-1 left-1',
+              corner === 'tr' && 'top-1 right-1',
+              corner === 'bl' && 'bottom-1 left-1',
+              corner === 'br' && 'bottom-1 right-1',
+            )}
+          >
+            <svg width="8" height="8" viewBox="0 0 8 8" fill="currentColor" className="text-muted-foreground">
+              <rect x="0" y="0" width="3" height="3" rx="0.5"/>
+              <rect x="5" y="0" width="3" height="3" rx="0.5"/>
+              <rect x="0" y="5" width="3" height="3" rx="0.5"/>
+              <rect x="5" y="5" width="3" height="3" rx="0.5"/>
+            </svg>
+          </div>
+        ))}
+        {children}
+      </div>
+    </Panel>
+  )
 }
 
 
@@ -243,11 +314,50 @@ export default function LivePreviewEditor({
     panelIds: ['tools', 'preview', 'properties'],
   })
 
+  // Panel order — persist to localStorage
+  const [panelOrder, setPanelOrder] = useState<PanelId[]>(() => {
+    try {
+      const saved = localStorage.getItem('videoclone.panel-order')
+      if (saved) {
+        const p = JSON.parse(saved) as unknown[]
+        if (Array.isArray(p) && p.length === 3 && p.every((x) => ['tools','preview','properties'].includes(x as string)))
+          return p as PanelId[]
+      }
+    } catch { /* ignore */ }
+    return ['tools', 'preview', 'properties']
+  })
+
+  const outerLayout = useDefaultLayout({
+    id: 'videoclone.editor.outer',
+    storage: typeof localStorage !== 'undefined' ? localStorage : undefined,
+    panelIds: ['left-col', 'right-col'],
+  })
+
+  // Layout preset: 'vertical' = preview cột phải full height; 'default' = preview giữa inline
+  const [layoutPreset, setLayoutPreset] = useState<'vertical' | 'default'>(() => {
+    try { return (localStorage.getItem('videoclone.layout-preset') as 'vertical' | 'default') || 'vertical' } catch { return 'vertical' }
+  })
+  const [showLayoutMenu, setShowLayoutMenu] = useState(false)
+
+  // Portal targets — 2 containers, chọn theo layoutPreset
+  const [rightColPortalEl, setRightColPortalEl] = useState<HTMLDivElement | null>(null)
+  const [inlinePortalEl, setInlinePortalEl] = useState<HTMLDivElement | null>(null)
+  const previewPortalEl = layoutPreset === 'vertical' ? rightColPortalEl : inlinePortalEl
+
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }))
+
+  function handlePanelDragEnd(event: DragEndEvent) {
+    const { active, over } = event
+    if (!over || active.id === over.id) return
+    const next = arrayMove(panelOrder, panelOrder.indexOf(active.id as PanelId), panelOrder.indexOf(over.id as PanelId))
+    setPanelOrder(next)
+    try { localStorage.setItem('videoclone.panel-order', JSON.stringify(next)) } catch { /* ignore */ }
+  }
+
   const [time, setTime] = useState(0)
   const layoutCacheRef = useRef<Record<string, { key: string; val: any }>>({})
-  useEffect(() => {
-    layoutCacheRef.current = {}
-  }, [projectId])
+  useEffect(() => { layoutCacheRef.current = {} }, [projectId])
+
   const [duration, setDuration] = useState(() =>
     Number.isFinite(mediaDurationProp) && (mediaDurationProp ?? 0) > 0 ? mediaDurationProp! : 0,
   )
@@ -431,8 +541,8 @@ export default function LivePreviewEditor({
   const textHistRef = useRef<{ key: string; t: number }>({ key: '', t: 0 })
 
   /** Mọi sửa 1 segment / overlay → undo được (Ctrl+Z). */
-  function editSegment(next: Segment, opts?: { textField?: string }) {
-    if (!historyQuietRef.current) {
+  function editSegment(next: Segment, opts?: { textField?: string; skipHistory?: boolean }) {
+    if (!historyQuietRef.current && !opts?.skipHistory) {
       if (opts?.textField) {
         const key = `${next.id}:${opts.textField}`
         const now = Date.now()
@@ -1005,7 +1115,7 @@ export default function LivePreviewEditor({
           const isVertLabel = s.layout === 'vertical' || s.layout === 'label'
           if (!overCoverMode) {
             // below/above: không vẽ mid/horizontal kiểu cover (đè OCR)
-            if (!isVertLabel) return null
+            if (!isVertLabel && s.bboxInherited !== false) return null
           } else if (
             !isOcrOverlayLayout(s.layout)
             && !effectiveOverlayLayout(s, sourceHeight)
@@ -1279,7 +1389,7 @@ export default function LivePreviewEditor({
   ) {
     const video = videoRef.current
     if (!video) return
-    const volMul = Math.max(0, Math.min(1, (settings.originalAudioVolume ?? 100) / 100))
+    const volMul = Math.max(0, Math.min(2, (settings.originalAudioVolume ?? 100) / 100))
     const bg = bgAudioRef.current
     const playStem = wantNoVocals && stemStatus === 'ready' && !!bg
     // Âm gốc chỉ điều khiển qua track «Âm gốc» (không duplicate mute trên Video)
@@ -2618,17 +2728,17 @@ export default function LivePreviewEditor({
             caption: laid.caption,
             lines: laid.lines,
             fontPx: laid.fontPx,
-          }, laid.fontPx))
+          }, laid.fontPx), { skipHistory: histGate.current })
           return
         }
         // Caption ngang: cùng fitFixedCoverCaption lúc kéo — thả không nhảy cỡ
         if (seg.translation.trim() && settings.burnSubs) {
           const layout = fitFixedCoverCaption(norm, seg.translation, sourceWidth, sourceHeight)
           const fitFs = layout.fontPx ?? autoFontFromBbox(norm, seg.translation, 0)
-          editSegment(segmentWithLayout({ ...seg, bboxInherited: false }, { ...layout, cover: norm }, fitFs))
+          editSegment(segmentWithLayout({ ...seg, bboxInherited: false }, { ...layout, cover: norm }, fitFs), { skipHistory: histGate.current })
           return
         }
-        editSegment({ ...seg, bbox: norm, bboxInherited: false, captionLayout: seg.captionLayout ?? null })
+        editSegment({ ...seg, bbox: norm, bboxInherited: false, captionLayout: seg.captionLayout ?? null }, { skipHistory: histGate.current })
       }
     }
     window.addEventListener('pointermove', update)
@@ -3886,6 +3996,7 @@ export default function LivePreviewEditor({
       return null as null | { box: PixelBox; fontPx: number }
     }
     if (timelineSeg.layout === 'vertical' || timelineSeg.layout === 'label') return null
+    if (timelineSeg.bboxInherited === false) return null
     const ocr =
       activeOcrBox
       ?? (timelineSeg.bbox ? clampCoverBox(timelineSeg.bbox, sourceWidth, sourceHeight) : null)
@@ -4105,7 +4216,7 @@ export default function LivePreviewEditor({
     if (busy) return
     const updatedSettings: ProjectSettings = {
       ...settings,
-      exportResolution: options.exportResolution,
+      exportResolution: options.exportResolution as ProjectSettings['exportResolution'],
       exportVideo: options.exportVideo,
       exportVideoFormat: options.exportVideoFormat,
       exportAudio: options.exportAudio,
@@ -4114,12 +4225,26 @@ export default function LivePreviewEditor({
       exportSrtFormat: options.exportSrtFormat,
       exportGif: options.exportGif,
       exportGifRes: options.exportGifRes,
+      exportOutputDir: options.exportOutputDir,
     }
     onSettings(updatedSettings)
     const payload = buildExportSegments(segments, updatedSettings, sourceWidth, sourceHeight)
     const exportEndSec = Math.max(0, ...videoClips.map((clip) => clip.end))
     const exportStartSec = videoClips.length === 1 ? (videoClips[0].sourceStart ?? 0) : 0
-    await Promise.resolve(onExport(payload, exportEndSec, exportStartSec, options.renderName))
+    const exportOverride: Partial<ProjectSettings> = {
+      exportResolution: options.exportResolution as ProjectSettings['exportResolution'],
+      exportVideo: options.exportVideo,
+      exportVideoFormat: options.exportVideoFormat,
+      exportAudio: options.exportAudio,
+      exportAudioFormat: options.exportAudioFormat,
+      exportSrt: options.exportSrt,
+      exportSrtFormat: options.exportSrtFormat,
+      exportGif: options.exportGif,
+      exportGifRes: options.exportGifRes,
+      exportOutputDir: options.exportOutputDir,
+    }
+    setIsExportModalOpen(false)
+    await Promise.resolve(onExport(payload, exportEndSec, exportStartSec, options.renderName, exportOverride, options.coverDataUrl))
   }
 
   const PROP_TABS: { key: PropTab; label: string; icon: React.ReactNode; hidden?: boolean }[] = [
@@ -4185,35 +4310,72 @@ export default function LivePreviewEditor({
                     : 'Khớp: theo cài đặt'}
           </span>
           <span className="text-xs text-muted-foreground">{busy ? 'Đang xử lý…' : 'Đã lưu'}</span>
-          <label
-            className="h-8 flex items-center gap-1 rounded-md border border-border bg-background px-2 text-xs text-muted-foreground"
-            title="Chất lượng đầu ra"
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
-              <rect x="3" y="4" width="18" height="14" rx="2" />
-              <path d="M8 21h8M12 18v3" />
-            </svg>
-            <select
-              className="bg-transparent text-foreground outline-none cursor-pointer"
-              value={settings.exportResolution}
-              disabled={busy}
-              onChange={(e) => onSettings({
-                ...settings,
-                exportResolution: e.target.value as ProjectSettings['exportResolution'],
-              })}
-              aria-label="Chất lượng đầu ra"
+          {/* Layout preset picker */}
+          <div className="relative">
+            <button
+              type="button"
+              title="Bố cục"
+              className="flex h-8 w-8 items-center justify-center rounded-md border border-border bg-background text-muted-foreground hover:bg-accent hover:text-foreground transition-colors cursor-pointer"
+              onClick={() => setShowLayoutMenu(v => !v)}
             >
-              <option value="144">144p</option>
-              <option value="240">240p</option>
-              <option value="360">360p</option>
-              <option value="480">480p</option>
-              <option value="720">720p</option>
-              <option value="1080">1080p</option>
-              <option value="1440">1440p (2K)</option>
-              <option value="2160">2160p (4K)</option>
-              <option value="original">Gốc</option>
-            </select>
-          </label>
+              {/* layout icon: 2 panels side by side + bottom bar */}
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="1" y="1" width="14" height="14" rx="2"/>
+                <line x1="9" y1="1" x2="9" y2="10"/>
+                <line x1="1" y1="10" x2="15" y2="10"/>
+              </svg>
+            </button>
+
+            {showLayoutMenu && (
+              <>
+                {/* backdrop */}
+                <div className="fixed inset-0 z-[9998]" onClick={() => setShowLayoutMenu(false)} />
+                <div
+                  className="absolute right-0 top-9 z-[9999] min-w-[200px] rounded-md border border-border bg-background shadow-xl py-1 text-xs"
+                  style={{ color: 'var(--foreground)' }}
+                >
+                  {([ ['default', 'Mặc định'], ['vertical', 'Dọc'] ] as const).map(([preset, label]) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      className="flex w-full items-center gap-2 px-3 py-2 hover:bg-accent transition-colors text-left"
+                      onClick={() => {
+                        setLayoutPreset(preset)
+                        try { localStorage.setItem('videoclone.layout-preset', preset) } catch { /* ignore */ }
+                        setShowLayoutMenu(false)
+                      }}
+                    >
+                      <span className="w-4 flex items-center justify-center">
+                        {layoutPreset === preset && (
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+                        )}
+                      </span>
+                      {label}
+                    </button>
+                  ))}
+                  <div className="my-1 border-t border-border" />
+                  <button
+                    type="button"
+                    className="flex w-full items-center gap-2 px-3 py-2 hover:bg-accent transition-colors text-left text-muted-foreground"
+                    onClick={() => {
+                      setLayoutPreset('vertical')
+                      try {
+                        localStorage.removeItem('videoclone.layout-preset')
+                        localStorage.removeItem('videoclone.editor.outer')
+                        localStorage.removeItem('videoclone.editor.main')
+                        localStorage.removeItem('videoclone.editor.sides')
+                      } catch { /* ignore */ }
+                      setShowLayoutMenu(false)
+                    }}
+                  >
+                    <span className="w-4" />
+                    Đặt lại bố cục tùy chỉnh
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+
           <button
             type="button"
             className="h-8 px-4 rounded-md bg-[#00c4cc] hover:bg-[#00b3ba] text-black font-semibold text-xs transition-colors disabled:opacity-50 cursor-pointer shadow-sm"
@@ -4228,6 +4390,14 @@ export default function LivePreviewEditor({
       {/* ── Editor layout — vertical gap-[0.18rem], panels rounded-sm ── */}
       <div className="min-h-0 min-w-0 flex-1">
         <ResizablePanelGroup
+          id="videoclone.editor.outer"
+          direction="horizontal"
+          className="size-full"
+          defaultLayout={outerLayout.defaultLayout}
+          onLayoutChanged={outerLayout.onLayoutChanged}
+        >
+          <ResizablePanel id="left-col" defaultSize={70} minSize={30} className="pl-2">
+        <ResizablePanelGroup
           id="videoclone.editor.main"
           direction="vertical"
           className="size-full"
@@ -4236,18 +4406,34 @@ export default function LivePreviewEditor({
         >
 
           {/* Main content: Assets | Preview | Properties */}
-          <ResizablePanel id="main" defaultSize={62} minSize={40} maxSize={82} className="min-h-0">
-            <ResizablePanelGroup
-              id="videoclone.editor.sides"
-              direction="horizontal"
-              className="size-full px-2"
-              defaultLayout={sideLayout.defaultLayout}
-              onLayoutChanged={sideLayout.onLayoutChanged}
-            >
+          <ResizablePanel id="main" defaultSize={62} minSize={15} className="min-h-0">
+            <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handlePanelDragEnd}>
+              <SortableContext items={layoutPreset === 'vertical' ? panelOrder.filter(p => p !== 'preview') : panelOrder} strategy={horizontalListSortingStrategy}>
+              <ResizablePanelGroup
+                key={`${panelOrder.join('|')}-${layoutPreset}`}
+                id={layoutPreset === 'vertical' ? 'videoclone.editor.sides-v' : 'videoclone.editor.sides'}
+                direction="horizontal"
+                className="size-full"
+                {...(layoutPreset !== 'vertical'
+                  ? { defaultLayout: sideLayout.defaultLayout, onLayoutChanged: sideLayout.onLayoutChanged }
+                  : {})}
+              >
+                {panelOrder.map((panelId, pIdx) => (
+                  <React.Fragment key={panelId}>
+                    {/* Handle: thêm giữa panel thực. Trong 'vertical' mode, bỏ qua preview (nó ở right-col) */}
+                    {pIdx > 0 &&
+                      (layoutPreset !== 'vertical' || panelId !== 'preview') &&
+                      panelOrder.slice(0, pIdx).some(p => layoutPreset !== 'vertical' || p !== 'preview') &&
+                      <ResizableHandle />}
 
-              {/* ── LEFT: Assets panel — vertical icon rail + view (OpenCut AssetsPanel) ── */}
-              <ResizablePanel id="tools" defaultSize={25} minSize={12} maxSize={45} className="min-w-0 pr-1">
-                <div className="panel bg-background flex h-full rounded-sm border border-border overflow-hidden">
+                    {panelId === 'tools' && (
+                    <SortablePanel
+                      {...PANEL_SIZES.tools}
+                      defaultSize={layoutPreset === 'vertical' ? 50 : PANEL_SIZES.tools.defaultSize}
+                      maxSize={layoutPreset === 'vertical' ? 85 : PANEL_SIZES.tools.maxSize}
+                      id="tools"
+                    >
+                      <div className="panel bg-background flex h-full rounded-sm border border-border overflow-hidden">
 
                   {/* Icon tab rail */}
                   <div className="scrollbar-hidden flex p-1 flex-col items-center justify-start gap-0.5 overflow-y-auto shrink-0">
@@ -4446,13 +4632,21 @@ export default function LivePreviewEditor({
                     )}
                   </div>
                 </div>
-              </ResizablePanel>
+                    </SortablePanel>
+                    )}
 
-              <ResizableHandle withHandle />
+                    {/* 'default' mode: preview slot inline — portal target nằm trong sides group */}
+                    {panelId === 'preview' && layoutPreset !== 'vertical' && (
+                      <SortablePanel {...PANEL_SIZES.preview} id="preview">
+                        <div
+                          ref={(el) => { if (el) setInlinePortalEl(el) }}
+                          className="relative h-full w-full"
+                        />
+                      </SortablePanel>
+                    )}
 
-              {/* ── CENTER: Preview panel (OpenCut PreviewPanel) ── */}
-              <ResizablePanel id="preview" defaultSize={50} minSize={25} className="min-h-0 min-w-0 px-1">
-                <div ref={previewRef} className="panel preview-panel bg-background relative flex size-full min-h-0 min-w-0 flex-col rounded-sm border border-border overflow-hidden">
+                    {panelId === 'preview' && previewPortalEl && createPortal(
+                      <div ref={previewRef} className="panel preview-panel bg-background relative flex size-full min-h-0 min-w-0 flex-col rounded-sm border border-border overflow-hidden">
 
                   {/* Viewport — Fit = vừa panel; % = scale + scroll */}
                   <div
@@ -4757,11 +4951,7 @@ export default function LivePreviewEditor({
                               onPointerDown={(e) => { e.stopPropagation(); beginBboxDrag(e, handle, bboxSeg) }}
                             />
                           ))}
-                          {(effectivePropTab === 'mask' || draggingBox) && (
-                            <span className="absolute -top-5 left-0 bg-violet-600/90 text-white text-[10px] px-1.5 py-0.5 rounded pointer-events-none whitespace-nowrap z-30">
-                              Vùng che · kéo góc/cạnh tự do
-                            </span>
-                          )}
+
                         </div>
                       )}
 
@@ -4834,7 +5024,7 @@ export default function LivePreviewEditor({
                           ) : overlayLay === 'label' || overlayLay === 'mid' ? (
                             <p
                               className={cn(
-                                'w-full h-full text-center text-white font-bold flex flex-col items-center justify-center',
+                                'max-w-full h-fit text-center text-white font-bold flex flex-col items-center justify-center',
                                 'overflow-visible',
                               )}
                               style={{
@@ -4858,7 +5048,7 @@ export default function LivePreviewEditor({
                               {lines.map((line, i) => (
                                 <span
                                   key={i}
-                                  className="block w-full text-center overflow-visible"
+                                  className="block max-w-full text-center overflow-visible"
                                   style={{
                                     whiteSpace: 'nowrap',
                                   }}
@@ -4869,7 +5059,7 @@ export default function LivePreviewEditor({
                             </p>
                           ) : (
                             <p
-                              className="w-full h-full text-center text-white font-bold flex flex-col items-center justify-center overflow-visible"
+                              className="max-w-full h-fit text-center text-white font-bold flex flex-col items-center justify-center overflow-visible"
                               style={{
                                 // boxSource = cover (container), không dùng caption.w — caption hẹp → cqw phình chữ to hơn bbox
                                 ...captionFontStyle(
@@ -4885,7 +5075,7 @@ export default function LivePreviewEditor({
                               }}
                             >
                               {lines.map((line, i) => (
-                                <span key={i} className="block w-full text-center whitespace-nowrap">
+                                <span key={i} className="block max-w-full text-center whitespace-nowrap">
                                   {line}
                                 </span>
                               ))}
@@ -4909,7 +5099,7 @@ export default function LivePreviewEditor({
                               'overflow-visible',
                             )}
                             style={{
-                              fontSize: `min(${Math.max(10, activeCaptionPx)}px, calc(100cqh * 0.92 / ${Math.max(1, Math.ceil((timelineSeg.translation.trim().split(/\s+/).length) / 6))}), calc(100cqw * 0.2))`,
+                              ...captionFontStyle(activeCaptionPx, activeCaptionBox.h),
                               lineHeight: 1.2,
                               ...captionChromeStyle(settings),
                               transform: 'none',
@@ -4942,7 +5132,7 @@ export default function LivePreviewEditor({
                               {overlay.logoSource !== 'text' && overlay.assetUrl
                                 ? <img src={overlay.assetUrl} className="size-full object-contain pointer-events-none" draggable={false} />
                                 : <div className="size-full flex items-center justify-center text-center font-extrabold" style={{ ...captionFontStyle(overlay.fontSize, overlay.h), fontFamily: captionFontCss(overlay.fontFamily ?? 'system'), color: overlay.color, textShadow: '0 2px 4px #000' }}>{overlay.text || 'LOGO'}</div>}
-                              {(sel || isLogoDraft) && <span className={cn('absolute -top-5 left-0 whitespace-nowrap rounded px-1 text-[10px] text-white', isLogoDraft ? 'bg-amber-600' : 'bg-cyan-700')}>{isLogoDraft ? 'Bản xem trước' : 'Logo · kéo / resize'}</span>}
+
                               {sel && (['nw', 'ne', 'sw', 'se'] as const).map((edge) => <span key={edge} className={cn('absolute size-4 rounded-sm bg-cyan-400 border border-white opacity-0 hover:opacity-100 transition-opacity', edge === 'nw' && '-left-2 -top-2 cursor-nwse-resize', edge === 'ne' && '-right-2 -top-2 cursor-nesw-resize', edge === 'sw' && '-left-2 -bottom-2 cursor-nesw-resize', edge === 'se' && '-right-2 -bottom-2 cursor-nwse-resize')} onPointerDown={(e) => beginOverlayResize(e, overlay, edge)} />)}
                             </div>
                           )
@@ -4970,9 +5160,7 @@ export default function LivePreviewEditor({
                               />
                               {sel && (
                                 <>
-                                  <span className="absolute -top-5 left-0 bg-fuchsia-600 text-white text-[10px] px-1 rounded z-20">
-                                    {overlay.text || 'Hiệu ứng'} · kéo / resize
-                                  </span>
+
                                   {(['nw', 'ne', 'sw', 'se', 'n', 's', 'e', 'w'] as const).map((edge) => {
                                     const pos: Record<string, string> = {
                                       nw: 'left-0 top-0 -translate-x-1/2 -translate-y-1/2 cursor-nwse-resize',
@@ -5007,9 +5195,7 @@ export default function LivePreviewEditor({
                             style={sourceToDisplayStyle(overlay, crop)}
                             onPointerDown={(e) => beginOverlayDrag(e, overlay)}
                           >
-                            {sel && (
-                              <span className="absolute -top-5 left-0 bg-violet-600 text-white text-[10px] px-1 rounded">⠿ drag</span>
-                            )}
+
                             <textarea
                               className="block w-full h-full bg-transparent outline-none resize-none text-center font-extrabold cursor-move"
                               style={{
@@ -5199,7 +5385,6 @@ export default function LivePreviewEditor({
                             <div className="my-1 border-t border-border" />
                             {PREVIEW_ZOOM_PRESETS.map((z) => (
                               <button
-                                key={z}
                                 type="button"
                                 className={cn(
                                   'flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-accent',
@@ -5241,14 +5426,17 @@ export default function LivePreviewEditor({
                       </div>
                     </div>
                   </div>
-                </div>
-              </ResizablePanel>
+                   </div>
+                    , previewPortalEl)}
 
-              <ResizableHandle withHandle />
-
-              {/* ── RIGHT: Properties panel — icon rail + content (OpenCut PropertiesPanel) ── */}
-              <ResizablePanel id="properties" defaultSize={25} minSize={15} maxSize={45} className="min-w-0 pl-1">
-                  <div className="panel bg-background flex h-full overflow-hidden rounded-sm border border-border">
+                    {panelId === 'properties' && (
+                    <SortablePanel
+                      {...PANEL_SIZES.properties}
+                      defaultSize={layoutPreset === 'vertical' ? 50 : PANEL_SIZES.properties.defaultSize}
+                      maxSize={layoutPreset === 'vertical' ? 85 : PANEL_SIZES.properties.maxSize}
+                      id="properties"
+                    >
+                      <div className="panel bg-background flex h-full overflow-hidden rounded-sm border border-border">
 
                     {/* Vertical tab rail — luôn hiện đủ tab (Âm thanh + Vùng che chữ) */}
                     <div className="flex shrink-0 flex-col gap-0.5 border-r border-border p-1 scrollbar-hidden overflow-y-auto">
@@ -5770,18 +5958,18 @@ export default function LivePreviewEditor({
                                       </button>
                                     ))}
                                   </div>
-                                  <PropLabel label={`Âm lượng nền: ${Math.max(0, Math.min(100, settings.originalAudioVolume ?? 100))}%`}>
+                                  <PropLabel label={`Âm lượng nền: ${Math.max(0, Math.min(200, settings.originalAudioVolume ?? 100))}%`}>
                                     <input
                                       type="range"
                                       min={0}
                                       max={100}
                                       className="w-full accent-primary"
-                                      value={Math.max(0, Math.min(100, settings.originalAudioVolume ?? 100))}
+                                      value={Math.max(0, Math.min(200, settings.originalAudioVolume ?? 100))}
                                       disabled={busy || settings.originalAudioMode === 'mute'}
                                       onChange={(e) =>
                                         onSettings({
                                           ...settings,
-                                          originalAudioVolume: Math.max(0, Math.min(100, Number(e.target.value) || 0)),
+                                          originalAudioVolume: Math.max(0, Math.min(200, Number(e.target.value) || 0)),
                                         })
                                       }
                                     />
@@ -5854,6 +6042,14 @@ export default function LivePreviewEditor({
                                           voice: v,
                                           ...(isOcrOverlayLayout(selected.layout) ? { dub: true } : {}),
                                         })
+                                      } else {
+                                        pushHistory()
+                                        const applied = segments.map((s) => {
+                                          if ((s.layout === 'vertical' || s.layout === 'label') && s.dub !== true) return s
+                                          return { ...s, voice: v }
+                                        })
+                                        void onSegmentsReplace(applied)
+                                        if (v) onSettings({ ...settings, defaultVoice: v })
                                       }
                                     }}
                                   >
@@ -5994,7 +6190,7 @@ export default function LivePreviewEditor({
                             ) : (
                               <>
                                 <p className="text-[11px] text-muted-foreground leading-relaxed">
-                                  Chọn giọng (nút <strong className="text-foreground font-medium">Tạo TTS tất cả</strong> bên phải) · chỉnh volume/tốc độ rồi <strong className="text-foreground font-medium">Áp dụng</strong> nếu cần.
+                                  Chọn giọng (nút <strong className="text-foreground font-medium">Tạo TTS tất cả</strong> bên phải) hoặc kéo thanh chỉnh volume/tốc độ để áp dụng cho tất cả các đoạn.
                                 </p>
                                 <PropLabel label={`Âm lượng TTS: ${globalTtsVolume}% · tất cả`}>
                                   <input
@@ -6005,6 +6201,15 @@ export default function LivePreviewEditor({
                                     value={globalTtsVolume}
                                     disabled={busy}
                                     onChange={(e) => setGlobalTtsVolume(Number(e.target.value))}
+                                    onPointerUp={(e) => {
+                                      const v = Number(e.currentTarget.value)
+                                      pushHistory()
+                                      const applied = segments.map((s) => {
+                                        if ((s.layout === 'vertical' || s.layout === 'label') && s.dub !== true) return s
+                                        return { ...s, ttsVolume: v }
+                                      })
+                                      void onSegmentsReplace(applied)
+                                    }}
                                   />
                                 </PropLabel>
                                 <div className="flex gap-1">
@@ -6019,7 +6224,15 @@ export default function LivePreviewEditor({
                                           : 'border-border text-muted-foreground hover:text-foreground hover:bg-accent',
                                       )}
                                       disabled={busy}
-                                      onClick={() => setGlobalTtsVolume(v)}
+                                      onClick={() => {
+                                        setGlobalTtsVolume(v)
+                                        pushHistory()
+                                        const applied = segments.map((s) => {
+                                          if ((s.layout === 'vertical' || s.layout === 'label') && s.dub !== true) return s
+                                          return { ...s, ttsVolume: v }
+                                        })
+                                        void onSegmentsReplace(applied)
+                                      }}
                                     >
                                       {v === 0 ? 'Tắt' : `${v}%`}
                                     </button>
@@ -6036,6 +6249,15 @@ export default function LivePreviewEditor({
                                     value={globalTtsSpeed}
                                     disabled={busy}
                                     onChange={(e) => setGlobalTtsSpeed(Number(e.target.value))}
+                                    onPointerUp={(e) => {
+                                      const v = Number(e.currentTarget.value)
+                                      pushHistory()
+                                      const applied = segments.map((s) => {
+                                        if ((s.layout === 'vertical' || s.layout === 'label') && s.dub !== true) return s
+                                        return { ...s, ttsSpeed: v }
+                                      })
+                                      void onSegmentsReplace(applied)
+                                    }}
                                   />
                                 </PropLabel>
                                 <div className="flex gap-1">
@@ -6050,7 +6272,15 @@ export default function LivePreviewEditor({
                                           : 'border-border text-muted-foreground hover:text-foreground hover:bg-accent',
                                       )}
                                       disabled={busy}
-                                      onClick={() => setGlobalTtsSpeed(v)}
+                                      onClick={() => {
+                                        setGlobalTtsSpeed(v)
+                                        pushHistory()
+                                        const applied = segments.map((s) => {
+                                          if ((s.layout === 'vertical' || s.layout === 'label') && s.dub !== true) return s
+                                          return { ...s, ttsSpeed: v }
+                                        })
+                                        void onSegmentsReplace(applied)
+                                      }}
                                     >
                                       {v}×
                                     </button>
@@ -6059,35 +6289,18 @@ export default function LivePreviewEditor({
 
                                 <button
                                   type="button"
-                                  className="w-full rounded-md border border-border bg-accent hover:bg-muted px-3 py-1.5 text-xs transition-colors disabled:opacity-50"
-                                  disabled={busy || segments.length === 0}
-                                  onClick={() => {
-                                    pushHistory()
-                                    const vol = Math.max(0, Math.min(200, globalTtsVolume))
-                                    const sp = Math.max(0.75, Math.min(1.5, globalTtsSpeed))
-                                    const voice = globalVoice || settings.defaultVoice
-                                    const applied = segments.map((s) => {
-                                      if ((s.layout === 'vertical' || s.layout === 'label') && s.dub !== true) {
-                                        return s
-                                      }
-                                      return { ...s, ttsVolume: vol, ttsSpeed: sp, voice }
-                                    })
-                                    void onSegmentsReplace(applied)
-                                    if (voice && voice !== settings.defaultVoice) {
-                                      onSettings({ ...settings, defaultVoice: voice })
-                                    }
-                                  }}
-                                >
-                                  Áp dụng giọng + âm thanh cho tất cả
-                                </button>
-                                <button
-                                  type="button"
                                   className="w-full rounded-md border border-border bg-accent hover:bg-muted px-3 py-1.5 text-xs transition-colors"
                                   disabled={busy}
                                   onClick={() => {
                                     setGlobalTtsVolume(100)
                                     setGlobalTtsSpeed(1)
                                     setGlobalVoice(settings.defaultVoice || '')
+                                    pushHistory()
+                                    const applied = segments.map((s) => {
+                                      if ((s.layout === 'vertical' || s.layout === 'label') && s.dub !== true) return s
+                                      return { ...s, ttsVolume: 100, ttsSpeed: 1, voice: settings.defaultVoice || '' }
+                                    })
+                                    void onSegmentsReplace(applied)
                                   }}
                                 >
                                   Reset về 100% · 1× · giọng mặc định
@@ -6264,16 +6477,22 @@ export default function LivePreviewEditor({
                       </div>
                     </ScrollArea>
                   </div>
-              </ResizablePanel>
-
-            </ResizablePanelGroup>
+                    </SortablePanel>
+                    )}
+                  </React.Fragment>
+                ))}
+              </ResizablePanelGroup>
+              </SortableContext>
+            </DndContext>
           </ResizablePanel>
 
-          <ResizableHandle withHandle />
+          <ResizableHandle />
 
           {/* ── BOTTOM: Timeline (CapCut — rộng, track cao) ── */}
-          <ResizablePanel id="timeline" defaultSize={38} minSize={26} maxSize={58} className="min-h-0 px-2 pb-2 pt-0.5">
-            <div className="panel bg-background h-full flex flex-col rounded-sm border border-border overflow-hidden">
+          <ResizablePanel id="timeline" defaultSize={38} minSize={10} maxSize={80} className="min-h-0 pb-2 pt-0.5">
+            <div
+              className="panel bg-background h-full flex flex-col rounded-sm border border-border overflow-hidden"
+            >
 
               {/* Timeline toolbar — bản gốc (trước chỉnh CapCut icon) */}
               <div className="flex items-center justify-between h-10 border-b border-border shrink-0 px-2.5">
@@ -6876,7 +7095,6 @@ export default function LivePreviewEditor({
                       {showDubTrack && (
                       <div className={cn('relative h-10 box-border border-b border-border/80 overflow-hidden', trackHidden.dub && 'opacity-30')} style={{ backgroundColor: 'var(--background)' }}>
                         {(() => {
-                          // Không bung compound — TTS đã gói trong shell (chỉ hiện video)
                           const dubs = segments.filter(
                             (seg) => !seg.isCompound && segmentHasDub(seg) && seg.audioUrl,
                           )
@@ -6940,11 +7158,30 @@ export default function LivePreviewEditor({
                                      openCtxMenu({ kind: 'dub', segId: seg.id, x: e.clientX, y: e.clientY }, e)
                                    }
                                  }}
-                              >
-                                <IconHeadphones size={11} className="shrink-0 mr-1 opacity-90" />
-                                {(seg.ttsSpeed ?? 1) !== 1 ? `${seg.ttsSpeed}×` : 'TTS'}
-                              </button>
-                            )
+                               >
+                                 <AudioWaveformBg />
+                                 <div className="relative z-10 flex items-center h-full pointer-events-none truncate mr-4">
+                                   <IconHeadphones size={11} className="shrink-0 mr-1 opacity-90" />
+                                   {(seg.ttsSpeed ?? 1) !== 1 ? `${seg.ttsSpeed}×` : 'TTS'}
+                                 </div>
+                                 <VolumeSlider
+                                   initialVolume={seg.ttsVolume ?? 100}
+                                   maxVolume={200}
+                                   onChangeEnd={(v) => {
+                                     if (v !== (seg.ttsVolume ?? 100)) {
+                                       if (!historyQuietRef.current) pushHistory()
+                                       const nextSegs = segments.map(s => {
+                                         if (s.voice && s.voice !== 'none') {
+                                           return { ...s, ttsVolume: v }
+                                         }
+                                         return s
+                                       })
+                                       void onSegmentsReplace(nextSegs)
+                                     }
+                                   }}
+                                 />
+                               </button>
+                             )
                            })
                          })()}
                        </div>
@@ -6972,7 +7209,7 @@ export default function LivePreviewEditor({
                               baseLabel = 'Xóa lời — lỗi tách (bấm Âm thanh → Thử lại)'
                               bg = '#c44'
                             } else if (stemStatus === 'ready') {
-                              baseLabel = `Xóa lời · nền ${Math.max(0, Math.min(100, settings.originalAudioVolume ?? 100))}%`
+                              baseLabel = `Xóa lời · nền ${Math.max(0, Math.min(200, settings.originalAudioVolume ?? 100))}%`
                               bg = '#3D7AE5'
                             } else {
                               baseLabel = 'Xóa lời… 1%'
@@ -7025,11 +7262,22 @@ export default function LivePreviewEditor({
                                   openCtxMenu({ kind: 'bg', x: e.clientX, y: e.clientY }, e)
                                 }}
                               >
+                                <AudioWaveformBg />
                                 <span
                                   className="absolute inset-y-0 left-0 w-2.5 cursor-ew-resize hover:bg-white/25 z-10"
                                   onPointerDown={(e) => beginMediaDrag(e, 'bg', clip, 'start')}
                                 />
-                                <span className="truncate pointer-events-none">{baseLabel}</span>
+                                <span className="truncate pointer-events-none relative z-10">{baseLabel}</span>
+                                <VolumeSlider
+                                  initialVolume={settings.originalAudioVolume ?? 100}
+                                  maxVolume={200}
+                                  onChangeEnd={(v) => {
+                                    if (v !== (settings.originalAudioVolume ?? 100)) {
+                                      if (!historyQuietRef.current) pushHistory()
+                                      onSettings({ ...settings, originalAudioVolume: v })
+                                    }
+                                  }}
+                                />
                                 <span
                                   className="absolute inset-y-0 right-0 w-2.5 cursor-ew-resize hover:bg-white/25 z-10"
                                   onPointerDown={(e) => beginMediaDrag(e, 'bg', clip, 'end')}
@@ -7115,6 +7363,22 @@ export default function LivePreviewEditor({
               </div>
             </div>
           </ResizablePanel>
+
+        </ResizablePanelGroup>
+          </ResizablePanel>
+
+          {/* Right col: preview full height — ch\u1ec9 trong 'vertical' mode */}
+          {layoutPreset === 'vertical' && (
+            <>
+              <ResizableHandle />
+              <ResizablePanel id="right-col" defaultSize={30} minSize={15} maxSize={60} className="min-h-0 pr-2 pb-2">
+                <div
+                  ref={(el) => { if (el) setRightColPortalEl(el) }}
+                  className="relative h-full w-full"
+                />
+              </ResizablePanel>
+            </>
+          )}
 
         </ResizablePanelGroup>
       </div>
@@ -7621,6 +7885,16 @@ export default function LivePreviewEditor({
         settings={settings}
         videoCoverUrl={videoUrl}
         durationSec={duration}
+      />
+      <ProgressPopup
+        active={speedBusy}
+        running={speedBusy}
+        title="Đang xử lý tốc độ"
+        message={`Đang áp dụng tốc độ ${speedDraft.toFixed(2)}×...`}
+        minimized={false}
+        progress={0}
+        onMinimize={() => {}}
+        onRestore={() => {}}
       />
     </div>
   )

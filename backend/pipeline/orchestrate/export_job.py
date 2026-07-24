@@ -60,6 +60,18 @@ def _logo_schedule(item: dict[str, Any], st: float, en: float, x: float, y: floa
         if (fst := max(st, float(frame.get("at") if frame.get("at") is not None else st))) < en
     ]
 
+import re as _re
+
+def _project_slug(meta: dict) -> str:
+    """Slug an toàn từ tên file video nguồn — dùng làm subfolder trong exports."""
+    vp = str(meta.get("videoPath") or "")
+    stem = Path(vp).stem if vp else ""
+    slug = _re.sub(r"[^\w\s-]", "", stem).strip()
+    slug = _re.sub(r"[\s_]+", "-", slug)
+    slug = slug[:48].strip("-") or "project"
+    return slug.lower()
+
+
 def run_export(project_id: str, *, nested: bool = False) -> Path:
     job_gen: int | None = None
     if not nested:
@@ -191,10 +203,73 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
     match_mode = str(settings.get("matchDuration") or "preferVideo")
     out = out_final(project_id)
 
+    # Cờ xuất độc lập — mặc định video=True nếu không có gì được chọn
+    do_video = bool(settings.get("exportVideo", True))
+    do_audio = bool(settings.get("exportAudio", False))
+    do_srt   = bool(settings.get("exportSrt",   False))
+    do_gif   = bool(settings.get("exportGif",   False))
+    if not any([do_video, do_audio, do_srt, do_gif]):
+        do_video = True
+
     # cover / burn độc lập; "Không dịch" → không chèn caption
     no_translate = str(settings.get("targetLang") or "") in ("none", "off", "source", "")
     cover = bool(settings.get("coverHardsubs", True))
     burn = bool(settings.get("burnSubs", True)) and not no_translate
+
+    # ── Fast path: chỉ xuất SRT (không cần render video) ──
+    if do_srt and not do_video and not do_audio and not do_gif:
+        try:
+            from pipeline.export.srt import write_srt
+            _custom_dir = str(settings.get("exportOutputDir") or "").strip()
+            _slug = _project_slug(meta)
+            exports = (Path(_custom_dir) if _custom_dir else PUBLIC_DATA / "exports") / _slug
+            exports.mkdir(parents=True, exist_ok=True)
+            render_id = f"{project_id}-{time.time_ns()}"
+            render_name = str(meta.pop("pendingRenderName", "")).strip() or f"Render {project_id}"
+            set_status(project_id, step="export", progress=50, message="Xuất chú thích (SRT)…", running=True)
+            check_cancel(project_id)
+            fmt = str(settings.get("exportSrtFormat") or "srt").lower()
+            cues = [
+                {"start": float(s.get("start") or 0), "end": float(s.get("end") or 0),
+                 "text": (str(s.get("translation") or s.get("source") or "")).strip()}
+                for s in segments
+                if not s.get("maskOnly")
+                and (str(s.get("translation") or s.get("source") or "")).strip()
+            ]
+            import re as _re_ext
+            safe_name = _re_ext.sub(r'[^\w\s-]', '', render_name).strip()
+            safe_name = _re_ext.sub(r'[-\s]+', '-', safe_name)
+            if not safe_name:
+                safe_name = project_id
+            srt_out     = exports / f"{safe_name}.{fmt}"
+            write_srt(srt_out, cues, capcut=False)
+            (exports / f"{safe_name}.json").write_text(
+                json.dumps({"name": render_name, "projectId": project_id, "kind": "srt"}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            rel = export_display_path(srt_out)
+            meta["lastRenderId"] = render_id
+            meta["lastRenderName"] = render_name
+            meta["exportOutputDir"] = str(exports)
+            save_meta(project_id, meta)
+            set_status(project_id, step="export", progress=100,
+                       message=f"Xong · {len(cues)} câu — {rel}",
+                       running=False, outputRel=rel, error=None)
+        except Cancelled:
+            set_status(project_id, step="export", progress=0, message="Đã huỷ xuất bản", running=False, error="cancelled")
+        except Exception as e:
+            err = short_cmd_error(e)
+            try:
+                from pipeline.core.app_log import append_exception
+                append_exception(f"[export:{project_id}] SRT FAILED", e)
+            except Exception:
+                pass
+            set_status(project_id, step="export", message=f"Xuất lỗi: {err}", running=False, error=err)
+        finally:
+            if not nested and job_gen is not None:
+                clear_job(project_id, job_gen)
+        return
+
 
     try:
         hint = f"preview {preview_sec}s — " if preview_sec > 0 else ""
@@ -221,7 +296,11 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
             running=True,
         )
         burned = out_burned(project_id)
-        if cover or burn or text_overlays:
+        if not do_video:
+            # Audio-only: không cần render video frame → copy nguồn làm temp để trích audio
+            import shutil as _shutil
+            _shutil.copy2(str(video), str(burned))
+        elif cover or burn or text_overlays:
             place = str(settings.get("captionPlacement") or "below").lower()
             if place not in ("below", "above"):
                 place = "below"
@@ -359,62 +438,103 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
         else:
             shutil.copy2(burned, out)
 
-        # Crop khung + encode độ phân giải trong **một** pass (tránh encode 2 lần → chậm)
-        aspect = str(settings.get("previewAspectRatio") or "original")
-        custom_crop = settings.get("previewCrop")
-        crop_box = None
-        if aspect not in ("", "original") and (aspect != "custom" or custom_crop):
-            sw, sh = video_size(out)
-            crop_box = resolve_export_crop(sw, sh, aspect, custom_crop)
+        if do_video:
+            # Crop khung + encode độ phân giải trong **một** pass (tránh encode 2 lần → chậm)
+            aspect = str(settings.get("previewAspectRatio") or "original")
+            custom_crop = settings.get("previewCrop")
+            crop_box = None
+            if aspect not in ("", "original") and (aspect != "custom" or custom_crop):
+                sw, sh = video_size(out)
+                crop_box = resolve_export_crop(sw, sh, aspect, custom_crop)
 
-        resolution = str(settings.get("exportResolution") or "1080").lower()
-        allowed_resolutions = {"144", "240", "360", "480", "720", "1080", "1440", "2160"}
-        if resolution != "original" and resolution not in allowed_resolutions:
-            resolution = "1080"
-        target_height = None if resolution == "original" else int(resolution)
-        resolution_label = "gốc" if target_height is None else f"{target_height}p"
-        aspect_hint = f" · khung {aspect}" if crop_box else ""
-        set_status(
-            project_id,
-            step="export",
-            progress=90,
-            message=progress_msg(f"Encode {resolution_label}", extra=aspect_hint.strip(" ·") or None),
-            running=True,
-        )
-        check_cancel(project_id)
-        encode_export_1080(
-            out,
-            out,
-            project_id=project_id,
-            target_height=target_height,
-            crop=crop_box,
-        )
+            resolution = str(settings.get("exportResolution") or "1080").lower()
+            allowed_resolutions = {"144", "240", "360", "480", "720", "1080", "1440", "2160"}
+            if resolution != "original" and resolution not in allowed_resolutions:
+                resolution = "1080"
+            target_height = None if resolution == "original" else int(resolution)
+            resolution_label = "gốc" if target_height is None else f"{target_height}p"
+            aspect_hint = f" · khung {aspect}" if crop_box else ""
+            set_status(
+                project_id,
+                step="export",
+                progress=90,
+                message=progress_msg(f"Encode {resolution_label}", extra=aspect_hint.strip(" ·") or None),
+                running=True,
+            )
+            check_cancel(project_id)
+            encode_export_1080(
+                out,
+                out,
+                project_id=project_id,
+                target_height=target_height,
+                crop=crop_box,
+            )
 
-        # bản dễ tìm: backend/public/exports/<id>.mp4
-        exports = PUBLIC_DATA / "exports"
-        exports.mkdir(exist_ok=True)
-        easy = exports / f"{project_id}.mp4"
+        # ban de tim: backend/public/exports/<slug>/<id>.mp4
+        _custom_dir = str(settings.get("exportOutputDir") or "").strip()
+        if _custom_dir:
+            exports = Path(_custom_dir)
+            _slug = _project_slug(meta)
+            exports = exports / _slug
+        else:
+            exports = PUBLIC_DATA / project_id / "exports"
+        exports.mkdir(parents=True, exist_ok=True)
         render_id = f"{project_id}-{time.time_ns()}"
-        archive = exports / f"{render_id}.mp4"
-        shutil.copy2(out, archive)
         render_name = str(meta.pop("pendingRenderName", "")).strip() or f"Render {project_id}"
-        (exports / f"{render_id}.json").write_text(
-            json.dumps({"name": render_name, "projectId": project_id}, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        shutil.copy2(out, easy)
+        import re as _re_ext
+        safe_name = _re_ext.sub(r'[^\w\s-]', '', render_name).strip()
+        safe_name = _re_ext.sub(r'[-\s]+', '-', safe_name)
+        if not safe_name:
+            safe_name = project_id
+
+        img_out = None
+        if str(settings.get("coverDataUrl") or "").startswith("data:image/"):
+            try:
+                import base64
+                cover_data_url = str(settings.get("coverDataUrl"))
+                header, encoded = cover_data_url.split(",", 1)
+                img_data = base64.b64decode(encoded)
+                ext = "jpg" if "jpeg" in header else "png"
+                img_out = exports / f"{safe_name}.{ext}"
+                img_out.write_bytes(img_data)
+            except Exception as e:
+                print(f"[export] Cover image decode error: {e}", flush=True)
+
+        if do_video:
+            easy = exports / f"{safe_name}.mp4"
+            if img_out and img_out.is_file():
+                try:
+                    from pipeline.core.jobs import run_cmd as _run_cmd
+                    _run_cmd(project_id, ["ffmpeg", "-y", "-i", str(out), "-i", str(img_out), "-map", "0", "-map", "1", "-c", "copy", "-disposition:v:1", "attached_pic", str(easy)])
+                except Exception as e:
+                    print(f"[export] Cover image embed error: {e}", flush=True)
+                    shutil.copy2(out, easy)
+            else:
+                shutil.copy2(out, easy)
+            (exports / f"{safe_name}.json").write_text(
+                json.dumps({"name": render_name, "projectId": project_id}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        else:
+            easy = out  # audio/gif dung file tam; khong luu mp4 dau ra
 
         # Xuất Âm thanh (MP3/WAV) nếu người dùng chọn
+        audio_rel = ""
         if bool(settings.get("exportAudio", False)):
             try:
-                from pipeline.core.media import _cmd
+                from pipeline.core.jobs import run_cmd as _run_cmd
                 fmt = str(settings.get("exportAudioFormat") or "mp3").lower()
-                audio_out = exports / f"{project_id}.{fmt}"
-                audio_archive = exports / f"{render_id}.{fmt}"
+                audio_out = exports / f"{safe_name}.{fmt}"
                 acodec = "libmp3lame" if fmt == "mp3" else "pcm_s16le" if fmt == "wav" else "aac"
-                _cmd(["ffmpeg", "-y", "-i", str(out), "-vn", "-acodec", acodec, str(audio_out)])
+                _run_cmd(project_id, ["ffmpeg", "-y", "-i", str(out), "-vn", "-acodec", acodec, str(audio_out)])
                 if audio_out.is_file():
-                    shutil.copy2(audio_out, audio_archive)
+                    audio_rel = export_display_path(audio_out)
+                    if not do_video:
+                        # Audio-only → ghi render JSON để xuất hiện trong danh sách
+                        (exports / f"{safe_name}.json").write_text(
+                            json.dumps({"name": render_name, "projectId": project_id, "kind": "audio"}, ensure_ascii=False),
+                            encoding="utf-8",
+                        )
             except Exception as ae:
                 print(f"[export] Audio export error: {ae}", flush=True)
 
@@ -422,60 +542,60 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
         if bool(settings.get("exportSrt", False)):
             try:
                 from pipeline.export.srt import write_srt
-                srt_out = exports / f"{project_id}.srt"
-                srt_archive = exports / f"{render_id}.srt"
+                srt_out = exports / f"{safe_name}.srt"
                 cues = []
                 for s in segments:
-                    if s.get("maskOnly"):
-                        continue
-                    txt = (str(s.get("translation") or s.get("source") or "")).strip()
-                    if txt:
+                    if not s.get("maskOnly") and (str(s.get("translation") or s.get("source") or "")).strip():
                         cues.append({
                             "start": float(s.get("start") or 0),
                             "end": float(s.get("end") or 0),
-                            "text": txt,
+                            "text": (str(s.get("translation") or s.get("source") or "")).strip(),
                         })
-                if cues:
-                    write_srt(srt_out, cues, capcut=False)
-                    write_srt(srt_archive, cues, capcut=False)
+                write_srt(srt_out, cues, capcut=False)
             except Exception as se:
                 print(f"[export] SRT export error: {se}", flush=True)
 
         # Xuất GIF nếu người dùng chọn
         if bool(settings.get("exportGif", False)):
             try:
-                from pipeline.core.media import _cmd
-                gif_out = exports / f"{project_id}.gif"
-                gif_archive = exports / f"{render_id}.gif"
-                gif_res = str(settings.get("exportGifRes") or "240")
-                _cmd(["ffmpeg", "-y", "-i", str(out), "-vf", f"fps=12,scale={gif_res}:-1:flags=lanczos", str(gif_out)])
+                from pipeline.core.jobs import run_cmd as _run_cmd
+                gif_out = exports / f"{safe_name}.gif"
+                res = int(settings.get("exportGifRes") or 480)
+                vf = f"fps=10,scale={res}:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse"
+                _run_cmd(project_id, ["ffmpeg", "-y", "-i", str(out), "-vf", vf, "-loop", "0", str(gif_out)])
                 if gif_out.is_file():
-                    shutil.copy2(gif_out, gif_archive)
+                    gif_rel = export_display_path(gif_out)
+                    results.append(f"GIF    : {gif_rel}")
             except Exception as ge:
                 print(f"[export] GIF export error: {ge}", flush=True)
 
         out_dur = ffprobe_duration(out)
-        ow, oh = video_size(out)
-        rel = export_display_path(out)
-        easy_rel = export_display_path(easy)
-        meta["outputPath"] = str(out.resolve())
-        meta["outputRel"] = rel
-        meta["exportCopy"] = easy_rel
+        ow, oh = video_size(out) if do_video else (0, 0)
+        easy_rel = export_display_path(easy) if do_video else audio_rel
+        if do_video:
+            meta["outputPath"] = str(out.resolve())
+            meta["outputRel"] = easy_rel
+            meta["exportCopy"] = easy_rel
+            meta["exportSize"] = f"{ow}x{oh}"
         meta["lastRenderId"] = render_id
-        meta["exportSize"] = f"{ow}x{oh}"
+        meta["lastRenderName"] = render_name
+        meta["exportOutputDir"] = str(exports)
         save_meta(project_id, meta)
-        if preview_sec > 0:
-            done = f"Xong preview {preview_sec}s · {ow}×{oh} ({out_dur:.1f}s) — {easy_rel}"
-        else:
-            done = f"Xong full · {ow}×{oh} ({out_dur:.1f}s) — {easy_rel}"
+        parts = []
+        if do_video: parts.append(f"Video {ow}x{oh} ({out_dur:.1f}s)")
+        if do_audio: parts.append("Audio")
+        if do_srt:   parts.append("SRT")
+        if do_gif:   parts.append("GIF")
+        prefix = f"preview {preview_sec}s" if preview_sec > 0 else "full"
+        done = f"Xong {prefix} · " + " + ".join(parts) + (f" -- {easy_rel}" if easy_rel else "")
         set_status(
             project_id,
             step="export",
             progress=100,
             message=done,
             running=False,
-            outputRel=easy_rel,
-            outputPath=str(out.resolve()),
+            outputRel=easy_rel or None,
+            outputPath=str(out.resolve()) if do_video else None,
             error=None,
         )
         return out

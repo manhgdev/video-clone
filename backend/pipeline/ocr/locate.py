@@ -126,16 +126,28 @@ Path(sys.argv[3]).write_text(
             wpy.write_text(worker_src, encoding="utf-8")
             env = os.environ.copy()
             env["PYTHONPATH"] = str(pipeline_root) + os.pathsep + env.get("PYTHONPATH", "")
+            if meipass:
+                env["VIDEO_CLONE_MEIPASS"] = str(meipass)
             if not env.get("VIDEO_CLONE_HOME"):
                 if sys.platform == "win32":
                     env["VIDEO_CLONE_HOME"] = str(Path(os.environ.get("LOCALAPPDATA", "")) / "VideoClone")
                 else:
                     env["VIDEO_CLONE_HOME"] = str(Path.home() / ".local" / "share" / "VideoClone")
             env.pop("VIDEO_CLONE_DESKTOP", None)
+            
+            # Windows: KHÔNG dùng MSMF vì MSMF tự động bóp méo khung hình/chèn viền đen (letterboxing)
+            # làm lệch tọa độ Bbox. Ép dùng FFmpeg với threads=1.
+            env["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "threads;1"
+            env["OPENCV_FFMPEG_MULTITHREADED"] = "0"
+            if sys.platform == "win32":
+                env["OPENCV_VIDEOIO_PRIORITY_MSMF"] = "0"
+                env["OPENCV_VIDEOIO_PRIORITY_FFMPEG"] = "100"
             cmd = [*uv_cmd, str(wpy), str(pipeline_root), str(pin), str(pout)]
             kw: dict[str, Any] = {
                 "capture_output": True,
                 "text": True,
+                "encoding": "utf-8",
+                "errors": "replace",
                 "timeout": 900,
                 "cwd": str(pipeline_root),
                 "env": env,
