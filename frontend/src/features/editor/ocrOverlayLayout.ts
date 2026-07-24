@@ -352,6 +352,57 @@ export function layoutMidOverlay(
     return best
   }
 
+  // Automatic mid captions share one lane font. Grow around the OCR centre
+  // for one/two lines before considering a smaller per-cue font.
+  if (allowExpand && fontPxIn > 0) {
+    const sharedFont = Math.max(8, Math.min(56, Math.round(fontPxIn)))
+    const frameInnerW = Math.max(8, frameW - pads(sharedFont).x * 2)
+    let sharedLines: string[] = [raw]
+    if (estimateLineW(raw, sharedFont) > frameInnerW) {
+      const wrapped = wrapLines(raw, frameInnerW, sharedFont)
+      if (wrapped.length <= MAX_LINES) {
+        sharedLines = wrapped
+      } else if (words.length >= 2) {
+        let best: string[] | null = null
+        let bestScore = Infinity
+        for (let i = 1; i < words.length; i++) {
+          const a = words.slice(0, i).join(' ')
+          const b = words.slice(i).join(' ')
+          const aw = estimateLineW(a, sharedFont)
+          const bw = estimateLineW(b, sharedFont)
+          if (aw > frameInnerW || bw > frameInnerW) continue
+          const score = Math.abs(aw - bw)
+          if (score < bestScore) {
+            bestScore = score
+            best = [a, b]
+          }
+        }
+        if (best) sharedLines = best
+      }
+    }
+    const sharedSize = blockSize(sharedFont, sharedLines)
+    if (sharedLines.length <= MAX_LINES && sharedSize.needW <= frameW && sharedSize.needH <= frameH) {
+      const cx = seed.x + seed.w / 2
+      const cy = seed.y + seed.h / 2
+      const w = Math.max(seed.w, sharedSize.needW)
+      const h = Math.max(seed.h, sharedSize.needH)
+      const cover = clampBox({ x: cx - w / 2, y: cy - h / 2, w, h }, frameW, frameH)
+      const p = pads(sharedFont)
+      return {
+        cover,
+        caption: {
+          x: cover.x + p.x,
+          y: cover.y + p.top,
+          w: Math.max(6, cover.w - p.x * 2),
+          h: Math.max(6, cover.h - p.top - p.bot),
+        },
+        lines: sharedLines,
+        mode: 'mid',
+        fontPx: sharedFont,
+      }
+    }
+  }
+
   // Keep a little more breathing room than the raw mask height; the bbox
   // includes source stroke/cover slack, not just the translated glyphs.
   const hCap = Math.max(10, Math.floor((seed.h / LINE) * 0.72))

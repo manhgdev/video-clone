@@ -1006,12 +1006,20 @@ def attach_speech_hardsub_boxes_inprocess(
     video_end = (frame_total / fps) if frame_total > 0 else None
     roi = _normalize_analysis_region(analysis_region)
 
-    # Nếu segment đã có bbox từ nhận dạng OCR chuẩn (asr_paddleocr_inprocess),
-    # GIỮ NGUYÊN 100% vị trí x, y, w, h thực tế, không pop/xóa hay ép y đáy.
+    # Bbox already present without a baked caption layout came from OCR, not a
+    # user drag. Keep its geometry but preserve the auto-layout semantics so
+    # the editor can expand translated text at the shared lane font.
     for seg in segments:
         bb = seg.get("bbox")
         if isinstance(bb, dict) and bb.get("w") and bb.get("h"):
-            seg["bboxInherited"] = False
+            cl = seg.get("captionLayout")
+            manual = (
+                seg.get("bboxInherited") is False
+                and isinstance(cl, dict)
+                and isinstance(cl.get("lines"), list)
+                and bool(cl.get("lines"))
+            )
+            seg["bboxInherited"] = False if manual else True
             _retag_layout_from_bbox(seg, fh)
 
     filtered: list[dict[str, Any]] = []

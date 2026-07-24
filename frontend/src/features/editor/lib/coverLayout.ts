@@ -56,7 +56,9 @@ export function fitCaptionLines(
   let fontPx = Math.max(minFont, Math.round(fontSizePx))
   const inner = Math.max(4, maxInnerW)
   if (preferOneLine) {
-    const minOneLineFont = Math.max(minFont, Math.round(fontSizePx * 0.8))
+    // One line is worthwhile only while it stays visually close to the lane
+    // font. Below 90%, use two readable lines instead of a tiny single line.
+    const minOneLineFont = Math.max(minFont, Math.round(fontSizePx * 0.9))
     while (fontPx > minOneLineFont && measureLineWidth(trimmed, fontPx) > inner) {
       fontPx -= 1
     }
@@ -458,7 +460,13 @@ export function resolveOverLayout(
     // mid/dọc/nhãn: cover = bbox OCR (không nới theo VI); chưa OCR → không bịa khung
     const seed = overlayCoverSeed(seg, frameW, frameH)
     if (!seed) return null
-    const want = preferred > 0 ? preferred : 0
+    // Mid captions use the shared caption font first; bbox fitting may shrink
+    // only when that size cannot fit. Vertical/label keep their own auto-fit.
+    const want = preferred > 0
+      ? preferred
+      : overlayLay === 'mid'
+        ? fontPx
+        : 0
     const laid = layoutOcrOverlay(overlayLay, seed, seg.translation, want, frameW, frameH)
     // CAP-MID/mid: cover tu layoutMidOverlay (trong seed OCR) — khong doi caption day
     return {
@@ -523,7 +531,7 @@ export function resolveOverLayout(
     // translated glyph ascenders/descenders and shadow before first drag.
     // ponytail: keep this margin only on inherited OCR, while user-dragged
     // layouts retain their exact stored fit.
-    const autoFontPx = Math.max(10, Math.floor(autoFontFromBbox(seed, seg.translation, fontPx) * 0.86))
+    const autoFontPx = fontPx
     const laid = manualCoverLayout(seed, seg.translation, autoFontPx, frameW, frameH, true)
     return { ...laid, fontPx: autoFontPx }
   }
@@ -876,6 +884,9 @@ export function layoutCaptionInCover(
   const trimmed = text.trim()
   const edge = Math.max(2, Math.round(cover.w * 0.02))
   const maxInnerW = Math.max(4, cover.w - edge * 2)
+  const sharedOneLineFits =
+    measureLineWidth(trimmed, fontSizePx) <= maxInnerW
+    && Math.ceil(fontSizePx * 1.12 + 4) <= cover.h
   // Check 1-line font size
   const fit1 = fitCaptionLines(trimmed, maxInnerW, fontSizePx, {
     minFont: 1,
@@ -906,7 +917,11 @@ export function layoutCaptionInCover(
 
   let fontPx: number
   let lines: string[]
-  if (font2 > font1 && lines2.length > 1) {
+  if (sharedOneLineFits) {
+    // First priority for auto mid/horizontal: one line at the shared font.
+    fontPx = fontSizePx
+    lines = [trimmed]
+  } else if (font2 > font1 && lines2.length > 1) {
     fontPx = font2
     lines = lines2
   } else {
@@ -1006,13 +1021,31 @@ export function manualCoverLayout(
 ): OverLayout {
   if (fixed) {
     let box = clampCoverBox(cover, frameW, frameH)
-    const oneLineW = Math.ceil(measureLineWidth(text.trim(), fontSizePx) + coverPad(fontSizePx, frameW).x * 2)
-    // Prefer one line when the remaining video width can hold it. This is
-    // shared by live drag and post-release layout so the bbox does not jump.
-    if (allowExpand && text.trim() && oneLineW > box.w && oneLineW <= frameW) {
+    // Automatic horizontal captions keep the shared font: expand to one line
+    // first, otherwise to a two-line block. Shrink happens only after the
+    // shared block has exhausted the frame.
+    const sharedLines = wrapCaptionText(
+      text.trim(),
+      frameMaxInnerWidth(fontSizePx, frameW),
+      fontSizePx,
+      2,
+    )
+    const sharedNeedW = Math.ceil(
+      Math.max(...sharedLines.map((line) => measureLineWidth(line, fontSizePx)), 1) / 0.96
+      + coverPad(fontSizePx, frameW).x * 2,
+    )
+    const sharedNeedH = Math.ceil(sharedLines.length * fontSizePx * 1.12 + 4)
+    if (
+      allowExpand
+      && text.trim()
+      && sharedLines.every((line) => measureLineWidth(line, fontSizePx) <= frameMaxInnerWidth(fontSizePx, frameW))
+      && (sharedNeedW > box.w || sharedNeedH > box.h)
+    ) {
       const cx = box.x + box.w / 2
-      const w = Math.min(frameW, oneLineW)
-      box = clampCoverBox({ ...box, x: Math.round(cx - w / 2), w }, frameW, frameH)
+      const cy = box.y + box.h / 2
+      const w = Math.min(frameW, Math.max(box.w, sharedNeedW))
+      const h = Math.min(frameH, Math.max(box.h, sharedNeedH))
+      box = clampCoverBox({ x: Math.round(cx - w / 2), y: Math.round(cy - h / 2), w, h }, frameW, frameH)
     }
     const laid = layoutCaptionInCover(box, text, fontSizePx, frameW)
     
