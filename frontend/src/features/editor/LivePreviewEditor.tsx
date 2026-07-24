@@ -64,7 +64,6 @@ import {
   dubPlaybackSpeed,
   effectiveOverlayLayout,
   emptyTrackFlags,
-  estimatePreviewCaptionBox,
   expandSegmentsForPlayback,
   fallbackCoverBox,
   fitTimelineZoom,
@@ -91,6 +90,7 @@ import {
   resolveCaptionFontSize,
   resolveCoverMaskOnly,
   resolveCropRect,
+  resolveBelowAboveLayout,
   resolveOverLayout,
   resolveOverlayFontPreferred,
   resolvePreviewOverLayout,
@@ -1156,7 +1156,6 @@ export default function LivePreviewEditor({
     // coverStart/coverEnd to hide source text before/after speech timing.
     return Boolean(target && time >= target.start && time < target.end)
   })()
-  const activeOcrBox = selectedBox
   const captionLanes = useMemo(() => {
     const present = new Set(layoutSegs.map((s) => captionLaneOf(s, sourceHeight || 1920)))
     return CAPTION_LANE_DEFS.filter((l) => l.key === 'horizontal' || present.has(l.key))
@@ -2731,11 +2730,15 @@ export default function LivePreviewEditor({
           }, laid.fontPx), { skipHistory: histGate.current })
           return
         }
-        // Caption ngang: cùng fitFixedCoverCaption lúc kéo — thả không nhảy cỡ
+        // Caption ngang: commit the exact live-drag layout; do not fit again.
         if (seg.translation.trim() && settings.burnSubs) {
-          const layout = fitFixedCoverCaption(norm, seg.translation, sourceWidth, sourceHeight)
-          const fitFs = layout.fontPx ?? autoFontFromBbox(norm, seg.translation, 0)
-          editSegment(segmentWithLayout({ ...seg, bboxInherited: false }, { ...layout, cover: norm }, fitFs), { skipHistory: histGate.current })
+          const live = getCachedPreviewLayout(seg, norm)
+          if (live) {
+            const fitFs = live.fontPx ?? autoFontFromBbox(live.cover, seg.translation, 0)
+            editSegment(segmentWithLayout({ ...seg, bboxInherited: false }, live, fitFs), { skipHistory: histGate.current })
+          } else {
+            editSegment({ ...seg, bbox: norm, bboxInherited: false, captionLayout: seg.captionLayout ?? null }, { skipHistory: histGate.current })
+          }
           return
         }
         editSegment({ ...seg, bbox: norm, bboxInherited: false, captionLayout: seg.captionLayout ?? null }, { skipHistory: histGate.current })
@@ -3993,29 +3996,24 @@ export default function LivePreviewEditor({
   // below/above: mid + horizontal — cỡ = bbox che, neo trên/dưới dải OCR
   const activeCaptionMeta = (() => {
     if (!overlayBurnOn || !timelineSeg?.translation.trim() || placement === 'over') {
-      return null as null | { box: PixelBox; fontPx: number }
+      return null as null | { box: PixelBox; fontPx: number; lines: string[] }
     }
     if (timelineSeg.layout === 'vertical' || timelineSeg.layout === 'label') return null
     if (timelineSeg.bboxInherited === false) return null
-    const ocr =
-      activeOcrBox
-      ?? (timelineSeg.bbox ? clampCoverBox(timelineSeg.bbox, sourceWidth, sourceHeight) : null)
-    if (!ocr) return null
-    const preferred =
-      (timelineSeg.fontSize && timelineSeg.fontSize > 0)
-        ? timelineSeg.fontSize
-        : 0
-    const fontPx = autoFontFromBbox(ocr, timelineSeg.translation, preferred)
-    const box = estimatePreviewCaptionBox(
-      ocr,
-      timelineSeg.translation,
-      fontPx,
+    const laid = resolveBelowAboveLayout(
+      timelineSeg,
+      settings,
       sourceWidth,
       sourceHeight,
       crop,
       placement,
     )
-    return { box, fontPx }
+    if (!laid) return null
+    return {
+      box: laid.caption,
+      fontPx: laid.fontPx ?? resolveCaptionFontSize(timelineSeg, settings, sourceWidth, sourceHeight),
+      lines: laid.lines,
+    }
   })()
   const activeCaptionBox = activeCaptionMeta?.box ?? null
   const activeCaptionPx =
@@ -4975,7 +4973,8 @@ export default function LivePreviewEditor({
                           key={layerSeg.id}
                           className={cn(
                             '@container [container-type:size] absolute z-20 pointer-events-none flex items-center justify-center',
-                            'overflow-visible',
+                            // Cover mode must clip glyph/shadow to the same bbox that hides the source text.
+                            overlayLay || !settings.coverHardsubs ? 'overflow-visible' : 'overflow-hidden',
                           )}
                           style={sourceToDisplayStyle(
                             // Horizontal cover mode: bám cover (che + chữ giữa khung tím)
@@ -5068,9 +5067,9 @@ export default function LivePreviewEditor({
                                   'h',
                                 ),
                                 ...captionChromeStyle(settings),
-                                lineHeight: 1.2,
+                                lineHeight: 1.12,
                                 margin: 0,
-                                padding: '0.06em 0.12em',
+                                padding: '0.02em 0.08em',
                                 boxSizing: 'border-box',
                               }}
                             >
@@ -5100,7 +5099,7 @@ export default function LivePreviewEditor({
                             )}
                             style={{
                               ...captionFontStyle(activeCaptionPx, activeCaptionBox.h),
-                              lineHeight: 1.2,
+                              lineHeight: 1.12,
                               ...captionChromeStyle(settings),
                               transform: 'none',
                               backgroundColor: (settings.captionBgStyle || 'none') === 'none'
@@ -5111,7 +5110,11 @@ export default function LivePreviewEditor({
                               boxSizing: 'border-box',
                             }}
                           >
-                            {timelineSeg.translation}
+                            {activeCaptionMeta?.lines.map((line, i) => (
+                              <span key={i} className="block max-w-full whitespace-nowrap">
+                                {line}
+                              </span>
+                            ))}
                           </p>
                         </div>
                       )}

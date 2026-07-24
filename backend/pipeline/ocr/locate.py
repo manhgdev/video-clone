@@ -18,6 +18,20 @@ from .labels import pick_label_box
 # Lock: chỉ một request được chạy OCR in-process — native ext crash khi song song.
 _inprocess_lock = threading.Lock()
 
+# Quick mode samples the whole timeline instead of invoking OCR for every cue.
+# 64 anchors keep style/location changes within a few neighbouring captions
+# while bounding long-video model calls.
+_QUICK_PROBE_LIMIT = 64
+
+
+def _spread_probes(items: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    """Return up to ``limit`` items spread evenly, including both endpoints."""
+    if limit < 2 or len(items) <= limit:
+        return items
+    last = len(items) - 1
+    indices = sorted({round(i * last / (limit - 1)) for i in range(limit)})
+    return [items[i] for i in indices]
+
 
 def _uv_run_cmd() -> list[str] | None:
     """Trả prefix command [uv, run, --python, venv_path] để chạy worker
@@ -439,7 +453,9 @@ def _probe_mid_hardsub(
         x0, y0 = max(0, x0), max(0, y0)
         x1, y1 = min(w, max(x0 + 8, x1)), min(h, max(y0 + 8, y1))
     else:
-        y0, y1 = int(h * 0.12), int(h * 0.92)
+        # Bottom hardsubs commonly extend to 95–98% of the frame.  Cropping
+        # at 92% cut the glyphs before OCR and forced an inaccurate fallback.
+        y0, y1 = int(h * 0.12), h
         x0, x1 = int(w * 0.04), int(w * 0.96)
     roi = frame_bgr[y0:y1, x0:x1]
     if roi.size == 0:
@@ -468,11 +484,13 @@ def _probe_mid_hardsub(
         try:
             xs = [float(p[0]) for p in box]
             ys = [float(p[1]) for p in box]
-            # pad nhẹ — vừa stroke, không phình theo VI
+            # Keep the detector's exact vertical polygon here.  The shared
+            # caption-box step adds one symmetric, height-aware ink bleed;
+            # padding here as well made bottom boxes loose and off-centre.
             bx0 = x0 + int(min(xs)) - 10
-            by0 = y0 + int(min(ys)) - 8
+            by0 = y0 + int(min(ys))
             bx1 = x0 + int(max(xs)) + 10
-            by1 = y0 + int(max(ys)) + 8
+            by1 = y0 + int(max(ys))
         except (TypeError, ValueError, IndexError):
             continue
         bw, bh = bx1 - bx0, by1 - by0
@@ -484,7 +502,7 @@ def _probe_mid_hardsub(
             if bh > bw * 1.35:
                 continue
             cy = (by0 + by1) * 0.5
-            if not (h * 0.12 < cy < h * 0.92):
+            if not (h * 0.12 < cy < h * 0.995):
                 continue
             # quá hẹp so với Whisper — bỏ; rộng hơn OK (che full dòng trên khung)
             if not is_sub and src_cjk >= 3 and bw < src_cjk * max(28, int(w * 0.028)):
@@ -632,10 +650,11 @@ def _apply_caption_box(
         pad_bot = max(12, int(round(fh * 0.015)), int(round(oh * 0.05)))
     else:
         pad_x = max(8, int(round(fw * 0.008)), int(round(ow * 0.04)))
-        pad_y = max(6, int(round(fh * 0.004)), int(round(oh * 0.08)))
-        pad_y = max(4, min(10, int(round(oh * 0.08))))
-        pad_top = max(4, min(pad_y, 10))
-        pad_bot = max(6, min(pad_y + 3, 14))
+        # RapidOCR may return only the bright glyph body. Scale the bleed with
+        # glyph height and keep it symmetric; the old top cap (10px) missed
+        # thick black/white outlines while shifting the box centre downward.
+        pad_y = max(6, min(18, int(round(oh * 0.16))))
+        pad_top = pad_bot = pad_y
     x0p = max(0, x0 - pad_x)
     y0p = max(0, y0 - pad_top)
     x1p = min(fw, x1 + pad_x)
@@ -1068,7 +1087,10 @@ def attach_speech_hardsub_boxes_inprocess(
     from .cover_timing import attach_cover_times
 
     attached = 0
-    probes = filtered  # Đo trực tiếp từng phân đoạn để đè đúng vị trí chữ gốc
+    # ponytail: quick mode OCRs at most 64 anchors; missing cues reuse the
+    # nearest anchor and recalculate width from their own CJK glyph count.
+    # Stable mode remains exhaustive for projects that explicitly request it.
+    probes = filtered if stable else _spread_probes(filtered, _QUICK_PROBE_LIMIT)
     total = len(probes)
     anchor_boxes: list[tuple[int, int, int, int]] = []
     try:

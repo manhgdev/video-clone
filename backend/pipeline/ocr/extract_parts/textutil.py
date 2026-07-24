@@ -122,6 +122,11 @@ def _ocr_fix_zh(texts: list[str], project_id: str | None = None) -> list[str]:
         ("马里亚纳海构", "马里亚纳海沟"),
         ("设想机", "摄像机"),
         ("信誓淡淡", "信誓旦旦"),
+        ("这是把这个亮和炒到最低了", "你这是把这亮度调到最低了"),
+        ("这是把这个亮和小到最低了", "你这是把这亮度调到最低了"),
+        # Whisper/OCR homophones in the common phone-brightness phrase.
+        ("亮和炒到最低", "亮度调到最低"),
+        ("亮和调到最低", "亮度调到最低"),
         # Watermark dọc 花木紫 thường bị OCR nhầm đúng một glyph.
         ("花木業", "花木紫"),
         ("花木葉", "花木紫"),

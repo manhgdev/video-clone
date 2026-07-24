@@ -252,11 +252,14 @@
 }
 
 .workers-setting {
-  flex: 0 1 auto;
+  /* Worker mode needs the readable width; Preview(s) only holds a short number. */
+  flex: 1 1 auto;
 }
 
 .preview-len {
-  flex: 1 1 0;
+  flex: 0 1 145px;
+  max-width: 145px;
+  min-width: 0;
 }
 
 .preview-run-label {
@@ -274,8 +277,8 @@
   font-weight: 700;
   font-size: 0.82rem;
   padding: 9px 0;
-  width: 3.2em;
-  min-width: 2.6em;
+  width: 5.4em;
+  min-width: 5.4em;
   flex-shrink: 0;
   cursor: pointer;
 }

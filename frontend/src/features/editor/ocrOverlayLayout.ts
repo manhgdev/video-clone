@@ -293,8 +293,9 @@ export function layoutMidOverlay(
   fontPxIn: number,
   frameW: number,
   frameH: number,
+  allowExpand = true,
 ): OcrOverlayLayout {
-  const seed = clampBox(coverIn, frameW, frameH)
+  let seed = clampBox(coverIn, frameW, frameH)
   const raw = text.trim() || ' '
   const LINE = 1.12
   const MAX_LINES = 2
@@ -351,11 +352,22 @@ export function layoutMidOverlay(
     return best
   }
 
-  const hCap = Math.max(10, Math.floor((seed.h / LINE) * 0.85))
+  // Keep a little more breathing room than the raw mask height; the bbox
+  // includes source stroke/cover slack, not just the translated glyphs.
+  const hCap = Math.max(10, Math.floor((seed.h / LINE) * 0.72))
+  if (allowExpand && raw.trim()) {
+    const oneLineFont = Math.min(fontPxIn > 0 ? Math.round(fontPxIn) : hCap, hCap, 56)
+    const oneLineW = blockSize(oneLineFont, [raw]).needW
+    if (oneLineW > seed.w && oneLineW <= frameW) {
+      const cx = seed.x + seed.w / 2
+      const x = Math.max(0, Math.min(frameW - oneLineW, Math.round(cx - oneLineW / 2)))
+      seed = { ...seed, x, w: oneLineW }
+    }
+  }
   let font1 = Math.min(fontPxIn > 0 ? Math.round(fontPxIn) : hCap, hCap, 56)
   while (font1 > 8 && !fitsSeed(font1, [raw])) font1 -= 1
 
-  const hCap2 = Math.floor((seed.h / (LINE * 2)) * 0.88)
+  const hCap2 = Math.floor((seed.h / (LINE * 2)) * 0.82)
   let font2 = Math.min(fontPxIn > 0 ? Math.round(fontPxIn) : hCap2, hCap2, 44)
   let lines2 = pack2(font2)
   while (font2 > 8 && !fitsSeed(font2, lines2)) {
@@ -394,7 +406,7 @@ export function layoutMidOverlay(
   const p2b = pads(fontPx)
   const maxLineW = Math.max(...lines.map((ln) => estimateLineW(ln, fontPx)), 0)
   const needW = Math.ceil(maxLineW + p2b.x * 2)
-  if (needW > cover.w) {
+  if (allowExpand && needW > cover.w) {
     const cx = cover.x + cover.w / 2
     const newW = Math.min(frameW, needW)
     const newX = Math.max(0, Math.min(frameW - newW, Math.round(cx - newW / 2)))
@@ -422,9 +434,10 @@ export function layoutOcrOverlay(
   fontPx: number,
   frameW: number,
   frameH: number,
+  allowExpand = true,
 ): OcrOverlayLayout {
   if (layout === 'vertical') return layoutVerticalOverlay(cover, text, fontPx, frameW, frameH)
-  if (layout === 'mid') return layoutMidOverlay(cover, text, fontPx, frameW, frameH)
+  if (layout === 'mid') return layoutMidOverlay(cover, text, fontPx, frameW, frameH, allowExpand)
   return layoutLabelOverlay(cover, text, fontPx, frameW, frameH)
 }
 

@@ -26,18 +26,6 @@ export function captionCenterInCover(coverY: number, coverH: number, textBlockH:
   return Math.round(coverY + Math.max(0, (coverH - textBlockH) / 2))
 }
 
-/** OCR horizontal boxes often include blank space above while missing the lower stroke. */
-export function shiftAutoCoverDown(box: PixelBox, fontSizePx: number, frameW: number, frameH: number): PixelBox {
-  const pad = coverPad(fontSizePx)
-  const shift = Math.max(0, Math.round(box.h * 0.26) - pad.top)
-  if (shift < 1) return box
-  return clampCoverBox(
-    { ...box, y: box.y + shift, h: Math.max(12, box.h - shift) },
-    frameW,
-    frameH,
-  )
-}
-
 export const CAP_PAD_X = 1
 
 export function coverInnerWidth(coverW: number, fontSizePx: number, frameW: number) {
@@ -323,8 +311,10 @@ export function tightenStoredBbox(
   box: PixelBox,
   frameW: number,
 ): PixelBox {
-  // Poly OCR thật đã có đúng hai biên: tuyệt đối không thu lại.
-  if (!seg.bboxInherited) return box
+  // Only an explicit false means the user dragged this box. Legacy OCR
+  // payloads omitted bboxInherited, so null still follows conservative
+  // horizontal tightening; Y/H remain exactly as located by the backend.
+  if (seg.bboxInherited === false) return box
   const cjk = [...(seg.source ?? '')].filter((c) => c >= '\u4e00' && c <= '\u9fff').length
   if (cjk < 1) return box
   const glyphW = Math.max(18, box.h * 0.68)
@@ -437,7 +427,7 @@ export function resolveOverLayout(
       // Kéo tay: fit theo khung draft (preferred=0 trừ khi user khóa fontSize trên đoạn)
       // Không khóa captionLayout.fontSize cũ — không thì thả chuột chữ tụt bé lại.
       const lockFs = resolveOverlayFontPreferred(seg)
-      const laid = layoutOcrOverlay(overlayLay, coverOverride, seg.translation, lockFs, frameW, frameH)
+      const laid = layoutOcrOverlay(overlayLay, coverOverride, seg.translation, lockFs, frameW, frameH, false)
       return {
         cover: clampCoverBox(coverOverride, frameW, frameH),
         caption: laid.caption,
@@ -445,7 +435,9 @@ export function resolveOverLayout(
         fontPx: laid.fontPx,
       }
     }
-    if (hasStoredLayout(seg, undefined)) {
+    // Persisted captionLayout is authoritative only after an explicit drag.
+    // Auto layouts from older cache versions must be recomputed on reopen.
+    if (seg.bboxInherited === false && hasStoredLayout(seg, undefined)) {
       const stored = storedOverLayout(seg, frameW, frameH)
       if (stored && !isBadOverlayStoredCover(seg, stored.cover, frameW, frameH)) {
         // Tin bbox/mask đã lưu; chữ xếp lại trong cover (tránh captionLayout x/y lệch → chữ sai chỗ)
@@ -482,15 +474,29 @@ export function resolveOverLayout(
 
   // Đang kéo: bám đúng draft (user chỉnh tay)
   if (coverOverride) {
-    return manualCoverLayout(coverOverride, seg.translation, fontPx, frameW, frameH, true)
+    const dragFont = Math.max(
+      10,
+      Math.floor(autoFontFromBbox(coverOverride, seg.translation, fontPx) * 0.86),
+    )
+    return manualCoverLayout(coverOverride, seg.translation, dragFont, frameW, frameH, true, false)
   }
 
   // Đã lưu từ editor (kéo tay) — giữ đúng bbox; chỉ xếp chữ trong cover (như mid)
-  if (hasStoredLayout(seg, fontPx)) {
+  // A dragged bbox stores the fitted font, which is usually smaller than the
+  // project default. Do not reject that layout merely because the default
+  // font changed; doing so re-runs the path with 48px and overflows the box.
+  if (seg.bboxInherited === false && hasStoredLayout(seg, undefined)) {
     const stored = storedOverLayout(seg, frameW, frameH)
     if (!stored) return null
-    const laid = manualCoverLayout(stored.cover, seg.translation, fontPx, frameW, frameH, true)
-    return laid
+    // The editor already fit this exact bbox before commit. Re-fitting here
+    // changes wrapping/font after mouse-up, so the released preview differs
+    // from the live drag preview. Translation edits clear captionLayout first.
+    return {
+      ...stored,
+      fontPx: Number(seg.captionLayout?.fontSize) > 0
+        ? Number(seg.captionLayout?.fontSize)
+        : fontPx,
+    }
   }
 
   const seedRaw = seg.bbox
@@ -500,20 +506,24 @@ export function resolveOverLayout(
       // In cover mode, use the same bottom fallback shown by the editor handles so
       // the mask and translated text are rendered instead of silently disappearing.
       ?? fallbackCoverBox(frameW, frameH, fontPx)
-  const normalizedSeed = normalizeCoverBox(seedRaw, frameW, frameH, fontPx)
-  // User-owned bbox: fixed; OCR auto: vẫn có thể shift nhẹ xuống
-  const seed = seg.bbox && seg.bboxInherited !== false
-    ? shiftAutoCoverDown(normalizedSeed, fontPx, frameW, frameH)
-    : normalizedSeed
+  // Bbox OCR is the coverage contract: never crop an edge after detection.
+  const seed = normalizeCoverBox(seedRaw, frameW, frameH, fontPx)
 
   // Bbox OCR / user: cover cố định như mid — fit chữ trong box, không phình sau drag
   const anchor = coverToAnchor(seed, fontPx, frameW)
   if (seg.bbox) {
     if (seg.bboxInherited === false) {
-      const laid = manualCoverLayout(seed, seg.translation, fontPx, frameW, frameH, true)
-      return { ...laid, fontPx }
+      const fixedFont = Number(seg.captionLayout?.fontSize) > 0
+        ? Number(seg.captionLayout?.fontSize)
+        : autoFontFromBbox(seed, seg.translation, 0)
+      const laid = manualCoverLayout(seed, seg.translation, fixedFont, frameW, frameH, true)
+      return { ...laid, fontPx: laid.fontPx ?? fixedFont }
     }
-    const autoFontPx = autoFontFromBbox(seed, seg.translation, fontPx)
+    // Auto OCR boxes are tight around source glyphs; leave room for the
+    // translated glyph ascenders/descenders and shadow before first drag.
+    // ponytail: keep this margin only on inherited OCR, while user-dragged
+    // layouts retain their exact stored fit.
+    const autoFontPx = Math.max(10, Math.floor(autoFontFromBbox(seed, seg.translation, fontPx) * 0.86))
     const laid = manualCoverLayout(seed, seg.translation, autoFontPx, frameW, frameH, true)
     return { ...laid, fontPx: autoFontPx }
   }
@@ -733,11 +743,36 @@ export function resolveBelowAboveLayout(
     (seg.bbox ? clampCoverBox(seg.bbox, frameW, frameH) : null)
     ?? seedCoverBox(seg, frameW, frameH, preferred)
     ?? fallbackCoverBox(frameW, frameH, preferred)
-  const fontPx = autoFontFromBbox(ocr, seg.translation, preferred)
-  const innerW = Math.min(frameW, Math.round(frameW * 0.88))
-  const lines = wrapCaptionText(seg.translation, innerW, fontPx, 3)
+  const fitFrameW = cropCoversFull(crop, frameW, frameH) ? frameW : crop.w
+  const { lines, fontPx } = fitOutsideCaption(ocr, seg.translation, preferred, fitFrameW)
   const caption = estimatePreviewCaptionBox(ocr, seg.translation, fontPx, frameW, frameH, crop, placement)
   return { cover: ocr, caption, lines, fontPx }
+}
+
+/** Caption ngoài bbox: co font để giữ một dòng trước, rồi mới cho xuống tối đa hai dòng. */
+export function fitOutsideCaption(
+  _ocr: PixelBox,
+  text: string,
+  preferred: number,
+  frameW: number,
+) {
+  // Bottom-lane captions share the project/segment font. Do not derive size
+  // from each OCR box: varying source glyph heights made adjacent cues jump.
+  const baseFont = Math.max(12, Math.round(preferred || AUTO_SUBTITLE_FONT))
+  const maxInnerW = Math.max(24, Math.round(frameW * 0.92))
+  let fontPx = baseFont
+  let lines = wrapCaptionText(text, maxInnerW, fontPx, 2)
+  // First choice: one horizontal line at the shared font. Otherwise keep the
+  // same font and wrap; shrink only as a last resort when a 2-line unit still
+  // exceeds the video width.
+  while (
+    fontPx > 12
+    && lines.some((line) => measureLineWidth(line, fontPx) > maxInnerW)
+  ) {
+    fontPx -= 1
+    lines = wrapCaptionText(text, maxInnerW, fontPx, 2)
+  }
+  return { lines, fontPx }
 }
 
 /** Bake đúng layout đang hiện ở preview vào segment — Xuất bản khóa WYSIWYG. */
@@ -967,12 +1002,21 @@ export function manualCoverLayout(
   frameW: number,
   frameH: number,
   fixed = false,
+  allowExpand = true,
 ): OverLayout {
   if (fixed) {
-    const box = clampCoverBox(cover, frameW, frameH)
+    let box = clampCoverBox(cover, frameW, frameH)
+    const oneLineW = Math.ceil(measureLineWidth(text.trim(), fontSizePx) + coverPad(fontSizePx, frameW).x * 2)
+    // Prefer one line when the remaining video width can hold it. This is
+    // shared by live drag and post-release layout so the bbox does not jump.
+    if (allowExpand && text.trim() && oneLineW > box.w && oneLineW <= frameW) {
+      const cx = box.x + box.w / 2
+      const w = Math.min(frameW, oneLineW)
+      box = clampCoverBox({ ...box, x: Math.round(cx - w / 2), w }, frameW, frameH)
+    }
     const laid = layoutCaptionInCover(box, text, fontSizePx, frameW)
     
-    if (laid.caption.w > box.w) {
+    if (allowExpand && laid.caption.w > box.w) {
       const cx = box.x + box.w / 2
       let newW = Math.min(frameW, laid.caption.w)
       let newX = Math.round(Math.max(0, Math.min(frameW - newW, cx - newW / 2)))
@@ -1222,10 +1266,11 @@ export function estimateCaptionBox(
 ): PixelBox {
   if (placement === 'over') return layoutOverMode(ocr, text, fontSizePx, frameW, frameH, '').caption
 
-  // Font không vượt cỡ dải che (OCR)
-  const fs = autoFontFromBbox(ocr, text, fontSizePx > 0 ? fontSizePx : 0)
-  // Wrap theo bề rộng gần dải che (không full 88% frame → chữ to)
-  const wrapW = Math.max(ocr.w, Math.min(frameW * 0.92, Math.max(ocr.w * 1.15, ocr.w + fs * 2)))
+  // Caption đáy/trên ưu tiên một dòng trên bề rộng video; chỉ xuống dòng
+  // khi đã co tới giới hạn đọc được. Dùng chung với preview/export bake.
+  const fitted = fitOutsideCaption(ocr, text, fontSizePx, frameW)
+  const fs = fitted.fontPx
+  const wrapW = Math.max(24, Math.round(frameW * 0.92))
   const textBox = tightCaptionTextBox(text, fs, frameW, frameH, wrapW)
   const gap = Math.max(3, Math.round(fs * 0.18))
   const cx = ocr.x + ocr.w / 2

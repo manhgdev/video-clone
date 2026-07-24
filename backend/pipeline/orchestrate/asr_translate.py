@@ -43,6 +43,7 @@ from pipeline.core.project import (
 )
 from pipeline.core.resources import adaptive_workers, progress_msg
 from pipeline.ocr.locate import attach_speech_hardsub_boxes
+from pipeline.ocr.extract_parts.textutil import _ocr_fix_zh
 from pipeline.translate import translate_segments
 from pipeline.tts import tts_cache_key, tts_segment
 
@@ -231,6 +232,13 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
 
             if not segments:
                 raise RuntimeError("Không nhận được đoạn thoại nào từ video.")
+
+            # Normalize a tiny, whitelisted set of Chinese ASR homophones before
+            # translation; this keeps the correction shared by Whisper and OCR.
+            fixed_sources = _ocr_fix_zh([str(s.get("source") or "") for s in segments], project_id)
+            for seg, fixed in zip(segments, fixed_sources):
+                if fixed:
+                    seg["source"] = fixed
 
             # giữ bản dịch + chỉnh preview (bbox, font…) khi cùng dòng chữ nguồn
             prev_by_source: dict[str, dict[str, Any]] = {}
