@@ -191,7 +191,7 @@ export default function RendersPage({ onEdit }: { onEdit: (projectId: string) =>
       )}
 
       {viewing && (
-        <div className="render-view-backdrop" role="presentation" onMouseDown={() => setViewing(null)}>
+        <div className="render-view-backdrop" role="presentation">
           <div className="render-view" role="dialog" aria-modal="true" aria-label={`Xem render ${viewing.projectId}`} onMouseDown={(event) => event.stopPropagation()}>
             <div><strong>{renderName(viewing)}</strong><button type="button" onClick={() => setViewing(null)}>Đóng</button></div>
             <video src={viewing.videoUrl} controls autoPlay playsInline />

@@ -298,7 +298,9 @@ export function layoutMidOverlay(
   let seed = clampBox(coverIn, frameW, frameH)
   const raw = text.trim() || ' '
   const LINE = 1.12
-  const MAX_LINES = 2
+  // Keep the shared lane font for up to three lines before shrinking it.
+  // Long translations otherwise became unreadably small inside a 2-line cap.
+  const MAX_LINES = 3
   const words = raw.split(/\s+/).filter(Boolean)
 
   const pads = (fs: number) => ({
@@ -329,8 +331,8 @@ export function layoutMidOverlay(
     )
   }
 
-  const pack2 = (f: number): string[] => {
-    const maxW = Math.max(8, seed.w - pads(f).x * 2)
+  const packLines = (f: number, maxWIn?: number): string[] => {
+    const maxW = Math.max(8, maxWIn ?? seed.w - pads(f).x * 2)
     if (estimateLineW(raw, f) <= maxW) return [raw]
     if (words.length < 2) return [raw]
     // ponytail: merge overflow lines into last line — never drop text
@@ -339,46 +341,40 @@ export function layoutMidOverlay(
       ? wrapped
       : [...wrapped.slice(0, MAX_LINES - 1), wrapped.slice(MAX_LINES - 1).join(' ')]
     let bestScore = Infinity
-    for (let i = 1; i < words.length; i++) {
-      const a = words.slice(0, i).join(' ')
-      const b = words.slice(i).join(' ')
-      if (estimateLineW(a, f) > maxW + 1 || estimateLineW(b, f) > maxW + 1) continue
-      const score = Math.abs(estimateLineW(a, f) - estimateLineW(b, f))
+    const consider = (candidate: string[]) => {
+      const widths = candidate.map((line) => estimateLineW(line, f))
+      if (widths.some((width) => width > maxW + 1)) return
+      // Prefer fewer lines when both layouts keep the same font; only use a
+      // third line when no valid two-line split remains.
+      const score = (candidate.length - 2) * (maxW + 1) + Math.max(...widths) - Math.min(...widths)
       if (score < bestScore) {
         bestScore = score
-        best = [a, b]
+        best = candidate
+      }
+    }
+    for (let i = 1; i < words.length; i++) {
+      consider([words.slice(0, i).join(' '), words.slice(i).join(' ')])
+      if (MAX_LINES >= 3) {
+        for (let j = i + 1; j < words.length; j++) {
+          consider([
+            words.slice(0, i).join(' '),
+            words.slice(i, j).join(' '),
+            words.slice(j).join(' '),
+          ])
+        }
       }
     }
     return best
   }
 
   // Automatic mid captions share one lane font. Grow around the OCR centre
-  // for one/two lines before considering a smaller per-cue font.
+  // for one/two/three lines before considering a smaller per-cue font.
   if (allowExpand && fontPxIn > 0) {
     const sharedFont = Math.max(8, Math.min(56, Math.round(fontPxIn)))
     const frameInnerW = Math.max(8, frameW - pads(sharedFont).x * 2)
     let sharedLines: string[] = [raw]
     if (estimateLineW(raw, sharedFont) > frameInnerW) {
-      const wrapped = wrapLines(raw, frameInnerW, sharedFont)
-      if (wrapped.length <= MAX_LINES) {
-        sharedLines = wrapped
-      } else if (words.length >= 2) {
-        let best: string[] | null = null
-        let bestScore = Infinity
-        for (let i = 1; i < words.length; i++) {
-          const a = words.slice(0, i).join(' ')
-          const b = words.slice(i).join(' ')
-          const aw = estimateLineW(a, sharedFont)
-          const bw = estimateLineW(b, sharedFont)
-          if (aw > frameInnerW || bw > frameInnerW) continue
-          const score = Math.abs(aw - bw)
-          if (score < bestScore) {
-            bestScore = score
-            best = [a, b]
-          }
-        }
-        if (best) sharedLines = best
-      }
+      sharedLines = packLines(sharedFont, frameInnerW)
     }
     const sharedSize = blockSize(sharedFont, sharedLines)
     if (sharedLines.length <= MAX_LINES && sharedSize.needW <= frameW && sharedSize.needH <= frameH) {
@@ -418,12 +414,12 @@ export function layoutMidOverlay(
   let font1 = Math.min(fontPxIn > 0 ? Math.round(fontPxIn) : hCap, hCap, 56)
   while (font1 > 8 && !fitsSeed(font1, [raw])) font1 -= 1
 
-  const hCap2 = Math.floor((seed.h / (LINE * 2)) * 0.82)
+  const hCap2 = Math.floor((seed.h / (LINE * MAX_LINES)) * 0.82)
   let font2 = Math.min(fontPxIn > 0 ? Math.round(fontPxIn) : hCap2, hCap2, 44)
-  let lines2 = pack2(font2)
+  let lines2 = packLines(font2)
   while (font2 > 8 && !fitsSeed(font2, lines2)) {
     font2 -= 1
-    lines2 = pack2(font2)
+    lines2 = packLines(font2)
   }
 
   let fontPx: number
@@ -439,7 +435,7 @@ export function layoutMidOverlay(
   // Co thêm nếu block vẫn > seed (an toàn)
   while (fontPx > 8 && !fitsSeed(fontPx, lines)) {
     fontPx -= 1
-    if (lines.length > 1) lines = pack2(fontPx)
+    if (lines.length > 1) lines = packLines(fontPx)
   }
 
   // Cover = seed OCR vàng — nhưng cho phép nới ngang nếu chữ dịch dài hơn
@@ -494,6 +490,16 @@ export function layoutOcrOverlay(
 
 /** ponytail: self-check — chữ trong bbox */
 export function __checkOcrOverlayLayout() {
+  const wideAuto = layoutMidOverlay(
+    { x: 55, y: 1334, w: 969, h: 82 },
+    'Trong chuyen di nay toi mat trung binh 1.000 doi loai 56 gam va tim duoc con ca kho so 12',
+    48,
+    1080,
+    1920,
+  )
+  if (wideAuto.fontPx < 48 || wideAuto.lines.length > 3) {
+    throw new Error('wide mid must keep shared font before shrinking')
+  }
   const midBox = { x: 200, y: 700, w: 240, h: 56 }
   const mid = layoutMidOverlay(midBox, 'Đào hoa quả', 0, 1080, 1920)
   // Height locked to seed
@@ -519,7 +525,7 @@ export function __checkOcrOverlayLayout() {
     1920,
   )
   if (longMid.cover.h > 90 + 1) throw new Error('long mid must not grow past seed h')
-  if (longMid.lines.length > 2) throw new Error('mid max 2 lines')
+  if (longMid.lines.length > 3) throw new Error('mid max 3 lines')
   if (longMid.lines.length * longMid.fontPx * 1.12 > longMid.cover.h - 2) {
     throw new Error('long mid block taller than cover')
   }
@@ -548,8 +554,8 @@ export function __checkOcrOverlayLayout() {
     1080,
     1920,
   )
-  if (shortNice.lines.length > 2) {
-    throw new Error('short mid max 2 lines, got ' + shortNice.lines.join('|'))
+  if (shortNice.lines.length > 3) {
+    throw new Error('short mid max 3 lines, got ' + shortNice.lines.join('|'))
   }
   // Bbox OCR cao/rộng: snug ôm chữ (cover nhỏ hơn seed)
   const tall = layoutMidOverlay(
@@ -559,7 +565,7 @@ export function __checkOcrOverlayLayout() {
     1080,
     1920,
   )
-  if (tall.lines.length > 2) throw new Error('project mid max 2 lines')
+  if (tall.lines.length > 3) throw new Error('project mid max 3 lines')
   if (tall.fontPx < 28) throw new Error('mid font too small: ' + tall.fontPx)
   // Pad đáy đủ che stroke; không dải thừa lớn
   if (tall.cover.h < tall.fontPx * 1.2) {
@@ -586,7 +592,7 @@ export function __checkOcrOverlayLayout() {
   if (L.fontPx > 40) throw new Error('label font must fit height')
 
   const short = layoutMidOverlay({ x: 196, y: 912, w: 136, h: 72 }, 'Đào hoa quả', 0, 1080, 1920)
-  if (short.lines.length > 2) throw new Error('short mid max 2 lines')
+  if (short.lines.length > 3) throw new Error('short mid max 3 lines')
   // 1 từ Latin
   const name = layoutMidOverlay({ x: 400, y: 900, w: 88, h: 64 }, 'Shaqin', 0, 1080, 1920)
   if (name.lines[0] !== 'Shaqin') throw new Error('latin word intact')

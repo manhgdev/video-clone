@@ -723,7 +723,6 @@ export default function Sidebar({
         <div
           className="clear-cache-modal-backdrop"
           role="presentation"
-          onClick={() => !clearingCache && setConfirmClear(false)}
         >
           <div
             className="clear-cache-modal"

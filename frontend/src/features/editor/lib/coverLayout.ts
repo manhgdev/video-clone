@@ -769,16 +769,18 @@ export function fitOutsideCaption(
   const baseFont = Math.max(12, Math.round(preferred || AUTO_SUBTITLE_FONT))
   const maxInnerW = Math.max(24, Math.round(frameW * 0.92))
   let fontPx = baseFont
-  let lines = wrapCaptionText(text, maxInnerW, fontPx, 2)
+  // Keep the shared font for up to three lines. Shrinking a two-line caption
+  // to 12px is what made wide portrait captions unreadably tiny.
+  let lines = wrapCaptionText(text, maxInnerW, fontPx, 3)
   // First choice: one horizontal line at the shared font. Otherwise keep the
-  // same font and wrap; shrink only as a last resort when a 2-line unit still
+  // same font and wrap; shrink only as a last resort when a 3-line unit still
   // exceeds the video width.
   while (
     fontPx > 12
     && lines.some((line) => measureLineWidth(line, fontPx) > maxInnerW)
   ) {
     fontPx -= 1
-    lines = wrapCaptionText(text, maxInnerW, fontPx, 2)
+    lines = wrapCaptionText(text, maxInnerW, fontPx, 3)
   }
   return { lines, fontPx }
 }
@@ -1121,10 +1123,11 @@ export function tightCaptionTextBox(
   frameW: number,
   frameH: number,
   wrapW?: number,
+  maxLines = 3,
 ): PixelBox {
   const pad = coverPad(fontSizePx, frameW)
   const innerW = wrapW ?? Math.min(frameW, Math.round(frameW * 0.88))
-  const lines = wrapCaptionText(text, innerW, fontSizePx, 3)
+  const lines = wrapCaptionText(text, innerW, fontSizePx, maxLines)
   const lineH = fontSizePx * 1.12
   const textW = Math.min(innerW, Math.max(...lines.map((l) => measureLineWidth(l, fontSizePx)), 1))
   return {
@@ -1304,7 +1307,7 @@ export function estimateCaptionBox(
   const fitted = fitOutsideCaption(ocr, text, fontSizePx, frameW)
   const fs = fitted.fontPx
   const wrapW = Math.max(24, Math.round(frameW * 0.92))
-  const textBox = tightCaptionTextBox(text, fs, frameW, frameH, wrapW)
+  const textBox = tightCaptionTextBox(text, fs, frameW, frameH, wrapW, Math.max(1, fitted.lines.length))
   const gap = Math.max(3, Math.round(fs * 0.18))
   const cx = ocr.x + ocr.w / 2
   let y0: number

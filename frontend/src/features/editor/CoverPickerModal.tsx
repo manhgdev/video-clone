@@ -139,7 +139,6 @@ export function CoverPickerModal({ isOpen, onClose, onConfirm, videoUrl }: Cover
     <div
       className="fixed inset-0 z-[10000] flex items-center justify-center backdrop-blur-sm"
       style={{ backgroundColor: 'rgba(0,0,0,0.8)' }}
-      onClick={(e) => { if (e.target === e.currentTarget) onClose() }}
     >
       <div
         className="flex flex-col w-[680px] max-w-[95vw] rounded-xl overflow-hidden font-sans select-none shadow-2xl border"

@@ -58,7 +58,7 @@ from pipeline import (
     tts_segment,
     video_fingerprint,
 )
-from pipeline.core.config import export_display_path
+from pipeline.core.config import REPO_ROOT, export_display_path
 from pipeline.core.jobs import arm_job
 from pipeline.core.media import meta_baked_speed, meta_has_user_bake, video_size
 from pipeline.export.mux import (
@@ -281,10 +281,16 @@ def api_reveal_output(project_id: str):
         _meta = load_meta(project_id) or {}
         _custom = str(_meta.get("exportOutputDir") or "").strip()
         if _custom and Path(_custom).is_dir():
-            exports = Path(_custom)
+            # exportOutputDir is persisted as the final render directory.
+            # Older projects stored the parent and need the slug fallback;
+            # never append the slug blindly (that caused <slug>/<slug>).
+            direct = Path(_custom)
+            exports = direct
             try:
                 from pipeline.orchestrate.export_job import _project_slug
-                exports = exports / _project_slug(_meta)
+                nested = direct / _project_slug(_meta)
+                if not any(direct.glob("*")) and nested.is_dir():
+                    exports = nested
             except Exception:
                 pass
     except Exception:
@@ -297,7 +303,28 @@ def api_reveal_output(project_id: str):
     if not safe_name:
         safe_name = project_id
 
-    candidates = [
+    # Prefer the exact file recorded by export_job; render names may contain
+    # Unicode/punctuation that is normalized differently by legacy metadata.
+    exact_paths: list[Path] = []
+    for raw in (_meta.get("outputPath"), _meta.get("outputRel"), _meta.get("exportCopy")):
+        value = str(raw or "").strip()
+        if not value:
+            continue
+        p = Path(value)
+        if not p.is_absolute():
+            p = REPO_ROOT / p
+        if p.is_file():
+            exact_paths.append(p)
+
+    export_dirs = [exports]
+    try:
+        from pipeline.orchestrate.export_job import _project_slug
+        legacy_exports = PUBLIC_DATA / "exports" / _project_slug(_meta)
+        if legacy_exports not in export_dirs:
+            export_dirs.append(legacy_exports)
+    except Exception:
+        pass
+    candidate_names = [
         exports / f"{safe_name}.mp4",
         exports / f"{safe_name}.mp3",
         exports / f"{safe_name}.wav",
@@ -306,6 +333,8 @@ def api_reveal_output(project_id: str):
         exports / f"{safe_name}.gif",
         exports / f"{project_id}.mp4",
     ]
+    names = [p.name for p in candidate_names]
+    candidates = exact_paths + [directory / name for directory in export_dirs for name in names]
     path = next((p for p in candidates if p.exists()), None)
 
     # Fallback: mở thư mục exports

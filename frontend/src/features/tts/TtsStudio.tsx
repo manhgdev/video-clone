@@ -2836,7 +2836,6 @@ export default function TtsStudio({
         <div
           className="tts-modal-backdrop"
           role="presentation"
-          onClick={closeBulkMoveModal}
         >
           <div
             className="tts-modal"

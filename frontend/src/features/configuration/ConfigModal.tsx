@@ -401,7 +401,6 @@ export default function ConfigModal({
     <div
       className="cfg-overlay"
       role="presentation"
-      onClick={canClose ? tryClose : undefined}
     >
       <div
         className={`cfg-modal cfg-modal-wide${section === 'setup' ? ' cfg-modal-setup' : ''}`}

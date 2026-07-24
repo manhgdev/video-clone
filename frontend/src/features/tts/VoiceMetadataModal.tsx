@@ -147,7 +147,7 @@ export default function VoiceMetadataModal({
   }
 
   return (
-    <div className="tts-modal-backdrop" role="presentation" onClick={() => !saving && onClose()}>
+    <div className="tts-modal-backdrop" role="presentation">
       <div
         className="tts-modal tts-voice-metadata-modal"
         role="dialog"

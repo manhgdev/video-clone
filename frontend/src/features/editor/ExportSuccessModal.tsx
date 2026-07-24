@@ -77,7 +77,6 @@ export function ExportSuccessModal({
     <div
       className="fixed inset-0 z-[9998] flex items-center justify-center backdrop-blur-sm"
       style={{ backgroundColor: 'rgba(0,0,0,0.75)' }}
-      onClick={(e) => { if (e.target === e.currentTarget) onClose() }}
     >
       <div
         className="flex flex-col w-[640px] max-w-[95vw] rounded-xl overflow-hidden font-sans select-none shadow-2xl border"

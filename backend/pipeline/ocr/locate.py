@@ -22,6 +22,10 @@ _inprocess_lock = threading.Lock()
 # 64 anchors keep style/location changes within a few neighbouring captions
 # while bounding long-video model calls.
 _QUICK_PROBE_LIMIT = 64
+# Stable mode keeps first/middle/last samples but caps long timelines. The
+# remaining cues inherit from the nearest stable anchor instead of triggering
+# another OCR pass.
+_STABLE_PROBE_LIMIT = 48
 
 
 def _spread_probes(items: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
@@ -919,7 +923,7 @@ def attach_speech_hardsub_boxes(
     """Whisper giữ timecode; OCR đo bbox.
 
     stable=False (mặc định, nhanh): 1 frame giữa mỗi mốc.
-    stable=True: đầu•giữa•cuối + majority + neo Y (chậm hơn ~3×).
+    stable=True: đầu•giữa•cuối + majority + neo Y (tối đa 48 mốc, tránh chậm video dài).
     analysis_region: {x,y,w,h} 0–1 — thu hẹp ROI OCR (nhanh + ít nhiễu).
 
     Frozen desktop: chạy trong subprocess .venv-runtime — crash OpenCV/RapidOCR
@@ -1097,8 +1101,11 @@ def attach_speech_hardsub_boxes_inprocess(
     attached = 0
     # ponytail: quick mode OCRs at most 64 anchors; missing cues reuse the
     # nearest anchor and recalculate width from their own CJK glyph count.
-    # Stable mode remains exhaustive for projects that explicitly request it.
-    probes = filtered if stable else _spread_probes(filtered, _QUICK_PROBE_LIMIT)
+    # Stable mode is capped too; unprobed cues inherit from nearby anchors.
+    probes = _spread_probes(
+        filtered,
+        _STABLE_PROBE_LIMIT if stable else _QUICK_PROBE_LIMIT,
+    )
     total = len(probes)
     anchor_boxes: list[tuple[int, int, int, int]] = []
     try:
@@ -1113,19 +1120,21 @@ def attach_speech_hardsub_boxes_inprocess(
             if stable:
                 # 3 frame × majority — chống OCR nhảy lung tung
                 hits: list[tuple[float, float, tuple[int, int, int, int], str]] = []
+                raw_hits: list[tuple[float, float, tuple[int, int, int, int], str]] = []
                 for t in _sample_times_in_cue(s0, e0):
                     hit = _read_probe(t, src, seg.get("layout") or "horizontal")
                     if not hit:
                         continue
+                    raw_hits.append(hit)
                     box = hit[2]
                     probe_bb = {"w": box[2] - box[0], "h": box[3] - box[1]}
                     if _bbox_fits_source(probe_bb, src, fw):
                         hits.append(hit)
+                # Avoid OCR'ing the same three frames a second time when all
+                # detections fail the width heuristic; raw hits are a safe
+                # fallback and preserve the previous behavior.
                 if not hits:
-                    for t in _sample_times_in_cue(s0, e0):
-                        hit = _read_probe(t, src, seg.get("layout") or "horizontal")
-                        if hit:
-                            hits.append(hit)
+                    hits = raw_hits
                 stable_box = _stable_box_from_hits(hits, fw=fw, fh=fh)
             else:
                 # 1 frame giữa cue

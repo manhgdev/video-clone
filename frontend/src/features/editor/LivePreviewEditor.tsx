@@ -919,7 +919,7 @@ export default function LivePreviewEditor({
     : appliedCrop
   const getCachedPreviewLayout = (s: Segment, override?: PixelBox) => {
     const cl = s.captionLayout
-    const key = `v13|${s.id}|${s.translation}|${s.layout}|${s.bboxInherited}|${s.bbox ? `${s.bbox.x},${s.bbox.y},${s.bbox.w},${s.bbox.h}` : ''}|${cl ? `${cl.x},${cl.y},${cl.w},${cl.h},${cl.fontSize},${(cl.lines || []).join('\\n')}` : ''}|${settings.subtitleFontSize}|${settings.subtitleFontFamily}|${crop.x},${crop.y},${crop.w},${crop.h}|${override ? `${override.x},${override.y},${override.w},${override.h}` : ''}`
+    const key = `v14|${s.id}|${s.translation}|${s.layout}|${s.bboxInherited}|${s.bbox ? `${s.bbox.x},${s.bbox.y},${s.bbox.w},${s.bbox.h}` : ''}|${cl ? `${cl.x},${cl.y},${cl.w},${cl.h},${cl.fontSize},${(cl.lines || []).join('\\n')}` : ''}|${settings.subtitleFontSize}|${settings.subtitleFontFamily}|${crop.x},${crop.y},${crop.w},${crop.h}|${override ? `${override.x},${override.y},${override.w},${override.h}` : ''}`
     const cached = layoutCacheRef.current[s.id]
     if (cached && cached.key === key) {
       return cached.val
