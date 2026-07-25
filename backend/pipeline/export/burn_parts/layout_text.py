@@ -364,12 +364,12 @@ def _caption_overlay(layout: dict[str, Any]) -> tuple[Any, int, int] | None:
     bg_hex = str(layout.get("bg_hex") or "#000000")
     bg_op = max(0, min(100, int(layout.get("bg_opacity") if layout.get("bg_opacity") is not None else 55)))
     css_cover_mode = str(layout.get("css_cover_mode") or "").lower()
-    # Cover captions are clipped by the Editor's bbox container. Other paths
-    # retain the safety margin for Vietnamese accents and descenders.
+    # Pad overlay for VI accents/descenders/shadow even in cover mode — FE often
+    # uses overflow-visible; m=0 + wrong PIL origin was clipping bottoms of ạ/g/y.
     draw_probe = ImageDraw.Draw(Image.new("L", (1, 1)))
     metric_box = draw_probe.textbbox((0, 0), "Áạgqỵ", font=font)
     metric_h = max(1, metric_box[3] - metric_box[1])
-    m = 0 if css_cover_mode else max(6, int(math.ceil(metric_h * 0.3)))
+    m = max(6, int(math.ceil(metric_h * 0.3)))
     bw, bh = (x1 - x0) + 2 * m, (y1 - y0) + 2 * m
     if bw < 4 or bh < 4:
         return None
@@ -391,72 +391,68 @@ def _caption_overlay(layout: dict[str, Any]) -> tuple[Any, int, int] | None:
             outline=(255, 255, 255, 30) if is_box else None,
             width=1,
         )
-    # Match the Editor's flex line boxes. PIL and Chromium use the same font
-    # widths here, but PIL's draw origin sits about .06em lower.
+    # Editor flex: line boxes centered in cover. PIL draw origin needs -bbox.
+    fs = float(getattr(font, "size", 0) or layout.get("fontsize") or 48)
     css_line_h = (
-        font.size * (1.1 if css_cover_mode == "mid" else 1.12)
+        fs * (1.1 if css_cover_mode == "mid" else 1.12)
         if css_cover_mode else 0.0
     )
-    css_top = (
-        max(0.0, (box_h - css_line_h * len(lines)) / 2.0)
-        if css_cover_mode else 0.0
-    )
-    ty = (
-        m + css_top - font.size * 0.06
-        if css_cover_mode
-        else m + max(0, (box_h - text_h) // 2) - int(round(metric_h * 0.06))
-    )
+    if css_cover_mode:
+        css_top = max(0.0, (box_h - css_line_h * max(1, len(lines))) / 2.0)
+        ty = m + css_top
+    else:
+        ty = m + max(0, (box_h - text_h) // 2) - int(round(metric_h * 0.06))
     thick = False  # ponytail: preview dùng soft shadow cho mọi layout; thick outline khác preview
     outline_thick = (
         (-3, 0), (3, 0), (0, -3), (0, 3), (-2, -2), (2, -2), (-2, 2), (2, 2),
         (-3, -1), (3, -1), (-3, 1), (3, 1), (-1, -3), (1, -3), (-1, 3), (1, 3),
         (-2, -3), (2, -3), (-2, 3), (2, 3),
     )
-    
+
+    def _line_xy(line: str, line_top: float) -> tuple[int, int, int]:
+        bb = draw.textbbox((0, 0), line, font=font)
+        left, top = bb[0], bb[1]
+        tw = bb[2] - bb[0]
+        th = bb[3] - bb[1]
+        tx = m + (box_w - tw) // 2 - left
+        if css_cover_mode:
+            # Center ink inside the CSS line box (flex items-center per line).
+            ink_top = line_top + max(0.0, (css_line_h - th) / 2.0)
+            gy = int(round(ink_top - top))
+        else:
+            gy = int(round(line_top - top))
+        return tx, gy, th
+
     # CAP-MID/label explicitly override captionChromeStyle with no shadow.
     if stroke_on and not thick and css_cover_mode not in ("mid", "label"):
         from PIL import ImageFilter
         shadow_layer = Image.new("RGBA", overlay.size, (0, 0, 0, 0))
         shadow_draw = ImageDraw.Draw(shadow_layer)
         # CSS drop-shadow: 0 2px 4px (relative to 48px base font in preview)
-        scale_f = max(0.5, font.size / 48.0)
+        scale_f = max(0.5, fs / 48.0)
         dy_off = int(round(2 * scale_f))
         blur_rad = max(1.0, 3.0 * scale_f)
-        
+
         ty_s = ty
         for i, line in enumerate(lines):
-            bb = draw.textbbox((0, 0), line, font=font)
-            tw = bb[2] - bb[0]
-            th = line_hs[i] if i < len(line_hs) else (bb[3] - bb[1])
-            tx = m + (box_w - tw) // 2
-            top = bb[1]
-            gy = ty_s if css_cover_mode else ty_s - top
+            tx, gy, th = _line_xy(line, ty_s)
+            if not css_cover_mode:
+                th = line_hs[i] if i < len(line_hs) else th
             shadow_draw.text((tx, gy + dy_off), line, font=font, fill=(0, 0, 0, 230))
-            ty_s += (
-                css_line_h
-                if css_cover_mode
-                else th + (gap_line if i + 1 < len(lines) else 0)
-            )
-            
+            ty_s += css_line_h if css_cover_mode else th + (gap_line if i + 1 < len(lines) else 0)
+
         shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(blur_rad))
         overlay.alpha_composite(shadow_layer)
 
     for i, line in enumerate(lines):
-        bb = draw.textbbox((0, 0), line, font=font)
-        tw = bb[2] - bb[0]
-        th = line_hs[i] if i < len(line_hs) else (bb[3] - bb[1])
-        tx = m + (box_w - tw) // 2
-        top = bb[1]
-        gy = ty if css_cover_mode else ty - top
+        tx, gy, th = _line_xy(line, ty)
+        if not css_cover_mode:
+            th = line_hs[i] if i < len(line_hs) else th
         if stroke_on and thick:
             for dx, dy in outline_thick:
                 draw.text((tx + dx, gy + dy), line, font=font, fill=(0, 0, 0, 250))
         draw.text((tx, gy), line, font=font, fill=fill)
-        ty += (
-            css_line_h
-            if css_cover_mode
-            else th + (gap_line if i + 1 < len(lines) else 0)
-        )
+        ty += css_line_h if css_cover_mode else th + (gap_line if i + 1 < len(lines) else 0)
     rgba = np.asarray(overlay)
     return rgba, x0 - m, y0 - m
 
