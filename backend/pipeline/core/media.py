@@ -457,22 +457,128 @@ def _has_audio_stream(path: Path) -> bool:
         return False
 
 
+def _retime_spans(
+    duration: float,
+    ordered: list[dict[str, Any]],
+    base: float,
+) -> list[tuple[float, float, float, float, float]]:
+    """Build the same piecewise clock the Editor uses while playing.
+
+    Segments are allowed to overlap (for example a long vertical OCR lane
+    underneath a short Mid caption).  The old cursor walk consumed the first
+    segment and silently ignored the later one, while the Editor deliberately
+    prefers Mid, then label, then horizontal, then vertical.  Split at every
+    boundary and choose one active lane for each interval so both paths use
+    one clock.
+    """
+    if duration <= 0:
+        return []
+
+    def _num(value: Any, fallback: float = 0.0) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return fallback
+
+    def _lane(segment: dict[str, Any]) -> int:
+        # Keep this ordering in lock-step with frontend pickTimelineSeg().
+        layout = str(segment.get("layout") or "horizontal").lower()
+        return {"mid": 0, "label": 1, "horizontal": 2, "vertical": 3}.get(layout, 4)
+
+    def _active_at(value: float) -> dict[str, Any] | None:
+        active = [
+            segment
+            for segment in ordered
+            if value >= max(0.0, _num(segment.get("start")))
+            and value < min(duration, _num(segment.get("end"), _num(segment.get("start"))))
+        ]
+        if not active:
+            return None
+        best_lane = min(_lane(segment) for segment in active)
+        candidates = [segment for segment in active if _lane(segment) == best_lane]
+        if best_lane == 0:
+            # solidMidAt() chooses the nearest start (the later Mid when
+            # intervals overlap); stable order breaks exact ties.
+            return max(
+                enumerate(candidates),
+                key=lambda item: (_num(item[1].get("start")), item[0]),
+            )[1]
+        # labels/horizontal/vertical use the first hit in the Editor's
+        # segment order, matching Array.find() in pickTimelineSeg().
+        return candidates[0]
+
+    boundaries = {0.0, float(duration)}
+    for segment in ordered:
+        start = max(0.0, min(float(duration), _num(segment.get("start"))))
+        end = max(start, min(float(duration), _num(segment.get("end"), start)))
+        boundaries.add(start)
+        boundaries.add(end)
+    points = sorted(boundaries)
+    raw: list[tuple[float, float, float]] = []
+    for start, end in zip(points, points[1:]):
+        if end <= start + 0.001:
+            continue
+        active = _active_at((start + end) / 2)
+        segment_speed = _num(active.get("videoSpeed"), 1.0) if active else 1.0
+        speed = max(0.25, min(2.0, base * segment_speed))
+        if raw and abs(raw[-1][2] - speed) < 1e-6 and abs(raw[-1][1] - start) < 1e-6:
+            raw[-1] = (raw[-1][0], end, speed)
+        else:
+            raw.append((start, end, speed))
+
+    spans: list[tuple[float, float, float, float, float]] = []
+    out_cursor = 0.0
+    for start, end, speed in raw:
+        out_end = out_cursor + (end - start) / speed
+        spans.append((start, end, speed, out_cursor, out_end))
+        out_cursor = out_end
+    return spans
+
+
+def retime_timeline_time(
+    value: float,
+    duration: float,
+    segments: list[dict[str, Any]],
+    *,
+    base_speed: float = 1.0,
+) -> float:
+    """Map one source timeline timestamp through the preview playback rates."""
+    base = max(0.25, min(2.0, float(base_speed or 1.0)))
+    ordered = sorted((dict(s) for s in segments), key=lambda s: float(s.get("start") or 0))
+    spans = _retime_spans(max(0.0, duration), ordered, base)
+    source = max(0.0, min(max(0.0, duration), float(value or 0)))
+    for source_start, source_end, speed, output_start, _output_end in spans:
+        if source <= source_end + 1e-6:
+            return output_start + max(0.0, min(source_end - source_start, source - source_start)) / speed
+    return spans[-1][4] if spans else source
+
+
 def retime_video_segments(
     video: Path,
     segments: list[dict[str, Any]],
     cache_dir: Path,
     project_id: str | None = None,
+    *,
+    base_speed: float = 1.0,
 ) -> tuple[Path, list[dict[str, Any]]]:
-    """Retime speech spans and return segments mapped onto output timeline."""
+    """Retime speech spans and return segments mapped onto output timeline.
+
+    ``base_speed`` mirrors the Editor's soft prefer-video playback rate; the
+    per-segment ``videoSpeed`` is multiplied on top of it.
+    """
     duration = ffprobe_duration(video)
+    base = max(0.25, min(2.0, float(base_speed or 1.0)))
     ordered = sorted((dict(s) for s in segments), key=lambda s: float(s.get("start") or 0))
-    if duration <= 0 or not any(abs(float(s.get("videoSpeed") or 1) - 1.0) > 0.001 for s in ordered):
+    if duration <= 0 or (
+        abs(base - 1.0) <= 0.001
+        and not any(abs(float(s.get("videoSpeed") or 1) - 1.0) > 0.001 for s in ordered)
+    ):
         return video, ordered
 
     stat = video.stat()
     signature = [
-        (s.get("id"), round(float(s.get("start") or 0), 4), round(float(s.get("end") or 0), 4),
-         round(float(s.get("videoSpeed") or 1), 3))
+         (s.get("id"), round(float(s.get("start") or 0), 4), round(float(s.get("end") or 0), 4),
+         round(base * float(s.get("videoSpeed") or 1), 3))
         for s in ordered
     ]
     key = hashlib.sha1(
@@ -481,25 +587,7 @@ def retime_video_segments(
     cache_dir.mkdir(parents=True, exist_ok=True)
     out = cache_dir / f"retimed_{key}.mp4"
 
-    spans: list[tuple[float, float, float, float, float]] = []
-    cursor = 0.0
-    out_cursor = 0.0
-    for segment in ordered:
-        start = max(cursor, min(duration, float(segment.get("start") or 0)))
-        end = max(start, min(duration, float(segment.get("end") or start)))
-        if start > cursor + 0.001:
-            gap = start - cursor
-            spans.append((cursor, start, 1.0, out_cursor, out_cursor + gap))
-            out_cursor += gap
-        # <1 = chậm (kéo dài span, đẩy timeline sau); >1 = nhanh
-        speed = max(0.4, min(2.0, float(segment.get("videoSpeed") or 1)))
-        if end > start + 0.001:
-            out_end = out_cursor + (end - start) / speed
-            spans.append((start, end, speed, out_cursor, out_end))
-            out_cursor = out_end
-        cursor = max(cursor, end)
-    if cursor < duration - 0.001:
-        spans.append((cursor, duration, 1.0, out_cursor, out_cursor + duration - cursor))
+    spans = _retime_spans(duration, ordered, base)
 
     def map_time(value: float) -> float:
         for source_start, source_end, speed, output_start, output_end in spans:
@@ -599,6 +687,95 @@ def retime_video_segments(
             except OSError:
                 pass
     return out, remapped
+
+
+def retime_audio_track(
+    audio: Path,
+    segments: list[dict[str, Any]],
+    cache_dir: Path,
+    project_id: str | None = None,
+    *,
+    base_speed: float = 1.0,
+    source_start: float = 0.0,
+    source_duration: float | None = None,
+) -> Path:
+    """Apply the video preview clock to a cached external stem track."""
+    full_duration = ffprobe_duration(audio)
+    offset = max(0.0, float(source_start or 0))
+    duration = max(
+        0.0,
+        min(
+            full_duration - offset,
+            float(source_duration) if source_duration is not None else full_duration - offset,
+        ),
+    )
+    base = max(0.25, min(2.0, float(base_speed or 1.0)))
+    ordered = sorted((dict(s) for s in segments), key=lambda s: float(s.get("start") or 0))
+    has_speed = any(abs(float(s.get("videoSpeed") or 1) - 1.0) > 0.001 for s in ordered)
+    if duration <= 0 or (
+        offset <= 0.001
+        and abs(duration - full_duration) <= 0.02
+        and abs(base - 1.0) <= 0.001
+        and not has_speed
+    ):
+        return audio
+
+    stat = audio.stat()
+    signature = [
+        (
+            s.get("id"),
+            round(float(s.get("start") or 0), 4),
+            round(float(s.get("end") or 0), 4),
+            round(base * float(s.get("videoSpeed") or 1), 3),
+        )
+        for s in ordered
+    ]
+    key = hashlib.sha1(
+        json.dumps(
+            [str(audio.resolve()), stat.st_size, stat.st_mtime_ns, offset, duration, signature]
+        ).encode()
+    ).hexdigest()[:16]
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    out = cache_dir / f"retimed_audio_{key}.wav"
+    if out.exists():
+        return out
+
+    spans = _retime_spans(duration, ordered, base)
+    filters: list[str] = []
+    labels: list[str] = []
+    for i, (start, end, speed, _out_start, _out_end) in enumerate(spans):
+        filters.append(
+            f"[0:a]atrim=start={offset + start:.6f}:end={offset + end:.6f},"
+            f"asetpts=PTS-STARTPTS,{atempo_chain(speed)}[a{i}]"
+        )
+        labels.append(f"[a{i}]")
+    filters.append("".join(labels) + f"concat=n={len(labels)}:v=0:a=1[aout]")
+    fc_path = cache_dir / f"retimed_audio_{key}_fc.txt"
+    fc_path.write_text(";\n".join(filters) + "\n", encoding="utf-8")
+    try:
+        run_cmd(
+            project_id,
+            [
+                "ffmpeg",
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                str(audio),
+                "-filter_complex_script",
+                str(fc_path),
+                "-map",
+                "[aout]",
+                "-c:a",
+                "pcm_s16le",
+                str(out),
+            ],
+        )
+    finally:
+        fc_path.unlink(missing_ok=True)
+    return out
+
 
 def ensure_preview_clip(
     source: Path, dest: Path, sec: float, project_id: str | None = None, *, start: float = 0

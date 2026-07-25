@@ -77,6 +77,11 @@ class SegmentIn(BaseModel):
     ttsVolume: float | None = None
     ttsSpeed: float | None = None
     fontSize: int | None = None
+    fontFamily: str | None = Field(
+        default=None,
+        pattern=r"^(?:system|segoe|arial|bold|helvetica|verdana|tahoma|trebuchet|rounded|impact|georgia|times|palatino|garamond|courier|mono|comic|cjk|meiryo|malgun)$",
+    )
+    textColor: str | None = Field(default=None, pattern=r"^#[0-9a-fA-F]{6}$")
     captionLayout: dict[str, Any] | None = None
     groupId: str | None = None
     isCompound: bool | None = None
@@ -249,6 +254,8 @@ SEG_PRESERVE = (
     "ttsVolume",
     "ttsSpeed",
     "fontSize",
+    "fontFamily",
+    "textColor",
     "coverStart",
     "coverEnd",
     "groupId",

@@ -24,23 +24,52 @@ function acquireDevLock() {
     if (err?.code !== 'EEXIST') throw err
   }
   const oldPid = Number(readFileSync(lockPath, 'utf8').trim())
+  if (!Number.isSafeInteger(oldPid) || oldPid <= 0) {
+    unlinkSync(lockPath)
+    writeFileSync(lockPath, String(process.pid), { flag: 'wx' })
+    return
+  }
   try {
-    process.kill(oldPid, 0)
+    if (!isWin) {
+      process.kill(oldPid, 0)
+      const check = spawnSync('ps', ['-p', String(oldPid), '-o', 'command='], { encoding: 'utf8' })
+      if (check.status !== 0 || !/scripts[\\/]dev\.mjs/.test(String(check.stdout || ''))) {
+        unlinkSync(lockPath)
+        writeFileSync(lockPath, String(process.pid), { flag: 'wx' })
+        return
+      }
+    }
     // PID có thể đã được Windows cấp lại cho tiến trình khác sau khi runner cũ chết.
     if (isWin) {
       const check = spawnSync('powershell.exe', [
         '-NoProfile',
         '-Command',
-        `$p = Get-CimInstance Win32_Process -Filter 'ProcessId = ${oldPid}' -ErrorAction SilentlyContinue; if ($p -and $p.Name -match '^node(\\.exe)?$' -and $p.CommandLine -match 'scripts\\\\dev\\\\.mjs') { 'dev-runner' }`,
-      ], { encoding: 'utf8' })
+        `$p = Get-CimInstance Win32_Process -Filter "ProcessId = ${oldPid}" -ErrorAction SilentlyContinue; if ($p -and $p.Name -match '^node(\\.exe)?$' -and $p.CommandLine -match 'scripts[\\\\/]dev\\.mjs') { 'dev-runner' }`,
+      ], { encoding: 'utf8', timeout: 3_000 })
+      if (check.error || check.status !== 0) {
+        throw new Error(`Không xác minh được dev:all cũ (pid ${oldPid}).`)
+      }
       if (!String(check.stdout || '').includes('dev-runner')) {
         unlinkSync(lockPath)
         writeFileSync(lockPath, String(process.pid), { flag: 'wx' })
         return
       }
     }
-    console.error(`dev:all đã chạy (pid ${oldPid}). Dừng terminal cũ trước khi chạy lại.`)
-    process.exit(1)
+    console.log(`Đang dừng dev:all cũ (pid ${oldPid})…`)
+    if (isWin) {
+      // PID đã được xác minh đúng runner; /T dọn luôn Vite/Uvicorn con, không đụng terminal cha.
+      const stopped = spawnSync(
+        'taskkill',
+        ['/PID', String(oldPid), '/T', '/F'],
+        { stdio: 'ignore', timeout: 8_000 },
+      )
+      if (stopped.status !== 0) throw new Error(`Không dừng được dev:all cũ (pid ${oldPid}).`)
+    } else {
+      process.kill(oldPid, 'SIGTERM')
+    }
+    unlinkSync(lockPath)
+    writeFileSync(lockPath, String(process.pid), { flag: 'wx' })
+    console.log(`Đã dừng dev:all cũ (pid ${oldPid}).`)
   } catch (err) {
     if (err?.code !== 'ESRCH') throw err
     unlinkSync(lockPath)
@@ -53,20 +82,6 @@ function releaseDevLock() {
     if (readFileSync(lockPath, 'utf8').trim() === String(process.pid)) unlinkSync(lockPath)
   } catch {
     /* lock already removed */
-  }
-}
-
-/** Dọn runner dev cũ của chính repo; chúng có thể tự sinh lại Vite/Uvicorn sau khi vừa dọn cổng. */
-function stopOtherDevLaunchers() {
-  if (!isWin) return
-  const script = [
-    "$self = " + process.pid,
-    "$root = [regex]::Escape(" + JSON.stringify(root) + ")",
-    "Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $self -and $_.Name -in @('node.exe', 'node') -and $_.CommandLine -match 'scripts\\\\dev\\\\.mjs' -and $_.CommandLine -match $root } | ForEach-Object { taskkill /PID $_.ProcessId /T /F | Out-Null; Write-Output $_.ProcessId }",
-  ].join('; ')
-  const out = spawnSync('powershell.exe', ['-NoProfile', '-Command', script], { encoding: 'utf8' })
-  for (const pid of String(out.stdout || '').match(/\d+/g) || []) {
-    console.log(`Đã dừng dev:all cũ (pid ${pid})`)
   }
 }
 
@@ -154,7 +169,6 @@ if (!py) {
 } else {
   acquireDevLock()
   process.on('exit', releaseDevLock)
-  stopOtherDevLaunchers()
 
   const viteBin = path.join(root, 'node_modules', 'vite', 'bin', 'vite.js')
   const webCmd = process.execPath

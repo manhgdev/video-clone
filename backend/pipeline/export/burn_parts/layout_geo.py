@@ -44,7 +44,7 @@ _ocr_mid_labels = ocr_mid_labels
 _ocr_mid_vertical = ocr_mid_vertical
 _ocr_mid_hardsub_boxes = ocr_mid_hardsub_boxes
 
-from pipeline.export.fonts import _font_for_preset
+from pipeline.export.fonts import _font_for_preset, _subtitle_font
 
 def _cover_max_h(frame_h: int, font_size: int = 36) -> int:
     """Đủ 1–3 dòng phụ đề — theo font, không kẹp quá thấp."""
@@ -84,6 +84,8 @@ def _fit_hardsub_box(
     frame_w: int,
     frame_h: int,
     source_text: str = "",
+    *,
+    font_path: str | None = None,
 ) -> tuple[int, int, int, int]:
     """Ngang: max(che hết chữ cũ, fit chữ dịch). Dọc: sát trên, nới đáy."""
     import math
@@ -100,7 +102,7 @@ def _fit_hardsub_box(
             probe = Image.new("RGB", (8, 8))
             draw = ImageDraw.Draw(probe)
             src_fs = max(int(round(font_size * 1.12)), int(round(sh * 0.92)), 28)
-            font = ImageFont.truetype(_subtitle_font(), src_fs)
+            font = ImageFont.truetype(font_path or _subtitle_font(), src_fs)
             raw = draw.textbbox((0, 0), src, font=font)[2]
             cjk = sum(1 for c in src if "\u4e00" <= c <= "\u9fff")
             cjk_floor = int(math.ceil(cjk * src_fs * 1.15)) if cjk else 0

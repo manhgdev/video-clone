@@ -387,7 +387,8 @@ def cover_and_burn(
         paint_mid = False
         if paint is not None and not is_vert and not is_label:
             pcy = (paint[1] + paint[3]) * 0.5
-            paint_mid = h * 0.18 < pcy < h * 0.70
+            # Keep identical to FE effectiveOverlayLayout().
+            paint_mid = h * 0.18 < pcy < h * 0.78
             if paint_mid:
                 is_mid = True
         if is_vert and paint is not None:
@@ -484,6 +485,10 @@ def cover_and_burn(
                 auto_fontsize=auto_fontsize,
             )
             cue_font = cue_font_getter(cue_fs)
+            cue_font_path = str(
+                getattr(cue_font, "path", "")
+                or _font_for_preset(cue_font_family or subtitle_font_family)
+            )
             # WYSIWYG: captionLayout từ editor (đã bake giống preview lúc Xuất)
             preview_lay = _preview_caption_layout(
                 seg_meta, cue_fs, cue_font_getter, layout_mode=lay_mode,
@@ -572,7 +577,7 @@ def cover_and_burn(
                     paint,
                     w,
                     h,
-                    font_path=_font_for_preset(subtitle_font_family),
+                    font_path=cue_font_path,
                     force_vertical=label_tall,
                     source=src_s,
                 )
@@ -607,7 +612,9 @@ def cover_and_burn(
                     cover_box = paint
                 else:
                     lay, cover_box = _layout_caption_over(
-                        text, cue_fs, paint, w, h, source_text=src_s,
+                        text, cue_fs, paint, w, h,
+                        source_text=src_s,
+                        font_path=cue_font_path,
                     )
             elif lay is None:
                 lay = _layout_caption(
@@ -616,9 +623,19 @@ def cover_and_burn(
         else:
             lay = None
         if lay is not None:
+            # In cover mode the Editor renders text inside the full mask bbox;
+            # captionLayout contributes only its committed lines/font size.
+            if cover and used_preview_layout and cover_box is not None:
+                lay = {
+                    **lay,
+                    "box": cover_box,
+                    "css_cover_mode": (
+                        "label" if is_label else "mid" if is_mid else "horizontal"
+                    ),
+                }
             lay = {
                 **lay,
-                "fill_hex": cap_fill_hex,
+                "fill_hex": str(seg_meta.get("textColor") or cap_fill_hex),
                 "bg_style": cap_bg_style,
                 "bg_hex": cap_bg_hex,
                 "bg_opacity": cap_bg_op,

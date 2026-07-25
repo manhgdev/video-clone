@@ -29,37 +29,43 @@ def _glyph_ink(font: Any, ch: str, size: int = 48) -> int:
 def _system_font_dirs() -> list[Path]:
     """Thư mục font theo OS — không hardcode 1 máy."""
     dirs: list[Path] = []
+    # Bundled fonts first: preview and export must use the exact same bytes.
+    here = Path(__file__).resolve()
+    for rel in ("fonts", "assets/fonts", "../../fonts"):
+        dirs.append((here.parent / rel).resolve())
+    try:
+        # Frozen app: _internal/pipeline/export/fonts.py → _internal/dist/fonts.
+        dirs.append((here.parents[2] / "dist" / "fonts").resolve())
+    except IndexError:
+        pass
+    try:
+        # Repository / frontend build.
+        repo_root = here.parents[3]
+        dirs.append((repo_root / "frontend" / "public" / "fonts").resolve())
+        dirs.append((repo_root / "frontend" / "dist" / "fonts").resolve())
+    except IndexError:
+        pass
+    env = os.environ.get("VIDEOCLONE_FONT_DIR") or os.environ.get("FONT_DIR")
+    if env:
+        dirs.append(Path(env))
     windir = os.environ.get("WINDIR") or os.environ.get("SystemRoot")
     if windir:
         dirs.append(Path(windir) / "Fonts")
     local = os.environ.get("LOCALAPPDATA")
     if local:
         dirs.append(Path(local) / "Microsoft" / "Windows" / "Fonts")
-    # macOS
     dirs.extend(
         [
             Path("/System/Library/Fonts"),
             Path("/System/Library/Fonts/Supplemental"),
             Path("/Library/Fonts"),
             Path.home() / "Library" / "Fonts",
-        ]
-    )
-    # Linux common + user
-    dirs.extend(
-        [
             Path("/usr/share/fonts"),
             Path("/usr/local/share/fonts"),
             Path.home() / ".fonts",
             Path.home() / ".local" / "share" / "fonts",
         ]
     )
-    # Bundled fonts next to repo (optional deploy)
-    here = Path(__file__).resolve()
-    for rel in ("fonts", "assets/fonts", "../../fonts"):
-        dirs.append((here.parent / rel).resolve())
-    env = os.environ.get("VIDEOCLONE_FONT_DIR") or os.environ.get("FONT_DIR")
-    if env:
-        dirs.append(Path(env))
     out: list[Path] = []
     seen: set[str] = set()
     for d in dirs:
@@ -92,7 +98,7 @@ def _font_index() -> dict[str, str]:
                 if p.suffix.lower() not in (".ttf", ".otf", ".ttc", ".otc"):
                     continue
                 name = p.name.lower()
-                # first win — ưu tiên dir đầu (Windows Fonts trước trên win)
+                # first win — bundled dirs come before host fonts
                 idx.setdefault(name, str(p.resolve()))
         except OSError:
             continue
@@ -161,6 +167,14 @@ def _font_covers_text(path: str, sample: str, size: int = 48) -> bool:
     if not need:
         return True
     ref = _ref_ink_map(sample, size)
+    try:
+        question_sig = (
+            font.getbbox("?"),
+            round(float(font.getlength("?")), 3),
+            bytes(font.getmask("?")),
+        )
+    except Exception:
+        question_sig = None
     # tofu box ink is nearly constant across missing VI glyphs
     inks: list[int] = []
     for ch in need:
@@ -172,6 +186,18 @@ def _font_covers_text(path: str, sample: str, size: int = 48) -> bool:
             bb = font.getbbox(ch)
             if not bb or bb[2] <= bb[0]:
                 return False
+        # Some fonts map unsupported Unicode directly to their visible "?"
+        # glyph, so non-empty ink alone is not proof of coverage.
+        if question_sig is not None and ch != "?":
+            try:
+                if (
+                    font.getbbox(ch),
+                    round(float(font.getlength(ch)), 3),
+                    bytes(font.getmask(ch)),
+                ) == question_sig:
+                    return False
+            except Exception:
+                pass
         if ref:
             r = ref.get(ch, 0)
             if r > 200 and ink < max(80, int(r * 0.35)):
@@ -209,52 +235,89 @@ def _pick_font(candidates: tuple[str, ...], *, sample: str = _VI_PROBE, cache_ke
 # preset id (CAPTION_FONT_PRESETS FE) → tên file ưu tiên (mọi OS)
 _FONT_PRESET_NAMES: dict[str, tuple[str, ...]] = {
     "system": (
+        "NotoSans-Bold.ttf",
         "segoeuib.ttf", "SegoeUI-Bold.ttf", "arialbd.ttf", "Arial Bold.ttf",
         "DejaVuSans-Bold.ttf", "NotoSans-Bold.ttf", "Helvetica.ttc",
     ),
-    "segoe": ("segoeuib.ttf", "segoeui.ttf", "SegoeUI-Bold.ttf", "Segoe UI.ttf"),
+    "segoe": (
+        "Inter-Bold.ttf",
+        "segoeuib.ttf", "segoeui.ttf", "SegoeUI-Bold.ttf", "Segoe UI.ttf",
+    ),
     "arial": (
+        "Arimo-Bold.ttf",
         "arialbd.ttf", "arial.ttf", "Arial Bold.ttf", "Arial.ttf",
         "DejaVuSans-Bold.ttf", "NotoSans-Bold.ttf",
     ),
     "bold": (
+        "ArchivoBlack-Regular.ttf",
         "arialbd.ttf", "ariblk.ttf", "Arial Bold.ttf", "Arial Black.ttf",
         "DejaVuSans-Bold.ttf", "NotoSans-Bold.ttf",
     ),
     "helvetica": (
+        "Roboto-Bold.ttf",
         "Helvetica.ttc", "HelveticaNeue.ttc", "arialbd.ttf", "Arial Bold.ttf",
         "DejaVuSans-Bold.ttf",
     ),
     "verdana": (
+        "OpenSans-Bold.ttf",
         "verdanab.ttf", "verdana.ttf", "Verdana Bold.ttf", "Verdana.ttf",
         "DejaVuSans-Bold.ttf",
     ),
-    "tahoma": ("tahomabd.ttf", "tahoma.ttf", "Tahoma Bold.ttf", "Tahoma.ttf"),
+    "tahoma": (
+        "Carlito-Bold.ttf",
+        "tahomabd.ttf", "tahoma.ttf", "Tahoma Bold.ttf", "Tahoma.ttf",
+    ),
     "trebuchet": (
+        "FiraSans-Bold.ttf",
         "trebucbd.ttf", "trebuc.ttf", "Trebuchet MS Bold.ttf", "Trebuchet MS.ttf",
     ),
-    "impact": ("impact.ttf", "Impact.ttf"),
+    "rounded": ("Nunito-Bold.ttf", "NotoSans-Bold.ttf", "DejaVuSans-Bold.ttf"),
+    "impact": ("Anton-Regular.ttf", "impact.ttf", "Impact.ttf"),
     "georgia": (
+        "Merriweather-Bold.ttf",
         "georgiab.ttf", "georgia.ttf", "Georgia Bold.ttf", "Georgia.ttf",
     ),
     "times": (
+        "Tinos-Bold.ttf",
         "timesbd.ttf", "times.ttf", "Times New Roman Bold.ttf", "Times New Roman.ttf",
         "LiberationSerif-Bold.ttf",
     ),
+    "palatino": (
+        "Literata-Bold.ttf",
+        "palab.ttf", "pala.ttf", "Palatino Linotype Bold.ttf",
+    ),
+    "garamond": ("EBGaramond-Bold.ttf", "garabd.ttf", "gara.ttf", "Garamond.ttf"),
     "courier": (
+        "CourierPrime-Bold.ttf",
         "courbd.ttf", "cour.ttf", "Courier New Bold.ttf", "Courier New.ttf",
         "DejaVuSansMono-Bold.ttf",
     ),
+    "mono": (
+        "NotoSansMono-Bold.ttf",
+        "consolab.ttf", "consola.ttf", "DejaVuSansMono-Bold.ttf",
+    ),
+    "comic": (
+        "ComicNeue-Bold.ttf",
+        "comicbd.ttf", "comic.ttf", "Comic Sans MS Bold.ttf",
+    ),
     "cjk": (
+        "NotoSansSC-Bold.ttf",
         "msyhbd.ttc", "msyh.ttc", "msyhbd.ttf", "msyh.ttf",
         "PingFang.ttc", "NotoSansCJK-Regular.ttc", "NotoSansCJK-Bold.ttc",
         "SourceHanSansSC-Regular.otf", "WenQuanYiMicroHei.ttf",
     ),
-    "meiryo": ("meiryob.ttc", "meiryo.ttc", "YuGothic-Bold.otf", "NotoSansCJKjp-Regular.otf"),
-    "malgun": ("malgunbd.ttf", "malgun.ttf", "AppleSDGothicNeo.ttc", "NotoSansCJKkr-Regular.otf"),
+    "meiryo": (
+        "NotoSansJP-Bold.ttf",
+        "meiryob.ttc", "meiryo.ttc", "YuGothic-Bold.otf", "NotoSansCJKjp-Regular.otf",
+    ),
+    "malgun": (
+        "NotoSansKR-Bold.ttf",
+        "malgunbd.ttf", "malgun.ttf", "AppleSDGothicNeo.ttc", "NotoSansCJKkr-Regular.otf",
+    ),
 }
 
 _SUBTITLE_BOLD_NAMES = (
+    "NotoSans-Bold.ttf",
     "arialbd.ttf", "segoeuib.ttf", "arial.ttf", "segoeui.ttf",
     "Arial Bold.ttf", "Arial Unicode.ttf", "Arial.ttf",
     "DejaVuSans-Bold.ttf", "DejaVuSans.ttf",

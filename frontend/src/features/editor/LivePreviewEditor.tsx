@@ -33,6 +33,7 @@ import {
   aspectWindowNorm,
   centeredAspectCrop,
   BOOKMARK_EPS,
+  CAPTION_COLORS,
   CAPTION_FONT_PRESETS,
   CAPTION_LANE_DEFS,
   COVER_MASK_STYLES,
@@ -105,6 +106,7 @@ import {
   segmentForDub,
   segmentHasDub,
   segmentWithLayout,
+  setMeasureFontFamily,
   segmentsAt,
   snapBoxToCenter,
   solidMidAt,
@@ -182,6 +184,15 @@ function loadTimelineTool(name: 'mainTrackMagnet' | 'autoSnapping' | 'mediaLinke
     return typeof saved[name] === 'boolean' ? saved[name] : true
   } catch {
     return true
+  }
+}
+
+async function loadCaptionFont(family: string, text = 'Phụ đề tiếng Việt') {
+  if (typeof document === 'undefined' || !document.fonts) return
+  try {
+    await document.fonts.load(`700 48px ${captionFontCss(family)}`, text)
+  } catch {
+    // The bundled fallback remains usable; relayout still runs below.
   }
 }
 
@@ -356,7 +367,22 @@ export default function LivePreviewEditor({
 
   const [time, setTime] = useState(0)
   const layoutCacheRef = useRef<Record<string, { key: string; val: any }>>({})
+  const fontApplySeqRef = useRef(0)
+  const [, setCaptionFontsReady] = useState(0)
   useEffect(() => { layoutCacheRef.current = {} }, [projectId])
+  const captionFontLoadKey = [...new Set([
+    settings.subtitleFontFamily || 'system',
+    ...segments.map((seg) => seg.fontFamily || settings.subtitleFontFamily || 'system'),
+  ])].sort().join('|')
+  useEffect(() => {
+    let active = true
+    void Promise.all(captionFontLoadKey.split('|').map((family) => loadCaptionFont(family))).then(() => {
+      if (!active) return
+      layoutCacheRef.current = {}
+      setCaptionFontsReady((tick) => tick + 1)
+    })
+    return () => { active = false }
+  }, [captionFontLoadKey])
 
   const [duration, setDuration] = useState(() =>
     Number.isFinite(mediaDurationProp) && (mediaDurationProp ?? 0) > 0 ? mediaDurationProp! : 0,
@@ -919,7 +945,7 @@ export default function LivePreviewEditor({
     : appliedCrop
   const getCachedPreviewLayout = (s: Segment, override?: PixelBox) => {
     const cl = s.captionLayout
-    const key = `v14|${s.id}|${s.translation}|${s.layout}|${s.bboxInherited}|${s.bbox ? `${s.bbox.x},${s.bbox.y},${s.bbox.w},${s.bbox.h}` : ''}|${cl ? `${cl.x},${cl.y},${cl.w},${cl.h},${cl.fontSize},${(cl.lines || []).join('\\n')}` : ''}|${settings.subtitleFontSize}|${settings.subtitleFontFamily}|${crop.x},${crop.y},${crop.w},${crop.h}|${override ? `${override.x},${override.y},${override.w},${override.h}` : ''}`
+    const key = `v15|${s.id}|${s.translation}|${s.layout}|${s.bboxInherited}|${s.bbox ? `${s.bbox.x},${s.bbox.y},${s.bbox.w},${s.bbox.h}` : ''}|${cl ? `${cl.x},${cl.y},${cl.w},${cl.h},${cl.fontSize},${(cl.lines || []).join('\\n')}` : ''}|${settings.subtitleFontSize}|${s.fontFamily || settings.subtitleFontFamily}|${crop.x},${crop.y},${crop.w},${crop.h}|${override ? `${override.x},${override.y},${override.w},${override.h}` : ''}`
     const cached = layoutCacheRef.current[s.id]
     if (cached && cached.key === key) {
       return cached.val
@@ -1359,6 +1385,7 @@ export default function LivePreviewEditor({
       bakedPreferVideo,
       at?.videoSpeed,
       bakedSpeed,
+      hasBakedSpeed,
     )
     dubHardSyncRef.current = true
     syncOriginalBg(
@@ -1446,6 +1473,7 @@ export default function LivePreviewEditor({
       bakedPreferVideo,
       at?.videoSpeed,
       bakedSpeed,
+      hasBakedSpeed,
     )
     syncOriginalBg(t, false, Boolean(dubTokenRef.current), playRate, false)
   }
@@ -1480,12 +1508,21 @@ export default function LivePreviewEditor({
     // Đang phát dở → giữ nguyên câu (không nhảy / không lặp)
     const holdId = dubTokenRef.current.split('|')[0]
     const held = holdId ? dubSegs.find((s) => s.id === holdId) : undefined
-    if (held?.audioUrl && !a.ended && a.currentTime > 0.02 && videoTime >= held.start - 0.08) {
+    const heldClipEnded = held
+      ? videoTime >= held.start + dubClipSeconds(
+          held,
+          dubSegs,
+          previewVideoRate(settings.matchDuration, bakedPreferVideo, held.videoSpeed, bakedSpeed, hasBakedSpeed),
+          bakedSpeed,
+        ) - 0.01
+      : false
+    if (held?.audioUrl && !heldClipEnded && !a.ended && a.currentTime > 0.02 && videoTime >= held.start - 0.08) {
       const playRate = previewVideoRate(
         settings.matchDuration,
         bakedPreferVideo,
         held.videoSpeed,
         bakedSpeed,
+        hasBakedSpeed,
       )
       if (Math.abs(video.playbackRate - playRate) > 0.01) video.playbackRate = playRate
       const speed = dubPlaybackSpeed(held, bakedSpeed)
@@ -1504,7 +1541,8 @@ export default function LivePreviewEditor({
     }
 
     // Vừa xong câu → đánh dấu, không play lại
-    if (held && a.ended) {
+    if (held && (a.ended || heldClipEnded)) {
+      if (heldClipEnded) a.pause()
       finished.add(held.id)
       dubTokenRef.current = ''
     }
@@ -1515,6 +1553,7 @@ export default function LivePreviewEditor({
       bakedPreferVideo,
       at?.videoSpeed,
       bakedSpeed,
+      hasBakedSpeed,
     )
     const seg = trackMute.dub
       ? null
@@ -1530,6 +1569,7 @@ export default function LivePreviewEditor({
         bakedPreferVideo,
         at?.videoSpeed,
         bakedSpeed,
+        hasBakedSpeed,
       )
       if (Math.abs(video.playbackRate - idleRate) > 0.01) video.playbackRate = idleRate
       syncOriginalBg(videoTime, true, false, idleRate, hardSync)
@@ -1541,6 +1581,7 @@ export default function LivePreviewEditor({
       bakedPreferVideo,
       seg.videoSpeed,
       bakedSpeed,
+      hasBakedSpeed,
     )
     if (Math.abs(video.playbackRate - playRate) > 0.01) video.playbackRate = playRate
 
@@ -2777,38 +2818,45 @@ export default function LivePreviewEditor({
     window.addEventListener('pointerup', commit, { once: true })
   }
 
+  function relayoutCaptionSegment(
+    seg: Segment,
+    patch: Pick<Segment, 'fontSize' | 'fontFamily'>,
+  ): Segment {
+    const next = { ...seg, ...patch, captionLayout: null }
+    setMeasureFontFamily(captionFontCss(next.fontFamily || settings.subtitleFontFamily || 'system'))
+    if (!next.translation.trim() || !(settings.coverHardsubs && settings.burnSubs)) return next
+    if (isOcrOverlayLayout(next.layout)) {
+      const preferred = (next.fontSize ?? 0) > 0 ? Number(next.fontSize) : 0
+      const seed = overlayCoverSeed(next, sourceWidth, sourceHeight)
+      if (!seed) return next
+      const laid = layoutOcrOverlay(next.layout, seed, next.translation, preferred, sourceWidth, sourceHeight)
+      return segmentWithLayout(next, {
+        cover: laid.cover,
+        caption: laid.caption,
+        lines: laid.lines,
+        fontPx: laid.fontPx,
+      }, laid.fontPx)
+    }
+    const fontPx = resolveCaptionFontSize(next, settings, sourceWidth, sourceHeight)
+    const base = next.bbox
+      ? clampCoverBox(next.bbox, sourceWidth, sourceHeight)
+      : resolveSegmentCover(next, settings, sourceWidth, sourceHeight)
+        ?? seedCoverBox(next, sourceWidth, sourceHeight, fontPx)
+        ?? fallbackCoverBox(sourceWidth, sourceHeight, fontPx)
+    return segmentWithLayout(
+      next,
+      adaptiveCoverLayout(base, next.translation, fontPx, sourceWidth, sourceHeight),
+      fontPx,
+    )
+  }
+
   function applyFontSize(scope: 'one' | 'all', sizeOverride?: number) {
     const size = sizeOverride !== undefined ? sizeOverride : fontSizeDraft
     setFontSizeDraft(size)
-    const relayout = (seg: Segment): Segment => {
-      if (!seg.translation.trim()) {
-        return { ...seg, fontSize: size, captionLayout: null }
-      }
-      // cover mode: nới khung theo chữ; below/above: chỉ font + xóa bake layout cũ
-      if (!(settings.coverHardsubs && settings.burnSubs)) {
-        return { ...seg, fontSize: size, captionLayout: null }
-      }
-      if (isOcrOverlayLayout(seg.layout)) {
-        const preferred = size > 0 ? size : 0
-        const seed = overlayCoverSeed({ ...seg, fontSize: preferred }, sourceWidth, sourceHeight)
-        if (!seed) return { ...seg, fontSize: preferred, captionLayout: null }
-        const laid = layoutOcrOverlay(seg.layout, seed, seg.translation, preferred, sourceWidth, sourceHeight)
-        return segmentWithLayout({ ...seg, fontSize: preferred, captionLayout: null }, {
-          cover: laid.cover,
-          caption: laid.caption,
-          lines: laid.lines,
-          fontPx: laid.fontPx,
-        }, laid.fontPx)
-      }
-      const fontPx = resolveCaptionFontSize({ ...seg, fontSize: size }, settings, sourceWidth, sourceHeight)
-      const base = seg.bbox
-        ? clampCoverBox(seg.bbox, sourceWidth, sourceHeight)
-        : resolveSegmentCover(seg, settings, sourceWidth, sourceHeight)
-          ?? seedCoverBox(seg, sourceWidth, sourceHeight, fontPx)
-          ?? fallbackCoverBox(sourceWidth, sourceHeight, fontPx)
-      const layout = adaptiveCoverLayout(base, seg.translation, fontPx, sourceWidth, sourceHeight)
-      return segmentWithLayout({ ...seg, fontSize: size, captionLayout: null }, layout, fontPx)
-    }
+    const relayout = (seg: Segment) => relayoutCaptionSegment(seg, {
+      fontSize: size,
+      fontFamily: seg.fontFamily,
+    })
     if (scope === 'one') {
       if (selected) editSegment(relayout(selected))
       return
@@ -2825,6 +2873,33 @@ export default function LivePreviewEditor({
     if (size > 0 && lane === 'horizontal') {
       onSettings({ ...settings, subtitleFontSize: size })
     }
+  }
+
+  async function applyFontFamily(scope: 'one' | 'all', family: string) {
+    const seq = ++fontApplySeqRef.current
+    await loadCaptionFont(family, selected?.translation || 'Phụ đề tiếng Việt')
+    if (seq !== fontApplySeqRef.current) return
+    const relayout = (seg: Segment) => relayoutCaptionSegment(seg, {
+      fontSize: seg.fontSize,
+      fontFamily: family,
+    })
+    if (scope === 'one') {
+      if (selected) editSegment(relayout(selected))
+      return
+    }
+    pushHistory()
+    onSettings({ ...settings, subtitleFontFamily: family })
+    void onSegmentsReplace(segments.map(relayout))
+  }
+
+  function applyCaptionColor(scope: 'one' | 'all', textColor: string) {
+    if (scope === 'one') {
+      if (selected) editSegment({ ...selected, textColor })
+      return
+    }
+    pushHistory()
+    onSettings({ ...settings, captionTextColor: textColor })
+    void onSegmentsReplace(segments.map((seg) => ({ ...seg, textColor })))
   }
 
   function applyCaptionModeAll(mode: 'cover' | 'below' | 'above' | 'none') {
@@ -3350,6 +3425,21 @@ export default function LivePreviewEditor({
     return time > start + SPLIT_EDGE && time < end - SPLIT_EDGE
   }
 
+  function segmentTimelineRange(seg: Segment, lane: 'caption' | 'dub') {
+    if (lane === 'caption') return { start: seg.start, end: seg.end }
+    const videoRate = previewVideoRate(
+      settings.matchDuration,
+      bakedPreferVideo,
+      seg.videoSpeed,
+      bakedSpeed,
+      hasBakedSpeed,
+    )
+    return {
+      start: seg.start,
+      end: seg.start + dubClipSeconds(seg, segments, videoRate, bakedSpeed),
+    }
+  }
+
   type ToolTarget =
     | { kind: 'seg'; seg: Segment }
     | { kind: 'ov'; ov: TextOverlay }
@@ -3373,18 +3463,31 @@ export default function LivePreviewEditor({
       return selectedOverlay ? { kind: 'ov', ov: selectedOverlay } : null
     }
     if (trackFocus === 'caption' || trackFocus === 'dub') {
-      if (selected && rangeUnderPlayhead(selected.start, selected.end)) {
+      const lane = trackFocus
+      const selectedRange = selected ? segmentTimelineRange(selected, lane) : null
+      if (selected && selectedRange && rangeUnderPlayhead(selectedRange.start, selectedRange.end)) {
         return { kind: 'seg', seg: selected }
       }
-      const at = segmentAt(segments, time)
-      if (at && rangeUnderPlayhead(at.start, at.end)) return { kind: 'seg', seg: at }
+      const at = lane === 'dub'
+        ? segments.find((seg) => {
+            if (seg.isCompound || !segmentHasDub(seg) || !seg.audioUrl) return false
+            const range = segmentTimelineRange(seg, 'dub')
+            return rangeUnderPlayhead(range.start, range.end)
+          })
+        : segmentAt(segments, time)
+      if (at) {
+        const range = segmentTimelineRange(at, lane)
+        if (rangeUnderPlayhead(range.start, range.end)) return { kind: 'seg', seg: at }
+      }
       return selected ? { kind: 'seg', seg: selected } : null
     }
     return null
   })()
 
   function clipRange(target: NonNullable<typeof editTarget>) {
-    if (target.kind === 'seg') return { start: target.seg.start, end: target.seg.end }
+    if (target.kind === 'seg') {
+      return segmentTimelineRange(target.seg, trackFocus === 'dub' ? 'dub' : 'caption')
+    }
     if (target.kind === 'ov') return { start: target.ov.start, end: target.ov.end }
     return { start: target.clip.start, end: target.clip.end }
   }
@@ -3489,7 +3592,11 @@ export default function LivePreviewEditor({
     pushHistory()
     const t = time
     if (editTarget.kind === 'ov') {
-      editOverlay({ ...editTarget.ov, start: Math.min(t, editTarget.ov.end - MIN_CLIP_SEC) })
+      editOverlay(
+        { ...editTarget.ov, start: Math.min(t, editTarget.ov.end - MIN_CLIP_SEC) },
+        false,
+        { skipHistory: true },
+      )
       return
     }
     if (editTarget.kind === 'media') {
@@ -3545,7 +3652,10 @@ export default function LivePreviewEditor({
       return
     }
     const seg = editTarget.seg
-    void editSegment({ ...seg, start: Math.min(t, seg.end - MIN_CLIP_SEC), captionLayout: null })
+    void editSegment(
+      { ...seg, start: Math.min(t, seg.end - MIN_CLIP_SEC), captionLayout: null },
+      { skipHistory: true },
+    )
   }
 
   function trimRightToPlayhead() {
@@ -3553,7 +3663,11 @@ export default function LivePreviewEditor({
     pushHistory()
     const t = time
     if (editTarget.kind === 'ov') {
-      editOverlay({ ...editTarget.ov, end: Math.max(t, editTarget.ov.start + MIN_CLIP_SEC) })
+      editOverlay(
+        { ...editTarget.ov, end: Math.max(t, editTarget.ov.start + MIN_CLIP_SEC) },
+        false,
+        { skipHistory: true },
+      )
       return
     }
     if (editTarget.kind === 'media') {
@@ -3571,6 +3685,28 @@ export default function LivePreviewEditor({
       return
     }
     const seg = editTarget.seg
+    if (trackFocus === 'dub') {
+      const videoRate = previewVideoRate(
+        settings.matchDuration,
+        bakedPreferVideo,
+        seg.videoSpeed,
+        bakedSpeed,
+        hasBakedSpeed,
+      )
+      const speed = dubPlaybackSpeed(seg, bakedSpeed)
+      const rawDuration = Math.max(
+        0.05,
+        ((t - seg.start - 0.04) * speed) / Math.max(0.2, videoRate),
+      )
+      void editSegment(
+        {
+          ...seg,
+          audioDuration: Math.min(seg.audioDuration ?? rawDuration, rawDuration),
+        },
+        { skipHistory: true },
+      )
+      return
+    }
     void editSegment({
       ...seg,
       end: Math.max(t, seg.start + MIN_CLIP_SEC),
@@ -3578,7 +3714,7 @@ export default function LivePreviewEditor({
       audioUrl: undefined,
       audioFile: undefined,
       audioDuration: undefined,
-    })
+    }, { skipHistory: true })
   }
 
   function duplicateClip() {
@@ -3626,6 +3762,27 @@ export default function LivePreviewEditor({
     }
     void onSegmentsReplace(reindexSegments([...segments, copy]))
     setSelectedId(copy.id)
+  }
+
+  function removeDubClips(ids: string[], recordHistory = true) {
+    const drop = new Set(ids.filter((id) => segments.some((seg) => seg.id === id)))
+    if (!drop.size) return
+    if (recordHistory) pushHistory()
+    void onSegmentsReplace(segments.map((seg) => (
+      drop.has(seg.id)
+        ? {
+            ...seg,
+            dub: false,
+            audioUrl: undefined,
+            audioFile: undefined,
+            audioDuration: undefined,
+          }
+        : seg
+    )))
+    pauseDubAudio()
+    dubTokenRef.current = ''
+    setSelectedId(null)
+    setSelectedDubIds([])
   }
 
   function deleteSelectedClip() {
@@ -3708,6 +3865,13 @@ export default function LivePreviewEditor({
       return
     }
     // Caption / TTS: xóa + ripple đóng gap toàn timeline
+    if (trackFocus === 'dub') {
+      removeDubClips(
+        [...new Set([...selectedDubIds, editTarget.seg.id])],
+        false,
+      )
+      return
+    }
     const id = editTarget.seg.id
     const dropSeg = segments.find((s) => s.id === id)
     if (!dropSeg) return
@@ -4790,6 +4954,7 @@ export default function LivePreviewEditor({
                               bakedPreferVideo,
                               laneSeg?.videoSpeed,
                               bakedSpeed,
+                              hasBakedSpeed,
                             )
                             syncDubAudio(current, !event.currentTarget.paused)
                           }}
@@ -5000,7 +5165,7 @@ export default function LivePreviewEditor({
                                 padding: '0.04em 0.04em',
                                 boxSizing: 'border-box',
                                 ...overlayDisplayFontStyle('vertical', layerLayout.cover, fontPx, lines.length),
-                                 ...captionChromeStyle(settings),
+                                 ...captionChromeStyle(settings, layerSeg),
                                  transform: 'translateY(-0.06em)',
                               }}
                             >
@@ -5033,7 +5198,7 @@ export default function LivePreviewEditor({
                                   fontPx,
                                   lines.length,
                                 ),
-                                ...captionChromeStyle(settings),
+                                ...captionChromeStyle(settings, layerSeg),
                                 // CAP-MID/label: bỏ bóng chữ (text-shadow) — chỉ chữ trắng trên bbox
                                 textShadow: 'none',
                                 WebkitTextStroke: '0',
@@ -5066,7 +5231,7 @@ export default function LivePreviewEditor({
                                   Math.max(1, layerLayout.cover.h),
                                   'h',
                                 ),
-                                ...captionChromeStyle(settings),
+                                ...captionChromeStyle(settings, layerSeg),
                                 lineHeight: 1.12,
                                 margin: 0,
                                 padding: '0.02em 0.08em',
@@ -5100,7 +5265,7 @@ export default function LivePreviewEditor({
                             style={{
                               ...captionFontStyle(activeCaptionPx, activeCaptionBox.h),
                               lineHeight: 1.12,
-                              ...captionChromeStyle(settings),
+                              ...captionChromeStyle(settings, timelineSeg),
                               transform: 'none',
                               backgroundColor: (settings.captionBgStyle || 'none') === 'none'
                                 ? 'transparent'
@@ -5539,6 +5704,49 @@ export default function LivePreviewEditor({
                             {ttsError && <p className="text-xs text-destructive">{ttsError}</p>}
 
                             <div className="border-t border-border pt-3 flex flex-col gap-2">
+                              <div className="grid grid-cols-[1fr_auto] gap-1.5">
+                                <PropLabel label="Phông chữ">
+                                  <select
+                                    className="w-full rounded-md border border-border bg-input px-2 py-1 text-xs outline-none focus:border-ring"
+                                    value={selected.fontFamily || settings.subtitleFontFamily || 'system'}
+                                    disabled={busy}
+                                    onChange={(e) => void applyFontFamily('one', e.target.value)}
+                                  >
+                                    {CAPTION_FONT_PRESETS.map((font) => (
+                                      <option key={font.id} value={font.id} style={{ fontFamily: font.css }}>{font.label}</option>
+                                    ))}
+                                  </select>
+                                </PropLabel>
+                                <PropLabel label="Màu chữ">
+                                  <input
+                                    type="color"
+                                    className="h-7 w-10 cursor-pointer rounded border border-border bg-transparent"
+                                    value={selected.textColor || settings.captionTextColor || '#ffffff'}
+                                    disabled={busy}
+                                    onChange={(e) => applyCaptionColor('one', e.target.value)}
+                                  />
+                                </PropLabel>
+                              </div>
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                {CAPTION_COLORS.map((color) => (
+                                  <button
+                                    key={color}
+                                    type="button"
+                                    title={color}
+                                    className={cn(
+                                      'size-5 rounded-full border shrink-0',
+                                      (selected.textColor || settings.captionTextColor || '#ffffff').toLowerCase() === color
+                                        ? 'border-primary ring-1 ring-primary'
+                                        : color === '#000000' || color === '#1e293b'
+                                          ? 'border-border/80'
+                                          : 'border-border',
+                                    )}
+                                    style={{ background: color }}
+                                    disabled={busy}
+                                    onClick={() => applyCaptionColor('one', color)}
+                                  />
+                                ))}
+                              </div>
                               <PropLabel label={`Cỡ chữ (xem trước ~${activeCaptionPx}px)`}>
                                 <select
                                   className="w-full rounded-md border border-border bg-input px-2 py-1 text-xs outline-none focus:border-ring"
@@ -5655,7 +5863,7 @@ export default function LivePreviewEditor({
                                     className="w-full rounded-md border border-border bg-input px-2 py-1 text-xs outline-none focus:border-ring"
                                     value={settings.subtitleFontFamily || 'system'}
                                     disabled={busy}
-                                    onChange={(e) => onSettings({ ...settings, subtitleFontFamily: e.target.value })}
+                                    onChange={(e) => void applyFontFamily('all', e.target.value)}
                                   >
                                     {CAPTION_FONT_PRESETS.map((f) => (
                                       <option key={f.id} value={f.id} style={{ fontFamily: f.css }}>{f.label}</option>
@@ -5687,28 +5895,24 @@ export default function LivePreviewEditor({
                                     className="h-7 w-8 cursor-pointer rounded border border-border bg-transparent"
                                     value={settings.captionTextColor || '#ffffff'}
                                     disabled={busy}
-                                    onChange={(e) => onSettings({ ...settings, captionTextColor: e.target.value })}
+                                    onChange={(e) => applyCaptionColor('all', e.target.value)}
                                   />
-                                  {[
-                                    '#ffffff', '#f8fafc', '#e2e8f0', '#000000', '#1e293b',
-                                    '#ffd166', '#f59e0b', '#ef476f', '#e11d48',
-                                    '#06d6a0', '#10b981', '#118ab2', '#3b82f6', '#8b5cf6',
-                                  ].map((c) => (
+                                  {CAPTION_COLORS.map((color) => (
                                     <button
-                                      key={c}
+                                      key={color}
                                       type="button"
-                                      title={c}
+                                      title={color}
                                       className={cn(
                                         'size-5 rounded-full border shrink-0',
-                                        (settings.captionTextColor || '#ffffff').toLowerCase() === c
+                                        (settings.captionTextColor || '#ffffff').toLowerCase() === color
                                           ? 'border-primary ring-1 ring-primary'
-                                          : c === '#000000' || c === '#1e293b'
+                                          : color === '#000000' || color === '#1e293b'
                                             ? 'border-border/80'
                                             : 'border-border',
                                       )}
-                                      style={{ background: c }}
+                                      style={{ background: color }}
                                       disabled={busy}
-                                      onClick={() => onSettings({ ...settings, captionTextColor: c })}
+                                      onClick={() => applyCaptionColor('all', color)}
                                     />
                                   ))}
                                 </div>
@@ -7110,6 +7314,7 @@ export default function LivePreviewEditor({
                                 bakedPreferVideo,
                                 seg.videoSpeed,
                                 bakedSpeed,
+                                hasBakedSpeed,
                               ),
                               bakedSpeed,
                             )
@@ -7616,14 +7821,8 @@ export default function LivePreviewEditor({
                 </CtxItem>
                 <CtxItem
                   onClick={() => {
-                    editSegment({
-                      ...seg,
-                      dub: false,
-                      audioUrl: undefined,
-                      audioFile: undefined,
-                      audioDuration: undefined,
-                    })
                     setCtxMenu(null)
+                    removeDubClips([seg.id])
                   }}
                 >
                   Tắt lồng tiếng đoạn này

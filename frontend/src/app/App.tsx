@@ -1204,6 +1204,14 @@ export default function App() {
   }, [flushSegmentSave])
 
   async function onSegmentsReplace(next: Segment[], opts?: { persist?: boolean }) {
+    // A whole-list operation (delete/split/trim) supersedes any debounced
+    // single-segment PUT.  Leaving that timer alive can write the deleted
+    // segment back after the replace request completes.
+    if (segSaveTimer.current != null) {
+      window.clearTimeout(segSaveTimer.current)
+      segSaveTimer.current = null
+    }
+    segSavePending.current = null
     // UI cập nhật ngay — không đợi network (tránh đơ khi merge group lớn)
     const ordered = [...next]
       .sort((a, b) => a.start - b.start || a.end - b.end)

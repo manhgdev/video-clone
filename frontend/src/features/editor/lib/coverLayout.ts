@@ -337,6 +337,7 @@ export function resolveSegmentCover(
   frameH: number,
 ): PixelBox | null {
   if (!seg) return null
+  setMeasureFontFamily(captionFontCss(seg.fontFamily || settings.subtitleFontFamily || 'system'))
   const fontPx = resolveCaptionFontSize(seg, settings, frameW, frameH)
   const over = settings.coverHardsubs && settings.burnSubs && seg.translation.trim()
   if (isOcrOverlayLayout(seg.layout)) {
@@ -417,7 +418,7 @@ export function resolveOverLayout(
   if (!seg?.translation.trim()) return null
   if (!settings.burnSubs) return null
   // ponytail: sync measurement font with CSS render font — prevents text overflow
-  setMeasureFontFamily(captionFontCss(settings.subtitleFontFamily || 'system'))
+  setMeasureFontFamily(captionFontCss(seg.fontFamily || settings.subtitleFontFamily || 'system'))
   const fontPx = resolveCaptionFontSize(seg, settings, frameW, frameH)
 
   // Overlay OCR mid / dọc / nhãn — hoặc horizontal có bbox giữa khung
@@ -746,6 +747,7 @@ export function resolveBelowAboveLayout(
   placement: 'below' | 'above',
 ): OverLayout | null {
   if (!seg.translation.trim()) return null
+  setMeasureFontFamily(captionFontCss(seg.fontFamily || settings.subtitleFontFamily || 'system'))
   const preferred = resolveCaptionFontSize(seg, settings, frameW, frameH)
   const ocr =
     (seg.bbox ? clampCoverBox(seg.bbox, frameW, frameH) : null)

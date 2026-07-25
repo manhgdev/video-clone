@@ -306,7 +306,9 @@ def api_reveal_output(project_id: str):
     # Prefer the exact file recorded by export_job; render names may contain
     # Unicode/punctuation that is normalized differently by legacy metadata.
     exact_paths: list[Path] = []
-    for raw in (_meta.get("outputPath"), _meta.get("outputRel"), _meta.get("exportCopy")):
+    # `outputPath` is the intermediate file in project/out; reveal the
+    # published export copy first so Explorer opens the folder the user sees.
+    for raw in (_meta.get("outputRel"), _meta.get("exportCopy"), _meta.get("outputPath")):
         value = str(raw or "").strip()
         if not value:
             continue

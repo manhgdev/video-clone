@@ -40,8 +40,8 @@ export function previewVideoRate(
   const fileOrLocked =
     Boolean(hasBakedSpeed) || Boolean(bakedPreferVideo) || speedOff1
   const vs =
-    typeof segSpeed === 'number' && segSpeed > 0.2 && segSpeed < 0.995
-      ? Math.max(0.35, Math.min(1, segSpeed))
+    typeof segSpeed === 'number' && segSpeed > 0.2
+      ? Math.max(0.35, Math.min(2, segSpeed))
       : 1
   if (fileOrLocked) return vs
   const base = matchDuration === 'preferVideo' ? 0.8 : 1

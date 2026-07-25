@@ -59,6 +59,8 @@ def _layout_caption_over(
     frame_w: int,
     frame_h: int,
     source_text: str = "",
+    *,
+    font_path: str | None = None,
 ) -> tuple[dict[str, Any], tuple[int, int, int, int]]:
     """Layout over khớp preview — trả (caption lay, cover box)."""
     from PIL import Image, ImageDraw, ImageFont
@@ -67,7 +69,7 @@ def _layout_caption_over(
     ox0, oy0, ox1, oy1 = ocr_box
     ocr_w, ocr_h = ox1 - ox0, oy1 - oy0
     cx = (ox0 + ox1) // 2
-    font_path = _subtitle_font()
+    font_path = font_path or _subtitle_font()
     try:
         font = ImageFont.truetype(font_path, font_size)
     except OSError:
@@ -150,7 +152,13 @@ def _layout_caption_over(
     # Cover full ngang được (frame_w)
     auto_w = min(frame_w, max(_fit_cover_width(content_w, cap_w, frame_w), cap_w))
     cover_box = _fit_hardsub_box(
-        (ox0, oy0, ox1, oy1), auto_w, font_size, frame_w, frame_h, src
+        (ox0, oy0, ox1, oy1),
+        auto_w,
+        font_size,
+        frame_w,
+        frame_h,
+        src,
+        font_path=font_path,
     )
     cover_x0, cover_y0, cover_x1, cover_y1 = cover_box
     cover_w = cover_x1 - cover_x0
@@ -211,27 +219,14 @@ def _preview_caption_layout(
     from PIL import Image, ImageDraw
 
     mode = (layout_mode or str(segment.get("layout") or "")).lower()
-    is_vertical = mode == "vertical"
-
+    # captionLayout is the Editor's committed geometry.  Its font/line fit was
+    # measured before export; expanding the box again with PIL metrics makes
+    # the rendered video drift from the preview (especially on Vietnamese
+    # glyphs and Windows font fallback).
     font = font_getter(fs)
     probe = Image.new("RGB", (8, 8))
     draw = ImageDraw.Draw(probe)
     line_boxes = [draw.textbbox((0, 0), ln, font=font) for ln in lines]
-
-    if is_vertical:
-        # Vertical text: bw is determined by font size and lines, bh is determined by text length
-        th = sum(b[2] - b[0] for b in line_boxes) if line_boxes else 0
-        if th > bh - 2:
-            diff = (th + 2) - bh
-            bh = th + 2
-            y = max(0, y - diff // 2)
-    else:
-        # Horizontal text: bw is determined by text width
-        tw = max((b[2] - b[0]) for b in line_boxes) if line_boxes else 0
-        if tw > bw - 2:
-            diff = (tw + 2) - bw
-            bw = tw + 2
-            x = max(0, x - diff // 2)
 
     line_hs = [max(1, b[3] - b[1]) for b in line_boxes]
     gap_line = max(2, fs // 8)
@@ -368,12 +363,13 @@ def _caption_overlay(layout: dict[str, Any]) -> tuple[Any, int, int] | None:
     bg_style = str(layout.get("bg_style") or "none").lower()
     bg_hex = str(layout.get("bg_hex") or "#000000")
     bg_op = max(0, min(100, int(layout.get("bg_opacity") if layout.get("bg_opacity") is not None else 55)))
-    # Chừa theo font metrics, không dùng margin cố định: dấu tiếng Việt và
-    # descender (g/q/y) có thể vượt box layout vài pixel ở font lớn.
+    css_cover_mode = str(layout.get("css_cover_mode") or "").lower()
+    # Cover captions are clipped by the Editor's bbox container. Other paths
+    # retain the safety margin for Vietnamese accents and descenders.
     draw_probe = ImageDraw.Draw(Image.new("L", (1, 1)))
     metric_box = draw_probe.textbbox((0, 0), "Áạgqỵ", font=font)
     metric_h = max(1, metric_box[3] - metric_box[1])
-    m = max(6, int(math.ceil(metric_h * 0.3)))
+    m = 0 if css_cover_mode else max(6, int(math.ceil(metric_h * 0.3)))
     bw, bh = (x1 - x0) + 2 * m, (y1 - y0) + 2 * m
     if bw < 4 or bh < 4:
         return None
@@ -395,8 +391,21 @@ def _caption_overlay(layout: dict[str, Any]) -> tuple[Any, int, int] | None:
             outline=(255, 255, 255, 30) if is_box else None,
             width=1,
         )
-    # Optical center: line-box + shadow nặng phía dưới làm chữ nhìn thấp hơn tâm bbox.
-    ty = m + max(0, (box_h - text_h) // 2) - int(round(metric_h * 0.06))
+    # Match the Editor's flex line boxes. PIL and Chromium use the same font
+    # widths here, but PIL's draw origin sits about .06em lower.
+    css_line_h = (
+        font.size * (1.1 if css_cover_mode == "mid" else 1.12)
+        if css_cover_mode else 0.0
+    )
+    css_top = (
+        max(0.0, (box_h - css_line_h * len(lines)) / 2.0)
+        if css_cover_mode else 0.0
+    )
+    ty = (
+        m + css_top - font.size * 0.06
+        if css_cover_mode
+        else m + max(0, (box_h - text_h) // 2) - int(round(metric_h * 0.06))
+    )
     thick = False  # ponytail: preview dùng soft shadow cho mọi layout; thick outline khác preview
     outline_thick = (
         (-3, 0), (3, 0), (0, -3), (0, 3), (-2, -2), (2, -2), (-2, 2), (2, 2),
@@ -404,7 +413,8 @@ def _caption_overlay(layout: dict[str, Any]) -> tuple[Any, int, int] | None:
         (-2, -3), (2, -3), (-2, 3), (2, 3),
     )
     
-    if stroke_on and not thick:
+    # CAP-MID/label explicitly override captionChromeStyle with no shadow.
+    if stroke_on and not thick and css_cover_mode not in ("mid", "label"):
         from PIL import ImageFilter
         shadow_layer = Image.new("RGBA", overlay.size, (0, 0, 0, 0))
         shadow_draw = ImageDraw.Draw(shadow_layer)
@@ -420,9 +430,13 @@ def _caption_overlay(layout: dict[str, Any]) -> tuple[Any, int, int] | None:
             th = line_hs[i] if i < len(line_hs) else (bb[3] - bb[1])
             tx = m + (box_w - tw) // 2
             top = bb[1]
-            gy = ty_s - top
+            gy = ty_s if css_cover_mode else ty_s - top
             shadow_draw.text((tx, gy + dy_off), line, font=font, fill=(0, 0, 0, 230))
-            ty_s += th + (gap_line if i + 1 < len(lines) else 0)
+            ty_s += (
+                css_line_h
+                if css_cover_mode
+                else th + (gap_line if i + 1 < len(lines) else 0)
+            )
             
         shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(blur_rad))
         overlay.alpha_composite(shadow_layer)
@@ -433,12 +447,16 @@ def _caption_overlay(layout: dict[str, Any]) -> tuple[Any, int, int] | None:
         th = line_hs[i] if i < len(line_hs) else (bb[3] - bb[1])
         tx = m + (box_w - tw) // 2
         top = bb[1]
-        gy = ty - top
+        gy = ty if css_cover_mode else ty - top
         if stroke_on and thick:
             for dx, dy in outline_thick:
                 draw.text((tx + dx, gy + dy), line, font=font, fill=(0, 0, 0, 250))
         draw.text((tx, gy), line, font=font, fill=fill)
-        ty += th + (gap_line if i + 1 < len(lines) else 0)
+        ty += (
+            css_line_h
+            if css_cover_mode
+            else th + (gap_line if i + 1 < len(lines) else 0)
+        )
     rgba = np.asarray(overlay)
     return rgba, x0 - m, y0 - m
 
@@ -531,7 +549,7 @@ def _layout_caption(
         place = "over"
     probe = Image.new("RGB", (8, 8))
     draw = ImageDraw.Draw(probe)
-    font_path = _subtitle_font()
+    font_path = str(getattr(font, "path", "") or _subtitle_font())
     max_lines = 3
     # below/above: cỡ ≈ chiều cao bbox che (OCR) — không dùng 48/project to
     if ocr_box and place in ("below", "above"):
@@ -878,7 +896,10 @@ def _layout_caption_vertical(
     probe = Image.new("RGB", (8, 8))
     draw = ImageDraw.Draw(probe)
     # Font display đậm; CJK fallback Unicode nếu rounded không vẽ được
-    font_path = _subtitle_font_vertical() if not pure_cjk else _subtitle_font()
+    font_path = str(
+        getattr(font, "path", "")
+        or (_subtitle_font_vertical() if not pure_cjk else _subtitle_font())
+    )
     # title dọc dài (CJK ≥4): full cột; text ngắn: bám OCR, không phình 42% khung
     n_units_est = len(re.sub(r"\s+", "", raw)) if pure_cjk else len(
         [w for w in re.split(r"[\s·・/|]+", raw) if w] or [raw]

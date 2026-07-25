@@ -27,6 +27,10 @@ export type Segment = {
   ttsSpeed?: number
   /** Cỡ chữ phụ đề riêng đoạn (px); 0 = theo cài đặt dự án / tự động */
   fontSize?: number
+  /** Phông chữ riêng đoạn; bỏ trống = theo cài đặt dự án. */
+  fontFamily?: string
+  /** Màu chữ riêng đoạn #RRGGBB; bỏ trống = theo cài đặt dự án. */
+  textColor?: string
   source: string
   translation: string
   voice: string

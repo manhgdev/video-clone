@@ -145,19 +145,16 @@ def _tts_clip_plan(
     if match == "preferVideo":
         max_video_factor = PREFER_VIDEO_FACTOR
         soft_tts_speed = 1.06
-        hard_tts_cap = 1.15  # sau retime hiếm khi cần; không cắt
         fixed_factor = 1.0 if baked_prefer else (
             PREFER_VIDEO_FACTOR if allow_video_slowdown else 1.0
         )
     elif match == "none":
         max_video_factor = 1.45
         soft_tts_speed = 1.08
-        hard_tts_cap = 1.30
         fixed_factor = None
     else:
         max_video_factor = 1.35
         soft_tts_speed = 1.12
-        hard_tts_cap = 1.45
         fixed_factor = None
 
     raw: list[tuple[Path, float, float, float, float, float]] = []
@@ -218,37 +215,26 @@ def _tts_clip_plan(
             video_factor = max(video_factor, min(mid, max_video_factor))
         video_factor = min(max_video_factor, max(1.0, video_factor))
 
-    # Full TTS: trim = toàn bộ audio sau atempo nhẹ; không atrim theo slot ngắn
+    # Preview keeps the user's TTS speed for the whole wav. Export must not
+    # add a second fit-speed or trim the tail; doing either changes the voice
+    # and can drop the final words compared with Editor playback.
     clips: list[tuple[Path, float, float, float, float]] = []
     for wav, start, slot0, ad, volume, manual_speed in raw:
         slot = slot0 * video_factor
         ad_eff = ad / max(manual_speed, 0.05) if ad > 0.05 else slot
-        speed = 1.0
-        if ad_eff > 0.08 and ad_eff > slot * soft_tts_speed:
-            speed = min(hard_tts_cap, ad_eff / max(slot, 0.05))
-            speed = max(1.0, speed)
-        played = ad_eff / max(speed, 0.05) if ad_eff > 0.05 else slot
-        # Ưu tiên đọc hết — trim = full play (slot đã giãn bởi retime)
+        played = ad_eff if ad_eff > 0.05 else slot
         trim = max(0.08, played + 0.04)
-        # sp cuối cùng luôn trong khoảng atempo chain xử lý được
-        sp_out = max(0.5, min(4.0, speed * manual_speed))
+        sp_out = max(0.5, min(4.0, manual_speed))
         clips.append((wav, start * video_factor, trim, sp_out, volume))
     clips.sort(key=lambda c: c[1])
     out: list[tuple[Path, float, float, float, float]] = []
-    for i, (wav, start, trim, sp, volume) in enumerate(clips):
-        next_start = clips[i + 1][1] if i + 1 < len(clips) else None
-        if next_start is not None and trim > next_start - start - 0.02:
-            # retime đã đẩy câu sau — hiếm; chỉ siết nếu vẫn đè
-            room = max(0.08, next_start - start - 0.02)
-            if trim > room * 1.02:
-                # tăng tốc thêm thay vì cắt (giữ full nếu có thể)
-                need_sp = sp * (trim / room)
-                if need_sp <= hard_tts_cap * 1.05:
-                    sp = min(hard_tts_cap, need_sp)
-                    trim = room
-                else:
-                    trim = room
+    cursor = 0.0
+    for wav, start, trim, sp, volume in clips:
+        # Rounding/manual edits may still leave a tiny overlap after retime.
+        # Cascade the next sentence like the single Audio element in preview.
+        start = max(start, cursor)
         out.append((wav, start, trim, sp, volume))
+        cursor = start + trim + 0.02
     return out, video_factor
 
 
@@ -288,7 +274,7 @@ def _mix_tts_track(
         for w, s, slot, sp, volume in ordered_plan
     ]
     key = hashlib.sha1(
-        (f"v11|retime-fit|vf{plan_vf:.3f}|{match}|" + "|".join(signature)).encode()
+        (f"v12|wysiwyg-full-tts|vf{plan_vf:.3f}|{match}|" + "|".join(signature)).encode()
     ).hexdigest()[:16]
     out = root / "cache" / f"tts_mix_{key}.wav"
     if out.exists():
@@ -308,7 +294,9 @@ def _mix_tts_track(
             parts: list[str] = []
             # Luôn qua chain — không emit atempo thô <0.5
             sp = max(0.25, min(4.0, float(speed) or 1.0))
-            if abs(sp - 1.0) >= 0.03:
+            # Preview applies every manual TTS rate (including 0.99/1.01);
+            # do not round small but visible speed edits back to 1×.
+            if abs(sp - 1.0) >= 0.0005:
                 parts.append(_atempo_chain(sp))
             parts.append(f"volume={max(0.0, min(2.0, float(volume))):.3f}")
             # max_sec = full play duration (cascade); pad nhỏ tránh cắt sample cuối

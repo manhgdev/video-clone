@@ -1,5 +1,5 @@
 import type React from 'react'
-import type { ProjectSettings } from '@/features/project/project.types'
+import type { ProjectSettings, Segment } from '@/features/project/project.types'
 import { cn } from '@/shared/lib/cn'
 
 export function formatTimecode(value: number) {
@@ -91,27 +91,33 @@ export const COVER_MASK_STYLES: { id: ProjectSettings['coverMaskStyle']; label: 
 ]
 
 export const CAPTION_FONT_PRESETS: { id: string; label: string; css: string }[] = [
-  { id: 'system', label: 'Hệ thống', css: 'system-ui, "Segoe UI", sans-serif' },
-  { id: 'segoe', label: 'Segoe UI', css: '"Segoe UI", system-ui, sans-serif' },
-  { id: 'arial', label: 'Arial', css: 'Arial, Helvetica, sans-serif' },
-  { id: 'bold', label: 'Arial Black', css: '"Arial Black", "Helvetica Neue", Arial, sans-serif' },
-  { id: 'helvetica', label: 'Helvetica', css: '"Helvetica Neue", Helvetica, Arial, sans-serif' },
-  { id: 'verdana', label: 'Verdana', css: 'Verdana, Geneva, sans-serif' },
-  { id: 'tahoma', label: 'Tahoma', css: 'Tahoma, Geneva, sans-serif' },
-  { id: 'trebuchet', label: 'Trebuchet', css: '"Trebuchet MS", "Segoe UI", sans-serif' },
-  { id: 'rounded', label: 'Nunito / tròn', css: 'Nunito, "Segoe UI", "Trebuchet MS", sans-serif' },
-  { id: 'impact', label: 'Impact', css: 'Impact, Haettenschweiler, "Arial Narrow Bold", sans-serif' },
-  { id: 'georgia', label: 'Georgia', css: 'Georgia, "Times New Roman", serif' },
-  { id: 'times', label: 'Times', css: '"Times New Roman", Times, serif' },
-  { id: 'palatino', label: 'Palatino', css: '"Palatino Linotype", Palatino, "Book Antiqua", serif' },
-  { id: 'garamond', label: 'Garamond', css: 'Garamond, "Times New Roman", serif' },
-  { id: 'courier', label: 'Courier', css: '"Courier New", Courier, monospace' },
-  { id: 'mono', label: 'Consolas', css: 'Consolas, "Courier New", ui-monospace, monospace' },
-  { id: 'comic', label: 'Comic Sans', css: '"Comic Sans MS", "Comic Sans", cursive' },
-  { id: 'cjk', label: 'CJK / Noto', css: '"Noto Sans SC", "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif' },
-  { id: 'meiryo', label: 'Meiryo (JP)', css: 'Meiryo, "Yu Gothic", "MS Gothic", sans-serif' },
-  { id: 'malgun', label: 'Malgun (KR)', css: '"Malgun Gothic", "Apple SD Gothic Neo", sans-serif' },
+  { id: 'system', label: 'Noto Sans', css: '"VC Noto Sans", sans-serif' },
+  { id: 'segoe', label: 'Inter', css: '"VC Inter", sans-serif' },
+  { id: 'arial', label: 'Arimo', css: '"VC Arimo", sans-serif' },
+  { id: 'bold', label: 'Archivo Black', css: '"VC Archivo Black", sans-serif' },
+  { id: 'helvetica', label: 'Roboto', css: '"VC Roboto", sans-serif' },
+  { id: 'verdana', label: 'Open Sans', css: '"VC Open Sans", sans-serif' },
+  { id: 'tahoma', label: 'Carlito', css: '"VC Carlito", sans-serif' },
+  { id: 'trebuchet', label: 'Fira Sans', css: '"VC Fira Sans", sans-serif' },
+  { id: 'rounded', label: 'Nunito / tròn', css: '"VC Nunito", sans-serif' },
+  { id: 'impact', label: 'Anton', css: '"VC Anton", sans-serif' },
+  { id: 'georgia', label: 'Merriweather', css: '"VC Merriweather", serif' },
+  { id: 'times', label: 'Tinos', css: '"VC Tinos", serif' },
+  { id: 'palatino', label: 'Literata', css: '"VC Literata", serif' },
+  { id: 'garamond', label: 'EB Garamond', css: '"VC EB Garamond", serif' },
+  { id: 'courier', label: 'Cousine', css: '"VC Cousine", monospace' },
+  { id: 'mono', label: 'Noto Sans Mono', css: '"VC Noto Sans Mono", monospace' },
+  { id: 'comic', label: 'Patrick Hand', css: '"VC Patrick Hand", cursive' },
+  { id: 'cjk', label: 'Noto Sans SC', css: '"VC Noto Sans SC", sans-serif' },
+  { id: 'meiryo', label: 'Noto Sans JP', css: '"VC Noto Sans JP", sans-serif' },
+  { id: 'malgun', label: 'Noto Sans KR', css: '"VC Noto Sans KR", sans-serif' },
 ]
+
+export const CAPTION_COLORS = [
+  '#ffffff', '#f8fafc', '#e2e8f0', '#000000', '#1e293b',
+  '#ffd166', '#f59e0b', '#ef476f', '#e11d48',
+  '#06d6a0', '#10b981', '#118ab2', '#3b82f6', '#8b5cf6',
+] as const
 
 export function captionFontCss(family?: string): string {
   return CAPTION_FONT_PRESETS.find((f) => f.id === family)?.css
@@ -123,11 +129,14 @@ export function captionFontCss(family?: string): string {
  * Mặc định = bản đẹp cũ: trắng + soft drop-shadow (không stroke dày, không nền).
  * Chỉ bật nền/viền nặng khi user chọn trong panel.
  */
-export function captionChromeStyle(settings: ProjectSettings): React.CSSProperties {
-  const color = settings.captionTextColor || '#ffffff'
+export function captionChromeStyle(
+  settings: ProjectSettings,
+  segment?: Pick<Segment, 'fontFamily' | 'textColor'>,
+): React.CSSProperties {
+  const color = segment?.textColor || settings.captionTextColor || '#ffffff'
   const bg = settings.captionBgStyle || 'none'
   const customColor = color.toLowerCase() !== '#ffffff'
-  const family = settings.subtitleFontFamily || 'system'
+  const family = segment?.fontFamily || settings.subtitleFontFamily || 'system'
   const style: React.CSSProperties = {
     color,
     fontFamily: captionFontCss(family),

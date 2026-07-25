@@ -17,6 +17,9 @@ from pipeline.core.media import (
     ensure_preview_clip,
     extract_audio,
     ffprobe_duration,
+    retime_audio_track,
+    retime_timeline_time,
+    retime_video_segments,
     resolve_export_crop,
     video_size,
 )
@@ -90,6 +93,8 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
     video, preview_sec = export_source_video(project_id, meta)
     root = ensure_layout(project_id)
     source_dur = ffprobe_duration(video)
+    settings = meta.get("settings") or {}
+    match_mode = str(settings.get("matchDuration") or "preferVideo")
     export_start = max(0, float(meta.get("exportStartSec") or 0))
     export_end = float(meta.get("exportEndSec") or 0)
     if export_start > 0 or (export_end > 0 and source_dur > 0 and export_end < source_dur - 0.02):
@@ -100,21 +105,49 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
             project_id,
             start=export_start,
         )
-    # chỉ giữ cue trong độ dài clip (tránh đoạn full khi nhầm cache)
+    # Chuyển cue về mốc 0 của clip xuất. Preview luôn dùng mốc timeline này;
+    # giữ mốc nguồn ở đây sẽ làm bbox/caption/TTS lệch khi exportStartSec > 0.
     vid_dur = ffprobe_duration(video) or 1e9
-    segments = [
-        dict(s)
-        for s in (meta.get("segments") or [])
-        if float(s.get("start") or 0) < vid_dur - 0.05
-    ]
+    segments = [dict(s) for s in (meta.get("segments") or [])]
+    if export_start > 0:
+        for s in segments:
+            for key in ("start", "end", "coverStart", "coverEnd"):
+                if s.get(key) is None:
+                    continue
+                try:
+                    s[key] = max(0.0, float(s[key]) - export_start)
+                except (TypeError, ValueError):
+                    pass
+    segments = [s for s in segments if float(s.get("start") or 0) < vid_dur - 0.05]
     segments = expand_compound_segments(segments)
     for s in segments:
         if float(s.get("end") or 0) > vid_dur:
             s["end"] = vid_dur
+    source_timeline_duration = vid_dur
+    source_timeline_segments = [dict(s) for s in segments]
+    # Preview applies each TTS-fit videoSpeed to the actual <video> playback.
+    # Bake that same piecewise timeline before masks/captions/audio so every
+    # later stage receives the preview's wall-clock start/end values.
+    soft_preview_speed = (
+        0.8
+        if match_mode == "preferVideo"
+        and not meta.get("bakedPreferVideo")
+        and meta.get("bakedSpeed") is None
+        else 1.0
+    )
+    video, segments = retime_video_segments(
+        video,
+        segments,
+        root / "cache",
+        project_id,
+        base_speed=soft_preview_speed,
+    )
+    vid_dur = ffprobe_duration(video) or vid_dur
     # Free text + effect regions (làm mờ tự do): cùng hệ tọa độ pixel.
     text_overlays: list[dict[str, Any]] = []
     for item in meta.get("overlays") or []:
-        if float(item.get("start") or 0) >= vid_dur:
+        item_start = float(item.get("start") or 0) - export_start
+        if item_start >= vid_dur:
             continue
         kind = str(item.get("kind") or "text").lower()
         x = float(item.get("x") or 0)
@@ -123,8 +156,18 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
         h = float(item.get("h") or 0)
         if w < 4 or h < 4:
             continue
-        st = float(item.get("start") or 0)
-        en = float(item.get("end") or 0)
+        st = retime_timeline_time(
+            item_start,
+            source_timeline_duration,
+            source_timeline_segments,
+            base_speed=soft_preview_speed,
+        )
+        en = retime_timeline_time(
+            float(item.get("end") or 0) - export_start,
+            source_timeline_duration,
+            source_timeline_segments,
+            base_speed=soft_preview_speed,
+        )
         if kind == "logo":
             asset_path = ""
             asset_url = str(item.get("assetUrl") or "")
@@ -199,8 +242,6 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
                 "skipCoverMask": True,
             }
         )
-    settings = meta.get("settings") or {}
-    match_mode = str(settings.get("matchDuration") or "preferVideo")
     out = out_final(project_id)
 
     # Cờ xuất độc lập — mặc định video=True nếu không có gì được chọn
@@ -273,8 +314,8 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
 
     try:
         hint = f"preview {preview_sec}s — " if preview_sec > 0 else ""
-        # WYSIWYG: timeline = start/end editor đã xem trước. KHÔNG retime_video_segments
-        # (bước đó encode cả video lại → chậm + lệch preview). TTS khớp slot bằng mux.
+        # videoSpeed was baked into the cached video/timeline before overlays.
+        # Keep this defensive cleanup for legacy speed=1 payloads.
         for segment in segments:
             segment.pop("videoSpeed", None)
         place = str(settings.get("captionPlacement") or "below").lower()
@@ -323,6 +364,7 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
                 cover=cover,
                 burn=burn or bool(text_overlays),
                 subtitle_font_size=int(settings.get("subtitleFontSize", 0)),
+                subtitle_font_family=str(settings.get("subtitleFontFamily") or "system"),
                 project_id=project_id,
                 workers=exp_w,
                 caption_placement=place,
@@ -380,6 +422,15 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
             # Stem cache theo videoPath gốc — đã tách lúc xem trước thì không Demucs lại
             source_audio = separate_no_vocals(project_id, report=True)
             if source_audio and source_audio.is_file():
+                source_audio = retime_audio_track(
+                    source_audio,
+                    source_timeline_segments,
+                    root / "cache",
+                    project_id,
+                    base_speed=soft_preview_speed,
+                    source_start=export_start,
+                    source_duration=source_timeline_duration,
+                )
                 set_status(
                     project_id,
                     step="export",
