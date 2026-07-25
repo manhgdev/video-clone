@@ -873,7 +873,7 @@ def ensure_preview_clip(
                 str(tmp),
             ],
         )
-    tmp.replace(dest)
+    _atomic_replace(tmp, dest)
     return dest
 
 
@@ -966,7 +966,7 @@ def ensure_playback_speed(
     cmd.append(str(tmp))
     try:
         run_cmd(project_id, cmd)
-        tmp.replace(dest)
+        _atomic_replace(tmp, dest)
     except Exception:
         try:
             tmp.unlink(missing_ok=True)
