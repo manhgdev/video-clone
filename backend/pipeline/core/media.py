@@ -1,16 +1,59 @@
 """ffmpeg/ffprobe helpers and hardware probe."""
 from __future__ import annotations
 
+import os
 import platform
 import hashlib
 import json
+import shutil
 import subprocess
 import sys
+import time
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 from .jobs import run_cmd
+
+
+def _atomic_replace(src: Path, dst: Path, *, attempts: int = 30) -> None:
+    """Replace dst with src; retry when Windows locks final.mp4 (preview/player/AV)."""
+    src_p, dst_p = Path(src), Path(dst)
+    if not src_p.is_file():
+        raise FileNotFoundError(str(src_p))
+    dst_p.parent.mkdir(parents=True, exist_ok=True)
+    last: BaseException | None = None
+    for attempt in range(max(1, attempts)):
+        try:
+            os.replace(str(src_p), str(dst_p))
+            return
+        except PermissionError as exc:
+            last = exc
+        except OSError as exc:
+            win = getattr(exc, "winerror", None)
+            if win not in (5, 32) and getattr(exc, "errno", None) not in (13, 11):
+                raise
+            last = exc
+        if attempt >= 1 and dst_p.exists():
+            try:
+                dst_p.unlink()
+                os.replace(str(src_p), str(dst_p))
+                return
+            except OSError as exc:
+                last = exc
+        time.sleep(min(1.25, 0.04 * (attempt + 1)))
+    # Some readers hold a share that blocks rename but allows overwrite-copy.
+    try:
+        shutil.copyfile(str(src_p), str(dst_p))
+        try:
+            src_p.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return
+    except OSError as exc:
+        last = exc
+    assert last is not None
+    raise last
 
 
 def atempo_chain(ratio: float) -> str:
@@ -1321,7 +1364,7 @@ def encode_export_1080(
             str(tmp),
         ],
     )
-    tmp.replace(dst)
+    _atomic_replace(tmp, dst)
     return dst
 
 
@@ -1444,5 +1487,5 @@ def crop_export_aspect(
             str(tmp),
         ],
     )
-    tmp.replace(dst)
+    _atomic_replace(tmp, dst)
     return dst
