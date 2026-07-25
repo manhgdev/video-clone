@@ -52,6 +52,22 @@ from .layout_geo import (
 from pipeline.export.fonts import _font_for_preset, _subtitle_font, _subtitle_font_vertical
 from pipeline.export.cover_mask import _apply_cover_mask, _parse_hex_color
 
+
+def _ink_w(draw: Any, text: str, font: Any) -> int:
+    """Bề ngang mực chữ — bbox + getlength + slack (khớp FE measureLineWidth)."""
+    if not text:
+        return 0
+    bb = draw.textbbox((0, 0), text, font=font)
+    raw = max(0, int(bb[2] - bb[0]))
+    try:
+        raw = max(raw, int(math.ceil(float(font.getlength(text)))))
+    except Exception:
+        pass
+    fs = int(getattr(font, "size", 24) or 24)
+    # Slack cố định (khớp FE) — không *1.08 để cover khỏi phình lệch
+    return int(math.ceil(raw + max(6, fs * 0.12)))
+
+
 def _layout_caption_over(
     text: str,
     font_size: int,
@@ -93,7 +109,7 @@ def _layout_caption_over(
             font = ImageFont.truetype(font_path, size)
         except OSError:
             font = ImageFont.load_default()
-        one_w = draw.textbbox((0, 0), trimmed, font=font)[2] if trimmed else 0
+        one_w = _ink_w(draw, trimmed, font) if trimmed else 0
         if one_w <= int(max_inner * 1.02):
             break
         size -= 1
@@ -102,8 +118,8 @@ def _layout_caption_over(
         font = ImageFont.truetype(font_path, size)
     except OSError:
         font = ImageFont.load_default()
-    one_w = draw.textbbox((0, 0), trimmed, font=font)[2] if trimmed else 0
-    
+    one_w = _ink_w(draw, trimmed, font) if trimmed else 0
+
     if one_w <= int(max_inner * 1.06):
         lines = [trimmed] if trimmed else [""]
         line_boxes = [draw.textbbox((0, 0), ln, font=font) for ln in lines]
@@ -118,14 +134,14 @@ def _layout_caption_over(
             if len(lines) > 2:
                 lines = _merge_to_n_lines(lines, 2)
             line_boxes = [draw.textbbox((0, 0), ln, font=font) for ln in lines]
-            tw = max((b[2] - b[0]) for b in line_boxes) if line_boxes else 0
+            tw = max((_ink_w(draw, ln, font) for ln in lines), default=0)
             if tw <= max_inner * 1.02 or size <= 12:
                 break
             size -= 1
 
     line_hs = [max(1, b[3] - b[1]) for b in line_boxes]
     gap_line = max(2, size // 8)
-    text_w = max((b[2] - b[0]) for b in line_boxes) if line_boxes else one_w
+    text_w = max((_ink_w(draw, ln, font) for ln in lines), default=one_w)
     text_h = sum(line_hs) + gap_line * max(0, len(lines) - 1)
     text_block_h = int(math.ceil(len(lines) * size * 1.12 + 4))
     font_size = size
@@ -137,7 +153,7 @@ def _layout_caption_over(
         src_fs = max(int(round(font_size * 1.12)), int(round(ocr_h * 0.92)), 28)
         try:
             src_font = ImageFont.truetype(font_path, src_fs)
-            raw = draw.textbbox((0, 0), src, font=src_font)[2]
+            raw = _ink_w(draw, src, src_font)
             cjk = sum(1 for c in src if "\u4e00" <= c <= "\u9fff")
             cjk_floor = int(math.ceil(cjk * src_fs * 1.15)) if cjk else 0
             outline = int(math.ceil(src_fs * 0.5))
@@ -147,7 +163,8 @@ def _layout_caption_over(
 
     orig_w = max(src_w, ocr_w) if src else ocr_w
     content_w = max(orig_w, text_w)
-    cap_pad_x = 1
+    # khớp FE CAP_PAD_X=4
+    cap_pad_x = 4
     cap_w = int(text_w + cap_pad_x * 2)
     # Cover full ngang được (frame_w)
     auto_w = min(frame_w, max(_fit_cover_width(content_w, cap_w, frame_w), cap_w))
@@ -984,7 +1001,7 @@ def _wrap_text(draw: Any, text: str, font: Any, max_w: int) -> list[str]:
     cur = words[0]
     for w in words[1:]:
         trial = f"{cur} {w}"
-        if draw.textbbox((0, 0), trial, font=font)[2] <= max_w:
+        if _ink_w(draw, trial, font) <= max_w:
             cur = trial
         else:
             lines.append(cur)

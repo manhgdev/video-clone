@@ -26,7 +26,25 @@ export function captionCenterInCover(coverY: number, coverH: number, textBlockH:
   return Math.round(coverY + Math.max(0, (coverH - textBlockH) / 2))
 }
 
-export const CAP_PAD_X = 1
+export const CAP_PAD_X = 4
+
+/** Bề ngang cover cần cho 1 dòng (mực đã measure + pad 2 bên). */
+export function lineNeedWidth(text: string, fontSizePx: number) {
+  return Math.ceil(measureLineWidth(text, fontSizePx) + CAP_PAD_X * 2)
+}
+
+/** Nới cover theo bề ngang cần, giữ tâm — không lệch 1 phía khi chạm mép frame. */
+export function expandCoverCentered(
+  box: PixelBox,
+  needW: number,
+  frameW: number,
+  frameH: number,
+): PixelBox {
+  const cx = box.x + box.w / 2
+  const w = Math.min(frameW, Math.max(box.w, Math.ceil(needW)))
+  const x = Math.round(Math.max(0, Math.min(frameW - w, cx - w / 2)))
+  return clampCoverBox({ ...box, x, w }, frameW, frameH)
+}
 
 export function coverInnerWidth(coverW: number, fontSizePx: number, frameW: number) {
   const pad = coverPad(fontSizePx, frameW)
@@ -183,11 +201,15 @@ export function measureLineWidth(text: string, fontSizePx: number) {
     }
     if (_measureCtx) {
       _measureCtx.font = `700 ${fontSizePx}px ${_measureFontFamily}`
-      // ponytail: 1.05 safety — small margin for sub-pixel rounding
-      return _measureCtx.measureText(text).width * 1.05
+      const m = _measureCtx.measureText(text)
+      const left = Number.isFinite(m.actualBoundingBoxLeft) ? Math.abs(m.actualBoundingBoxLeft) : 0
+      const right = Number.isFinite(m.actualBoundingBoxRight) ? Math.abs(m.actualBoundingBoxRight) : 0
+      const raw = Math.max(m.width || 0, left + right)
+      // Slack nhỏ cố định — tránh *1.08 làm cover phình lệch mép frame
+      return Math.ceil(raw + Math.max(6, fontSizePx * 0.12))
     }
   }
-  return text.length * fontSizePx * 0.40
+  return Math.ceil(text.length * fontSizePx * 0.42)
 }
 
 /** Xuống dòng — đổ ngang tối đa trước, rồi mới cân 2–3 dòng */
@@ -196,7 +218,6 @@ export function wrapCaptionText(text: string, maxInnerW: number, fontSizePx: num
   if (!trimmed) return ['']
   if (maxLines <= 1) return [trimmed]
 
-  // ponytail: measureLineWidth already has 1.15x safety — no extra tolerance needed
   const fits = (s: string) => measureLineWidth(s, fontSizePx) <= maxInnerW
   if (fits(trimmed)) return [trimmed]
 
@@ -285,18 +306,21 @@ export function layoutOverMode(
   const sourceW = sourceTrim ? measureSourceInkWidth(sourceTrim, fontPx, anchor.h) : 0
   const origW = inkW ?? (sourceTrim ? Math.max(sourceW, anchor.w) : anchor.w)
   const contentW = coverContentWidth(origW, textW)
-  const capPadX = 2
-  const captionW = Math.ceil(textW + capPadX * 2)
-  // Cover: max(OCR, chữ VI) — được full frameW
-  const coverW = Math.min(frameW, Math.max(coverBoxWidth(contentW, frameW), captionW + pad.x * 2))
+  const inkCapW = Math.max(...lines.map((l) => lineNeedWidth(l, fontPx)), Math.ceil(textW + CAP_PAD_X * 2))
+  // Cover: max(OCR, chữ VI) — căn tâm OCR
+  const coverW = Math.min(frameW, Math.max(coverBoxWidth(contentW, frameW), inkCapW + pad.x * 2))
   const coverX = Math.round(Math.max(0, Math.min(frameW - coverW, cx - coverW / 2)))
   const coverY = Math.max(0, anchor.y - pad.top)
   const coverH = Math.min(
     frameH - coverY,
     Math.max(anchor.h, textBlockH) + pad.top + pad.bottom + COVER_SHADOW_BOT,
   )
-
-  const captionX = Math.round(Math.max(0, Math.min(frameW - captionW, cx - captionW / 2)))
+  // 1 dòng: caption full cover (bbox vàng không hẹp lệch); 2 dòng: theo dòng dài
+  const edge = Math.max(2, Math.round(coverW * 0.01))
+  const captionW = Math.ceil(
+    lines.length === 1 ? Math.max(inkCapW, coverW - edge * 2) : inkCapW,
+  )
+  const captionX = Math.round(Math.max(coverX, Math.min(coverX + coverW - captionW, coverX + coverW / 2 - captionW / 2)))
   const captionY = captionCenterInCover(coverY, coverH, textBlockH)
 
   return {
@@ -497,14 +521,25 @@ export function resolveOverLayout(
   if (seg.bboxInherited === false && hasStoredLayout(seg, undefined)) {
     const stored = storedOverLayout(seg, frameW, frameH)
     if (!stored) return null
-    // The editor already fit this exact bbox before commit. Re-fitting here
-    // changes wrapping/font after mouse-up, so the released preview differs
-    // from the live drag preview. Translation edits clear captionLayout first.
+    // Giữ bbox đã kéo; chỉ nới ngang căn tâm nếu chữ tràn (không refit full).
+    const fs = Number(seg.captionLayout?.fontSize) > 0
+      ? Number(seg.captionLayout?.fontSize)
+      : fontPx
+    const lines = stored.lines.length ? stored.lines : [seg.translation.trim()]
+    const needW = Math.max(...lines.map((l) => lineNeedWidth(l, fs)), 1)
+      + coverPad(fs, frameW).x * 2
+    const cover = needW > stored.cover.w
+      ? expandCoverCentered(stored.cover, needW, frameW, frameH)
+      : stored.cover
+    if (cover.w === stored.cover.w && cover.x === stored.cover.x) {
+      return { ...stored, cover, fontPx: fs }
+    }
+    const laid = layoutCaptionInCover(cover, seg.translation, fs, frameW)
     return {
-      ...stored,
-      fontPx: Number(seg.captionLayout?.fontSize) > 0
-        ? Number(seg.captionLayout?.fontSize)
-        : fontPx,
+      cover,
+      caption: laid.caption,
+      lines: laid.lines.length ? laid.lines : lines,
+      fontPx: laid.fontPx ?? fs,
     }
   }
 
@@ -886,12 +921,10 @@ export function layoutCaptionInCover(
   _frameW: number,
 ): Pick<OverLayout, 'caption' | 'lines'> & { fontPx?: number } {
   const trimmed = text.trim()
-  const edge = Math.max(2, Math.round(cover.w * 0.02))
-  const maxInnerW = Math.max(4, cover.w - edge * 2)
+  const maxInnerW = Math.max(4, cover.w - CAP_PAD_X * 2)
   const sharedOneLineFits =
     measureLineWidth(trimmed, fontSizePx) <= maxInnerW
     && Math.ceil(fontSizePx * 1.12 + 4) <= cover.h
-  // Check 1-line font size
   const fit1 = fitCaptionLines(trimmed, maxInnerW, fontSizePx, {
     minFont: 1,
     preferOneLine: true,
@@ -899,14 +932,11 @@ export function layoutCaptionInCover(
   })
   const font1 = fit1.fontPx
 
-  // Check 2-line font size (don't force one line)
   const fit2 = fitCaptionLines(trimmed, maxInnerW, fontSizePx, {
     minFont: 1,
     preferOneLine: false,
     maxLines: 2,
   })
-  // However, fitCaptionLines doesn't check cover.h!
-  // We need to ensure that the 2-line layout fits within cover.h.
   let font2 = fit2.fontPx
   let lines2 = fit2.lines
   while (font2 > 8 && lines2.length > 1 && Math.ceil(lines2.length * font2 * 1.12 + 4) > cover.h) {
@@ -916,34 +946,37 @@ export function layoutCaptionInCover(
     lines2 = refit.lines
   }
   if (Math.ceil(lines2.length * font2 * 1.12 + 4) > cover.h) {
-    font2 = 0 // Does not fit vertically
+    font2 = 0
   }
 
   let fontPx: number
   let lines: string[]
   if (sharedOneLineFits) {
-    // First priority for auto mid/horizontal: one line at the shared font.
     fontPx = fontSizePx
     lines = [trimmed]
   } else if (font2 > font1 && lines2.length > 1) {
     fontPx = font2
     lines = lines2
   } else {
-    // If 2-lines didn't fit, we fallback to 1 line.
-    // The previous fit1 might have aborted early due to preferOneLine's 20% limit.
-    // We force it to shrink all the way down to minFont to guarantee it fits.
     const forcedFit = fitCaptionLines(trimmed, maxInnerW, fontSizePx, { minFont: 1, preferOneLine: false, maxLines: 1 })
     fontPx = forcedFit.fontPx
     lines = forcedFit.lines
   }
 
+  while (fontPx > 8 && lines.some((line) => measureLineWidth(line, fontPx) > maxInnerW)) {
+    fontPx -= 1
+    lines = wrapCaptionText(trimmed, maxInnerW, fontPx, Math.max(1, lines.length))
+  }
+
   const lineH = fontPx * 1.12
   const textBlockH = Math.ceil(lines.length * lineH + 4)
   const textW = Math.max(...lines.map((l) => measureLineWidth(l, fontPx)), 1)
-  const captionW = Math.ceil(
-    lines.length === 1
-      ? Math.max(textW + CAP_PAD_X * 2, cover.w - edge * 2)
-      : textW + CAP_PAD_X * 2,
+  const inkCapW = Math.max(...lines.map((l) => lineNeedWidth(l, fontPx)), Math.ceil(textW + CAP_PAD_X * 2))
+  // 1 dòng: caption = gần full cover (khung vàng không lệch hẹp một bên)
+  const edge = Math.max(2, Math.round(cover.w * 0.01))
+  const captionW = Math.min(
+    cover.w,
+    Math.ceil(lines.length === 1 ? Math.max(inkCapW, cover.w - edge * 2) : inkCapW),
   )
   const cx = cover.x + cover.w / 2
   const captionX = Math.round(Math.max(cover.x, Math.min(cover.x + cover.w - captionW, cx - captionW / 2)))
@@ -977,8 +1010,10 @@ export function adaptiveCoverLayout(
     const lineH = fs * 1.12
     const textBlockH = Math.ceil(ls.length * lineH + 4)
     const textW = Math.max(...ls.map((l) => measureLineWidth(l, fs)), 1)
-    const captionW = Math.ceil(textW + CAP_PAD_X * 2)
-    const coverW = Math.min(frameW, Math.max(cover.w, captionW + pad.x * 2))
+    const inkCapW = Math.max(...ls.map((l) => lineNeedWidth(l, fs)), Math.ceil(textW + CAP_PAD_X * 2))
+    const coverW = Math.min(frameW, Math.max(cover.w, inkCapW + pad.x * 2))
+    const edge = Math.max(2, Math.round(coverW * 0.01))
+    const captionW = Math.ceil(ls.length === 1 ? Math.max(inkCapW, coverW - edge * 2) : inkCapW)
     const byText = textBlockH + pad.top + pad.bottom + COVER_SHADOW_BOT
     const coverH = Math.min(frameH, Math.max(cover.h, byText))
     return { lineH, textBlockH, textW, captionW, coverW, coverH }
@@ -1034,9 +1069,9 @@ export function manualCoverLayout(
       fontSizePx,
       2,
     )
+    const padX = coverPad(fontSizePx, frameW).x
     const sharedNeedW = Math.ceil(
-      Math.max(...sharedLines.map((line) => measureLineWidth(line, fontSizePx)), 1) / 0.96
-      + coverPad(fontSizePx, frameW).x * 2,
+      Math.max(...sharedLines.map((line) => lineNeedWidth(line, fontSizePx)), 1) + padX * 2,
     )
     const sharedNeedH = Math.ceil(sharedLines.length * fontSizePx * 1.12 + 4)
     if (
@@ -1045,28 +1080,25 @@ export function manualCoverLayout(
       && sharedLines.every((line) => measureLineWidth(line, fontSizePx) <= frameMaxInnerWidth(fontSizePx, frameW))
       && (sharedNeedW > box.w || sharedNeedH > box.h)
     ) {
-      const cx = box.x + box.w / 2
       const cy = box.y + box.h / 2
-      const w = Math.min(frameW, Math.max(box.w, sharedNeedW))
       const h = Math.min(frameH, Math.max(box.h, sharedNeedH))
-      box = clampCoverBox({ x: Math.round(cx - w / 2), y: Math.round(cy - h / 2), w, h }, frameW, frameH)
+      box = expandCoverCentered(box, sharedNeedW, frameW, frameH)
+      box = clampCoverBox(
+        { ...box, y: Math.round(Math.max(0, Math.min(frameH - h, cy - h / 2))), h },
+        frameW,
+        frameH,
+      )
     }
-    const laid = layoutCaptionInCover(box, text, fontSizePx, frameW)
-    
-    if (allowExpand && laid.caption.w > box.w) {
-      const cx = box.x + box.w / 2
-      let newW = Math.min(frameW, laid.caption.w)
-      let newX = Math.round(Math.max(0, Math.min(frameW - newW, cx - newW / 2)))
-      const expandedBox = clampCoverBox({ ...box, x: newX, w: newW }, frameW, frameH)
-      const laid2 = layoutCaptionInCover(expandedBox, text, fontSizePx, frameW)
-      return {
-        cover: expandedBox,
-        caption: laid2.caption,
-        lines: laid2.lines,
-        fontPx: laid2.fontPx ?? fontSizePx,
-      }
+    let laid = layoutCaptionInCover(box, text, fontSizePx, frameW)
+    const fs = laid.fontPx ?? fontSizePx
+    const inkNeedW = Math.ceil(
+      Math.max(...laid.lines.map((line) => lineNeedWidth(line, fs)), 1) + padX * 2,
+    )
+    if (allowExpand && inkNeedW > box.w) {
+      box = expandCoverCentered(box, inkNeedW, frameW, frameH)
+      laid = layoutCaptionInCover(box, text, fontSizePx, frameW)
     }
-    
+
     return {
       cover: box,
       caption: laid.caption,

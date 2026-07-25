@@ -5138,8 +5138,8 @@ export default function LivePreviewEditor({
                           key={layerSeg.id}
                           className={cn(
                             '@container [container-type:size] absolute z-20 pointer-events-none flex items-center justify-center',
-                            // Cover mode must clip glyph/shadow to the same bbox that hides the source text.
-                            overlayLay || !settings.coverHardsubs ? 'overflow-visible' : 'overflow-hidden',
+                            // Không clip chữ VI (tránh cắt đuôi); mask che hardsub dùng cover box riêng.
+                            'overflow-visible',
                           )}
                           style={sourceToDisplayStyle(
                             // Horizontal cover mode: bám cover (che + chữ giữa khung tím)
@@ -5234,12 +5234,18 @@ export default function LivePreviewEditor({
                                 ...captionChromeStyle(settings, layerSeg),
                                 lineHeight: 1.12,
                                 margin: 0,
-                                padding: '0.02em 0.08em',
+                                // Không pad ngang — pad đã tính trong cover.w (tránh overflow-hidden cắt đuôi)
+                                padding: '0.02em 0',
                                 boxSizing: 'border-box',
+                                width: '100%',
                               }}
                             >
                               {lines.map((line, i) => (
-                                <span key={i} className="block max-w-full text-center whitespace-nowrap">
+                                <span
+                                  key={i}
+                                  className="block text-center whitespace-nowrap"
+                                  style={{ maxWidth: 'none' }}
+                                >
                                   {line}
                                 </span>
                               ))}
