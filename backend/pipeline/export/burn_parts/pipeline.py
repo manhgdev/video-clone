@@ -22,6 +22,7 @@ from pipeline.core.project import ensure_layout, set_status
 from pipeline.core.resources import adaptive_workers
 from pipeline.ocr.extract import _ocr_join_lines, _rapidocr_labels
 from pipeline.ocr.cover_timing import resolve_cover_window
+from pipeline.ocr.overlay_cover import mid_bottom_cutoff
 from pipeline.ocr.labels import (
     clamp_label_box,
     cover_fit_label,
@@ -50,6 +51,13 @@ from .layout_text import *  # noqa: F403
 from .ocr_boxes import *  # noqa: F403
 from pipeline.export.fonts import _font_for_preset, _subtitle_font, _subtitle_font_vertical
 from pipeline.export.cover_mask import _apply_cover_mask
+
+
+def _burn_frame_count_complete(written: int, expected: int, fps: float) -> bool:
+    """Allow normal decoder rounding, never accept a materially truncated render."""
+    tolerance = max(2, int(math.ceil(max(1.0, fps) * 0.5)))
+    return written > 0 and (expected <= 0 or written >= max(1, expected - tolerance))
+
 
 def cover_and_burn(
     video: Path,
@@ -109,10 +117,7 @@ def cover_and_burn(
     cap_stroke = bool(caption_stroke if caption_stroke is not None else True)
     # cover → chữ đè đúng dải OCR; không cover → above/below hardsub (mid cũng below/above)
     layout_place = "over" if cover else place
-    try:
-        font = ImageFont.truetype(_font_for_preset(subtitle_font_family), fontsize)
-    except OSError:
-        font = ImageFont.load_default()
+    font = ImageFont.truetype(_font_for_preset(subtitle_font_family), fontsize)
 
     # (cover_start, cover_end, burn_start, burn_end, text, source, layout)
     # Cover nới rộng hơn burn: hardsub hay hiện trước/sau ASR; burn vẫn bám timecode.
@@ -326,10 +331,7 @@ def cover_and_burn(
         cached = font_cache.get(fs)
         if cached is not None:
             return cached
-        try:
-            cached = ImageFont.truetype(_font_for_preset(subtitle_font_family), fs)
-        except OSError:
-            cached = ImageFont.load_default()
+        cached = ImageFont.truetype(_font_for_preset(subtitle_font_family), fs)
         font_cache[fs] = cached
         return cached
 
@@ -368,6 +370,7 @@ def cover_and_burn(
         is_vert = lay_mode == "vertical"
         is_label = lay_mode == "label"
         is_mid = lay_mode == "mid"
+        uses_bbox_caption = lay_mode in ("horizontal", "mid")
         src_s = (src or "").strip()
         use_label_style = is_label
         # Fallback paint: coverHardsubs hoặc overlay mid/dọc (preview vẫn mask khi burn)
@@ -388,7 +391,7 @@ def cover_and_burn(
         if paint is not None and not is_vert and not is_label:
             pcy = (paint[1] + paint[3]) * 0.5
             # Keep identical to FE effectiveOverlayLayout().
-            paint_mid = h * 0.18 < pcy < h * 0.78
+            paint_mid = h * 0.18 < pcy < h * mid_bottom_cutoff(w, h)
             if paint_mid:
                 is_mid = True
         if is_vert and paint is not None:
@@ -497,8 +500,9 @@ def cover_and_burn(
             lay: dict[str, Any] | None = None
             # below/above: không ép mid layout "over" — dùng placement above/below OCR
             force_below_above = (not cover) and layout_place in ("below", "above")
-            # Mid + cover: ưu tiên layout bake từ preview; mid + below/above → skip
-            if is_mid and paint is not None and not force_below_above:
+            # Caption + CAP-MID share the same bbox-fitting engine. Their tags
+            # and timing lanes remain separate.
+            if uses_bbox_caption and paint is not None and not force_below_above:
                 if preview_lay is not None and editor_locked:
                     lay = preview_lay
                     cover_box = paint
@@ -557,7 +561,7 @@ def cover_and_burn(
                 lay = _layout_caption_vertical(
                     text, cue_font, cue_fs, layout_paint if layout_paint else paint, w, h
                 )
-            elif lay is None and is_mid and paint is not None and not force_below_above:
+            elif lay is None and uses_bbox_caption and paint is not None and not force_below_above:
                 mid_pref = int(seg_meta.get("fontSize") or 0)
                 lay = _layout_mid_caption(
                     text,
@@ -630,7 +634,7 @@ def cover_and_burn(
                     **lay,
                     "box": cover_box,
                     "css_cover_mode": (
-                        "label" if is_label else "mid" if is_mid else "horizontal"
+                        "label" if is_label else "mid" if uses_bbox_caption else "horizontal"
                     ),
                 }
             lay = {
@@ -843,6 +847,7 @@ def cover_and_burn(
         cap = cv2.VideoCapture(str(video))
         if not cap.isOpened():
             raise RuntimeError(f"Không mở được video: {video}")
+    decoder_fallback = False
     # Nếu frame lẻ: crop khi ghi (ghi ew×eh)
     _frame_ew, _frame_eh = ew, eh
     _src_w, _src_h = int(w), int(h)
@@ -972,7 +977,8 @@ def cover_and_burn(
         frame_bytes = _src_w * _src_h * 3
 
         def read_frame() -> tuple[bool, Any]:
-            if decoder is None:
+            nonlocal cap, decoder_fallback
+            if decoder is None or decoder_fallback:
                 assert cap is not None
                 return cap.read()
             assert decoder.stdout is not None
@@ -980,7 +986,21 @@ def cover_and_burn(
             while len(raw) < frame_bytes:
                 chunk = decoder.stdout.read(frame_bytes - len(raw))
                 if not chunk:
-                    return False, None
+                    if frame_i >= frame_total:
+                        return False, None
+                    # ponytail: NVDEC can die transiently after its one-frame
+                    # capability probe; resume at the same frame on CPU.
+                    decoder_fallback = True
+                    cap = cv2.VideoCapture(str(video))
+                    if not cap.isOpened() or (
+                        frame_i > 0
+                        and not cap.set(cv2.CAP_PROP_POS_FRAMES, frame_i)
+                    ):
+                        raise RuntimeError(
+                            f"Decoder GPU dừng ở frame {frame_i}/{frame_total} "
+                            "và không thể tiếp tục bằng CPU"
+                        )
+                    return cap.read()
                 raw.extend(chunk)
             frame = np.frombuffer(raw, dtype=np.uint8).reshape((_src_h, _src_w, 3))
             return True, frame
@@ -1025,6 +1045,7 @@ def cover_and_burn(
             painted_q.put(None)
 
     t = threading.Thread(target=_reader_painter, name="burn-read", daemon=True)
+    written_frames = 0
     try:
         t.start()
         pipe_dead = False
@@ -1044,6 +1065,7 @@ def cover_and_burn(
                     pipe_dead = True
                     break
                 proc.stdin.write(b"".join(batch_raw))
+                written_frames += len(batch_raw)
             except BrokenPipeError:
                 pipe_dead = True
                 break
@@ -1106,6 +1128,20 @@ def cover_and_burn(
         raise RuntimeError(
             f"cover_and_burn ffmpeg failed (code={code})"
             + (f" — {tail}" if tail else " — broken pipe (ffmpeg thoát sớm)")
+        )
+    output_duration = float(ffprobe_duration(out) or 0.0)
+    expected_duration = frame_total / fps if frame_total > 0 else 0.0
+    if (
+        not _burn_frame_count_complete(written_frames, frame_total, fps)
+        or (
+            expected_duration > 0
+            and output_duration + 0.5 < expected_duration
+        )
+    ):
+        raise RuntimeError(
+            "cover_and_burn produced a truncated video "
+            f"({written_frames}/{frame_total} frames, "
+            f"{output_duration:.3f}/{expected_duration:.3f}s)"
         )
     try:
         err_path.unlink(missing_ok=True)

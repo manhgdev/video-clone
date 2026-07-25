@@ -82,6 +82,15 @@ class BundledCaptionFontTest(unittest.TestCase):
         for layout in (regular, over, vertical):
             self.assertEqual(Path(layout["font"].path).resolve(), Path(selected).resolve())
 
+    def test_missing_preset_falls_back_to_bundled_noto_not_host_font(self) -> None:
+        fonts._font_file_index = None
+        fonts._font_cache.clear()
+        fallback = Path(fonts._font_for_preset("missing-preset"))
+
+        self.assertEqual(fallback.name, "NotoSans-Bold.ttf")
+        self.assertEqual(fallback.parent.name, "fonts")
+        self.assertNotEqual(str(fallback), "Arial")
+
     def test_segment_caption_style_fields_are_validated(self) -> None:
         base = dict(id="s1", index=0, start=0, end=1, source="", translation="", voice="")
         segment = SegmentIn(**base, fontFamily="rounded", textColor="#12aBcF")

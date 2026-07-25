@@ -5,8 +5,20 @@ vertical = cột; label = multi-box; mid = flash giữa. Không dùng preview pa
 """
 from __future__ import annotations
 
+import math
 import re
 from typing import Any
+
+
+def mid_bottom_cutoff(frame_w: int, frame_h: int) -> float:
+    """Start of the visual bottom band for the decoded input aspect ratio."""
+    if frame_w <= 0 or frame_h <= 0:
+        return 0.78
+    aspect = frame_w / frame_h
+    # ponytail: log scale is reciprocal for portrait/landscape and covers any
+    # input ratio; clamp only pathological panoramas/tall strips.
+    cutoff = 0.75 - 0.03 * math.log2(aspect) / math.log2(16 / 9)
+    return max(0.70, min(0.80, cutoff))
 
 
 def is_overlay_layout(layout: str | None) -> bool:

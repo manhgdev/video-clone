@@ -1,9 +1,11 @@
 import type { ProjectSettings, Segment } from '@/features/project/project.types'
 import {
+  OCR_MID_PAD_EM,
   layoutOcrOverlay,
+  setOcrMeasureFontFamily,
 } from '@/features/editor/ocrOverlayLayout'
 import { resolveCropRect, captionFontCss, type PixelBox, type CropRect } from './previewStyles'
-import { isOcrOverlayLayout, effectiveOverlayLayout } from './segmentQuery'
+import { effectiveOverlayLayout } from './segmentQuery'
 
 export const AUTO_SUBTITLE_FONT = 48
 /** Khớp burn._cover_max_h — đủ 1–3 dòng theo font */
@@ -26,7 +28,8 @@ export function captionCenterInCover(coverY: number, coverH: number, textBlockH:
   return Math.round(coverY + Math.max(0, (coverH - textBlockH) / 2))
 }
 
-export const CAP_PAD_X = 4
+/** Khoảng thở ngang trong toạ độ video; tương đương ~6px ở preview điện thoại. */
+export const CAP_PAD_X = 16
 
 /** Bề ngang cover cần cho 1 dòng (mực đã measure + pad 2 bên). */
 export function lineNeedWidth(text: string, fontSizePx: number) {
@@ -184,12 +187,13 @@ export function coverBoxWidth(contentW: number, frameW: number) {
 export type OverLayout = { cover: PixelBox; caption: PixelBox; lines: string[]; fontPx?: number }
 
 let _measureCtx: CanvasRenderingContext2D | null = null
-let _measureFontFamily = 'system-ui, -apple-system, "Segoe UI", sans-serif'
+let _measureFontFamily = '"VC Noto Sans", sans-serif'
 
 /** ponytail: sync measurement font with the CSS render font */
 export function setMeasureFontFamily(css: string) {
   if (css && css !== _measureFontFamily) {
     _measureFontFamily = css
+    setOcrMeasureFontFamily(css)
   }
 }
 
@@ -364,8 +368,10 @@ export function resolveSegmentCover(
   setMeasureFontFamily(captionFontCss(seg.fontFamily || settings.subtitleFontFamily || 'system'))
   const fontPx = resolveCaptionFontSize(seg, settings, frameW, frameH)
   const over = settings.coverHardsubs && settings.burnSubs && seg.translation.trim()
-  if (isOcrOverlayLayout(seg.layout)) {
+  const overlayLay = effectiveOverlayLayout(seg, frameH, frameW)
+  if (overlayLay) {
     return overlayCoverSeed(seg, frameW, frameH)
+      ?? (seg.layout === 'horizontal' ? fallbackCoverBox(frameW, frameH, fontPx) : null)
   }
   if (!over) {
     const seed = seg.bbox
@@ -447,7 +453,7 @@ export function resolveOverLayout(
 
   // Overlay OCR mid / dọc / nhãn — hoặc horizontal có bbox giữa khung
   // (không phụ thuộc coverHardsubs: chữ vẫn đúng chỗ; mask mới cần cover)
-  const overlayLay = effectiveOverlayLayout(seg, frameH)
+  const overlayLay = effectiveOverlayLayout(seg, frameH, frameW)
   if (overlayLay) {
     const preferred = resolveOverlayFontPreferred(seg)
     if (coverOverride) {
@@ -472,7 +478,9 @@ export function resolveOverLayout(
         // captionLayout.fontSize là kết quả auto cũ, không phải lựa chọn khóa
         // của người dùng. Bỏ nó để bbox dài tự tính lại font lớn nhất có thể.
         // 0 = auto fit bbox; preferred chỉ khi user set fontSize đoạn
-        const want = preferred > 0 ? preferred : 0
+        // Mid retries the shared project font and grows its automatic cover;
+        // otherwise a stored OCR box permanently keeps long captions tiny.
+        const want = preferred > 0 ? preferred : overlayLay === 'mid' ? fontPx : 0
         const laid = layoutOcrOverlay(overlayLay, cover, seg.translation, want, frameW, frameH)
         return {
           cover: clampCoverBox(laid.cover, frameW, frameH),
@@ -482,8 +490,10 @@ export function resolveOverLayout(
         }
       }
     }
-    // mid/dọc/nhãn: cover = bbox OCR (không nới theo VI); chưa OCR → không bịa khung
+    // Caption/CAP-MID share one bbox engine. Caption without OCR keeps only
+    // the old bottom coordinate as its fallback; its fitting is still mid.
     const seed = overlayCoverSeed(seg, frameW, frameH)
+      ?? (seg.layout === 'horizontal' ? fallbackCoverBox(frameW, frameH, fontPx) : null)
     if (!seed) return null
     // Mid captions use the shared caption font first; bbox fitting may shrink
     // only when that size cannot fit. Vertical/label keep their own auto-fit.
@@ -650,7 +660,7 @@ export function resolvePreviewOverLayout(
   if (!base) return null
   // Nếu segment có bbox (OCR hoặc user kéo) HOẶC thuộc layout mid/label/vertical
   // -> GIỮ NGUYÊN tọa độ đè đúng chỗ. Không tự động shift/fallback xuống đáy màn hình.
-  const overlayLay = seg ? effectiveOverlayLayout(seg, frameH) : null
+  const overlayLay = seg ? effectiveOverlayLayout(seg, frameH, frameW) : null
   if (
     overlayLay === 'mid' ||
     overlayLay === 'label' ||
@@ -1232,7 +1242,7 @@ export function overlayDisplayFontStyle(
       width: '100%',
       height: '100%',
       overflow: 'hidden',
-      padding: '0 1px',
+      padding: layout === 'mid' ? `0 ${OCR_MID_PAD_EM}em` : '0 6px',
       boxSizing: 'border-box' as const,
     }
   }

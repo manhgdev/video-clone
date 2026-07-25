@@ -86,10 +86,7 @@ def _layout_caption_over(
     ocr_w, ocr_h = ox1 - ox0, oy1 - oy0
     cx = (ox0 + ox1) // 2
     font_path = font_path or _subtitle_font()
-    try:
-        font = ImageFont.truetype(font_path, font_size)
-    except OSError:
-        font = ImageFont.load_default()
+    font = ImageFont.truetype(font_path, font_size)
     probe = Image.new("RGB", (8, 8))
     draw = ImageDraw.Draw(probe)
 
@@ -105,19 +102,13 @@ def _layout_caption_over(
     text_block_h = font_size
     min_one_line = max(12, int(round(font_size * 0.8)))
     while size > min_one_line:
-        try:
-            font = ImageFont.truetype(font_path, size)
-        except OSError:
-            font = ImageFont.load_default()
+        font = ImageFont.truetype(font_path, size)
         one_w = _ink_w(draw, trimmed, font) if trimmed else 0
         if one_w <= int(max_inner * 1.02):
             break
         size -= 1
 
-    try:
-        font = ImageFont.truetype(font_path, size)
-    except OSError:
-        font = ImageFont.load_default()
+    font = ImageFont.truetype(font_path, size)
     one_w = _ink_w(draw, trimmed, font) if trimmed else 0
 
     if one_w <= int(max_inner * 1.06):
@@ -126,10 +117,7 @@ def _layout_caption_over(
     else:
         size = font_size
         while size >= 12:
-            try:
-                font = ImageFont.truetype(font_path, size)
-            except OSError:
-                font = ImageFont.load_default()
+            font = ImageFont.truetype(font_path, size)
             lines = _wrap_text(draw, trimmed, font, max_inner)
             if len(lines) > 2:
                 lines = _merge_to_n_lines(lines, 2)
@@ -802,6 +790,8 @@ def _layout_mid_caption(
     gap_line = max(2, size // 8)
     line_h = (max(line_hs) if line_hs else size) + gap_line
     text_h = sum(line_hs) + gap_line * max(0, len(lines) - 1)
+    # Keep the same 0.5em side breathing room as the preview.
+    pad_x = max(pad_x, int(math.ceil(size * 0.5)))
     # ponytail: nới rộng bbox ngang nếu chữ dịch vẫn dài hơn bbox gốc
     max_line_w = max(
         (draw.textbbox((0, 0), ln, font=font_use)[2] for ln in lines), default=0

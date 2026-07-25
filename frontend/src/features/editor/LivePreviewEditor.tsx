@@ -108,7 +108,9 @@ import {
   segmentWithLayout,
   setMeasureFontFamily,
   segmentsAt,
+  speedSegmentAt,
   snapBoxToCenter,
+  trimSegmentsForVideoRight,
   solidMidAt,
   solidOcrAt,
   solidOverlaysAt,
@@ -397,7 +399,10 @@ export default function LivePreviewEditor({
   useEffect(() => {
     if (settings.defaultVoice) setGlobalVoice((v) => v || settings.defaultVoice)
   }, [settings.defaultVoice])
-  const [videoSize, setVideoSize] = useState({ width: 1080, height: 1920 })
+  const [videoSize, setVideoSize] = useState({ width: 0, height: 0 })
+  useEffect(() => {
+    setVideoSize({ width: 0, height: 0 })
+  }, [videoUrl])
   const [cropEditing, setCropEditing] = useState(false)
   const [cropDraft, setCropDraft] = useState(() => settings.previewCrop ?? { x: 0.1, y: 0.1, w: 0.8, h: 0.8 })
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -830,6 +835,38 @@ export default function LivePreviewEditor({
   const timelineDuration = clipCap > 0
     ? Math.min(Math.max(0, clipCap - videoSourceStart), sourceDur > 0 ? Math.max(0, sourceDur - videoSourceStart) : clipCap)
     : videoTrackEnd > 0 ? Math.max(videoTrackEnd, 1) : Math.max(sourceDur - videoSourceStart, lastSegment?.end ?? 0, 1)
+
+  useEffect(() => {
+    if (!playing) return
+    let frame = 0
+    const syncRate = () => {
+      const video = videoRef.current
+      if (!video || video.paused || video.ended) return
+      const current = Math.max(0, video.currentTime - videoSourceStart)
+      const active = speedSegmentAt(segments, current)
+      const rate = previewVideoRate(
+        settings.matchDuration,
+        bakedPreferVideo,
+        active?.videoSpeed,
+        bakedSpeed,
+        hasBakedSpeed,
+      )
+      if (Math.abs(video.playbackRate - rate) > 0.001) video.playbackRate = rate
+      // ponytail: one cheap check per painted frame; switch to boundary timers only if profiling needs it.
+      frame = window.requestAnimationFrame(syncRate)
+    }
+    frame = window.requestAnimationFrame(syncRate)
+    return () => window.cancelAnimationFrame(frame)
+  }, [
+    playing,
+    segments,
+    videoSourceStart,
+    settings.matchDuration,
+    bakedPreferVideo,
+    bakedSpeed,
+    hasBakedSpeed,
+  ])
+
   const [tracksViewportW, setTracksViewportW] = useState(0)
   // Fit mặc định 80%; slider cho phép thu nhỏ timeline xuống 30% khung.
   const zoomSliderMin = useMemo(() => {
@@ -933,8 +970,11 @@ export default function LivePreviewEditor({
     mediaDurRef.current = 0
   }, [projectId])
 
-  const sourceWidth = videoSize.width
-  const sourceHeight = videoSize.height
+  const videoFrameReady = videoSize.width > 0 && videoSize.height > 0
+  // Keep the canvas stable while metadata loads, but never infer a caption
+  // lane from this display-only fallback.
+  const sourceWidth = videoFrameReady ? videoSize.width : 1080
+  const sourceHeight = videoFrameReady ? videoSize.height : 1920
   const aspectId = settings.previewAspectRatio ?? 'original'
   const appliedCrop = useMemo(
     () => resolveCropRect(sourceWidth, sourceHeight, aspectId, settings.previewCrop),
@@ -999,8 +1039,8 @@ export default function LivePreviewEditor({
     () =>
       segments
         .filter((s) => !s.isCompound)
-        .map((s) => withInferredLayout(s, sourceHeight > 0 ? sourceHeight : 1920)),
-    [segments, sourceHeight],
+        .map((s) => videoFrameReady ? withInferredLayout(s, sourceHeight, sourceWidth) : s),
+    [segments, sourceHeight, sourceWidth, videoFrameReady],
   )
   const compoundShells = useMemo(
     () => segments.filter((s) => s.isCompound),
@@ -1028,9 +1068,9 @@ export default function LivePreviewEditor({
   const layoutSegs = useMemo(
     () =>
       expandSegmentsForPlayback(segments).map((s) =>
-        withInferredLayout(s, sourceHeight > 0 ? sourceHeight : 1920),
+        videoFrameReady ? withInferredLayout(s, sourceHeight, sourceWidth) : s,
       ),
-    [segments, sourceHeight],
+    [segments, sourceHeight, sourceWidth, videoFrameReady],
   )
   /** TTS: luôn bung children (timing từng câu). Shell mix chỉ khi không bung được. */
   const dubPlaySegments = useMemo(() => {
@@ -1043,7 +1083,8 @@ export default function LivePreviewEditor({
   // selected có thể là shell compound (rỗng chữ) — không dùng cho caption layout
   const selectedIsShell = Boolean(selected?.isCompound)
   const selectedLayout = selected && !selectedIsShell
-    ? layoutSegs.find((s) => s.id === selected.id) ?? withInferredLayout(selected, sourceHeight || 1920)
+    ? layoutSegs.find((s) => s.id === selected.id)
+      ?? (videoFrameReady ? withInferredLayout(selected, sourceHeight, sourceWidth) : selected)
     : null
   const selectedFontPx = resolveCaptionFontSize(selectedLayout ?? undefined, settings, sourceWidth, sourceHeight)
   const fallbackBox = seedCoverBox(selectedLayout ?? undefined, sourceWidth, sourceHeight, selectedFontPx)
@@ -1079,18 +1120,18 @@ export default function LivePreviewEditor({
     .filter((s) => (s.translation || '').trim() && !skipSpuriousMid(s))
   // Một mid / một caption ngang tại một thời điểm — tránh bbox trước đè bbox sau
   const pickOneMid = (list: Segment[]) => {
-    const mids = list.filter((s) => captionLaneOf(s, sourceHeight) === 'mid')
+    const mids = list.filter((s) => captionLaneOf(s, sourceHeight, sourceWidth) === 'mid')
     if (mids.length <= 1) return list
     const keep = solidMidAt(list, time, captionPreferId) ?? mids[0]
-    return list.filter((s) => captionLaneOf(s, sourceHeight) !== 'mid' || s.id === keep.id)
+    return list.filter((s) => captionLaneOf(s, sourceHeight, sourceWidth) !== 'mid' || s.id === keep.id)
   }
   const pickOneHorizontal = (list: Segment[]) => {
-    const hors = list.filter((s) => captionLaneOf(s, sourceHeight) === 'horizontal')
+    const hors = list.filter((s) => captionLaneOf(s, sourceHeight, sourceWidth) === 'horizontal')
     if (hors.length <= 1) return list
     // Ưu tiên clip đang trong [start,end); không thì cover pad mới nhất
     const active = hors.find((s) => time >= s.start && time < s.end)
       ?? hors.reduce((a, b) => (a.start >= b.start ? a : b))
-    return list.filter((s) => captionLaneOf(s, sourceHeight) !== 'horizontal' || s.id === active.id)
+    return list.filter((s) => captionLaneOf(s, sourceHeight, sourceWidth) !== 'horizontal' || s.id === active.id)
   }
   const coverSegs = pickOneHorizontal(pickOneMid(coverSegsRaw))
   const timelineSegs = pickOneHorizontal(pickOneMid(timelineSegsRaw))
@@ -1118,7 +1159,7 @@ export default function LivePreviewEditor({
             if (overCoverMode) {
               return (
                 isOcrOverlayLayout(s.layout)
-                || Boolean(effectiveOverlayLayout(s, sourceHeight))
+                || Boolean(effectiveOverlayLayout(s, sourceHeight, sourceWidth))
                 || Boolean(s.translation.trim())
               )
             }
@@ -1144,7 +1185,7 @@ export default function LivePreviewEditor({
             if (!isVertLabel && s.bboxInherited !== false) return null
           } else if (
             !isOcrOverlayLayout(s.layout)
-            && !effectiveOverlayLayout(s, sourceHeight)
+            && !effectiveOverlayLayout(s, sourceHeight, sourceWidth)
             && !s.translation.trim()
           ) {
             return null
@@ -1183,9 +1224,9 @@ export default function LivePreviewEditor({
     return Boolean(target && time >= target.start && time < target.end)
   })()
   const captionLanes = useMemo(() => {
-    const present = new Set(layoutSegs.map((s) => captionLaneOf(s, sourceHeight || 1920)))
+    const present = new Set(layoutSegs.map((s) => captionLaneOf(s, sourceHeight, sourceWidth)))
     return CAPTION_LANE_DEFS.filter((l) => l.key === 'horizontal' || present.has(l.key))
-  }, [layoutSegs, sourceHeight])
+  }, [layoutSegs, sourceHeight, sourceWidth])
   const previewLogoDraft = logoDraft
     ? { ...logoDraft, positionKeyframes: generateLogoKeyframes(logoDraft, timelineDuration, sourceWidth, sourceHeight, segments, logoDraft.positionSeed) }
     : null
@@ -1379,7 +1420,7 @@ export default function LivePreviewEditor({
   useEffect(() => {
     const video = videoRef.current
     if (!video) return
-    const at = segmentAt(segments, video.currentTime)
+    const at = speedSegmentAt(segments, videoToTimelineTime(video.currentTime))
     const playRate = previewVideoRate(
       settings.matchDuration,
       bakedPreferVideo,
@@ -1467,7 +1508,7 @@ export default function LivePreviewEditor({
     bgAudioRef.current?.pause()
     const video = videoRef.current
     const t = video?.currentTime ?? 0
-    const at = segmentAt(segments, t)
+    const at = speedSegmentAt(segments, videoToTimelineTime(t))
     const playRate = previewVideoRate(
       settings.matchDuration,
       bakedPreferVideo,
@@ -1547,7 +1588,7 @@ export default function LivePreviewEditor({
       dubTokenRef.current = ''
     }
 
-    const at = segmentAt(segments, videoTime)
+    const at = speedSegmentAt(segments, videoTime)
     const playRateProbe = previewVideoRate(
       settings.matchDuration,
       bakedPreferVideo,
@@ -2446,8 +2487,8 @@ export default function LivePreviewEditor({
           setSelectedId(current.id)
         } else if (cov) {
           const prev = selectedId ? segments.find((s) => s.id === selectedId) : null
-          const prevLane = prev ? captionLaneOf(prev) : null
-          if (!(captionLaneOf(cov) === 'vertical' && prevLane && prevLane !== 'vertical')) {
+          const prevLane = prev ? captionLaneOf(prev, sourceHeight, sourceWidth) : null
+          if (!(captionLaneOf(cov, sourceHeight, sourceWidth) === 'vertical' && prevLane && prevLane !== 'vertical')) {
             setSelectedId(cov.id)
           }
         }
@@ -2748,7 +2789,7 @@ export default function LivePreviewEditor({
           Math.abs(norm.w - original.w) > 2 || Math.abs(norm.h - original.h) > 2
         // mid/dọc/nhãn (+ horizontal giữa khung): cover cố định = khung kéo, fit chữ trong box
         const overlayLay =
-          effectiveOverlayLayout(seg, sourceHeight)
+          effectiveOverlayLayout(seg, sourceHeight, sourceWidth)
           ?? (isOcrOverlayLayout(seg.layout) ? seg.layout : null)
         if (overlayLay && seg.translation.trim() && settings.burnSubs) {
           const lockFs = resolveOverlayFontPreferred(seg)
@@ -2863,10 +2904,10 @@ export default function LivePreviewEditor({
     }
     // «Tất cả» = cùng lane (Caption / CAP-MID / Dọc / Nhãn) — không đụng lane khác
     const src = selected ?? bboxSeg
-    const lane = src ? captionLaneOf(src, sourceHeight || 1920) : null
+    const lane = src ? captionLaneOf(src, sourceHeight, sourceWidth) : null
     pushHistory()
     void onSegmentsReplace(segments.map((seg) => {
-      if (lane && captionLaneOf(seg, sourceHeight || 1920) !== lane) return seg
+      if (lane && captionLaneOf(seg, sourceHeight, sourceWidth) !== lane) return seg
       return relayout(seg)
     }))
     // Chỉ cập nhật font dự án khi áp lane Caption đáy
@@ -3323,9 +3364,9 @@ export default function LivePreviewEditor({
     setTrackFocus('caption')
     setPropTab('caption')
     if (opts?.range && selectedId) {
-      const lane = captionLaneOf(seg)
+      const lane = captionLaneOf(seg, sourceHeight, sourceWidth)
       const laneSegs = segments
-        .filter((s) => captionLaneOf(s) === lane)
+        .filter((s) => captionLaneOf(s, sourceHeight, sourceWidth) === lane)
         .slice()
         .sort((a, b) => a.start - b.start)
       const a = laneSegs.findIndex((s) => s.id === selectedId)
@@ -3662,6 +3703,23 @@ export default function LivePreviewEditor({
     if (!editTarget || !canTrimRight) return
     pushHistory()
     const t = time
+    const dubTrimAt = (seg: Segment, boundary: number) => {
+      const videoRate = previewVideoRate(
+        settings.matchDuration,
+        bakedPreferVideo,
+        seg.videoSpeed,
+        bakedSpeed,
+        hasBakedSpeed,
+      )
+      const speed = dubPlaybackSpeed(seg, bakedSpeed)
+      return {
+        videoRate,
+        rawDuration: Math.max(
+          0.05,
+          ((boundary - seg.start - 0.04) * speed) / Math.max(0.2, videoRate),
+        ),
+      }
+    }
     if (editTarget.kind === 'ov') {
       editOverlay(
         { ...editTarget.ov, end: Math.max(t, editTarget.ov.start + MIN_CLIP_SEC) },
@@ -3675,6 +3733,73 @@ export default function LivePreviewEditor({
       const patch = (list: MediaClip[]) =>
         list.map((c) => (c.id === editTarget.clip.id ? { ...c, end } : c))
       if (editTarget.track === 'video') {
+        const trimsTimelineTail = !videoClips.some(
+          (clip) => clip.id !== editTarget.clip.id && clip.end > editTarget.clip.end + 0.02,
+        )
+        const affectedEnd = trimsTimelineTail
+          ? Number.POSITIVE_INFINITY
+          : editTarget.clip.end
+        const previousById = new Map(segments.map((item) => [item.id, item] as const))
+        const capDubAtBoundary = (
+          next: Segment,
+          previous: Segment,
+          boundary: number,
+          rangeEnd: number,
+        ): Segment => {
+          let out = next
+          if (next.isCompound && next.compoundChildren?.length && previous.compoundChildren?.length) {
+            const previousChildren = new Map(
+              previous.compoundChildren.map((item) => [item.id, item] as const),
+            )
+            out = {
+              ...out,
+              compoundChildren: next.compoundChildren.map((child) => {
+                const previousChild = previousChildren.get(child.id)
+                return previousChild
+                  ? capDubAtBoundary(
+                      child,
+                      previousChild,
+                      boundary - next.start,
+                      rangeEnd - next.start,
+                    )
+                  : child
+              }),
+            }
+          }
+          if (
+            previous.start >= boundary
+            || previous.start >= rangeEnd
+            || !segmentHasDub(previous)
+            || (!previous.audioUrl && !previous.audioFile && !(previous.audioDuration && previous.audioDuration > 0.05))
+          ) {
+            return out
+          }
+          const { videoRate, rawDuration } = dubTrimAt(previous, boundary)
+          const dubEnd = previous.start + dubClipSeconds(
+            previous,
+            segments,
+            videoRate,
+            bakedSpeed,
+          )
+          if (dubEnd <= boundary + 0.02) return out
+          return {
+            ...out,
+            audioDuration: Math.min(previous.audioDuration ?? rawDuration, rawDuration),
+          }
+        }
+        const trimmedSegments = trimSegmentsForVideoRight(
+          segments,
+          end,
+          editTarget.clip.end,
+          trimsTimelineTail,
+        ).map((item) => {
+          const previous = previousById.get(item.id)
+          return previous
+            ? capDubAtBoundary(item, previous, end, affectedEnd)
+            : item
+        })
+        pauseDubAudio()
+        void onSegmentsReplace(reindexSegments(trimmedSegments))
         setVideoClips(patch)
         if (mediaLinked) setBgClips((list) => list.map((c) =>
           Math.abs(c.start - editTarget.clip.start) <= 0.02 && Math.abs(c.end - editTarget.clip.end) <= 0.02
@@ -3686,18 +3811,7 @@ export default function LivePreviewEditor({
     }
     const seg = editTarget.seg
     if (trackFocus === 'dub') {
-      const videoRate = previewVideoRate(
-        settings.matchDuration,
-        bakedPreferVideo,
-        seg.videoSpeed,
-        bakedSpeed,
-        hasBakedSpeed,
-      )
-      const speed = dubPlaybackSpeed(seg, bakedSpeed)
-      const rawDuration = Math.max(
-        0.05,
-        ((t - seg.start - 0.04) * speed) / Math.max(0.2, videoRate),
-      )
+      const { rawDuration } = dubTrimAt(seg, t)
       void editSegment(
         {
           ...seg,
@@ -4109,8 +4223,8 @@ export default function LivePreviewEditor({
             const anchor = segments.find((s) => s.id === selectedId) ?? segments[0]
             if (anchor) {
               event.preventDefault()
-              const lane = captionLaneOf(anchor)
-              setSelectedIds(segments.filter((s) => captionLaneOf(s) === lane).map((s) => s.id))
+              const lane = captionLaneOf(anchor, sourceHeight, sourceWidth)
+              setSelectedIds(segments.filter((s) => captionLaneOf(s, sourceHeight, sourceWidth) === lane).map((s) => s.id))
               if (!selectedId) setSelectedId(anchor.id)
             }
           }
@@ -4200,7 +4314,7 @@ export default function LivePreviewEditor({
     const sizeChanged =
       Math.abs(norm.w - prev.w) > 2 || Math.abs(norm.h - prev.h) > 2
     const overlayLay =
-      effectiveOverlayLayout(selected, sourceHeight)
+      effectiveOverlayLayout(selected, sourceHeight, sourceWidth)
       ?? (isOcrOverlayLayout(selected.layout) ? selected.layout : null)
     if (overlayLay && selected.translation.trim() && settings.burnSubs) {
       const lockFs = resolveOverlayFontPreferred(selected)
@@ -4262,7 +4376,7 @@ export default function LivePreviewEditor({
   ) {
     const srcSeg = selected ?? bboxSeg
     if (!srcSeg || sourceWidth <= 0 || sourceHeight <= 0) return
-    const lane = captionLaneOf(srcSeg, sourceHeight || 1920)
+    const lane = captionLaneOf(srcSeg, sourceHeight, sourceWidth)
     const byTime = range?.mode === 'range'
     const t0 = byTime ? Math.min(range!.fromSec, range!.toSec) : null
     const t1 = byTime ? Math.max(range!.fromSec, range!.toSec) : null
@@ -4282,7 +4396,7 @@ export default function LivePreviewEditor({
         if (s1 <= t0! || s0 >= t1!) return seg
       } else {
         if (!(seg.translation || '').trim()) return seg
-        if (captionLaneOf(seg, sourceHeight || 1920) !== lane) return seg
+        if (captionLaneOf(seg, sourceHeight, sourceWidth) !== lane) return seg
       }
       if (!seg.bbox || seg.bbox.w <= 0 || seg.bbox.h <= 0) return seg
       const own = {
@@ -4368,7 +4482,7 @@ export default function LivePreviewEditor({
   const applyAllLaneLabel = (() => {
     const src = selected ?? bboxSeg
     if (!src) return 'lane'
-    const key = captionLaneOf(src, sourceHeight || 1920)
+    const key = captionLaneOf(src, sourceHeight, sourceWidth)
     return CAPTION_LANE_DEFS.find((l) => l.key === key)?.label ?? key
   })()
 
@@ -4390,6 +4504,15 @@ export default function LivePreviewEditor({
       exportOutputDir: options.exportOutputDir,
     }
     onSettings(updatedSettings)
+    await Promise.all([
+      ...new Set([
+        updatedSettings.subtitleFontFamily || 'system',
+        ...segments.map((seg) => seg.fontFamily || updatedSettings.subtitleFontFamily || 'system'),
+        ...overlays.map((overlay) => overlay.fontFamily || 'system'),
+      ]),
+    ].map((family) => loadCaptionFont(family)))
+    // Chốt bbox/line chỉ sau khi font bundle thật đã sẵn sàng.
+    layoutCacheRef.current = {}
     const payload = buildExportSegments(segments, updatedSettings, sourceWidth, sourceHeight)
     const exportEndSec = Math.max(0, ...videoClips.map((clip) => clip.end))
     const exportStartSec = videoClips.length === 1 ? (videoClips[0].sourceStart ?? 0) : 0
@@ -4940,15 +5063,15 @@ export default function LivePreviewEditor({
                                 setSelectedId(now.id)
                               } else if (cov) {
                                 const prev = selectedId ? segments.find((s) => s.id === selectedId) : null
-                                const prevLane = prev ? captionLaneOf(prev) : null
-                                if (captionLaneOf(cov) === 'vertical' && prevLane && prevLane !== 'vertical') {
+                                const prevLane = prev ? captionLaneOf(prev, sourceHeight, sourceWidth) : null
+                                if (captionLaneOf(cov, sourceHeight, sourceWidth) === 'vertical' && prevLane && prevLane !== 'vertical') {
                                   /* keep */
                                 } else {
                                   setSelectedId(cov.id)
                                 }
                               }
                             }
-                            const laneSeg = pickTimelineSeg(segments, current, selectedId)
+                            const laneSeg = speedSegmentAt(segments, current)
                             event.currentTarget.playbackRate = previewVideoRate(
                               settings.matchDuration,
                               bakedPreferVideo,
@@ -4967,8 +5090,8 @@ export default function LivePreviewEditor({
                                 setSelectedId(current.id)
                               } else if (cov) {
                                 const prev = selectedId ? segments.find((s) => s.id === selectedId) : null
-                                const prevLane = prev ? captionLaneOf(prev) : null
-                                if (captionLaneOf(cov) === 'vertical' && prevLane && prevLane !== 'vertical') {
+                                const prevLane = prev ? captionLaneOf(prev, sourceHeight, sourceWidth) : null
+                                if (captionLaneOf(cov, sourceHeight, sourceWidth) === 'vertical' && prevLane && prevLane !== 'vertical') {
                                   /* keep */
                                 } else {
                                   setSelectedId(cov.id)
@@ -5120,7 +5243,7 @@ export default function LivePreviewEditor({
 
                       {/* Phụ đề dịch — mọi clip overlapping (mid + dọc + đáy cùng lúc) */}
                       {captionLayers.map(({ seg: layerSeg, layout: layerLayout }) => {
-                        const overlayLay = effectiveOverlayLayout(layerSeg, sourceHeight)
+                        const overlayLay = effectiveOverlayLayout(layerSeg, sourceHeight, sourceWidth)
                         const fontPx = layerLayout.fontPx
                           ?? (overlayLay
                             ? fitOverlayFontPx(
@@ -5202,9 +5325,9 @@ export default function LivePreviewEditor({
                                 // CAP-MID/label: bỏ bóng chữ (text-shadow) — chỉ chữ trắng trên bbox
                                 textShadow: 'none',
                                 WebkitTextStroke: '0',
-                                // CAP-MID: overflow-hidden, no translateY
+                                // CAP-MID: padding comes from the same em value
+                                // used by its source-coordinate bbox calculation.
                                 whiteSpace: 'normal',
-                                padding: 0,
                                 boxSizing: 'border-box',
                                 margin: 0,
                               }}
@@ -5234,8 +5357,8 @@ export default function LivePreviewEditor({
                                 ...captionChromeStyle(settings, layerSeg),
                                 lineHeight: 1.12,
                                 margin: 0,
-                                // Không pad ngang — pad đã tính trong cover.w (tránh overflow-hidden cắt đuôi)
-                                padding: '0.02em 0',
+                                // Giữ 1px hai mép; bbox đã chừa phần còn lại để không cắt đuôi.
+                                padding: '0.02em 6px',
                                 boxSizing: 'border-box',
                                 width: '100%',
                               }}
@@ -5301,8 +5424,14 @@ export default function LivePreviewEditor({
                             ? { ...motionFrame, opacity: (overlay.opacity ?? 85) / 100 }
                             : motionFrame
                           const display = { ...overlay, x: frame.x, y: frame.y }
+                          const blockedByCaption = captionLayers.some(({ layout }) =>
+                            display.x < layout.cover.x + layout.cover.w
+                            && display.x + display.w > layout.cover.x
+                            && display.y < layout.cover.y + layout.cover.h
+                            && display.y + display.h > layout.cover.y,
+                          )
                           return (
-                            <div key={overlay.id} className={cn('group absolute z-[25] cursor-move overflow-visible outline outline-1 outline-transparent hover:outline-cyan-300/70', isLogoDraft && 'outline-dashed !outline-amber-300', sel && !isLogoDraft && 'outline-2 !outline-cyan-300')} style={{ ...sourceToDisplayStyle(display, crop), containerType: 'size', opacity: frame.opacity * (isLogoDraft ? .55 : 1) }} onPointerDown={(e) => { if (isLogoDraft) beginOverlayDrag(e, overlay); else { e.stopPropagation(); editLogo(overlay.logoSource ?? 'text') } }}>
+                            <div key={overlay.id} className={cn('group absolute z-[25] cursor-move overflow-visible outline outline-1 outline-transparent hover:outline-cyan-300/70', isLogoDraft && 'outline-dashed !outline-amber-300', sel && !isLogoDraft && 'outline-2 !outline-cyan-300')} style={{ ...sourceToDisplayStyle(display, crop), containerType: 'size', opacity: blockedByCaption ? 0 : frame.opacity * (isLogoDraft ? .55 : 1) }} onPointerDown={(e) => { if (isLogoDraft) beginOverlayDrag(e, overlay); else { e.stopPropagation(); editLogo(overlay.logoSource ?? 'text') } }}>
                               {overlay.logoSource !== 'text' && overlay.assetUrl
                                 ? <img src={overlay.assetUrl} className="size-full object-contain pointer-events-none" draggable={false} />
                                 : <div className="size-full flex items-center justify-center text-center font-extrabold" style={{ ...captionFontStyle(overlay.fontSize, overlay.h), fontFamily: captionFontCss(overlay.fontFamily ?? 'system'), color: overlay.color, textShadow: '0 2px 4px #000' }}>{overlay.text || 'LOGO'}</div>}
@@ -6924,9 +7053,9 @@ export default function LivePreviewEditor({
                           else if (row.id === 'caption') {
                             const laneKey = 'laneKey' in row ? row.laneKey : 'horizontal'
                             const under = segments.find(
-                              (s) => captionLaneOf(s) === laneKey && time >= s.start && time < s.end,
+                              (s) => captionLaneOf(s, sourceHeight, sourceWidth) === laneKey && time >= s.start && time < s.end,
                             )
-                            const hit = under ?? segments.find((s) => captionLaneOf(s) === laneKey)
+                            const hit = under ?? segments.find((s) => captionLaneOf(s, sourceHeight, sourceWidth) === laneKey)
                             if (hit) focusCaption(hit)
                             else setTrackFocus('caption')
                           }
@@ -7224,7 +7353,7 @@ export default function LivePreviewEditor({
                           beginMarqueeSelect(e)
                         }}
                       >
-                        {timelineLayoutSegs.filter((seg) => captionLaneOf(seg, sourceHeight || 1920) === lane.key).map((seg) => {
+                        {timelineLayoutSegs.filter((seg) => captionLaneOf(seg, sourceHeight, sourceWidth) === lane.key).map((seg) => {
                           const gd = groupDraft?.[seg.id]
                           const display = gd
                             ? { ...seg, ...gd }

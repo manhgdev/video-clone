@@ -172,8 +172,11 @@ def test_mid_cover_uses_frontend_flex_center_without_shadow():
     alpha = rgba[:, :, 3]
     ys, _xs = (alpha > 180).nonzero()
 
-    assert (x, y, rgba.shape[1], rgba.shape[0]) == (0, 0, 903, 177)
-    assert 15 <= int(ys.min()) <= 25
+    # Overlay may extend past the box to preserve accents/descenders, but its
+    # source-coordinate ink placement must still match the frontend flex box.
+    assert x <= 0 and y <= 0
+    assert x + rgba.shape[1] >= 903 and y + rgba.shape[0] >= 177
+    assert 15 <= y + int(ys.min()) <= 25
     assert not ((rgba[:, :, :3] == 0).all(axis=2) & (alpha > 0)).any()
 
 

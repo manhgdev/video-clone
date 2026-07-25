@@ -1,4 +1,4 @@
-"""Portable system font resolution for burn/export (Win / macOS / Linux)."""
+"""Bundled caption font resolution shared with the frontend preview."""
 from __future__ import annotations
 
 import os
@@ -7,15 +7,7 @@ from typing import Any
 
 _VI_PROBE = "ĂÂĐÊÔƠƯăâđêôơưáàảãạắằấầếềốồớờứừýỳệỗộỹỐồủỹ"
 
-# Chỉ tên file / stem — resolve qua _system_font_dirs() (Win / macOS / Linux).
-_REF_FONT_NAMES = (
-    "Arial Unicode.ttf",
-    "Arial.ttf",
-    "arial.ttf",
-    "DejaVuSans.ttf",
-    "NotoSans-Regular.ttf",
-    "NotoSansCJK-Regular.ttc",
-)
+_REF_FONT_NAMES = ("NotoSans-Bold.ttf",)
 
 
 def _glyph_ink(font: Any, ch: str, size: int = 48) -> int:
@@ -27,7 +19,7 @@ def _glyph_ink(font: Any, ch: str, size: int = 48) -> int:
 
 
 def _system_font_dirs() -> list[Path]:
-    """Thư mục font theo OS — không hardcode 1 máy."""
+    """Chỉ font đi kèm app; không phụ thuộc font cài trên máy."""
     dirs: list[Path] = []
     # Bundled fonts first: preview and export must use the exact same bytes.
     here = Path(__file__).resolve()
@@ -48,24 +40,6 @@ def _system_font_dirs() -> list[Path]:
     env = os.environ.get("VIDEOCLONE_FONT_DIR") or os.environ.get("FONT_DIR")
     if env:
         dirs.append(Path(env))
-    windir = os.environ.get("WINDIR") or os.environ.get("SystemRoot")
-    if windir:
-        dirs.append(Path(windir) / "Fonts")
-    local = os.environ.get("LOCALAPPDATA")
-    if local:
-        dirs.append(Path(local) / "Microsoft" / "Windows" / "Fonts")
-    dirs.extend(
-        [
-            Path("/System/Library/Fonts"),
-            Path("/System/Library/Fonts/Supplemental"),
-            Path("/Library/Fonts"),
-            Path.home() / "Library" / "Fonts",
-            Path("/usr/share/fonts"),
-            Path("/usr/local/share/fonts"),
-            Path.home() / ".fonts",
-            Path.home() / ".local" / "share" / "fonts",
-        ]
-    )
     out: list[Path] = []
     seen: set[str] = set()
     for d in dirs:
@@ -229,123 +203,54 @@ def _pick_font(candidates: tuple[str, ...], *, sample: str = _VI_PROBE, cache_ke
         if Path(p).exists():
             _font_cache[key] = p
             return p
-    return "Arial"
+    fallback = _resolve_font_name("NotoSans-Bold.ttf")
+    if fallback:
+        _font_cache[key] = fallback
+        return fallback
+    raise FileNotFoundError(
+        "Thiếu font đi kèm frontend/dist/fonts/NotoSans-Bold.ttf"
+    )
 
 
-# preset id (CAPTION_FONT_PRESETS FE) → tên file ưu tiên (mọi OS)
+# preset id (CAPTION_FONT_PRESETS FE) → đúng file đi kèm app
 _FONT_PRESET_NAMES: dict[str, tuple[str, ...]] = {
-    "system": (
-        "NotoSans-Bold.ttf",
-        "segoeuib.ttf", "SegoeUI-Bold.ttf", "arialbd.ttf", "Arial Bold.ttf",
-        "DejaVuSans-Bold.ttf", "NotoSans-Bold.ttf", "Helvetica.ttc",
-    ),
-    "segoe": (
-        "Inter-Bold.ttf",
-        "segoeuib.ttf", "segoeui.ttf", "SegoeUI-Bold.ttf", "Segoe UI.ttf",
-    ),
-    "arial": (
-        "Arimo-Bold.ttf",
-        "arialbd.ttf", "arial.ttf", "Arial Bold.ttf", "Arial.ttf",
-        "DejaVuSans-Bold.ttf", "NotoSans-Bold.ttf",
-    ),
-    "bold": (
-        "ArchivoBlack-Regular.ttf",
-        "arialbd.ttf", "ariblk.ttf", "Arial Bold.ttf", "Arial Black.ttf",
-        "DejaVuSans-Bold.ttf", "NotoSans-Bold.ttf",
-    ),
-    "helvetica": (
-        "Roboto-Bold.ttf",
-        "Helvetica.ttc", "HelveticaNeue.ttc", "arialbd.ttf", "Arial Bold.ttf",
-        "DejaVuSans-Bold.ttf",
-    ),
-    "verdana": (
-        "OpenSans-Bold.ttf",
-        "verdanab.ttf", "verdana.ttf", "Verdana Bold.ttf", "Verdana.ttf",
-        "DejaVuSans-Bold.ttf",
-    ),
-    "tahoma": (
-        "Carlito-Bold.ttf",
-        "tahomabd.ttf", "tahoma.ttf", "Tahoma Bold.ttf", "Tahoma.ttf",
-    ),
-    "trebuchet": (
-        "FiraSans-Bold.ttf",
-        "trebucbd.ttf", "trebuc.ttf", "Trebuchet MS Bold.ttf", "Trebuchet MS.ttf",
-    ),
-    "rounded": ("Nunito-Bold.ttf", "NotoSans-Bold.ttf", "DejaVuSans-Bold.ttf"),
-    "impact": ("Anton-Regular.ttf", "impact.ttf", "Impact.ttf"),
-    "georgia": (
-        "Merriweather-Bold.ttf",
-        "georgiab.ttf", "georgia.ttf", "Georgia Bold.ttf", "Georgia.ttf",
-    ),
-    "times": (
-        "Tinos-Bold.ttf",
-        "timesbd.ttf", "times.ttf", "Times New Roman Bold.ttf", "Times New Roman.ttf",
-        "LiberationSerif-Bold.ttf",
-    ),
-    "palatino": (
-        "Literata-Bold.ttf",
-        "palab.ttf", "pala.ttf", "Palatino Linotype Bold.ttf",
-    ),
-    "garamond": ("EBGaramond-Bold.ttf", "garabd.ttf", "gara.ttf", "Garamond.ttf"),
-    "courier": (
-        "CourierPrime-Bold.ttf",
-        "courbd.ttf", "cour.ttf", "Courier New Bold.ttf", "Courier New.ttf",
-        "DejaVuSansMono-Bold.ttf",
-    ),
-    "mono": (
-        "NotoSansMono-Bold.ttf",
-        "consolab.ttf", "consola.ttf", "DejaVuSansMono-Bold.ttf",
-    ),
-    "comic": (
-        "ComicNeue-Bold.ttf",
-        "comicbd.ttf", "comic.ttf", "Comic Sans MS Bold.ttf",
-    ),
-    "cjk": (
-        "NotoSansSC-Bold.ttf",
-        "msyhbd.ttc", "msyh.ttc", "msyhbd.ttf", "msyh.ttf",
-        "PingFang.ttc", "NotoSansCJK-Regular.ttc", "NotoSansCJK-Bold.ttc",
-        "SourceHanSansSC-Regular.otf", "WenQuanYiMicroHei.ttf",
-    ),
-    "meiryo": (
-        "NotoSansJP-Bold.ttf",
-        "meiryob.ttc", "meiryo.ttc", "YuGothic-Bold.otf", "NotoSansCJKjp-Regular.otf",
-    ),
-    "malgun": (
-        "NotoSansKR-Bold.ttf",
-        "malgunbd.ttf", "malgun.ttf", "AppleSDGothicNeo.ttc", "NotoSansCJKkr-Regular.otf",
-    ),
+    "system": ("NotoSans-Bold.ttf",),
+    "segoe": ("Inter-Bold.ttf",),
+    "arial": ("Arimo-Bold.ttf",),
+    "bold": ("ArchivoBlack-Regular.ttf",),
+    "helvetica": ("Roboto-Bold.ttf",),
+    "verdana": ("OpenSans-Bold.ttf",),
+    "tahoma": ("Carlito-Bold.ttf",),
+    "trebuchet": ("FiraSans-Bold.ttf",),
+    "rounded": ("Nunito-Bold.ttf",),
+    "impact": ("Anton-Regular.ttf",),
+    "georgia": ("Merriweather-Bold.ttf",),
+    "times": ("Tinos-Bold.ttf",),
+    "palatino": ("Literata-Bold.ttf",),
+    "garamond": ("EBGaramond-Bold.ttf",),
+    "courier": ("CourierPrime-Bold.ttf",),
+    "mono": ("NotoSansMono-Bold.ttf",),
+    "comic": ("ComicNeue-Bold.ttf",),
+    "cjk": ("NotoSansSC-Bold.ttf",),
+    "meiryo": ("NotoSansJP-Bold.ttf",),
+    "malgun": ("NotoSansKR-Bold.ttf",),
 }
 
-_SUBTITLE_BOLD_NAMES = (
-    "NotoSans-Bold.ttf",
-    "arialbd.ttf", "segoeuib.ttf", "arial.ttf", "segoeui.ttf",
-    "Arial Bold.ttf", "Arial Unicode.ttf", "Arial.ttf",
-    "DejaVuSans-Bold.ttf", "DejaVuSans.ttf",
-    "NotoSans-Bold.ttf", "NotoSans-Regular.ttf",
-    "PingFang.ttc", "NotoSansCJK-Regular.ttc", "Helvetica.ttc",
-)
-
-_SUBTITLE_VERT_NAMES = (
-    "arialbd.ttf", "segoeuib.ttf", "Arial Bold.ttf",
-    "Verdana Bold.ttf", "Tahoma Bold.ttf", "Trebuchet MS Bold.ttf",
-    "Arial Unicode.ttf", "HelveticaNeue.ttc", "SFNS.ttf",
-    "DejaVuSans-Bold.ttf", "DejaVuSans.ttf", "NotoSans-Bold.ttf",
-)
+_SUBTITLE_BOLD_NAMES = ("NotoSans-Bold.ttf",)
+_SUBTITLE_VERT_NAMES = ("NotoSans-Bold.ttf",)
 
 
 def _font_for_preset(preset_id: str) -> str:
-    """Trả font file cho preset FE — resolve theo OS, không hardcode C:/Windows."""
+    """Trả đúng font bundle của preset FE; preset lạ dùng Noto Sans bundle."""
     names = _FONT_PRESET_NAMES.get(preset_id or "") or ()
     candidates = _resolve_font_names(*names)
     if candidates:
-        hit = _pick_font(candidates, cache_key=f"preset_{preset_id}")
-        if hit != "Arial" or candidates:
-            return hit
+        return _pick_font(candidates, cache_key=f"preset_{preset_id}")
     return _subtitle_font()
 
 
 def _subtitle_font() -> str:
-    """Khớp preview `font-bold` — Arial/Segoe/DejaVu/Noto tùy máy."""
+    """Font caption mặc định, cùng bytes với preview."""
     return _pick_font(
         _resolve_font_names(*_SUBTITLE_BOLD_NAMES),
         cache_key="sub_bold",

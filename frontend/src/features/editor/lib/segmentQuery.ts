@@ -103,20 +103,30 @@ export function isOcrOverlayLayout(layout: Segment['layout']): layout is 'vertic
   return layout === 'vertical' || layout === 'label' || layout === 'mid'
 }
 
-/** Caption ngang nhưng bbox OCR nằm giữa khung → xử lý như mid (không ép đáy). */
+/** Must match backend overlay_cover.mid_bottom_cutoff(). */
+export function captionMidBottomCutoff(frameW: number, frameH: number): number {
+  if (frameW <= 0 || frameH <= 0) return 0.78
+  const aspect = frameW / frameH
+  const cutoff = 0.75 - 0.03 * Math.log2(aspect) / Math.log2(16 / 9)
+  return Math.max(0.70, Math.min(0.80, cutoff))
+}
+
+/**
+ * Engine xếp chữ cho overlay. `horizontal` vẫn thuộc lane Caption, nhưng dùng
+ * chung engine bbox của mid; khác nhau chỉ ở tag/tọa độ fallback.
+ */
 export function effectiveOverlayLayout(
   seg: Segment,
   frameH: number,
+  frameW = 1080,
 ): 'vertical' | 'label' | 'mid' | null {
-  // mid/dọc/nhãn đã tag — luôn mid path (keo tay cung khong roi caption day)
+  // mid/dọc/nhãn đã tag — luôn overlay path.
   if (isOcrOverlayLayout(seg.layout)) return seg.layout
-  // Caption day keo tay: dung horizontal
-  if (seg.bboxInherited === false) return null
+  if (seg.layout === 'horizontal') return 'mid'
   const b = seg.bbox
   if (!b || frameH <= 0) return null
   const cy = b.y + b.h / 2
-  // horizontal + bbox giua khung → xu ly nhu mid
-  if (cy > frameH * 0.18 && cy < frameH * 0.78) return 'mid'
+  if (cy > frameH * 0.18 && cy < frameH * captionMidBottomCutoff(frameW, frameH)) return 'mid'
   return null
 }
 
@@ -135,29 +145,21 @@ export const CAPTION_LANE_DEFS: {
 ]
 
 /** Lane timeline / caption: ưu tiên layout lưu; horizontal/trống + bbox giữa → mid. */
-export function captionLaneOf(seg: Segment, frameH = 1920): CaptionLaneKey {
+export function captionLaneOf(seg: Segment, frameH = 1920, frameW = 1080): CaptionLaneKey {
   const lay = seg.layout
   if (lay === 'mid' || lay === 'vertical' || lay === 'label') return lay
-  if (seg.bboxInherited === false) return 'horizontal'
   const b = seg.bbox
   if (b && frameH > 0) {
     const cy = b.y + b.h / 2
-    // khớp locate._layout_from_cy (0.18–0.78)
-    if (cy > frameH * 0.18 && cy < frameH * 0.78) return 'mid'
+    if (cy > frameH * 0.18 && cy < frameH * captionMidBottomCutoff(frameW, frameH)) return 'mid'
   }
   return 'horizontal'
 }
 
 /** Chuẩn hoá layout theo bbox OCR — ghi đè horizontal sai khi chữ ở giữa khung. */
-export function withInferredLayout(seg: Segment, frameH: number): Segment {
-  if (seg.bboxInherited && seg.bbox && seg.bbox.w >= Math.max(1, seg.bbox.h) * 8) {
-    return { ...seg, layout: 'horizontal' }
-  }
+export function withInferredLayout(seg: Segment, frameH: number, frameW = 1080): Segment {
   if (seg.layout === 'vertical' || seg.layout === 'label') return seg
-  if (seg.bboxInherited === false) {
-    return seg.layout ? seg : { ...seg, layout: 'horizontal' }
-  }
-  const lane = captionLaneOf({ ...seg, layout: undefined }, frameH)
+  const lane = captionLaneOf({ ...seg, layout: undefined }, frameH, frameW)
   if (lane === 'mid') return seg.layout === 'mid' ? seg : { ...seg, layout: 'mid' }
   if (seg.layout === 'horizontal' || seg.layout === 'mid') return seg
   return { ...seg, layout: 'horizontal' }
@@ -202,6 +204,22 @@ export function segmentsAt(segments: Segment[], time: number): Segment[] {
   return segments.filter((s) => time >= s.start && time < s.end)
 }
 
+/**
+ * Segment điều khiển playbackRate. Phải khớp backend _retime_spans():
+ * chỉ [start,end), không cover padding và không phụ thuộc clip đang chọn.
+ */
+export function speedSegmentAt(segments: Segment[], time: number): Segment | null {
+  const hits = segmentsAt(segments, time)
+  if (!hits.length) return null
+  const lane = (s: Segment) =>
+    ({ mid: 0, label: 1, horizontal: 2, vertical: 3 } as const)[s.layout || 'horizontal'] ?? 4
+  const rank = Math.min(...hits.map(lane))
+  const candidates = hits.filter((s) => lane(s) === rank)
+  if (rank !== 0) return candidates[0] ?? null
+  return candidates.reduce((best, seg) =>
+    seg.start >= best.start ? seg : best)
+}
+
 export function pickTimelineSeg(segments: Segment[], time: number, selectedId: string | null): Segment | null {
   // selectedId có thể là compound shell (không có trong list đã bung) — bỏ prefer
   const prefer =
@@ -230,6 +248,24 @@ export function pickTimelineSeg(segments: Segment[], time: number, selectedId: s
   )
 }
 
+/** Self-check cho clock preview/export: không dính speed sang cover/gap. */
+export function __checkSpeedSegmentPick(): void {
+  const segments = [
+    { id: 'v', start: 0, end: 8, layout: 'vertical', videoSpeed: 1.2 },
+    { id: 'h', start: 1, end: 4, layout: 'horizontal', videoSpeed: 0.9 },
+    { id: 'm', start: 2, end: 3, layout: 'mid', videoSpeed: 0.6 },
+  ] as Segment[]
+  if (speedSegmentAt(segments, 2.5)?.id !== 'm') {
+    throw new Error('Mid speed must win over overlapping lanes')
+  }
+  if (speedSegmentAt(segments, 3.5)?.id !== 'h') {
+    throw new Error('Horizontal speed must win after Mid ends')
+  }
+  if (speedSegmentAt(segments, 8.1) !== null) {
+    throw new Error('Speed must stop outside [start,end)')
+  }
+}
+
 /** Self-check: Mid solid dưới gạch luôn được chọn — không stick vertical/cover pad. */
 export function __checkSolidMidBboxPick(): void {
   const vert = { id: 'v', start: 0, end: 400, layout: 'vertical' as const, source: '花', translation: 'x' }
@@ -242,6 +278,35 @@ export function __checkSolidMidBboxPick(): void {
   const stickPad = pickTimelineSeg(segs as Segment[], t, 'a')
   if (stickPad?.id !== 'b') throw new Error(`must not stick mid-a cover/select over solid mid-b`)
   if (!solidMidAt(segs as Segment[], t)) throw new Error('solidMidAt missing')
+  const legacyMid = {
+    id: 'legacy', start: 0, end: 1, layout: 'horizontal' as const,
+    bboxInherited: false, bbox: { x: 80, y: 860, w: 920, h: 70 }, source: 'x', translation: 'x',
+  } as Segment
+  if (withInferredLayout(legacyMid, 1920).layout !== 'mid') {
+    throw new Error('middle legacy bbox must not stay on the bottom lane')
+  }
+  const bottom = {
+    id: 'bottom', start: 0, end: 1, layout: 'horizontal' as const,
+    source: '', translation: 'Caption đáy',
+  } as Segment
+  if (captionLaneOf(bottom, 1920) !== 'horizontal') {
+    throw new Error('bottom caption must keep the Caption lane')
+  }
+  if (effectiveOverlayLayout(bottom, 1920) !== 'mid') {
+    throw new Error('bottom caption must share the mid bbox engine')
+  }
+  const portrait = captionMidBottomCutoff(1080, 1920)
+  const landscape = captionMidBottomCutoff(1920, 1080)
+  const fourFive = captionMidBottomCutoff(4, 5)
+  const fourThree = captionMidBottomCutoff(4, 3)
+  if (
+    Math.abs(portrait - 0.78) > 1e-9
+    || Math.abs(landscape - 0.72) > 1e-9
+    || !(fourFive > 0.75 && fourFive < portrait)
+    || !(fourThree < 0.75 && fourThree > landscape)
+  ) {
+    throw new Error('caption bottom band must follow the input aspect ratio')
+  }
 }
 
 /** Self-check: Alt+G compound — preview bung children, chữ giữ timing tuyệt đối. */

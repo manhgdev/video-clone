@@ -20,6 +20,7 @@ from pipeline.core.project import ensure_layout, set_status
 from pipeline.core.resources import adaptive_workers, progress_msg
 from pipeline.ocr.extract import _ocr_join_lines, _rapidocr_labels
 from pipeline.ocr.cover_timing import resolve_cover_window
+from pipeline.ocr.overlay_cover import mid_bottom_cutoff
 from pipeline.ocr.labels import (
     clamp_label_box,
     cover_fit_label,
@@ -198,7 +199,7 @@ def _ocr_cue_boxes(
                     u0 = mid_b[0]
                     cy0 = (u0[1] + u0[3]) * 0.5
                     # cy giữa khung → dùng mid; nếu thực sự sát đáy thì để band xử lý
-                    if fh * 0.18 < cy0 < fh * 0.70:
+                    if fh * 0.18 < cy0 < fh * mid_bottom_cutoff(fw, fh):
                         b = mid_b
                     else:
                         b, _tx = _ocr_band_subs(frame, ocr)

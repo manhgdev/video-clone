@@ -14,6 +14,7 @@ import threading
 
 from .extract import _ocr_join_lines, _rapidocr_labels
 from .labels import pick_label_box
+from .overlay_cover import mid_bottom_cutoff
 
 # Lock: chỉ một request được chạy OCR in-process — native ext crash khi song song.
 _inprocess_lock = threading.Lock()
@@ -42,7 +43,9 @@ def _uv_run_cmd() -> list[str] | None:
     trong .venv-runtime mà không phụ thuộc vào system Python đã cài.
     """
     if not getattr(sys, "frozen", False):
-        return None
+        # Keep RapidOCR/ONNX in a clean process: CTranslate2 Whisper may have
+        # already loaded an incompatible cuDNN DLL into the server process.
+        return [sys.executable]
     home = (os.environ.get("VIDEO_CLONE_HOME") or "").strip()
     if not home:
         if sys.platform == "win32":
@@ -609,17 +612,16 @@ def _similar_hardsub_len(a: str, b: str) -> bool:
     return abs(ca - cb) <= max(1, ca // 3)
 
 
-def _layout_from_cy(cy: float, fh: int) -> str:
-    """mid = hardsub giữa/giữa-dưới khung; horizontal = đáy cổ điển."""
-    if fh <= 0:
+def _layout_from_cy(cy: float, fh: int, fw: int = 1080) -> str:
+    """mid = free-position caption; horizontal = aspect-aware bottom band."""
+    if fw <= 0 or fh <= 0:
         return "horizontal"
-    # 0.78: TikTok mid thường thấp hơn 0.70 — không đẩy nhầm vào Caption
-    if fh * 0.18 < cy < fh * 0.78:
+    if fh * 0.18 < cy < fh * mid_bottom_cutoff(fw, fh):
         return "mid"
     return "horizontal"
 
 
-def _retag_layout_from_bbox(seg: dict[str, Any], fh: int) -> None:
+def _retag_layout_from_bbox(seg: dict[str, Any], fh: int, fw: int = 1080) -> None:
     """Gắn layout theo bbox đã đo — không để None/horizontal khi chữ ở giữa."""
     lay = str(seg.get("layout") or "")
     if lay in ("vertical", "label"):
@@ -628,12 +630,7 @@ def _retag_layout_from_bbox(seg: dict[str, Any], fh: int) -> None:
     cy = _bbox_cy_frac(bbox, fh)
     if cy is None:
         return
-    # A very wide, shallow OCR strip is a normal horizontal subtitle even in
-    # portrait video, where its Y center can still be below the 0.78 cutoff.
-    if bbox and float(bbox.get("w") or 0) >= float(bbox.get("h") or 1) * 8:
-        seg["layout"] = "horizontal"
-        return
-    seg["layout"] = _layout_from_cy(cy * fh, fh)
+    seg["layout"] = _layout_from_cy(cy * fh, fh, fw)
 
 
 def _apply_caption_box(
@@ -648,6 +645,14 @@ def _apply_caption_box(
     ow = max(1, x1 - x0)
     oh = max(1, y1 - y0)
     lay = str(seg.get("layout") or "")
+    if lay not in ("vertical", "label"):
+        # ponytail: cap abnormal single-lane OCR polygons; if multi-row source
+        # captions are supported later, derive this from the individual rows.
+        max_caption_h = max(24, int(round(min(fw, fh) * 0.085)))
+        if oh > max_caption_h:
+            y0 = max(0, min(fh - max_caption_h, int(round(cy - max_caption_h * 0.5))))
+            y1 = y0 + max_caption_h
+            oh = max_caption_h
     if lay == "vertical":
         pad_x = max(12, int(round(fw * 0.015)), int(round(ow * 0.15)))
         pad_top = max(12, int(round(fh * 0.015)), int(round(oh * 0.05)))
@@ -674,11 +679,7 @@ def _apply_caption_box(
     saved = seg["bbox"]
     old_lay = str(seg.get("layout") or "")
     if old_lay not in ("vertical", "label"):
-        seg["layout"] = (
-            "horizontal"
-            if saved["w"] >= max(1, saved["h"]) * 8
-            else _layout_from_cy(cy, fh)
-        )
+        seg["layout"] = _layout_from_cy(cy, fh, fw)
     seg.pop("captionLayout", None)
 
 
@@ -761,11 +762,7 @@ def _inherit_caption_bboxes(
         seg["bboxInherited"] = True
         seg["_fromInherit"] = True
         # Giữ mid/horizontal theo Y donor — không ép horizontal khi mượn từ mid
-        seg["layout"] = (
-            "horizontal"
-            if width >= max(1, donor["h"]) * 8
-            else _layout_from_cy(cy, fh)
-        )
+        seg["layout"] = _layout_from_cy(cy, fh, fw)
         seg.pop("captionLayout", None)
         n += 1
     return n
@@ -873,12 +870,14 @@ def _snap_inherited_y(
     segments: list[dict[str, Any]],
     anchor_cy: float | None,
     fh: int,
+    fw: int = 1080,
 ) -> None:
     """Neo Y chỉ cho Caption đáy (horizontal) kế thừa — không kéo CAP-MID xuống cuối."""
     if anchor_cy is None or fh <= 0:
         return
     # Anchor đáy: chỉ dùng nếu dải neo thực sự gần đáy (tránh mid median kéo horizontal)
-    if anchor_cy < fh * 0.72:
+    bottom_cutoff = mid_bottom_cutoff(fw, fh)
+    if anchor_cy < fh * bottom_cutoff:
         return
     tol = fh * 0.06
     for seg in segments:
@@ -901,7 +900,7 @@ def _snap_inherited_y(
             continue
         cy = y + h * 0.5
         # Đã ở dải đáy thì thôi; mid-ish cy đừng kéo xuống
-        if cy < fh * 0.70:
+        if cy < fh * bottom_cutoff:
             continue
         if abs(cy - anchor_cy) <= tol:
             continue
@@ -930,16 +929,32 @@ def attach_speech_hardsub_boxes(
     không kéo tắt VideoClone.exe. Không fallback in-process — native ext crash
     trong frozen parent kill cả app, không bắt được bằng try/except.
     """
-    if getattr(sys, "frozen", False):
+    n = _locate_via_runtime_subprocess(
+        video,
+        segments,
+        only_missing=only_missing,
+        stable=stable,
+        analysis_region=analysis_region,
+    )
+    if n == 0 and analysis_region:
+        # A stale/manual ROI can miss the actual subtitle band completely.
+        # Retry once on the full frame before allowing the UI to use a bottom fallback.
+        try:
+            from pipeline.core.app_log import append_log
+
+            append_log("[locate-subprocess] ROI found 0 boxes; retry full frame")
+        except Exception:
+            pass
         n = _locate_via_runtime_subprocess(
             video,
             segments,
             only_missing=only_missing,
             stable=stable,
-            analysis_region=analysis_region,
+            analysis_region=None,
         )
-        if n is not None and n >= 0:
-            return n
+    if n is not None and n >= 0:
+        return n
+    if getattr(sys, "frozen", False):
         # subprocess không chạy được — skip an toàn thay vì crash
         try:
             from pipeline.core.app_log import append_log
@@ -1002,6 +1017,12 @@ def attach_speech_hardsub_boxes_inprocess(
         return 0
     fw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
     fh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+    # Use the decoded frame shape, not a portrait default or container hint.
+    # This also follows OpenCV's applied rotation, so bbox coordinates and
+    # aspect classification are measured in the same coordinate system.
+    ok_first, first_frame = cap.read()
+    if ok_first and first_frame is not None and first_frame.size:
+        fh, fw = first_frame.shape[:2]
     if fw <= 0 or fh <= 0:
         cap.release()
         return 0
@@ -1024,7 +1045,7 @@ def attach_speech_hardsub_boxes_inprocess(
                 and bool(cl.get("lines"))
             )
             seg["bboxInherited"] = False if manual else True
-            _retag_layout_from_bbox(seg, fh)
+            _retag_layout_from_bbox(seg, fh, fw)
 
     filtered: list[dict[str, Any]] = []
     for seg in segments:
@@ -1036,7 +1057,7 @@ def attach_speech_hardsub_boxes_inprocess(
         if only_missing and isinstance(bb, dict) and bb.get("w") and bb.get("h"):
             cy = _bbox_cy_frac(bb, fh)
             if cy is not None and _bbox_fits_source(bb, src, fw):
-                _retag_layout_from_bbox(seg, fh)
+                _retag_layout_from_bbox(seg, fh, fw)
                 continue
         filtered.append(seg)
     if not filtered:
@@ -1161,19 +1182,21 @@ def attach_speech_hardsub_boxes_inprocess(
     attached += _inherit_caption_bboxes(segments, fh, fw)
     if stable:
         # Neo Y chỉ Caption đáy inherit — không kéo CAP-MID / tiêu đề dọc xuống đáy
+        bottom_cutoff = mid_bottom_cutoff(fw, fh)
         bottom_boxes = [
             b
             for b in anchor_boxes
-            if b and (b[1] + b[3]) * 0.5 >= fh * 0.72
+            if b and (b[1] + b[3]) * 0.5 >= fh * bottom_cutoff
         ]
         _snap_inherited_y(
             segments,
             _global_cy_band(bottom_boxes or [], fh),
             fh,
+            fw,
         )
     _ensure_cover_times(segments, video_end)
     for seg in segments:
         seg.pop("_probeAnchored", None)
         seg.pop("_fromInherit", None)
-        _retag_layout_from_bbox(seg, fh)
+        _retag_layout_from_bbox(seg, fh, fw)
     return attached

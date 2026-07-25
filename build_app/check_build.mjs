@@ -59,6 +59,10 @@ const internalDir = existsSync(path.join(distDir, '_internal')) ? path.join(dist
 // 3. dist/index.html (frontend build đã được pack)
 const distIndex = path.join(internalDir, 'dist', 'index.html')
 check('dist/index.html', existsSync(distIndex))
+check(
+  'bundled caption font',
+  existsSync(path.join(internalDir, 'dist', 'fonts', 'NotoSans-Bold.ttf')),
+)
 
 // 4. ffmpeg
 const ffmpeg = path.join(internalDir, isWin ? 'ffmpeg.exe' : 'ffmpeg')

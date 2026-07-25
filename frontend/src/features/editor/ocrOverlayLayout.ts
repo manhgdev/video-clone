@@ -12,6 +12,15 @@ export type OcrOverlayLayout = {
   fontPx: number
 }
 
+export const OCR_MID_PAD_EM = 0.5
+
+let overlayMeasureCtx: CanvasRenderingContext2D | null = null
+let overlayMeasureFontFamily = '"VC Noto Sans", sans-serif'
+
+export function setOcrMeasureFontFamily(css: string): void {
+  if (css) overlayMeasureFontFamily = css
+}
+
 /** Fallback nhỏ — chỉ khi chưa có bbox OCR. */
 export function ocrFallbackCover(
   frameW: number,
@@ -62,6 +71,24 @@ function clampBox(box: OcrCoverBox, frameW: number, frameH: number): OcrCoverBox
 }
 
 function estimateLineW(text: string, fontPx: number): number {
+  if (typeof document !== 'undefined') {
+    if (!overlayMeasureCtx) {
+      overlayMeasureCtx = document.createElement('canvas').getContext('2d')
+    }
+    if (overlayMeasureCtx) {
+      overlayMeasureCtx.font = `700 ${fontPx}px ${overlayMeasureFontFamily}`
+      const measured = overlayMeasureCtx.measureText(text)
+      const left = Number.isFinite(measured.actualBoundingBoxLeft)
+        ? Math.abs(measured.actualBoundingBoxLeft)
+        : 0
+      const right = Number.isFinite(measured.actualBoundingBoxRight)
+        ? Math.abs(measured.actualBoundingBoxRight)
+        : 0
+      return Math.ceil(
+        Math.max(measured.width || 0, left + right) + Math.max(6, fontPx * 0.12),
+      )
+    }
+  }
   // Khớp system-ui bold preview (~0.52em Latin, không 0.62 → wrap sớm CAP-MID)
   let w = 0
   for (const c of text) {
@@ -304,7 +331,7 @@ export function layoutMidOverlay(
   const words = raw.split(/\s+/).filter(Boolean)
 
   const pads = (fs: number) => ({
-    x: Math.max(4, Math.round(fs * 0.14)),
+    x: Math.max(16, Math.round(fs * OCR_MID_PAD_EM)),
     top: Math.max(3, Math.round(fs * 0.1)),
     bot: Math.max(5, Math.round(fs * 0.2)),
   })
@@ -319,6 +346,10 @@ export function layoutMidOverlay(
       needH: Math.ceil(textH + p.top + p.bot),
     }
   }
+
+  // ponytail: canvas/font metrics can be a few pixels narrower than browser glyphs;
+  // reserve a small horizontal bleed so automatic boxes never cut the last glyph.
+  const safeWidth = (width: number, fs: number) => width + Math.max(6, Math.ceil(fs * 0.2))
 
   const fitsSeed = (fs: number, lines: string[]) => {
     if (!lines.length || fs < 8) return false
@@ -370,31 +401,36 @@ export function layoutMidOverlay(
   // Automatic mid captions share one lane font. Grow around the OCR centre
   // for one/two/three lines before considering a smaller per-cue font.
   if (allowExpand && fontPxIn > 0) {
-    const sharedFont = Math.max(8, Math.min(56, Math.round(fontPxIn)))
-    const frameInnerW = Math.max(8, frameW - pads(sharedFont).x * 2)
-    let sharedLines: string[] = [raw]
-    if (estimateLineW(raw, sharedFont) > frameInnerW) {
-      sharedLines = packLines(sharedFont, frameInnerW)
-    }
-    const sharedSize = blockSize(sharedFont, sharedLines)
-    if (sharedLines.length <= MAX_LINES && sharedSize.needW <= frameW && sharedSize.needH <= frameH) {
-      const cx = seed.x + seed.w / 2
-      const cy = seed.y + seed.h / 2
-      const w = Math.max(seed.w, sharedSize.needW)
-      const h = Math.max(seed.h, sharedSize.needH)
-      const cover = clampBox({ x: cx - w / 2, y: cy - h / 2, w, h }, frameW, frameH)
-      const p = pads(sharedFont)
-      return {
-        cover,
-        caption: {
-          x: cover.x + p.x,
-          y: cover.y + p.top,
-          w: Math.max(6, cover.w - p.x * 2),
-          h: Math.max(6, cover.h - p.top - p.bot),
-        },
-        lines: sharedLines,
-        mode: 'mid',
-        fontPx: sharedFont,
+    for (let sharedFont = Math.max(8, Math.min(56, Math.round(fontPxIn))); sharedFont >= 8; sharedFont -= 1) {
+      const frameInnerW = Math.max(
+        8,
+        frameW - pads(sharedFont).x * 2 - Math.max(6, Math.ceil(sharedFont * 0.2)),
+      )
+      let sharedLines: string[] = [raw]
+      if (estimateLineW(raw, sharedFont) > frameInnerW) {
+        sharedLines = packLines(sharedFont, frameInnerW)
+      }
+      const sharedSize = blockSize(sharedFont, sharedLines)
+      const sharedW = safeWidth(sharedSize.needW, sharedFont)
+      if (sharedLines.length <= MAX_LINES && sharedW <= frameW && sharedSize.needH <= frameH) {
+        const cx = seed.x + seed.w / 2
+        const cy = seed.y + seed.h / 2
+        const w = Math.max(seed.w, sharedW)
+        const h = Math.max(seed.h, sharedSize.needH)
+        const cover = clampBox({ x: cx - w / 2, y: cy - h / 2, w, h }, frameW, frameH)
+        const p = pads(sharedFont)
+        return {
+          cover,
+          caption: {
+            x: cover.x + p.x,
+            y: cover.y + p.top,
+            w: Math.max(6, cover.w - p.x * 2),
+            h: Math.max(6, cover.h - p.top - p.bot),
+          },
+          lines: sharedLines,
+          mode: 'mid',
+          fontPx: sharedFont,
+        }
       }
     }
   }
@@ -404,7 +440,7 @@ export function layoutMidOverlay(
   const hCap = Math.max(10, Math.floor((seed.h / LINE) * 0.72))
   if (allowExpand && raw.trim()) {
     const oneLineFont = Math.min(fontPxIn > 0 ? Math.round(fontPxIn) : hCap, hCap, 56)
-    const oneLineW = blockSize(oneLineFont, [raw]).needW
+    const oneLineW = safeWidth(blockSize(oneLineFont, [raw]).needW, oneLineFont)
     if (oneLineW > seed.w && oneLineW <= frameW) {
       const cx = seed.x + seed.w / 2
       const x = Math.max(0, Math.min(frameW - oneLineW, Math.round(cx - oneLineW / 2)))
@@ -414,7 +450,9 @@ export function layoutMidOverlay(
   let font1 = Math.min(fontPxIn > 0 ? Math.round(fontPxIn) : hCap, hCap, 56)
   while (font1 > 8 && !fitsSeed(font1, [raw])) font1 -= 1
 
-  const hCap2 = Math.floor((seed.h / (LINE * MAX_LINES)) * 0.82)
+  // Most translated captions wrap to two lines. Budgeting for all three here
+  // made two-line captions unnecessarily tiny before width was exhausted.
+  const hCap2 = Math.floor((seed.h / (LINE * 2)) * 0.82)
   let font2 = Math.min(fontPxIn > 0 ? Math.round(fontPxIn) : hCap2, hCap2, 44)
   let lines2 = packLines(font2)
   while (font2 > 8 && !fitsSeed(font2, lines2)) {
@@ -452,7 +490,7 @@ export function layoutMidOverlay(
   // ponytail: nới rộng cover ngang nếu chữ dịch tràn bbox gốc
   const p2b = pads(fontPx)
   const maxLineW = Math.max(...lines.map((ln) => estimateLineW(ln, fontPx)), 0)
-  const needW = Math.ceil(maxLineW + p2b.x * 2)
+  const needW = safeWidth(Math.ceil(maxLineW + p2b.x * 2), fontPx)
   if (allowExpand && needW > cover.w) {
     const cx = cover.x + cover.w / 2
     const newW = Math.min(frameW, needW)
@@ -500,6 +538,31 @@ export function __checkOcrOverlayLayout() {
   if (wideAuto.fontPx < 48 || wideAuto.lines.length > 3) {
     throw new Error('wide mid must keep shared font before shrinking')
   }
+  const vietnamese = 'Thế nên đêm qua trời mưa to'
+  const vietnameseFont = 32
+  const vietnameseMid = layoutMidOverlay(
+    { x: 420, y: 900, w: 180, h: 80 },
+    vietnamese,
+    vietnameseFont,
+    1080,
+    1920,
+  )
+  const vietnameseNeedW = Math.ceil(estimateLineW(vietnamese, vietnameseFont))
+    + Math.max(16, Math.round(vietnameseFont * OCR_MID_PAD_EM)) * 2
+    + Math.max(6, Math.ceil(vietnameseFont * 0.2))
+  if (vietnameseMid.cover.w < vietnameseNeedW) {
+    throw new Error('automatic mid cover must leave glyph bleed room')
+  }
+  const persistedMid = layoutMidOverlay(
+    { x: 300, y: 900, w: 460, h: 77 },
+    'Nếu hôm nay bạn không thể bỏ nó đi thì tại sao ngày mai nó lại tiếp tục như thế này',
+    48,
+    1080,
+    1920,
+  )
+  if (persistedMid.fontPx < 44 || persistedMid.cover.h <= 77) {
+    throw new Error('mid must grow a persisted cover before shrinking the shared font')
+  }
   const midBox = { x: 200, y: 700, w: 240, h: 56 }
   const mid = layoutMidOverlay(midBox, 'Đào hoa quả', 0, 1080, 1920)
   // Height locked to seed
@@ -543,6 +606,9 @@ export function __checkOcrOverlayLayout() {
   if (overflowMid.lines.length * overflowMid.fontPx * 1.12 > overflowMid.cover.h + 1) {
     throw new Error('overflow mid text taller than cover')
   }
+  if (overflowMid.lines.length === 2 && overflowMid.fontPx < 24) {
+    throw new Error('two-line mid must not use the three-line font cap')
+  }
   if (overflowMid.lines.some((ln) => estimateLineW(ln, overflowMid.fontPx) > overflowMid.cover.w - 4)) {
     throw new Error('overflow mid line wider than cover')
   }
@@ -570,6 +636,21 @@ export function __checkOcrOverlayLayout() {
   // Pad đáy đủ che stroke; không dải thừa lớn
   if (tall.cover.h < tall.fontPx * 1.2) {
     throw new Error('mid cover too short for glyph bottom: ' + tall.cover.h)
+  }
+  const clippedSentence = 'Nhưng bố mẹ anh ấy đã cố tình làm vậy'
+  const clipped = layoutMidOverlay(
+    { x: 598, y: 954, w: 758, h: 96 },
+    clippedSentence,
+    48,
+    1920,
+    1080,
+  )
+  const clippedPad = Math.max(16, Math.round(clipped.fontPx * OCR_MID_PAD_EM))
+  const clippedNeed = estimateLineW(clippedSentence, clipped.fontPx)
+    + clippedPad * 2
+    + Math.max(6, Math.ceil(clipped.fontPx * 0.2))
+  if (clipped.lines.length !== 1 || clipped.cover.w < clippedNeed) {
+    throw new Error('mid must widen for rendered text plus equal side padding')
   }
   // Cover height = seed height (locked)
 

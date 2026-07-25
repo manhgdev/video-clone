@@ -83,6 +83,64 @@ export function clipAtTime(clips: MediaClip[], t: number): MediaClip | null {
   return clips.find((c) => t >= c.start && t < c.end) ?? clips.find((c) => t >= c.start && t <= c.end) ?? null
 }
 
+/** Remove caption/TTS content covered by a right trim on the Video lane. */
+export function trimSegmentsForVideoRight(
+  segments: Segment[],
+  trimEnd: number,
+  previousEnd: number,
+  trimsTimelineTail: boolean,
+): Segment[] {
+  const cutStart = Math.max(0, trimEnd)
+  const cutEnd = trimsTimelineTail ? Number.POSITIVE_INFINITY : Math.max(cutStart, previousEnd)
+  return segments.flatMap((seg) => {
+    if (seg.end <= cutStart || seg.start >= cutEnd) return [seg]
+    if (seg.start >= cutStart) return []
+    const end = Math.min(seg.end, cutStart)
+    if (end - seg.start < 0.04) return []
+    const next: Segment = { ...seg, end, captionLayout: null }
+    if (typeof seg.coverEnd === 'number') next.coverEnd = Math.min(seg.coverEnd, cutStart)
+    if (
+      typeof next.coverStart === 'number'
+      && typeof next.coverEnd === 'number'
+      && next.coverStart > next.coverEnd
+    ) {
+      next.coverStart = next.coverEnd
+    }
+    if (seg.isCompound && seg.compoundChildren?.length) {
+      const oldSpan = Math.max(0.04, seg.end - seg.start)
+      const nextSpan = Math.max(0, end - seg.start)
+      next.compoundChildren = trimSegmentsForVideoRight(
+        seg.compoundChildren,
+        nextSpan,
+        oldSpan,
+        true,
+      )
+      if (!next.compoundChildren.length) return []
+    }
+    return [next]
+  })
+}
+
+export function __checkTrimSegmentsForVideoRight() {
+  const seg = (id: string, start: number, end: number): Segment => ({
+    id, index: 0, start, end, source: id, translation: id, voice: 'system',
+  })
+  const tail = trimSegmentsForVideoRight(
+    [seg('before', 1, 3), seg('cross', 4, 7), seg('after', 7, 9)],
+    5,
+    10,
+    true,
+  )
+  if (tail.map((item) => item.id).join(',') !== 'before,cross' || tail[1]?.end !== 5) {
+    throw new Error('trim right tail must clip the crossing caption and remove later caption/TTS')
+  }
+  const middle = trimSegmentsForVideoRight([seg('cut', 6, 8), seg('later', 11, 12)], 6, 10, false)
+  if (middle.length !== 1 || middle[0]?.id !== 'later') {
+    throw new Error('trim right middle clip must preserve captions belonging to the later video clip')
+  }
+  return true
+}
+
 /** Gộp khoảng [a,b) đã sort — dùng ripple delete. */
 export function mergeTimeRanges(ranges: { start: number; end: number }[]): { start: number; end: number }[] {
   const sorted = ranges

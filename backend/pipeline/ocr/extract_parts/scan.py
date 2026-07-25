@@ -21,6 +21,7 @@ from typing import Any
 from pipeline.core.jobs import check_cancel, run_cmd
 from pipeline.core.project import cache_frames, set_status
 from pipeline.core.resources import adaptive_workers
+from pipeline.ocr.overlay_cover import mid_bottom_cutoff
 
 # giới hạn tổng luồng OCR phụ — tránh 100% CPU (để UI/OS ~5–10%)
 _ocr_sem: threading.Semaphore | None = None
@@ -586,7 +587,7 @@ def _classify_overlay_detections(
         text, conf, bx0, by0, bx1, by1, cx, cy, bw, bh, cjk = it
         if bh > bw * 1.25:
             continue
-        if not (vh * 0.18 < cy < vh * 0.78):
+        if not (vh * 0.18 < cy < vh * mid_bottom_cutoff(vw, vh)):
             continue
         if not (vw * 0.12 < cx < vw * 0.88):
             continue

@@ -415,6 +415,8 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                 running=True,
             )
             n_box = 0
+            locate_ok = False
+            locate_layout_version = 3
             # Frozen: probe cv2 TRƯỚC — nếu path hỏng thì bỏ locate (vẫn giữ bản dịch).
             # Tránh native crash OpenCV recursion kéo tắt cả app sau khi dịch xong.
             cv2_ok = True
@@ -446,11 +448,12 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                     n_box = attach_speech_hardsub_boxes(
                         video,
                         segments,
-                        only_missing=True,
+                        only_missing=int(meta.get("bboxLocateVersion") or 0) >= locate_layout_version,
                         project_id=project_id,
                         stable=bool(settings.get("stableCaptionLocate", False)),
                         analysis_region=settings.get("analysisRegion"),
                     )
+                    locate_ok = True
                 except BaseException as ocr_e:
                     # BaseException: bắt cả lỗi lạ; không để kill thread/app
                     n_box = 0
@@ -467,6 +470,8 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                         message=f"Bỏ định vị OCR ({type(ocr_e).__name__}) — vẫn giữ bản dịch",
                         running=True,
                     )
+            if locate_ok:
+                meta["bboxLocateVersion"] = locate_layout_version
             if n_box:
                 set_status(
                     project_id,
