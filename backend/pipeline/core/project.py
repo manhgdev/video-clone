@@ -116,11 +116,16 @@ def preview_tag(preview_sec: int) -> str:
     return f"p{int(preview_sec)}" if preview_sec > 0 else "full"
 
 
-def audio_cache_tag(preview_sec: int, match_duration: str) -> str:
-    """Tag wav theo preview. Pipeline luôn ASR/TTS ở 1×; bake tốc độ chỉ sau editor."""
-    # match_duration giữ tham số (tương thích caller) — không còn s080 auto
+def _speed_key_tag(speed: float) -> str:
+    """s1 khi 1× (giữ cache cũ); s080/s115… khi ASR chạy trên file đã bake."""
+    s = max(0.5, min(2.0, float(speed or 1.0)))
+    return "s1" if abs(s - 1.0) < 0.001 else f"s{int(round(s * 100)):03d}"
+
+
+def audio_cache_tag(preview_sec: int, match_duration: str, speed: float = 1.0) -> str:
+    """Tag wav theo preview + tốc độ file thật sự được ASR (preferVideo bake trước)."""
     _ = match_duration
-    return f"{preview_tag(preview_sec)}_s1"
+    return f"{preview_tag(preview_sec)}_{_speed_key_tag(speed)}"
 
 
 def resolve_project_video(meta: dict[str, Any], project_id: str) -> Path:
@@ -139,7 +144,9 @@ def resolve_project_video(meta: dict[str, Any], project_id: str) -> Path:
                     return wp
             else:
                 # Preview Ns: chỉ nhận file cùng Ns (preview_20… / bake cùng tag)
-                if f"preview_{preview_sec}" in name or not is_preview_file:
+                from pipeline.core.media import preview_clip_matches
+
+                if preview_clip_matches(name, preview_sec) or not is_preview_file:
                     return wp
     if preview_sec > 0:
         cached = ensure_layout(project_id) / "cache" / f"preview_{preview_sec}.mp4"
@@ -182,15 +189,15 @@ def inherit_voice(seg_voice: str | None, default: str) -> str:
     return v
 
 
-def asr_cache_key(settings: dict[str, Any], source_fp: str) -> str:
+def asr_cache_key(settings: dict[str, Any], source_fp: str, speed: float = 1.0) -> str:
     engine = settings.get("engine", "paddleocr")
     src = settings.get("sourceLang", "auto")
     prev = int(settings.get("previewSec") or 0)
     # o20: quét cả nhãn ngang ở 10–22% phía trên khung.
     # a15: Whisper siết biên theo words, KHÔNG tách 1 câu thành nhiều mảnh.
     ver = "o20" if engine in ("paddleocr", "screen") else "a15"
-    # Pipeline luôn 1×; bake tốc độ chỉ qua rebake-speed trong editor
-    return f"{engine}|{src}|{source_fp}|p{prev}|{ver}|s1"
+    # speed = tốc độ file thật sự ASR (preferVideo bake 0.8 TRƯỚC khi dịch)
+    return f"{engine}|{src}|{source_fp}|p{prev}|{ver}|{_speed_key_tag(speed)}"
 
 
 def trans_cache_key(settings: dict[str, Any]) -> str:

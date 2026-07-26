@@ -346,6 +346,30 @@ def _hex_rgba(hex_color: str, alpha: int = 255) -> tuple[int, int, int, int]:
         return (255, 255, 255, alpha)
 
 
+# line-height CSS theo mode preview: mid 1.1 (JSX overlayDisplayFontStyle),
+# overlay = textarea free-text 1.25, dọc 1.0 + gap 0.08em, mặc định 1.12.
+_CSS_LINE_FACTOR = {"mid": 1.1, "overlay": 1.25, "vertical": 1.0}
+
+
+def _css_block_layout(mode: str, fs: float, n_lines: int, box_h: float) -> tuple[float, float]:
+    """(top, step) của khối dòng CSS trong box — khớp flex preview.
+
+    overlay: top-align (textarea); còn lại căn giữa (kể cả tràn — flex center
+    tràn đều 2 phía, không kẹp 0). Dọc: pitch 1.08em + translateY(-0.06em).
+    """
+    n = max(1, int(n_lines))
+    line_h = fs * _CSS_LINE_FACTOR.get(mode, 1.12)
+    gap = fs * 0.08 if mode == "vertical" else 0.0
+    block_h = line_h * n + gap * (n - 1)
+    if mode == "overlay":
+        top = 0.0
+    else:
+        top = (box_h - block_h) / 2.0
+    if mode == "vertical":
+        top -= fs * 0.06
+    return top, line_h + gap
+
+
 def _caption_overlay(layout: dict[str, Any]) -> tuple[Any, int, int] | None:
     """Render RGBA một lần / câu — blit nhanh mỗi khung."""
     import numpy as np
@@ -398,12 +422,14 @@ def _caption_overlay(layout: dict[str, Any]) -> tuple[Any, int, int] | None:
         )
     # Editor flex: line boxes centered in cover. PIL draw origin needs -bbox.
     fs = float(getattr(font, "size", 0) or layout.get("fontsize") or 48)
-    css_line_h = (
-        fs * (1.1 if css_cover_mode == "mid" else 1.12)
-        if css_cover_mode else 0.0
-    )
+    # line-height khớp preview: mid 1.1, overlay(textarea) 1.25, dọc 1.0 + gap
+    # 0.08em, còn lại 1.12. Dọc thêm translateY(-0.06em) như JSX.
+    css_line_h = fs * _CSS_LINE_FACTOR.get(css_cover_mode, 1.12) if css_cover_mode else 0.0
+    css_gap = fs * 0.08 if css_cover_mode == "vertical" else 0.0
     if css_cover_mode:
-        css_top = max(0.0, (box_h - css_line_h * max(1, len(lines))) / 2.0)
+        css_top, _css_step = _css_block_layout(
+            css_cover_mode, fs, len(lines), float(box_h)
+        )
         ty = m + css_top
     else:
         ty = m + max(0, (box_h - text_h) // 2) - int(round(metric_h * 0.06))
@@ -421,9 +447,10 @@ def _caption_overlay(layout: dict[str, Any]) -> tuple[Any, int, int] | None:
         th = bb[3] - bb[1]
         tx = m + (box_w - tw) // 2 - left
         if css_cover_mode:
-            # Center ink inside the CSS line box (flex items-center per line).
-            ink_top = line_top + max(0.0, (css_line_h - th) / 2.0)
-            gy = int(round(ink_top - top))
+            # CSS đặt glyph theo metric font (baseline cố định mọi dòng), không
+            # căn giữa ink từng dòng — ink-centering làm dòng có/không dấu nhảy y.
+            ascent, descent = font.getmetrics()
+            gy = int(round(line_top + (css_line_h - (ascent + descent)) / 2.0))
         else:
             gy = int(round(line_top - top))
         return tx, gy, th
@@ -444,7 +471,7 @@ def _caption_overlay(layout: dict[str, Any]) -> tuple[Any, int, int] | None:
             if not css_cover_mode:
                 th = line_hs[i] if i < len(line_hs) else th
             shadow_draw.text((tx, gy + dy_off), line, font=font, fill=(0, 0, 0, 230))
-            ty_s += css_line_h if css_cover_mode else th + (gap_line if i + 1 < len(lines) else 0)
+            ty_s += css_line_h + css_gap if css_cover_mode else th + (gap_line if i + 1 < len(lines) else 0)
 
         shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(blur_rad))
         overlay.alpha_composite(shadow_layer)
@@ -457,7 +484,7 @@ def _caption_overlay(layout: dict[str, Any]) -> tuple[Any, int, int] | None:
             for dx, dy in outline_thick:
                 draw.text((tx + dx, gy + dy), line, font=font, fill=(0, 0, 0, 250))
         draw.text((tx, gy), line, font=font, fill=fill)
-        ty += css_line_h if css_cover_mode else th + (gap_line if i + 1 < len(lines) else 0)
+        ty += css_line_h + css_gap if css_cover_mode else th + (gap_line if i + 1 < len(lines) else 0)
     rgba = np.asarray(overlay)
     return rgba, x0 - m, y0 - m
 

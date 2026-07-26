@@ -10,12 +10,12 @@ export function fullMediaClip(end: number): MediaClip {
 
 /**
  * Clamp media clips trong cửa sổ làm việc.
- * Không kéo 1 clip đã trim/xóa nửa về full span (lỗ trống giữ nguyên).
- * Chỉ stretch khi cửa sổ phình (preview N→full) và clip từng chạm mép cũ.
+ * Không kéo clip đã trim right/left về full span.
+ * Chỉ stretch khi cửa sổ phình (preview N→full) và clip từng chạm mép duration cũ.
  */
 export function normalizeMediaClips(clips: MediaClip[], durationSec: number, prevDuration = 0): MediaClip[] {
   if (!(durationSec > 0)) return []
-  const next = clips
+  let next = clips
     .filter((c) => c && typeof c.start === 'number' && typeof c.end === 'number' && c.end > c.start)
     .map((c) => ({
       ...c,
@@ -26,14 +26,9 @@ export function normalizeMediaClips(clips: MediaClip[], durationSec: number, pre
     .filter((c) => c.end - c.start >= SPLIT_EDGE)
     .sort((a, b) => a.start - b.start || a.end - b.end)
   if (!next.length) return [fullMediaClip(durationSec)]
-  // Cửa sổ phình (5s -> 10s): tự động kéo nếu chỉ có 1 clip bao trùm từ đầu
-  if (next.length === 1 && next[0].start === 0) {
-    next[0].end = durationSec
-    return next
-  }
-  // Cửa sổ phình (15s→full): kéo đuôi clip từng chạm mép duration cũ
+  // Cửa sổ phình (15s→full / 5s→10s): chỉ kéo clip đã chạm mép cũ — không undo trim right
   if (prevDuration > 0 && durationSec > prevDuration + 0.25) {
-    return next.map((c) => {
+    next = next.map((c) => {
       if (Math.abs(c.end - prevDuration) <= 0.51) {
         return { ...c, end: durationSec }
       }
@@ -137,6 +132,16 @@ export function __checkTrimSegmentsForVideoRight() {
   const middle = trimSegmentsForVideoRight([seg('cut', 6, 8), seg('later', 11, 12)], 6, 10, false)
   if (middle.length !== 1 || middle[0]?.id !== 'later') {
     throw new Error('trim right middle clip must preserve captions belonging to the later video clip')
+  }
+  // trim right must survive normalize (single clip from 0)
+  const trimmed = normalizeMediaClips([{ id: 'v', start: 0, end: 12, sourceStart: 0 }], 60, 60)
+  if (trimmed.length !== 1 || Math.abs(trimmed[0].end - 12) > 0.01) {
+    throw new Error(`normalize must keep trim-right end=12, got ${trimmed[0]?.end}`)
+  }
+  // window expand still stretches clip that touched old edge
+  const grown = normalizeMediaClips([{ id: 'v', start: 0, end: 15, sourceStart: 0 }], 60, 15)
+  if (grown.length !== 1 || Math.abs(grown[0].end - 60) > 0.01) {
+    throw new Error(`normalize must stretch edge-touching clip 15→60, got ${grown[0]?.end}`)
   }
   return true
 }

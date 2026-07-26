@@ -771,11 +771,20 @@ export function estimatePreviewCaptionBox(
   return { x: box.x + crop.x, y: box.y + crop.y, w: box.w, h: box.h }
 }
 
-export function segmentWithLayout(seg: Segment, layout: OverLayout, fontPx: number): Segment {
+export function segmentWithLayout(
+  seg: Segment,
+  layout: OverLayout,
+  fontPx: number,
+  settings?: ProjectSettings,
+): Segment {
+  const family = seg.fontFamily || settings?.subtitleFontFamily || 'system'
+  const fs = layout.fontPx ?? fontPx
   return {
     ...seg,
+    fontFamily: family,
+    fontSize: seg.fontSize && seg.fontSize > 0 ? seg.fontSize : fs,
     bbox: { x: layout.cover.x, y: layout.cover.y, w: layout.cover.w, h: layout.cover.h },
-    captionLayout: toCaptionLayout(layout.caption, layout.lines, layout.fontPx ?? fontPx),
+    captionLayout: toCaptionLayout(layout.caption, layout.lines, fs),
   }
 }
 
@@ -839,15 +848,31 @@ export function buildExportSegments(
   frameW: number,
   frameH: number,
 ): Segment[] {
-  if (!settings.burnSubs || frameW <= 0) return segments
+  const defaultFamily = settings.subtitleFontFamily || 'system'
+  const stampFont = (seg: Segment): Segment => ({
+    ...seg,
+    fontFamily: seg.fontFamily || defaultFamily,
+  })
+  if (!settings.burnSubs || frameW <= 0) {
+    return segments.map(stampFont)
+  }
   const place = captionPlacement(settings)
   const crop = resolveCropRect(frameW, frameH, settings.previewAspectRatio ?? 'original', settings.previewCrop)
   return segments.map((seg) => {
-    if (!seg.translation.trim()) return seg
-    const layout = resolvePreviewOverLayout(seg, settings, frameW, frameH, crop)
-    if (layout) {
-      const fontPx = layout.fontPx ?? resolveCaptionFontSize(seg, settings, frameW, frameH)
-      return segmentWithLayout(seg, layout, fontPx)
+    if (!seg.translation.trim()) return stampFont(seg)
+    // below/above: preview hiện caption auto (mid/ngang chưa kéo tay) ở lane
+    // đáy (activeCaptionBox) — bake đúng khung đó, KHÔNG neo bbox OCR.
+    const bottomLane =
+      place !== 'over'
+      && seg.layout !== 'vertical'
+      && seg.layout !== 'label'
+      && seg.bboxInherited !== false
+    if (!bottomLane) {
+      const layout = resolvePreviewOverLayout(seg, settings, frameW, frameH, crop)
+      if (layout) {
+        const fontPx = layout.fontPx ?? resolveCaptionFontSize(seg, settings, frameW, frameH)
+        return segmentWithLayout(seg, layout, fontPx, settings)
+      }
     }
     // Chèn dưới/trên: bake mid + horizontal (không dọc/nhãn) — khớp preview emerald box
     if (
@@ -857,10 +882,15 @@ export function buildExportSegments(
     ) {
       const baked = resolveBelowAboveLayout(seg, settings, frameW, frameH, crop, place)
       if (baked) {
-        return segmentWithLayout(seg, baked, baked.fontPx ?? resolveCaptionFontSize(seg, settings, frameW, frameH))
+        return segmentWithLayout(
+          seg,
+          baked,
+          baked.fontPx ?? resolveCaptionFontSize(seg, settings, frameW, frameH),
+          settings,
+        )
       }
     }
-    return seg
+    return stampFont(seg)
   })
 }
 
@@ -1333,6 +1363,32 @@ export function captionPlacement(settings: ProjectSettings): 'over' | 'below' | 
 /** Overlay OCR vẫn neo theo bbox khi burn — coverHardsubs chỉ bật mask. */
 export function overlayTextEnabled(settings: ProjectSettings): boolean {
   return Boolean(settings.burnSubs && settings.targetLang !== 'none')
+}
+
+/** ponytail: self-check — below/above bake đúng lane preview (đáy cho auto, bbox cho kéo tay). */
+export function __checkExportBakePlacement(): void {
+  const settings = {
+    burnSubs: true,
+    coverHardsubs: false,
+    captionPlacement: 'below',
+    subtitleFontSize: 0,
+    subtitleFontFamily: 'system',
+    targetLang: 'vi',
+    previewAspectRatio: 'original',
+  } as unknown as ProjectSettings
+  const seg = {
+    id: 's1', index: 0, start: 0, end: 2, source: '你好', translation: 'Xin chào',
+    voice: '', layout: 'mid', bbox: { x: 300, y: 800, w: 400, h: 80 },
+  } as unknown as Segment
+  const [baked] = buildExportSegments([seg], settings, 1080, 1920)
+  const cl = baked.captionLayout
+  if (!cl) throw new Error('below bake must produce captionLayout')
+  if (cl.y < 880) throw new Error('auto mid must bake the below lane, got y=' + cl.y)
+  const dragged = { ...seg, id: 's2', bboxInherited: false } as Segment
+  const [bakedDrag] = buildExportSegments([dragged], settings, 1080, 1920)
+  const cl2 = bakedDrag.captionLayout
+  if (!cl2) throw new Error('dragged bake must produce captionLayout')
+  if (cl2.y >= 880) throw new Error('dragged mid must stay anchored in its bbox, got y=' + cl2.y)
 }
 
 /** Ước lượng vị trí phụ đề — below/above: cỡ ≈ bbox che, neo sát trên/dưới dải OCR. */

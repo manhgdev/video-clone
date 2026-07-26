@@ -2,11 +2,45 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
+
+
+def _timeline_is_final(meta: dict[str, Any], video: Path) -> bool:
+    """True khi FE đã Áp dụng tốc độ: file bake + segment start/end = đồng hồ display."""
+    from pipeline.core.media import meta_has_user_bake
+
+    if meta.get("timelineClock") == "display":
+        return True
+    if meta_has_user_bake(meta):
+        return True
+    name = Path(video).name.lower()
+    if re.search(r"_s\d{3}", name) or name.startswith("source_s"):
+        return True
+    work = Path(str(meta.get("workVideo") or ""))
+    try:
+        if work.is_file() and Path(video).resolve() == work.resolve():
+            bake = meta_baked_speed(meta)
+            if abs(float(bake) - 1.0) > 0.02 or bool(meta.get("bakedPreferVideo")):
+                return True
+    except OSError:
+        pass
+    return False
+
+
+def _export_retime_base(meta: dict[str, Any], video: Path, match_mode: str) -> float:
+    """Global bake chỉ nằm trong file work. Retime export chỉ còn videoSpeed câu (base=1).
+
+    FE là nguồn timeline sau Áp dụng — BE không nhân tốc độ global lần 2.
+    """
+    _ = match_mode
+    _ = video
+    _ = meta
+    return 1.0
 
 from pipeline.asr import asr_paddleocr, asr_whisper
 from pipeline.export.burn import cover_and_burn
@@ -17,6 +51,7 @@ from pipeline.core.media import (
     ensure_preview_clip,
     extract_audio,
     ffprobe_duration,
+    meta_baked_speed,
     retime_audio_track,
     retime_timeline_time,
     retime_video_segments,
@@ -97,11 +132,21 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
     match_mode = str(settings.get("matchDuration") or "preferVideo")
     export_start = max(0, float(meta.get("exportStartSec") or 0))
     export_end = float(meta.get("exportEndSec") or 0)
-    if export_start > 0 or (export_end > 0 and source_dur > 0 and export_end < source_dur - 0.02):
+    # exportEndSec = mốc nguồn tuyệt đối (sourceStart + span) hoặc duration khi start=0
+    if export_end > export_start > 0:
+        export_clip_dur = export_end - export_start
+    elif export_end > 0:
+        export_clip_dur = export_end
+    else:
+        export_clip_dur = 0.0
+    if export_start > 0 or (
+        export_clip_dur > 0 and source_dur > 0 and export_start + export_clip_dur < source_dur - 0.02
+    ):
         video = ensure_preview_clip(
             video,
-            root / "cache" / f"export_{round(export_start * 1000)}_{round(export_end * 1000)}.mp4",
-            min(export_end, max(0.05, source_dur - export_start)),
+            root / "cache"
+            / f"export_{round(export_start * 1000)}_{round((export_start + export_clip_dur) * 1000)}.mp4",
+            max(0.05, min(export_clip_dur, max(0.05, source_dur - export_start))),
             project_id,
             start=export_start,
         )
@@ -125,22 +170,15 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
             s["end"] = vid_dur
     source_timeline_duration = vid_dur
     source_timeline_segments = [dict(s) for s in segments]
-    # Preview applies each TTS-fit videoSpeed to the actual <video> playback.
-    # Bake that same piecewise timeline before masks/captions/audio so every
-    # later stage receives the preview's wall-clock start/end values.
-    soft_preview_speed = (
-        0.8
-        if match_mode == "preferVideo"
-        and not meta.get("bakedPreferVideo")
-        and meta.get("bakedSpeed") is None
-        else 1.0
-    )
+    # FE timeline sau Áp dụng = chuẩn. base luôn 1.0 — chỉ nướng videoSpeed câu (TTS-fit).
+    timeline_final = _timeline_is_final(meta, video)
+    retime_base = _export_retime_base(meta, video, match_mode)
     video, segments = retime_video_segments(
         video,
         segments,
         root / "cache",
         project_id,
-        base_speed=soft_preview_speed,
+        base_speed=retime_base,
     )
     vid_dur = ffprobe_duration(video) or vid_dur
     # Free text + effect regions (làm mờ tự do): cùng hệ tọa độ pixel.
@@ -160,13 +198,13 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
             item_start,
             source_timeline_duration,
             source_timeline_segments,
-            base_speed=soft_preview_speed,
+            base_speed=retime_base,
         )
         en = retime_timeline_time(
             float(item.get("end") or 0) - export_start,
             source_timeline_duration,
             source_timeline_segments,
-            base_speed=soft_preview_speed,
+            base_speed=retime_base,
         )
         if kind == "logo":
             asset_path = ""
@@ -188,7 +226,8 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
                     "textColor": str(item.get("color") or "#ffffff"),
                     "bbox": {"x": fx, "y": fy, "w": w, "h": h},
                     "captionLayout": {"x": fx, "y": fy, "w": w, "h": h, "lines": [text], "fontSize": fs},
-                    "skipCoverMask": True, "logoAssetPath": asset_path if source != "text" else "",
+                    "skipCoverMask": True, "logoText": source == "text",
+                    "logoAssetPath": asset_path if source != "text" else "",
                     "logoOpacity": max(0, min(100, int(item.get("opacity") or 85))) / 100,
                     "logoFadeInEnd": fst + fade, "logoFadeOutStart": fen - fade,
                 })
@@ -240,6 +279,8 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
                 },
                 # Preview không blur dưới free-text — không mask khi burn
                 "skipCoverMask": True,
+                # textarea preview: top-align + line-height 1.25 (css mode overlay)
+                "overlayText": True,
             }
         )
     out = out_final(project_id)
@@ -422,12 +463,45 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
             # Stem cache theo videoPath gốc — đã tách lúc xem trước thì không Demucs lại
             source_audio = separate_no_vocals(project_id, report=True)
             if source_audio and source_audio.is_file():
+                # Stem tách từ file 1×. Nếu timeline display (đã bake): chậm đều stem
+                # về đồng hồ FE rồi mới áp videoSpeed câu (base=1).
+                bake_for_stem = meta_baked_speed(meta)
+                if timeline_final and abs(bake_for_stem - 1.0) > 0.02:
+                    from pipeline.core.jobs import run_cmd
+                    from pipeline.core.media import atempo_chain, _atomic_replace
+
+                    stem_dest = (
+                        root
+                        / "cache"
+                        / f"stem_display_s{int(round(bake_for_stem * 100)):03d}.wav"
+                    )
+                    if not stem_dest.is_file() or stem_dest.stat().st_size < 64:
+                        tmp = stem_dest.with_suffix(".tmp.wav")
+                        run_cmd(
+                            project_id,
+                            [
+                                "ffmpeg",
+                                "-y",
+                                "-hide_banner",
+                                "-loglevel",
+                                "error",
+                                "-i",
+                                str(source_audio),
+                                "-filter:a",
+                                atempo_chain(bake_for_stem),
+                                "-c:a",
+                                "pcm_s16le",
+                                str(tmp),
+                            ],
+                        )
+                        _atomic_replace(tmp, stem_dest)
+                    source_audio = stem_dest
                 source_audio = retime_audio_track(
                     source_audio,
                     source_timeline_segments,
                     root / "cache",
                     project_id,
-                    base_speed=soft_preview_speed,
+                    base_speed=1.0,
                     source_start=export_start,
                     source_duration=source_timeline_duration,
                 )
@@ -448,8 +522,6 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
             )
             check_cancel(project_id)
             bg_vol = max(0, min(100, int(settings.get("originalAudioVolume") or 100))) / 100.0
-            from pipeline.core.media import meta_baked_speed
-
             mux_dub(
                 project_id,
                 burned,

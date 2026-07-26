@@ -999,8 +999,46 @@ def meta_has_user_bake(meta: dict) -> bool:
     return meta.get("bakedSpeed") is not None
 
 
+def initial_rate_from_match_duration(match_duration: str | None) -> float:
+    """preferVideo → 0.80; còn lại → 1.00. Không bake file."""
+    return 0.80 if str(match_duration or "").strip() == "preferVideo" else 1.0
+
+
+def ensure_project_initial_playback_rate(
+    meta: dict,
+    settings: dict | None = None,
+) -> float:
+    """Ghi projectInitialPlaybackRate đúng một lần — không reset, không bake."""
+    raw = meta.get("projectInitialPlaybackRate")
+    if raw is not None:
+        try:
+            return clamp_playback_speed(float(raw))
+        except (TypeError, ValueError):
+            pass
+    s = settings if isinstance(settings, dict) else (meta.get("settings") or {})
+    rate = initial_rate_from_match_duration(
+        str((s or {}).get("matchDuration") or "")
+    )
+    meta["projectInitialPlaybackRate"] = rate
+    return rate
+
+
 def speed_cache_tag(speed: float) -> str:
     return f"s{int(round(clamp_playback_speed(speed) * 100)):03d}"
+
+
+def preview_clip_matches(name: str, preview_sec: int) -> bool:
+    """Đúng clip của cửa sổ preview Ns: preview_5.mp4 / preview_5_s080.mp4.
+
+    So khớp đủ tên — substring cũ ("preview_5" in name) match nhầm preview_50….
+    """
+    import re as _re
+
+    return bool(
+        _re.fullmatch(
+            rf"preview_{int(preview_sec)}(_s\d{{3}})?\.[a-z0-9]+", (name or "").lower()
+        )
+    )
 
 
 def scale_time_fields(obj: dict, scale: float, keys: tuple[str, ...] = ("start", "end")) -> None:
@@ -1085,34 +1123,61 @@ def ensure_timeline_baseline(meta: dict, current_speed: float) -> dict[str, Any]
 
 
 def apply_timeline_from_baseline(meta: dict, new_speed: float) -> None:
-    """t_display = t_1x / new_speed — luôn từ baseline, không cascade."""
+    """t_display = t_1x / new_speed — luôn từ baseline bất biến, không cascade."""
     import copy
 
     new_speed = clamp_playback_speed(new_speed)
     bl = ensure_timeline_baseline(meta, meta_baked_speed(meta))
+    # Dùng tỉ số chính xác; round µs-level khi ghi mốc (tránh drift float)
     scale = 1.0 / new_speed
+
+    def _round_us(t: float) -> float:
+        return round(float(t) * 1_000_000.0) / 1_000_000.0
+
     segs = copy.deepcopy(bl.get("segments") or [])
     ovs = copy.deepcopy(bl.get("overlays") or [])
     for seg in segs:
         if isinstance(seg, dict):
             _scale_segment_tree(seg, scale)
+            for k in _SEG_TIME_KEYS:
+                if seg.get(k) is not None:
+                    try:
+                        seg[k] = _round_us(float(seg[k]))
+                    except (TypeError, ValueError):
+                        pass
+            for ch in seg.get("compoundChildren") or []:
+                if isinstance(ch, dict):
+                    for k in _SEG_TIME_KEYS:
+                        if ch.get(k) is not None:
+                            try:
+                                ch[k] = _round_us(float(ch[k]))
+                            except (TypeError, ValueError):
+                                pass
     for ov in ovs:
         if isinstance(ov, dict):
             scale_time_fields(ov, scale, ("start", "end"))
+            for k in ("start", "end"):
+                if ov.get(k) is not None:
+                    try:
+                        ov[k] = _round_us(float(ov[k]))
+                    except (TypeError, ValueError):
+                        pass
     meta["segments"] = segs
     meta["overlays"] = ovs
     dur1 = float(bl.get("duration1x") or meta.get("duration") or 0)
     if dur1 > 0:
-        # duration nguồn giữ 1×; workDuration = độ dài file bake
-        meta["duration"] = dur1
+        meta["duration"] = _round_us(dur1)
         if abs(new_speed - 1.0) > 0.001:
-            meta["workDuration"] = dur1 / new_speed
+            meta["workDuration"] = _round_us(dur1 / new_speed)
         else:
             meta.pop("workDuration", None)
 
 
-def _merge_segment_content(dst: dict, src: dict) -> None:
-    """Giữ text/TTS/bbox từ src khi dst (sau scale) thiếu — không đụng start/end."""
+def _merge_segment_content(dst: dict, src: dict, *, prefer_src: bool = False) -> None:
+    """Giữ text/TTS/bbox từ src — không đụng start/end.
+
+    prefer_src=True: text/TTS hiện tại (preRemap) thắng baseline cũ.
+    """
     if not isinstance(dst, dict) or not isinstance(src, dict):
         return
     for k in (
@@ -1138,8 +1203,12 @@ def _merge_segment_content(dst: dict, src: dict) -> None:
         if sv is None:
             continue
         if k in ("translation", "source"):
-            if not str(dv or "").strip() and str(sv).strip():
+            if str(sv).strip() and (prefer_src or not str(dv or "").strip()):
                 dst[k] = sv
+        elif k in ("audioUrl", "audioFile", "audioDuration", "voice", "ttsSpeed", "ttsVolume", "dub"):
+            if prefer_src or dv is None:
+                if sv is not None and sv != "":
+                    dst[k] = sv
         elif dv is None:
             dst[k] = sv
     # compound children: merge theo id
@@ -1152,68 +1221,84 @@ def _merge_segment_content(dst: dict, src: dict) -> None:
             by_id = {str(c.get("id")): c for c in sc if isinstance(c, dict) and c.get("id")}
             for c in dc:
                 if isinstance(c, dict) and c.get("id") and str(c["id"]) in by_id:
-                    _merge_segment_content(c, by_id[str(c["id"])])
+                    _merge_segment_content(c, by_id[str(c["id"])], prefer_src=prefer_src)
 
 
 def _heal_segments_content(meta: dict) -> None:
-    """Sau remap: nếu segment mất translation/source, lấy lại từ bản trước remap / baseline."""
+    """Sau remap: text/TTS lấy từ preRemap (ưu tiên), thiếu mới lấy baseline."""
     segs = meta.get("segments") or []
     if not isinstance(segs, list):
         return
-    # Ưu tiên snapshot pre-remap (gắn tạm), rồi baseline, rồi chính segs cũ
-    donors: list[dict] = []
     pre = meta.pop("_preRemapSegments", None)
+    pre_by: dict[str, dict] = {}
     if isinstance(pre, list):
-        donors.extend(s for s in pre if isinstance(s, dict))
+        for s in pre:
+            if isinstance(s, dict) and s.get("id"):
+                pre_by[str(s["id"])] = s
+                for ch in s.get("compoundChildren") or []:
+                    if isinstance(ch, dict) and ch.get("id"):
+                        pre_by[str(ch["id"])] = ch
+    bl_by: dict[str, dict] = {}
     bl = meta.get("timelineBaseline") or {}
     if isinstance(bl, dict):
-        bl_segs = bl.get("segments") or []
-        if isinstance(bl_segs, list):
-            donors.extend(s for s in bl_segs if isinstance(s, dict))
-    by_id: dict[str, dict] = {}
-    for s in donors:
-        sid = str(s.get("id") or "")
-        if sid and sid not in by_id:
-            by_id[sid] = s
-        # cũng index children
-        for ch in s.get("compoundChildren") or []:
-            if isinstance(ch, dict) and ch.get("id"):
-                cid = str(ch["id"])
-                if cid not in by_id:
-                    by_id[cid] = ch
-    for seg in segs:
-        if not isinstance(seg, dict):
-            continue
+        for s in bl.get("segments") or []:
+            if isinstance(s, dict) and s.get("id"):
+                bl_by[str(s["id"])] = s
+                for ch in s.get("compoundChildren") or []:
+                    if isinstance(ch, dict) and ch.get("id"):
+                        bl_by[str(ch["id"])] = ch
+
+    def _heal_one(seg: dict) -> None:
         sid = str(seg.get("id") or "")
-        if sid and sid in by_id:
-            _merge_segment_content(seg, by_id[sid])
-        # heal children
+        if sid and sid in pre_by:
+            _merge_segment_content(seg, pre_by[sid], prefer_src=True)
+        elif sid and sid in bl_by:
+            _merge_segment_content(seg, bl_by[sid], prefer_src=False)
         for ch in seg.get("compoundChildren") or []:
-            if isinstance(ch, dict) and ch.get("id"):
-                cid = str(ch["id"])
-                if cid in by_id:
-                    _merge_segment_content(ch, by_id[cid])
+            if isinstance(ch, dict):
+                _heal_one(ch)
+
+    for seg in segs:
+        if isinstance(seg, dict):
+            _heal_one(seg)
 
 
 def remap_timeline_for_speed_change(meta: dict, old_speed: float, new_speed: float) -> None:
-    """Đổi bake speed: timeline/caption/TTS/overlay scale đồng bộ từ baseline 1×.
+    """Đổi bake speed: luôn từ baseline 1× bất biến — không cascade 0.8→1.15→0.8.
 
-    Không nhân chồng (0.8→1→2 luôn đúng như apply trực tiếp từ gốc).
-    Compound children, coverStart/End, overlays đều scale.
-    Không ghi đè videoSpeed từng câu (TTS fit).
-    Giữ translation/source/TTS/bbox — không để bake xóa text.
+    Baseline chỉ tạo MỘT LẦN (ensure_timeline_baseline). Mọi tốc độ mới:
+      t_display = t_1x / new_speed
+    Quay lại tốc độ cũ → cùng kết quả (không sai số tích lũy).
     """
     old_speed = clamp_playback_speed(old_speed)
     new_speed = clamp_playback_speed(new_speed)
-    if abs(old_speed - new_speed) < 1e-9:
+    if abs(old_speed - new_speed) < 1e-12:
         return
-    # Giữ bản nội dung trước remap để heal nếu baseline cũ thiếu text
+    # Nội dung hiện tại (text/TTS/overlay) để heal sau scale
     meta["_preRemapSegments"] = _deepcopy_json(meta.get("segments") or [])
-    # Chụp lại baseline từ timeline hiện tại ở old_speed.
-    meta["timelineBaseline"] = _snapshot_timeline_1x(meta, old_speed)
+    meta["_preRemapOverlays"] = _deepcopy_json(meta.get("overlays") or [])
+    # CHỈ tạo baseline nếu chưa có — KHÔNG snapshot lại từ timeline đã scale
+    ensure_timeline_baseline(meta, old_speed)
     apply_timeline_from_baseline(meta, new_speed)
     _heal_segments_content(meta)
-    # Đồng bộ text vào baseline 1× (lần bake sau không mất)
+    # Overlay text/asset: ưu tiên bản vừa edit (preRemap)
+    pre_ov = meta.pop("_preRemapOverlays", None)
+    if isinstance(pre_ov, list) and isinstance(meta.get("overlays"), list):
+        pre_by = {
+            str(o.get("id")): o
+            for o in pre_ov
+            if isinstance(o, dict) and o.get("id")
+        }
+        for ov in meta["overlays"]:
+            if not isinstance(ov, dict) or not ov.get("id"):
+                continue
+            src = pre_by.get(str(ov["id"]))
+            if not src:
+                continue
+            for k in ("text", "assetUrl", "color", "fontFamily", "fontSize", "kind"):
+                if src.get(k) is not None and src.get(k) != "":
+                    ov[k] = src[k]
+    # Đồng bộ text/TTS vào baseline (không đụng mốc thời gian 1×)
     try:
         bl = meta.get("timelineBaseline")
         if isinstance(bl, dict) and isinstance(bl.get("segments"), list):
@@ -1224,9 +1309,26 @@ def remap_timeline_for_speed_change(meta: dict, old_speed: float, new_speed: flo
             }
             for bs in bl["segments"]:
                 if isinstance(bs, dict) and bs.get("id") and str(bs["id"]) in cur_by:
-                    _merge_segment_content(bs, cur_by[str(bs["id"])])
+                    _merge_segment_content(bs, cur_by[str(bs["id"])], prefer_src=True)
+        if isinstance(bl, dict) and isinstance(bl.get("overlays"), list) and isinstance(pre_ov, list):
+            cur_ov = {
+                str(o.get("id")): o
+                for o in (meta.get("overlays") or [])
+                if isinstance(o, dict) and o.get("id")
+            }
+            for bo in bl["overlays"]:
+                if isinstance(bo, dict) and bo.get("id") and str(bo["id"]) in cur_ov:
+                    src = cur_ov[str(bo["id"])]
+                    for k in ("text", "assetUrl", "color", "fontFamily", "fontSize", "kind"):
+                        if src.get(k) is not None and src.get(k) != "":
+                            bo[k] = src[k]
     except Exception:
         pass
+
+
+def invalidate_timeline_baseline(meta: dict) -> None:
+    """Gọi khi trim/split/đổi nguồn — baseline 1× phải chụp lại từ timeline hiện tại."""
+    meta.pop("timelineBaseline", None)
 
 def preview_1x_path(project_id: str, meta: dict) -> Path:
     """File preview/source 1× (chưa bake tốc độ)."""

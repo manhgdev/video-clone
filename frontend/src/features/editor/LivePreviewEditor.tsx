@@ -86,6 +86,11 @@ import {
   pickTimelineSeg,
   displaySpeedDraft,
   fileBakedSpeed,
+  formatSpeedX,
+  speedStatusLines,
+  appliedFileSpeed,
+  mediaClipsFrom1xBaseline,
+  mediaClipsTo1xBaseline,
   previewVideoRate,
   reindexSegments,
   resolveCaptionFontSize,
@@ -99,7 +104,6 @@ import {
   rippleDeleteMediaClips,
   rippleShiftOverlay,
   rippleShiftSegment,
-  scaleMediaClips,
   seedCoverBox,
   segmentAt,
   segmentAtCover,
@@ -168,8 +172,8 @@ type Props = {
     timeScale?: number
     prevBakedSpeed?: number
   }) => void
-  /** Undo bake: chỉ đổi workVideo/URL, giữ segments từ history */
-  onRestoreBakedSpeed?: (speed: number) => void | Promise<void>
+  /** Undo bake: chỉ đổi workVideo/URL, giữ segments từ history (persist trước khi đổi file) */
+  onRestoreBakedSpeed?: (speed: number, segments?: Segment[]) => void | Promise<void>
   onExport: (segments?: Segment[], exportEndSec?: number, exportStartSec?: number, renderName?: string, settingsOverride?: Partial<ProjectSettings>, coverDataUrl?: string) => void | Promise<void>
   onSettings: (settings: ProjectSettings) => void
   overlays: TextOverlay[]
@@ -432,7 +436,7 @@ export default function LivePreviewEditor({
   const [globalTtsVolume, setGlobalTtsVolume] = useState(100)
   const [globalTtsSpeed, setGlobalTtsSpeed] = useState(1)
   const [globalVoice, setGlobalVoice] = useState(() => settings.defaultVoice || '')
-  // Slider: file bake (kể cả 1× lock) hoặc soft 0.8 preferVideo
+  // Slider = tốc độ file đã Áp dụng (1.00× nếu chưa bake)
   const [speedDraft, setSpeedDraft] = useState(() =>
     displaySpeedDraft(settings.matchDuration, bakedSpeed, bakedPreferVideo, hasBakedSpeed),
   )
@@ -440,6 +444,17 @@ export default function LivePreviewEditor({
   const [speedCancelling, setSpeedCancelling] = useState(false)
   const speedCancelRequestedRef = useRef(false)
   const [speedError, setSpeedError] = useState<string | null>(null)
+  const [speedProgress, setSpeedProgress] = useState(0)
+  const [speedMessage, setSpeedMessage] = useState('')
+  /** Transaction tốc độ: chỉ revision mới nhất được commit */
+  const speedTxnRef = useRef<{
+    rev: number
+    ac: AbortController | null
+    debounce: ReturnType<typeof setTimeout> | null
+    pendingRate: number | null
+  }>({ rev: 0, ac: null, debounce: null, pendingRate: null })
+  /** Baseline clip Video/BG ở 1× — mọi bake scale từ đây, không cascade */
+  const mediaClips1xRef = useRef<{ video: MediaClip[]; bg: MediaClip[] } | null>(null)
   const [stemStatus, setStemStatus] = useState<'off' | 'loading' | 'ready' | 'error'>('off')
   const [stemProgress, setStemProgress] = useState(0)
   const [stemError, setStemError] = useState<string | null>(null)
@@ -524,10 +539,25 @@ export default function LivePreviewEditor({
     persistMediaClips(projectId, 'bg', bgClips)
   }, [projectId, bgClips])
 
-  /** Tốc độ bake file (remap/API). Soft preferVideo 0.8 không dùng ở đây. */
+  /** Tốc độ bake file (remap/API). Soft preferVideo không dùng — chỉ sau Áp dụng. */
   function effectiveBakedSpeed(): number {
     return fileBakedSpeed(bakedSpeed, bakedPreferVideo, hasBakedSpeed)
   }
+
+  const speedStatus = useMemo(
+    () => speedStatusLines(
+      settings.matchDuration,
+      speedDraft,
+      bakedSpeed,
+      bakedPreferVideo,
+      hasBakedSpeed,
+    ),
+    [settings.matchDuration, speedDraft, bakedSpeed, bakedPreferVideo, hasBakedSpeed],
+  )
+  const appliedSpeedX = useMemo(
+    () => appliedFileSpeed(bakedSpeed, bakedPreferVideo, hasBakedSpeed),
+    [bakedSpeed, bakedPreferVideo, hasBakedSpeed],
+  )
 
   function takeSnap(): EditorSnap {
     const durNow =
@@ -618,8 +648,12 @@ export default function LivePreviewEditor({
     historyQuietRef.current = true
     const curBake = effectiveBakedSpeed()
     const wantBake = snap.bakedSpeed > 0.2 ? snap.bakedSpeed : 1
-    // Timeline/caption/TTS timing lấy từ snapshot (đã scale đúng lúc bake)
-    void onSegmentsReplace(snap.segments, { persist: false })
+    const bakeChanges = Math.abs(curBake - wantBake) > 0.008 && Boolean(onRestoreBakedSpeed)
+    // Timeline/caption/TTS timing lấy từ snapshot (đã scale đúng lúc bake).
+    // Server PHẢI mirror editor sau undo — không persist thì baseline/segments
+    // trên server còn ở lineage cũ → lần Áp dụng tốc độ sau remap ra timeline
+    // khác hẳn. Khi đổi bake: PUT tuần tự bên onRestoreBakedSpeed (tránh race).
+    void onSegmentsReplace(snap.segments, { persist: !bakeChanges })
     void onOverlaysReplace(snap.overlays)
     onSettings(snap.settings)
     setBookmarks(snap.bookmarks)
@@ -638,8 +672,8 @@ export default function LivePreviewEditor({
       pauseDubAudio()
     }
     // Chỉ đổi file video bake — không remap segments lại (tránh lệch history)
-    if (Math.abs(curBake - wantBake) > 0.008 && onRestoreBakedSpeed) {
-      void Promise.resolve(onRestoreBakedSpeed(wantBake)).finally(finish)
+    if (bakeChanges && onRestoreBakedSpeed) {
+      void Promise.resolve(onRestoreBakedSpeed(wantBake, snap.segments)).finally(finish)
     } else {
       queueMicrotask(finish)
     }
@@ -830,11 +864,20 @@ export default function LivePreviewEditor({
   const videoToTimelineTime = (value: number) => Math.max(0, value - videoSourceStart)
   const videoTrackEnd = videoClips.length ? Math.max(...videoClips.map((clip) => clip.end)) : 0
   // Preview Ns → chỉ làm việc trong Ns (khớp xuất). Dịch full → cả video.
+  // Ưu tiên videoTrackEnd (sau trim right) — không phình lại full source.
   const sourceDur = Number.isFinite(duration) && duration > 0 ? duration : 0
   const clipCap = workClipSec > 0 ? workClipSec : 0
-  const timelineDuration = clipCap > 0
-    ? Math.min(Math.max(0, clipCap - videoSourceStart), sourceDur > 0 ? Math.max(0, sourceDur - videoSourceStart) : clipCap)
-    : videoTrackEnd > 0 ? Math.max(videoTrackEnd, 1) : Math.max(sourceDur - videoSourceStart, lastSegment?.end ?? 0, 1)
+  const sourceWindow = sourceDur > 0 ? Math.max(0, sourceDur - videoSourceStart) : 0
+  const timelineDuration = (() => {
+    let d = videoTrackEnd > 0
+      ? videoTrackEnd
+      : Math.max(sourceWindow, lastSegment?.end ?? 0, 1)
+    if (clipCap > 0) {
+      const cap = Math.max(0, clipCap - videoSourceStart)
+      d = Math.min(d, cap, sourceWindow > 0 ? sourceWindow : cap)
+    }
+    return Math.max(d, 1)
+  })()
 
   useEffect(() => {
     if (!playing) return
@@ -1251,6 +1294,8 @@ export default function LivePreviewEditor({
     setSpeedDraft(
       displaySpeedDraft(settings.matchDuration, bakedSpeed, bakedPreferVideo, hasBakedSpeed),
     )
+    // Đổi project → baseline clip 1× phải chụp lại
+    mediaClips1xRef.current = null
   }, [projectId, bakedSpeed, bakedPreferVideo, hasBakedSpeed, settings.matchDuration])
 
   useEffect(() => {
@@ -2968,52 +3013,130 @@ export default function LivePreviewEditor({
     )
   }
 
-  /**
-   * Áp dụng đúng giá trị slider (0.50–2.00, kể cả 0.80 / 0.86 / 1.23…).
-   * Bake video từ file 1× + remap timeline từ baseline — không nhân chồng.
-   * TTS preview/export: playbackRate = ttsSpeed * bake (file wav 1×).
-   */
-  async function applyVideoSpeed(_scope: 'one' | 'all', speed?: number) {
-    // Lấy đúng số đang hiện cạnh «Tốc độ video» (slider hoặc nút nhanh)
+  /** Áp dụng ngay (nút Áp dụng) — vẫn hủy txn cũ + tăng revision */
+  function applyVideoSpeed(_scope: 'one' | 'all', speed?: number) {
     const raw = typeof speed === 'number' && Number.isFinite(speed) ? speed : speedDraft
     const v = Math.round(Math.max(0.5, Math.min(2, raw)) * 100) / 100
     setSpeedDraft(v)
-    if (speedBusy || busy) return
-    speedCancelRequestedRef.current = false
-    setSpeedBusy(true)
-    setSpeedError(null)
-    const prevT = videoRef.current?.currentTime ?? time
-    // prev = bake FILE (không soft 0.8) — soft→0.8 bake phải gọi API
-    const prevBaked = effectiveBakedSpeed()
-    const sameFileBake = Math.abs(prevBaked - v) < 0.005 && (hasBakedSpeed || Math.abs(v - 1) > 0.02)
-    if (sameFileBake) {
-      setSpeedBusy(false)
-      setSpeedError(null)
+    speedTxnRef.current.pendingRate = v
+    if (speedTxnRef.current.debounce) {
+      clearTimeout(speedTxnRef.current.debounce)
+      speedTxnRef.current.debounce = null
+    }
+    void executeSpeedTransaction(v)
+  }
+
+  async function executeSpeedTransaction(v: number) {
+    if (busy && !speedBusy) {
+      setSpeedError('Đang có job khác — đợi xong rồi Áp dụng tốc độ.')
       return
     }
-    // Ghi history TRƯỚC bake — Undo khôi phục tốc độ + timeline
-    pushHistory()
-    // Snapshot text local — merge sau bake (tránh meta đĩa thiếu translation)
+    const prevBaked = effectiveBakedSpeed()
+    // Đã khóa cùng số → no-op
+    if (hasBakedSpeed && Math.abs(prevBaked - v) < 0.005) {
+      return
+    }
+
+    // Hủy transaction / request cũ
+    if (speedTxnRef.current.ac) {
+      try { speedTxnRef.current.ac.abort() } catch { /* ignore */ }
+    }
+    speedCancelRequestedRef.current = true
+    try { await api.cancel(projectId) } catch { /* ignore */ }
+    speedCancelRequestedRef.current = false
+
+    let rev = ++speedTxnRef.current.rev
+    const ac = new AbortController()
+    speedTxnRef.current.ac = ac
+
+    setSpeedBusy(true)
+    setSpeedCancelling(false)
+    setSpeedProgress(3)
+    setSpeedMessage(`Đang áp dụng ${formatSpeedX(v)}…`)
+    setSpeedError(null)
+
+    const prevT = videoRef.current?.currentTime ?? time
     const localById = new Map(segments.map((s) => [s.id, s] as const))
+    const clipsSnap = {
+      video: videoClips.map((c) => ({ ...c })),
+      bg: bgClips.map((c) => ({ ...c })),
+    }
+
+    let pollId = 0
+    const pollStatus = () => {
+      if (rev !== speedTxnRef.current.rev || ac.signal.aborted) return
+      void api.status(projectId).then((s) => {
+        if (rev !== speedTxnRef.current.rev || ac.signal.aborted) return
+        if (typeof s.progress === 'number' && s.progress > 0) {
+          setSpeedProgress(Math.max(3, Math.min(99, s.progress)))
+        }
+        if (s.message) setSpeedMessage(s.message)
+      }).catch(() => { /* ignore */ })
+    }
+    pollId = window.setInterval(pollStatus, 400)
+    pollStatus()
+
+    const isLatest = () => rev === speedTxnRef.current.rev && !ac.signal.aborted
+
     try {
-      // Persist caption trước bake — backend load meta từ đĩa
       await onSegmentsReplace(segments, { persist: true })
-      const res = await api.rebakeSpeed(projectId, v)
+      if (!isLatest()) return
+      setSpeedProgress((p) => Math.max(p, 12))
+      let res = await api.rebakeSpeed(projectId, v, {
+        speedRevision: rev,
+        signal: ac.signal,
+      })
+      if (!isLatest()) return
+      if (
+        res.ignored
+        && res.reason === 'STALE_SPEED_REVISION'
+        && typeof res.speedRevision === 'number'
+        && res.speedRevision >= rev
+      ) {
+        // meta lưu revision từ phiên trước; FE mới mở đếm lại từ 1 → server
+        // coi request là cũ. Đồng bộ theo server rồi thử lại đúng một lần.
+        rev = res.speedRevision + 1
+        speedTxnRef.current.rev = rev
+        res = await api.rebakeSpeed(projectId, v, {
+          speedRevision: rev,
+          signal: ac.signal,
+        })
+        if (!isLatest()) return
+      }
+      if (res.ignored) {
+        setSpeedMessage('Bỏ qua (đã có tốc độ mới hơn)')
+        return
+      }
+
+      setSpeedProgress(92)
+      setSpeedMessage('Đang cập nhật timeline…')
       const applied =
         typeof res.bakedSpeed === 'number' && res.bakedSpeed > 0
           ? Math.round(res.bakedSpeed * 100) / 100
           : v
+
+      // Commit atomic — chỉ khi vẫn là revision mới nhất
+      if (!isLatest()) return
+
+      pushHistory()
       setSpeedDraft(applied)
-      // Scale media clips Video/Âm gốc (local) theo cùng hệ số timeline
+
+      if (!mediaClips1xRef.current) {
+        mediaClips1xRef.current = {
+          video: mediaClipsTo1xBaseline(clipsSnap.video, prevBaked),
+          bg: mediaClipsTo1xBaseline(clipsSnap.bg, prevBaked),
+        }
+      }
+      const nextVideo = mediaClipsFrom1xBaseline(mediaClips1xRef.current.video, applied)
+      const nextBg = mediaClipsFrom1xBaseline(mediaClips1xRef.current.bg, applied)
+      setVideoClips(nextVideo)
+      setBgClips(nextBg)
+
       const scale =
         typeof res.timeScale === 'number' && res.timeScale > 0
           ? res.timeScale
           : prevBaked / Math.max(0.5, applied)
-      if (Math.abs(scale - 1) > 1e-6) {
-        setVideoClips((list) => scaleMediaClips(list, scale))
-        setBgClips((list) => scaleMediaClips(list, scale))
-      }
-      // Merge text/TTS/bbox từ local nếu server trả rỗng
+
       const mergedSegs = (Array.isArray(res.segments) ? res.segments : []).map((s, i) => {
         const loc = localById.get(s.id)
         if (!loc) return { ...s, index: i }
@@ -3035,26 +3158,44 @@ export default function LivePreviewEditor({
             : loc.compoundChildren,
         }
       })
-      const mergedRes = { ...res, segments: mergedSegs }
+      const displayDur = Math.max(
+        0,
+        Number(res.duration) || Number(res.workClipSec) || 0,
+      )
+      if (!isLatest()) return
+
+      const mergedRes = {
+        ...res,
+        segments: mergedSegs,
+        duration: displayDur || res.duration,
+        workClipSec: displayDur || res.workClipSec,
+        bakedSpeed: applied,
+        hasBakedSpeed: true as const,
+      }
       onPreviewRebaked?.(mergedRes)
       if (!onPreviewRebaked) {
         void onSegmentsReplace(mergedSegs, { persist: true })
       }
-      // Playhead theo trục mới; hardSync stem/TTS
+
       const nextT = Math.max(0, prevT * scale)
       const vid = videoRef.current
       if (vid) {
         try {
           vid.playbackRate = 1
-          vid.currentTime = nextT
-        } catch { /* ignore */ }
+          const dur = Number(vid.duration)
+          const t = Number.isFinite(dur) && dur > 0 ? Math.min(nextT, Math.max(0, dur - 0.05)) : nextT
+          vid.currentTime = t
+          setTime(t)
+        } catch {
+          setTime(nextT)
+        }
+      } else {
+        setTime(nextT)
       }
-      setTime(nextT)
       dubHardSyncRef.current = true
       dubFinishedIdsRef.current.clear()
       dubTokenRef.current = ''
       pauseDubAudio()
-      // Stem: map lại theo bake mới
       const bg = bgAudioRef.current
       if (bg && wantNoVocals) {
         try {
@@ -3062,14 +3203,30 @@ export default function LivePreviewEditor({
           bg.playbackRate = applied
         } catch { /* ignore */ }
       }
+      setSpeedProgress(100)
+      setSpeedMessage(`Đã áp dụng ${formatSpeedX(applied)}`)
     } catch (e) {
-      if (!speedCancelRequestedRef.current) {
+      if (!isLatest()) return
+      const aborted =
+        (e instanceof DOMException && e.name === 'AbortError')
+        || speedCancelRequestedRef.current
+        || ac.signal.aborted
+      if (!aborted) {
         setSpeedError(e instanceof Error ? e.message : String(e))
       }
     } finally {
-      setSpeedBusy(false)
-      setSpeedCancelling(false)
-      speedCancelRequestedRef.current = false
+      window.clearInterval(pollId)
+      if (rev === speedTxnRef.current.rev) {
+        setSpeedBusy(false)
+        setSpeedCancelling(false)
+        speedCancelRequestedRef.current = false
+        window.setTimeout(() => {
+          if (rev === speedTxnRef.current.rev) {
+            setSpeedProgress(0)
+            setSpeedMessage('')
+          }
+        }, 600)
+      }
     }
   }
 
@@ -3078,12 +3235,23 @@ export default function LivePreviewEditor({
     speedCancelRequestedRef.current = true
     setSpeedCancelling(true)
     setSpeedError(null)
+    if (speedTxnRef.current.debounce) {
+      clearTimeout(speedTxnRef.current.debounce)
+      speedTxnRef.current.debounce = null
+    }
+    try { speedTxnRef.current.ac?.abort() } catch { /* ignore */ }
+    speedTxnRef.current.rev += 1
     try {
       await api.cancel(projectId)
     } catch (e) {
-      speedCancelRequestedRef.current = false
+      if (!speedCancelRequestedRef.current) {
+        setSpeedError(e instanceof Error ? e.message : String(e))
+      }
+    } finally {
+      setSpeedBusy(false)
       setSpeedCancelling(false)
-      setSpeedError(e instanceof Error ? e.message : String(e))
+      setSpeedProgress(0)
+      setSpeedMessage('')
     }
   }
 
@@ -4514,8 +4682,26 @@ export default function LivePreviewEditor({
     // Chốt bbox/line chỉ sau khi font bundle thật đã sẵn sàng.
     layoutCacheRef.current = {}
     const payload = buildExportSegments(segments, updatedSettings, sourceWidth, sourceHeight)
-    const exportEndSec = Math.max(0, ...videoClips.map((clip) => clip.end))
-    const exportStartSec = videoClips.length === 1 ? (videoClips[0].sourceStart ?? 0) : 0
+    // Sau Áp dụng tốc độ: work file = đồng hồ display — dùng start/end timeline (không sourceStart 1×).
+    // Chưa bake: cắt trên file 1× qua sourceStart + span.
+    const timelineFinal =
+      Boolean(hasBakedSpeed)
+      || Boolean(bakedPreferVideo)
+      || Math.abs(appliedFileSpeed(bakedSpeed, bakedPreferVideo, hasBakedSpeed) - 1) > 0.02
+    let exportStartSec = 0
+    let exportEndSec = 0
+    if (videoClips.length >= 1) {
+      if (timelineFinal) {
+        exportStartSec = Math.max(0, Math.min(...videoClips.map((c) => c.start)))
+        exportEndSec = Math.max(...videoClips.map((c) => c.end), timelineDuration)
+      } else {
+        const c0 = videoClips[0]
+        exportStartSec = videoClips.length === 1 ? (c0.sourceStart ?? 0) : 0
+        exportEndSec = videoClips.length === 1
+          ? exportStartSec + Math.max(0, c0.end - c0.start)
+          : Math.max(0, ...videoClips.map((c) => c.end))
+      }
+    }
     const exportOverride: Partial<ProjectSettings> = {
       exportResolution: options.exportResolution as ProjectSettings['exportResolution'],
       exportVideo: options.exportVideo,
@@ -4577,22 +4763,14 @@ export default function LivePreviewEditor({
         </div>
         <nav className="flex items-center gap-2 shrink-0">
           <span
-            className="text-xs text-muted-foreground max-w-[220px] truncate"
-            title="Quy tắc khớp thời lượng từ cài đặt Sidebar (đầu vào trước khi mở xem/sửa)"
+            className="text-xs text-muted-foreground max-w-[300px] truncate"
+            title={[
+              speedStatus.inputLine,
+              speedStatus.appliedLine,
+              speedStatus.exportLine,
+            ].join(' · ')}
           >
-            {settings.matchDuration === 'preferVideo'
-              ? (
-                  bakedPreferVideo || (typeof bakedSpeed === 'number' && Math.abs(bakedSpeed - 0.8) < 0.02)
-                    ? 'Khớp: đã chậm video 0.80× (bake)'
-                    : 'Khớp: chậm video 0.80× (playback)'
-                )
-              : settings.matchDuration === 'stretch'
-                ? 'Khớp: kéo TTS'
-                : settings.matchDuration === 'natural'
-                  ? 'Khớp: tốc độ tự nhiên'
-                  : settings.matchDuration === 'none'
-                    ? 'Khớp: không'
-                    : 'Khớp: theo cài đặt'}
+            {speedStatus.matchLabel}
           </span>
           <span className="text-xs text-muted-foreground">{busy ? 'Đang xử lý…' : 'Đã lưu'}</span>
           {/* Layout preset picker */}
@@ -5035,6 +5213,19 @@ export default function LivePreviewEditor({
                             const { duration: mediaDuration, videoWidth, videoHeight } = event.currentTarget
                             setDuration(mediaDuration)
                             if (videoWidth > 0 && videoHeight > 0) setVideoSize({ width: videoWidth, height: videoHeight })
+                            // Đổi URL (bake tốc độ) → element reset về 0 trong khi playhead
+                            // timeline vẫn ở t — play sẽ chạy sai chỗ. Khôi phục đúng t.
+                            const want = timelineToVideoTime(time)
+                            if (
+                              Number.isFinite(want)
+                              && want > 0.01
+                              && Math.abs(event.currentTarget.currentTime - want) > 0.25
+                            ) {
+                              event.currentTarget.currentTime = Math.max(
+                                videoSourceStart,
+                                Math.min(want, Math.max(videoSourceStart, mediaDuration - 0.05)),
+                              )
+                            }
                             if (event.currentTarget.currentTime < videoSourceStart) {
                               event.currentTarget.currentTime = videoSourceStart
                             }
@@ -5434,7 +5625,7 @@ export default function LivePreviewEditor({
                             <div key={overlay.id} className={cn('group absolute z-[25] cursor-move overflow-visible outline outline-1 outline-transparent hover:outline-cyan-300/70', isLogoDraft && 'outline-dashed !outline-amber-300', sel && !isLogoDraft && 'outline-2 !outline-cyan-300')} style={{ ...sourceToDisplayStyle(display, crop), containerType: 'size', opacity: blockedByCaption ? 0 : frame.opacity * (isLogoDraft ? .55 : 1) }} onPointerDown={(e) => { if (isLogoDraft) beginOverlayDrag(e, overlay); else { e.stopPropagation(); editLogo(overlay.logoSource ?? 'text') } }}>
                               {overlay.logoSource !== 'text' && overlay.assetUrl
                                 ? <img src={overlay.assetUrl} className="size-full object-contain pointer-events-none" draggable={false} />
-                                : <div className="size-full flex items-center justify-center text-center font-extrabold" style={{ ...captionFontStyle(overlay.fontSize, overlay.h), fontFamily: captionFontCss(overlay.fontFamily ?? 'system'), color: overlay.color, textShadow: '0 2px 4px #000' }}>{overlay.text || 'LOGO'}</div>}
+                                : <div className="size-full flex items-center justify-center text-center font-bold" style={{ ...captionFontStyle(overlay.fontSize, overlay.h), fontFamily: captionFontCss(overlay.fontFamily ?? 'system'), color: overlay.color, textShadow: '0 2px 4px #000' }}>{overlay.text || 'LOGO'}</div>}
 
                               {sel && (['nw', 'ne', 'sw', 'se'] as const).map((edge) => <span key={edge} className={cn('absolute size-4 rounded-sm bg-cyan-400 border border-white opacity-0 hover:opacity-100 transition-opacity', edge === 'nw' && '-left-2 -top-2 cursor-nwse-resize', edge === 'ne' && '-right-2 -top-2 cursor-nesw-resize', edge === 'sw' && '-left-2 -bottom-2 cursor-nesw-resize', edge === 'se' && '-right-2 -bottom-2 cursor-nwse-resize')} onPointerDown={(e) => beginOverlayResize(e, overlay, edge)} />)}
                             </div>
@@ -5500,9 +5691,11 @@ export default function LivePreviewEditor({
                           >
 
                             <textarea
-                              className="block w-full h-full bg-transparent outline-none resize-none text-center font-extrabold cursor-move"
+                              className="block w-full h-full bg-transparent outline-none resize-none text-center font-bold cursor-move"
                               style={{
                                 ...captionFontStyle(overlay.fontSize, overlay.h),
+                                // Font bundle 700 = đúng bytes export (extrabold là synthetic, xuất không có)
+                                fontFamily: captionFontCss(overlay.fontFamily ?? 'system'),
                                 color: overlay.color,
                                 textShadow: '0 2px 4px #000',
                                 lineHeight: 1.25,
@@ -6129,46 +6322,43 @@ export default function LivePreviewEditor({
                           </>
                         )}
 
-                        {effectivePropTab === 'video' && (() => {
+                         {effectivePropTab === 'video' && (() => {
                           const idx = selected ? segments.findIndex((s) => s.id === selected.id) : -1
                           const prevEnd = idx > 0 ? segments[idx - 1].end : 0
                           const nextStart = idx >= 0 ? (segments[idx + 1]?.start ?? timelineDuration) : timelineDuration
                           const minDur = 0.15
+                          const draftX = formatSpeedX(speedDraft)
+                          const fileX = formatSpeedX(appliedSpeedX)
+                          const draftMatchesFile = Math.abs(speedDraft - appliedSpeedX) < 0.005
+                          // Mặc định ban đầu theo Khớp thời lượng: preferVideo → 0.80×
+                          const defaultSpeedX = settings.matchDuration === 'preferVideo' ? 0.8 : 1
+                          const atDefault =
+                            Math.abs(appliedSpeedX - defaultSpeedX) < 0.005
+                            && Math.abs(speedDraft - defaultSpeedX) < 0.005
                           return (
                             <>
-                              {(() => {
-                                const actualBaked = effectiveBakedSpeed()
-                                const softHint =
-                                  !hasBakedSpeed
-                                  && settings.matchDuration === 'preferVideo'
-                                  && Math.abs(actualBaked - 1) < 0.02
-                                    ? ' · soft playback (chưa bake file)'
-                                    : ''
-                                const bakeHint =
-                                  Math.abs(actualBaked - speedDraft) > 0.01 && hasBakedSpeed
-                                    ? ` · file ${actualBaked.toFixed(2)}×`
-                                    : ''
-                                return (
-                                  <PropLabel
-                                    label={`Tốc độ video: ${speedDraft.toFixed(2)}×${softHint}${bakeHint}`}
-                                  >
-                                    <input
+                              <div className="rounded-md border border-border bg-muted/30 px-2 py-1.5 space-y-0.5 text-[10px] leading-snug text-muted-foreground">
+                                <p className="text-foreground/90">{speedStatus.inputLine}</p>
+                                <p>{speedStatus.appliedLine}</p>
+                                <p>{speedStatus.exportLine}</p>
+                              </div>
+                              <PropLabel label={`Chọn tốc độ: ${draftX}${draftMatchesFile ? ` (= file ${fileX})` : ` · file đang ${fileX}`}`}>
+                                <input
                                   type="range"
                                   min={0.5}
                                   max={2}
                                   step={0.01}
                                   className="w-full accent-primary"
                                   value={speedDraft}
-                                  disabled={busy || speedBusy}
-                                  onChange={(e) =>
-                                    setSpeedDraft(
-                                      Math.round(Number(e.target.value) * 100) / 100,
-                                    )
-                                  }
+                                  disabled={busy && !speedBusy}
+                                  onChange={(e) => {
+                                    setSpeedError(null)
+                                    const n = Math.round(Number(e.target.value) * 100) / 100
+                                    // Chỉ đổi draft — bake khi bấm «Áp dụng»
+                                    setSpeedDraft(n)
+                                  }}
                                 />
-                                  </PropLabel>
-                                )
-                              })()}
+                              </PropLabel>
                               <div className="flex gap-1">
                                 {[0.5, 0.75, 0.8, 1, 1.15, 1.5].map((v) => (
                                   <button
@@ -6179,12 +6369,22 @@ export default function LivePreviewEditor({
                                       Math.abs(speedDraft - v) < 0.005
                                         ? 'border-primary text-primary bg-primary/10'
                                         : 'border-border text-muted-foreground hover:text-foreground hover:bg-accent',
+                                      hasBakedSpeed && Math.abs(appliedSpeedX - v) < 0.005
+                                        && 'ring-1 ring-primary/40',
                                     )}
-                                    disabled={busy || speedBusy}
-                                    onClick={() => setSpeedDraft(v)}
-                                    title="Chỉ đặt slider — bấm Áp dụng để bake"
+                                    disabled={busy && !speedBusy}
+                                    onClick={() => {
+                                      setSpeedError(null)
+                                      // Chỉ đổi draft — bake khi bấm «Áp dụng»
+                                      setSpeedDraft(v)
+                                    }}
+                                    title={
+                                      hasBakedSpeed && Math.abs(appliedSpeedX - v) < 0.005
+                                        ? `Đang ${formatSpeedX(v)} — chọn số khác rồi bấm Áp dụng`
+                                        : `Chọn ${formatSpeedX(v)} rồi bấm Áp dụng`
+                                    }
                                   >
-                                    {v === 0.8 ? '0.80' : v}×
+                                    {formatSpeedX(v)}
                                   </button>
                                 ))}
                               </div>
@@ -6192,23 +6392,48 @@ export default function LivePreviewEditor({
                                 type="button"
                                 className="w-full rounded-md border border-primary/40 bg-primary/10 text-primary hover:bg-primary/20 px-2 py-1.5 text-[11px] transition-colors disabled:opacity-50"
                                 disabled={(busy && !speedBusy) || speedCancelling}
-                                title={`Bake toàn project @ ${speedDraft.toFixed(2)}× (Video + Caption + TTS + Âm gốc + Text)`}
-                                onClick={() => speedBusy
-                                  ? void cancelVideoSpeed()
-                                  : void applyVideoSpeed('all', speedDraft)}
+                                title={
+                                  speedBusy
+                                    ? 'Hủy bake đang chạy (hoặc chọn tốc độ khác để thay thế)'
+                                    : `Bake @ ${draftX}`
+                                }
+                                onClick={() => {
+                                  if (speedBusy && Math.abs(speedDraft - appliedSpeedX) < 0.005) {
+                                    void cancelVideoSpeed()
+                                    return
+                                  }
+                                  // Áp dụng ngay — hủy txn cũ nếu đang chạy
+                                  applyVideoSpeed('all', speedDraft)
+                                }}
                               >
                                 {speedCancelling
                                   ? 'Đang hủy…'
                                   : speedBusy
-                                    ? 'Hủy'
-                                  : `Áp dụng tốc độ ${speedDraft.toFixed(2)}× cho tất cả`}
+                                    ? `Đang bake… (Hủy / chọn số khác)`
+                                    : draftMatchesFile && hasBakedSpeed
+                                      ? `Đã khóa ${fileX} — chọn số khác để đổi`
+                                      : `Áp dụng ${draftX} cho tất cả → file ${draftX}`}
+                              </button>
+                              <button
+                                type="button"
+                                className="w-full rounded-md border border-border text-muted-foreground hover:text-foreground hover:bg-accent px-2 py-1.5 text-[11px] transition-colors disabled:opacity-50"
+                                disabled={(busy && !speedBusy) || speedCancelling || speedBusy || atDefault}
+                                title={`Đặt lại tốc độ mặc định ${formatSpeedX(defaultSpeedX)} (theo Khớp thời lượng) và áp dụng cho tất cả`}
+                                onClick={() => {
+                                  setSpeedError(null)
+                                  applyVideoSpeed('all', defaultSpeedX)
+                                }}
+                              >
+                                {atDefault
+                                  ? `Đang ở mặc định ${formatSpeedX(defaultSpeedX)}`
+                                  : `Về mặc định ${formatSpeedX(defaultSpeedX)}`}
                               </button>
                               {speedError && (
-                                <p className="text-[10px] text-destructive leading-snug">{speedError}</p>
+                                <p className="text-[10px] text-amber-600 dark:text-amber-400 leading-snug">{speedError}</p>
                               )}
                               <p className="text-[10px] text-muted-foreground leading-snug">
-                                Kéo slider (0.50–2.00) hoặc bấm nút nhanh → Áp dụng. Mọi track
-                                scale từ timeline gốc — không lệch / không nhân chồng.
+                                Thước = xuất (cùng tốc độ file). Chưa khóa: bấm Áp dụng kể cả 1.00× / 0.80×.
+                                Đã khóa cùng số: chọn tốc độ khác rồi Áp dụng. Khớp preferVideo chỉ TTS.
                               </p>
 
                               {selected && (
@@ -8224,14 +8449,16 @@ export default function LivePreviewEditor({
         durationSec={duration}
       />
       <ProgressPopup
-        active={speedBusy}
+        active={speedBusy || Boolean(speedError && speedProgress > 0)}
         running={speedBusy}
-        title="Đang xử lý tốc độ"
-        message={`Đang áp dụng tốc độ ${speedDraft.toFixed(2)}×...`}
+        title="Đang áp dụng tốc độ video"
+        message={speedMessage || `Đang áp dụng ${formatSpeedX(speedDraft)}…`}
+        progress={speedProgress}
+        error={speedBusy ? null : speedError}
         minimized={false}
-        progress={0}
         onMinimize={() => {}}
         onRestore={() => {}}
+        onCancel={speedBusy && !speedCancelling ? () => void cancelVideoSpeed() : undefined}
       />
     </div>
   )

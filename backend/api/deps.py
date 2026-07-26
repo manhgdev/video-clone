@@ -154,6 +154,8 @@ class PreviewTtsIn(BaseModel):
 class RebakeSpeedIn(BaseModel):
     speed: float = 1.0
     skipRemap: bool = False
+    # FE speedRevision — request cũ (rev nhỏ hơn) bị bỏ, không ghi đè
+    speedRevision: int | None = None
 
 
 class RetranslateIn(BaseModel):

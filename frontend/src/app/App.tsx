@@ -1265,6 +1265,7 @@ export default function App() {
     videoUrl: string
     timeScale?: number
     prevBakedSpeed?: number
+    hasBakedSpeed?: boolean
   }) {
     // Segments/overlays đã remap — giữ text nếu list server thiếu translation
     setSegments((prev) => {
@@ -1274,37 +1275,51 @@ export default function App() {
       return incoming.map((s) => {
         const loc = byId.get(s.id)
         if (!loc) return s
-        if ((s.translation || '').trim()) return s
-        if (!(loc.translation || '').trim() && !(loc.source || '').trim()) return s
+        // Giữ start/end từ server (đã scale); chỉ heal text/media rỗng
         return {
           ...s,
-          translation: loc.translation || s.translation,
-          source: (s.source || '').trim() ? s.source : loc.source,
+          translation: (s.translation || '').trim() || loc.translation || s.translation,
+          source: (s.source || '').trim() || loc.source || s.source,
           audioUrl: s.audioUrl || loc.audioUrl,
           audioFile: s.audioFile || loc.audioFile,
+          audioDuration: s.audioDuration ?? loc.audioDuration,
           bbox: s.bbox ?? loc.bbox,
           captionLayout: s.captionLayout ?? loc.captionLayout,
+          layout: s.layout ?? loc.layout,
+          voice: s.voice || loc.voice,
         }
       })
     })
     if (Array.isArray(res.overlays)) setOverlays(res.overlays)
-    const wc = Math.max(0, res.workClipSec)
+    // Cửa sổ display sau bake — thước = xuất
+    const wc = Math.max(0, Number(res.workClipSec) || Number(res.duration) || 0)
     workClipSecRef.current = wc
     setWorkClipSec(wc)
-    // duration = độ dài timeline display (workDuration khi bake)
-    if (res.duration > 0) setDuration(res.duration)
+    if (wc > 0) setDuration(wc)
+    else if (res.duration > 0) setDuration(res.duration)
     const bs = res.bakedSpeed > 0 ? res.bakedSpeed : res.bakedPreferVideo ? 0.8 : 1
     bakedPreferVideoRef.current = Boolean(res.bakedPreferVideo) && Math.abs(bs - 1) > 0.02
     setBakedPreferVideo(bakedPreferVideoRef.current)
     setBakedSpeed(bs)
-    // rebake luôn = user lock (kể cả 1×)
     setHasBakedSpeed(true)
     setVideoUrl(freshVideoUrl(res.videoUrl))
   }
 
   /** Undo bake: chỉ đổi workVideo — segments giữ từ history snapshot */
-  async function onRestoreBakedSpeed(speed: number) {
+  async function onRestoreBakedSpeed(speed: number, segs?: Segment[]) {
     if (!projectId) return
+    // Persist snapshot TRƯỚC khi rebake (tuần tự — tránh race PUT/POST ghi đè
+    // nhau): server segments + baseline pop phải theo lineage undo.
+    if (segs?.length) {
+      const ordered = [...segs]
+        .sort((a, b) => a.start - b.start || a.end - b.end)
+        .map((s, i) => ({ ...s, index: i }))
+      try {
+        await api.replaceSegments(projectId, ordered)
+      } catch {
+        // giữ undo local; export vẫn gửi segments từ editor
+      }
+    }
     const res = await api.rebakeSpeed(projectId, speed, { skipRemap: true })
     const wc = Math.max(0, res.workClipSec)
     workClipSecRef.current = wc

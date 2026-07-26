@@ -550,11 +550,19 @@ export const api = {
   ) => `${base}/projects/${projectId}/audio/download?kind=${encodeURIComponent(kind)}&t=${Date.now()}`,
 
   /** Bake tốc độ preview toàn bộ + remap timeline. */
-  rebakeSpeed: (projectId: string, speed: number, opts?: { skipRemap?: boolean }) =>
+  rebakeSpeed: (
+    projectId: string,
+    speed: number,
+    opts?: { skipRemap?: boolean; speedRevision?: number; signal?: AbortSignal },
+  ) =>
     fetchJson<{
       ok?: boolean
+      ignored?: boolean
+      reason?: string
+      speedRevision?: number
       bakedSpeed: number
       bakedPreferVideo: boolean
+      hasBakedSpeed?: boolean
       workClipSec: number
       duration: number
       /** t_new = t_old * timeScale — scale media clips Video/Âm gốc */
@@ -571,7 +579,9 @@ export const api = {
         body: JSON.stringify({
           speed,
           skipRemap: Boolean(opts?.skipRemap),
+          speedRevision: opts?.speedRevision ?? null,
         }),
+        signal: opts?.signal,
       },
       600_000,
     ),

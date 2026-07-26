@@ -116,23 +116,25 @@ async def api_upload(file: UploadFile = File(...)):
     dest = root / f"source{ext}"
     tmp.replace(dest)
     duration = ffprobe_duration(dest)
-    save_meta(
-        project_id,
-        {
-            "videoPath": str(dest),
-            "duration": duration,
-            "sourceFp": fp,
-            "segments": [],
-            "cache": {},
-            "settings": Settings().model_dump(),
-            "status": {
-                "step": "video",
-                "progress": 100,
-                "message": "Video sẵn sàng",
-                "running": False,
-            },
+    init_settings = Settings().model_dump()
+    from pipeline.core.media import ensure_project_initial_playback_rate
+
+    init_meta: dict = {
+        "videoPath": str(dest),
+        "duration": duration,
+        "sourceFp": fp,
+        "segments": [],
+        "cache": {},
+        "settings": init_settings,
+        "status": {
+            "step": "video",
+            "progress": 100,
+            "message": "Video sẵn sàng",
+            "running": False,
         },
-    )
+    }
+    ensure_project_initial_playback_rate(init_meta, init_settings)
+    save_meta(project_id, init_meta)
     return {
         "projectId": project_id,
         "videoUrl": f"/api/projects/{project_id}/video",
@@ -169,14 +171,39 @@ def api_rebake_speed(project_id: str, body: RebakeSpeedIn):
     meta = load_meta(project_id)
     if not meta:
         raise HTTPException(404)
-    if (meta.get("status") or {}).get("running"):
+
+    # Chống request cũ ghi đè: chỉ revision >= speedRevision đã lưu mới chạy
+    req_rev = body.speedRevision
+    if req_rev is not None:
+        saved_rev = int(meta.get("speedRevision") or 0)
+        if int(req_rev) < saved_rev:
+            return {
+                "ok": True,
+                "ignored": True,
+                "reason": "STALE_SPEED_REVISION",
+                "speedRevision": saved_rev,
+                "bakedSpeed": meta_baked_speed(meta),
+                "bakedPreferVideo": bool(meta.get("bakedPreferVideo")),
+                "hasBakedSpeed": bool(meta.get("bakedSpeed") is not None or meta.get("bakedPreferVideo")),
+                "workClipSec": float(meta.get("workDuration") or meta.get("previewSec") or 0),
+                "duration": float(meta.get("workDuration") or meta.get("duration") or 0),
+                "segments": meta.get("segments") or [],
+                "overlays": meta.get("overlays") or [],
+                "videoUrl": f"/api/projects/{project_id}/video",
+                "timeScale": 1.0,
+                "prevBakedSpeed": meta_baked_speed(meta),
+            }
+        meta["speedRevision"] = int(req_rev)
+        save_meta(project_id, meta)
+
+    # Job khác (export/dịch) — không chặn nếu chính bake tốc độ đang chạy sẽ clear
+    st_run = (meta.get("status") or {}).get("running")
+    st_step = str((meta.get("status") or {}).get("step") or "")
+    if st_run and st_step not in ("", "video", "idle"):
         raise HTTPException(409, "Đang có job chạy — đợi xong rồi áp dụng tốc độ")
 
     speed = clamp_playback_speed(body.speed)
     old = meta_baked_speed(meta)
-    if not body.skipRemap:
-        remap_timeline_for_speed_change(meta, old, speed)
-
     base = preview_1x_path(project_id, meta)
     if not base.is_file():
         raise HTTPException(404, "Chưa có preview 1× — chạy Dịch trước")
@@ -185,18 +212,45 @@ def api_rebake_speed(project_id: str, body: RebakeSpeedIn):
     preview_sec = max(0, int(meta.get("previewSec") or 0))
     arm_job(project_id)
     try:
+        set_status(
+            project_id,
+            step="video",
+            progress=8,
+            message=f"Chuẩn bị tốc độ {speed:.2f}× (từ {old:.2f}×)…",
+            running=True,
+            error=None,
+        )
+        # Remap timeline TRƯỚC bake file — scale từ baseline 1×, không nhân chồng
+        if not body.skipRemap:
+            set_status(
+                project_id,
+                step="video",
+                progress=18,
+                message="Đang scale timeline / caption / TTS…",
+                running=True,
+                error=None,
+            )
+            remap_timeline_for_speed_change(meta, old, speed)
+
         if abs(speed - 1.0) < 0.001:
+            set_status(
+                project_id,
+                step="video",
+                progress=70,
+                message="Khóa file 1.00×…",
+                running=True,
+                error=None,
+            )
             work = base
             meta.pop("bakedPreferVideo", None)
-            # Giữ key bakedSpeed=1.0 → khóa 1× (không soft preferVideo 0.8 lại)
             meta["bakedSpeed"] = 1.0
             meta.pop("workDuration", None)
         else:
             set_status(
                 project_id,
                 step="video",
-                progress=5,
-                message=f"Bake tốc độ {speed:.2f}×…",
+                progress=35,
+                message=f"Đang bake video {speed:.2f}× (ffmpeg)…",
                 running=True,
                 error=None,
             )
@@ -207,10 +261,49 @@ def api_rebake_speed(project_id: str, body: RebakeSpeedIn):
                 else cache / f"source_{tag}.mp4"
             )
             work = ensure_playback_speed(base, dest, speed, project_id=project_id)
+            set_status(
+                project_id,
+                step="video",
+                progress=85,
+                message="Đang đo độ dài file bake…",
+                running=True,
+                error=None,
+            )
             meta["bakedPreferVideo"] = True
             meta["bakedSpeed"] = speed
             meta["workDuration"] = float(ffprobe_duration(work) or 0)
         meta["workVideo"] = str(work.resolve())
+        # FE timeline sau Áp dụng = đồng hồ display — BE export tin mốc start/end
+        meta["timelineClock"] = "display"
+        # Trước khi ghi: request mới hơn đã claim revision → bỏ kết quả cũ
+        if req_rev is not None:
+            latest = load_meta(project_id) or {}
+            if int(req_rev) < int(latest.get("speedRevision") or 0):
+                set_status(
+                    project_id,
+                    step="video",
+                    progress=100,
+                    message="Bỏ qua bake cũ (đã có tốc độ mới hơn)",
+                    running=False,
+                    error=None,
+                )
+                return {
+                    "ok": True,
+                    "ignored": True,
+                    "reason": "STALE_SPEED_REVISION",
+                    "speedRevision": int(latest.get("speedRevision") or 0),
+                    "bakedSpeed": meta_baked_speed(latest),
+                    "bakedPreferVideo": bool(latest.get("bakedPreferVideo")),
+                    "hasBakedSpeed": True,
+                    "workClipSec": float(latest.get("workDuration") or latest.get("duration") or 0),
+                    "duration": float(latest.get("workDuration") or latest.get("duration") or 0),
+                    "segments": latest.get("segments") or [],
+                    "overlays": latest.get("overlays") or [],
+                    "videoUrl": f"/api/projects/{project_id}/video",
+                    "timeScale": 1.0,
+                    "prevBakedSpeed": old,
+                }
+            meta["speedRevision"] = int(req_rev)
         save_meta(project_id, meta)
     except Cancelled as e:
         set_status(
@@ -236,24 +329,21 @@ def api_rebake_speed(project_id: str, body: RebakeSpeedIn):
         clear_job(project_id)
 
     speed_baked = abs(speed - 1.0) > 0.001
-    work_clip = float(meta["workDuration"]) if speed_baked else float(preview_sec)
-    if not speed_baked and work.is_file():
+    # workClipSec / duration = đúng cửa sổ display (khớp thước sau bake)
+    work_clip = float(meta.get("workDuration") or 0)
+    if work_clip <= 0.2 and work.is_file():
         try:
-            wd = float(ffprobe_duration(work) or 0)
-            if wd > 0.2:
-                work_clip = wd
+            work_clip = float(ffprobe_duration(work) or 0)
         except Exception:
-            pass
-    duration = float(
-        meta.get("workDuration") or ffprobe_duration(work) or meta.get("duration") or 0
-    )
-    if not speed_baked and work_clip > 0:
-        duration = work_clip
+            work_clip = 0.0
+    if work_clip <= 0.2 and preview_sec > 0:
+        work_clip = float(preview_sec) / speed if speed_baked and speed > 0.2 else float(preview_sec)
+    duration = work_clip if work_clip > 0.2 else float(meta.get("duration") or 0)
     set_status(
         project_id,
         step="video",
         progress=100,
-        message=f"Preview {speed:.2f}× sẵn sàng",
+        message=f"Đã áp dụng {speed:.2f}× — thước {duration:.1f}s",
         running=False,
         error=None,
     )
@@ -261,9 +351,8 @@ def api_rebake_speed(project_id: str, body: RebakeSpeedIn):
         "ok": True,
         "bakedSpeed": speed,
         "bakedPreferVideo": speed_baked,
-        # true cả khi 1× — user đã Áp dụng, không soft 0.8 lại
         "hasBakedSpeed": True,
-        "workClipSec": work_clip,
+        "workClipSec": duration,
         "duration": duration,
         "segments": meta.get("segments") or [],
         "overlays": meta.get("overlays") or [],
@@ -316,6 +405,14 @@ def api_status(project_id: str):
     st["bakedPreferVideo"] = bool(speed_baked)
     st["bakedSpeed"] = baked_speed if user_bake else 1.0
     st["hasBakedSpeed"] = bool(user_bake)
+    # Tốc độ khởi tạo (preferVideo→0.8) — ghi 1 lần, không bake file
+    from pipeline.core.media import ensure_project_initial_playback_rate
+
+    had_init = meta.get("projectInitialPlaybackRate") is not None
+    init_rate = ensure_project_initial_playback_rate(meta, meta.get("settings") or {})
+    if not had_init:
+        save_meta(project_id, meta)
+    st["projectInitialPlaybackRate"] = float(init_rate)
     if meta.get("settings"):
         st["settings"] = meta["settings"]
     if meta.get("outputRel"):

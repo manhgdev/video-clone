@@ -47,6 +47,68 @@ def test_rebake_uses_latest_tts_caption_and_overlay_content():
     assert (meta["overlays"][0]["start"], meta["overlays"][0]["end"]) == (2, 5)
 
 
+def test_speed_roundtrip_from_immutable_baseline():
+    """0.80 → 1.15 → 1.00 → 0.80 phải về đúng mốc 0.80 ban đầu (không cascade)."""
+    meta = {
+        "duration": 10.0,
+        "previewSec": 10,
+        "segments": [
+            {"id": "a", "start": 0.0, "end": 4.0, "translation": "một"},
+            {"id": "b", "start": 4.0, "end": 10.0, "translation": "hai", "coverStart": 4.5, "coverEnd": 9.5},
+        ],
+        "overlays": [{"id": "o1", "start": 1.0, "end": 3.0, "text": "logo"}],
+    }
+    # Lần 1: 1.00 → 0.80
+    remap_timeline_for_speed_change(meta, 1.0, 0.8)
+    assert abs(meta["segments"][0]["end"] - 5.0) < 1e-6
+    assert abs(meta["segments"][1]["end"] - 12.5) < 1e-6
+    assert abs(float(meta["workDuration"]) - 12.5) < 1e-6
+    snap_080 = {
+        "segs": [(s["start"], s["end"]) for s in meta["segments"]],
+        "ov": (meta["overlays"][0]["start"], meta["overlays"][0]["end"]),
+        "wd": float(meta["workDuration"]),
+    }
+    baseline_id = id(meta.get("timelineBaseline"))
+
+    # 0.80 → 1.15
+    remap_timeline_for_speed_change(meta, 0.8, 1.15)
+    assert abs(meta["segments"][0]["end"] - (4.0 / 1.15)) < 1e-6
+    assert id(meta.get("timelineBaseline")) == baseline_id  # baseline không bị ghi đè
+
+    # 1.15 → 1.00
+    remap_timeline_for_speed_change(meta, 1.15, 1.0)
+    assert abs(meta["segments"][0]["end"] - 4.0) < 1e-6
+    assert abs(meta["segments"][1]["end"] - 10.0) < 1e-6
+
+    # 1.00 → 0.80 lại = đúng snap_080
+    remap_timeline_for_speed_change(meta, 1.0, 0.8)
+    for i, (st, en) in enumerate(snap_080["segs"]):
+        assert abs(meta["segments"][i]["start"] - st) < 1e-9
+        assert abs(meta["segments"][i]["end"] - en) < 1e-9
+    assert abs(meta["overlays"][0]["start"] - snap_080["ov"][0]) < 1e-9
+    assert abs(meta["overlays"][0]["end"] - snap_080["ov"][1]) < 1e-9
+    assert abs(float(meta["workDuration"]) - snap_080["wd"]) < 1e-9
+
+    # 100 lần 0.80 ↔ 1.15 không drift
+    for _ in range(100):
+        remap_timeline_for_speed_change(meta, 0.8, 1.15)
+        remap_timeline_for_speed_change(meta, 1.15, 0.8)
+    for i, (st, en) in enumerate(snap_080["segs"]):
+        assert abs(meta["segments"][i]["start"] - st) < 1e-9
+        assert abs(meta["segments"][i]["end"] - en) < 1e-9
+
+
+def test_same_speed_noop():
+    meta = {
+        "duration": 10.0,
+        "segments": [{"id": "a", "start": 0.0, "end": 10.0, "translation": "x"}],
+    }
+    remap_timeline_for_speed_change(meta, 1.0, 0.8)
+    before = (meta["segments"][0]["start"], meta["segments"][0]["end"], meta.get("workDuration"))
+    remap_timeline_for_speed_change(meta, 0.8, 0.8)
+    assert (meta["segments"][0]["start"], meta["segments"][0]["end"], meta.get("workDuration")) == before
+
+
 def test_retime_video_segments_maps_tts_speed_to_export_clock(tmp_path, monkeypatch):
     video = tmp_path / "source.mp4"
     video.write_bytes(b"source")
@@ -235,3 +297,26 @@ def test_export_tts_uses_same_baked_speed_as_preview(tmp_path):
 
     assert clips[0][3] == 1.1 * 1.15
     assert clips[0][2] >= 2.0 / clips[0][3]
+
+
+def test_export_retime_base_always_one_global_in_file_only(tmp_path):
+    from pipeline.orchestrate.export_job import _export_retime_base, _timeline_is_final
+
+    baked = tmp_path / "preview_30_s115.mp4"
+    baked.write_bytes(b"x")
+    meta = {
+        "bakedSpeed": 1.15,
+        "bakedPreferVideo": True,
+        "timelineClock": "display",
+        "workVideo": str(baked),
+        "settings": {"matchDuration": "preferVideo"},
+    }
+    # Global bake chỉ trong file — retime export base luôn 1.0
+    assert _export_retime_base(meta, baked, "preferVideo") == 1.0
+    assert _timeline_is_final(meta, baked) is True
+
+    src = tmp_path / "source.mp4"
+    src.write_bytes(b"x")
+    assert _export_retime_base({"settings": {}}, src, "preferVideo") == 1.0
+    assert _timeline_is_final({"bakedSpeed": 1.0}, src) is True
+    assert _timeline_is_final({}, src) is False

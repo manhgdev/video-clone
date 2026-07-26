@@ -54,9 +54,42 @@ from pipeline.export.cover_mask import _apply_cover_mask
 
 
 def _burn_frame_count_complete(written: int, expected: int, fps: float) -> bool:
-    """Allow normal decoder rounding, never accept a materially truncated render."""
-    tolerance = max(2, int(math.ceil(max(1.0, fps) * 0.5)))
-    return written > 0 and (expected <= 0 or written >= max(1, expected - tolerance))
+    """Allow normal decoder rounding, never accept a materially truncated render.
+
+    OpenCV CAP_PROP_FRAME_COUNT often overshoots decodable frames (VFR/B-frames);
+    tolerance scales with length (~0.75s or 0.75% of frames).
+    """
+    if written <= 0:
+        return False
+    if expected <= 0:
+        return True
+    fps_s = max(1.0, float(fps) if fps and fps > 0 else 25.0)
+    tolerance = max(
+        2,
+        int(math.ceil(fps_s * 0.75)),
+        int(math.ceil(expected * 0.0075)),
+    )
+    return written >= max(1, expected - tolerance)
+
+
+def _burn_output_complete(
+    written: int,
+    expected_frames: int,
+    fps: float,
+    output_duration: float,
+    expected_duration: float,
+) -> bool:
+    """Prefer duration when full; frame count alone is unreliable vs OpenCV totals."""
+    if written <= 0:
+        return False
+    dur_ok = expected_duration <= 0 or output_duration + 0.5 >= expected_duration
+    # Duration proves a full encode (audio/container); ignore inflated FRAME_COUNT.
+    if dur_ok and expected_duration > 1.0 and output_duration + 0.25 >= expected_duration:
+        return True
+    frames_ok = _burn_frame_count_complete(written, expected_frames, fps)
+    if not frames_ok:
+        return False
+    return dur_ok
 
 
 def cover_and_burn(
@@ -629,14 +662,29 @@ def cover_and_burn(
         if lay is not None:
             # In cover mode the Editor renders text inside the full mask bbox;
             # captionLayout contributes only its committed lines/font size.
-            if cover and used_preview_layout and cover_box is not None:
-                lay = {
-                    **lay,
-                    "box": cover_box,
-                    "css_cover_mode": (
-                        "label" if is_label else "mid" if uses_bbox_caption else "horizontal"
-                    ),
-                }
+            # css mode = nhánh JSX preview thật: overlay(textarea) / logo text /
+            # nhãn / dọc / mid (cover hoặc kéo tay) / caption đáy below-above.
+            if used_preview_layout:
+                if seg_meta.get("overlayText"):
+                    css_mode = "overlay"
+                elif seg_meta.get("logoText"):
+                    css_mode = "horizontal"
+                elif is_label:
+                    css_mode = "label"
+                elif is_vert:
+                    css_mode = "vertical"
+                elif cover or seg_meta.get("bboxInherited") is False:
+                    css_mode = "mid"
+                else:
+                    css_mode = "horizontal"
+                lay = {**lay, "css_cover_mode": css_mode}
+                if cover and cover_box is not None:
+                    lay["box"] = cover_box
+                elif css_mode in ("mid", "label", "vertical") and not seg_meta.get("overlayText"):
+                    # below/above: dọc/nhãn/kéo-tay vẫn vẽ trong cover như preview
+                    ov_box = cover_box or _segment_bbox_override(seg_meta, w, h)
+                    if ov_box is not None:
+                        lay["box"] = ov_box
             lay = {
                 **lay,
                 "fill_hex": str(seg_meta.get("textColor") or cap_fill_hex),
@@ -837,6 +885,10 @@ def cover_and_burn(
                 "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
                 "-i", str(video), "-an", "-sn", "-dn",
                 "-vf", "hwdownload,format=nv12",
+                # Nguồn VFR (clip -c copy): không CFR-hoá theo tbr — tbr 30 trên
+                # clip 23.9fps từng bơm 153/122 frame → video slow-motion + ffmpeg
+                # -shortest thoát sớm giữa write (written=0, báo truncated).
+                "-fps_mode", "passthrough",
                 "-f", "rawvideo", "-pix_fmt", "bgr24", "-",
             ],
             **decode_kw,
@@ -1059,13 +1111,16 @@ def cover_and_burn(
                 continue
             if batch_raw is None:
                 break
-            # Một write/batch — giảm syscall, nuôi NVENC đều hơn
+            # Ghi từng frame: BrokenPipeError giữa batch vẫn đếm đúng số frame
+            # đã vào encoder (write cả batch từng làm written=0 dù ffmpeg đã
+            # encode gần đủ → báo «truncated» sai).
             try:
                 if proc.poll() is not None:
                     pipe_dead = True
                     break
-                proc.stdin.write(b"".join(batch_raw))
-                written_frames += len(batch_raw)
+                for raw in batch_raw:
+                    proc.stdin.write(raw)
+                    written_frames += 1
             except BrokenPipeError:
                 pipe_dead = True
                 break
@@ -1130,13 +1185,15 @@ def cover_and_burn(
             + (f" — {tail}" if tail else " — broken pipe (ffmpeg thoát sớm)")
         )
     output_duration = float(ffprobe_duration(out) or 0.0)
-    expected_duration = frame_total / fps if frame_total > 0 else 0.0
-    if (
-        not _burn_frame_count_complete(written_frames, frame_total, fps)
-        or (
-            expected_duration > 0
-            and output_duration + 0.5 < expected_duration
-        )
+    # Prefer container duration over OpenCV frame_count/fps (often inflated).
+    src_dur = float(ffprobe_duration(video) or 0.0)
+    expected_duration = (
+        src_dur
+        if src_dur > 0
+        else (frame_total / fps if frame_total > 0 and fps > 0 else 0.0)
+    )
+    if not _burn_output_complete(
+        written_frames, frame_total, fps, output_duration, expected_duration
     ):
         raise RuntimeError(
             "cover_and_burn produced a truncated video "

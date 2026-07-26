@@ -82,6 +82,8 @@ def _locate_via_runtime_subprocess(
     only_missing: bool,
     stable: bool,
     analysis_region: Any,
+    project_id: str | None = None,
+    status_workers: int = 0,
 ) -> int | None:
     """Chạy attach_speech_hardsub_boxes trong process runtime riêng.
 
@@ -114,6 +116,10 @@ def _locate_via_runtime_subprocess(
         "only_missing": only_missing,
         "stable": stable,
         "analysis_region": analysis_region,
+        # Con ghi status «Định vị OCR · x/y» trực tiếp — cha đang block chờ nên
+        # không đua ghi meta.
+        "project_id": project_id,
+        "status_workers": int(status_workers or 0),
     }
     # Worker script file — tránh quoting -c trên Windows
     worker_src = '''# vc-locate-worker
@@ -128,9 +134,10 @@ n = attach_speech_hardsub_boxes_inprocess(
     data["video"],
     data["segments"],
     only_missing=bool(data.get("only_missing", True)),
-    project_id=None,
+    project_id=data.get("project_id"),
     stable=bool(data.get("stable", False)),
     analysis_region=data.get("analysis_region"),
+    status_workers=int(data.get("status_workers") or 0),
 )
 Path(sys.argv[3]).write_text(
     json.dumps({"n": int(n), "segments": data["segments"]}, ensure_ascii=False),
@@ -149,11 +156,14 @@ Path(sys.argv[3]).write_text(
             env["PYTHONPATH"] = str(pipeline_root) + os.pathsep + env.get("PYTHONPATH", "")
             if meipass:
                 env["VIDEO_CLONE_MEIPASS"] = str(meipass)
-            if not env.get("VIDEO_CLONE_HOME"):
-                if sys.platform == "win32":
-                    env["VIDEO_CLONE_HOME"] = str(Path(os.environ.get("LOCALAPPDATA", "")) / "VideoClone")
-                else:
-                    env["VIDEO_CLONE_HOME"] = str(Path.home() / ".local" / "share" / "VideoClone")
+            # Con phải dùng ĐÚNG data dir của cha (dev: backend/, frozen: home
+            # launcher đã set) — fallback LOCALAPPDATA cũ làm set_status của
+            # worker ghi vào public/ ma, UI không thấy «Định vị OCR · x/y».
+            from pipeline.core.config import DATA, PUBLIC_DATA, SERVER_ROOT
+
+            env["VIDEO_CLONE_HOME"] = str(SERVER_ROOT)
+            env["VIDEO_CLONE_DATA"] = str(DATA)
+            env["VIDEO_CLONE_PUBLIC_DATA"] = str(PUBLIC_DATA)
             env.pop("VIDEO_CLONE_DESKTOP", None)
             
             # Windows: KHÔNG dùng MSMF vì MSMF tự động bóp méo khung hình/chèn viền đen (letterboxing)
@@ -918,6 +928,7 @@ def attach_speech_hardsub_boxes(
     project_id: str | None = None,
     stable: bool = False,
     analysis_region: Any = None,
+    status_workers: int = 0,
 ) -> int:
     """Whisper giữ timecode; OCR đo bbox.
 
@@ -935,6 +946,8 @@ def attach_speech_hardsub_boxes(
         only_missing=only_missing,
         stable=stable,
         analysis_region=analysis_region,
+        project_id=project_id,
+        status_workers=status_workers,
     )
     if n == 0 and analysis_region:
         # A stale/manual ROI can miss the actual subtitle band completely.
@@ -951,6 +964,8 @@ def attach_speech_hardsub_boxes(
             only_missing=only_missing,
             stable=stable,
             analysis_region=None,
+            project_id=project_id,
+            status_workers=status_workers,
         )
     if n is not None and n >= 0:
         return n
@@ -969,6 +984,7 @@ def attach_speech_hardsub_boxes(
         project_id=project_id,
         stable=stable,
         analysis_region=analysis_region,
+        status_workers=status_workers,
     )
 
 
@@ -980,6 +996,7 @@ def attach_speech_hardsub_boxes_inprocess(
     project_id: str | None = None,
     stable: bool = False,
     analysis_region: Any = None,
+    status_workers: int = 0,
 ) -> int:
     """In-process locate (dev + runtime worker). Không gọi từ frozen parent nếu tránh được."""
     # Frozen parent fallback: NEVER bare ``import cv2``.
@@ -1107,13 +1124,21 @@ def attach_speech_hardsub_boxes_inprocess(
         _report._prev_done = done
         pct = 95 + min(3, int(3 * done / total))
         from ..core.project import set_status
+        from ..core.resources import progress_msg
 
         mode_lab = "ổn định đầu•giữa•cuối" if stable else "nhanh 1 frame"
         set_status(
             project_id,
             step="translate",
             progress=pct,
-            message=f"Định vị OCR {done}/{total} mốc ({mode_lab})…",
+            # «Định vị OCR · 3/10 · nhanh 1 frame · 8 luồng»
+            message=progress_msg(
+                "Định vị OCR",
+                done,
+                total,
+                extra=mode_lab,
+                workers=status_workers or None,
+            ),
             running=True,
         )
 

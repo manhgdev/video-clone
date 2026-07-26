@@ -20,6 +20,7 @@ from pipeline.core.media import (
     ensure_preview_clip,
     extract_audio,
     ffprobe_duration,
+    preview_clip_matches,
     retime_video_segments,
     video_size,
 )
@@ -121,8 +122,8 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
         else:
             video = source
 
-        # Lần đầu dịch/lồng tiếng: luôn 1× (không bake 0.80).
-        # Chậm/nhanh chỉ khi user bấm «Áp dụng tốc độ» trong editor (rebake-speed).
+        # preferVideo: bake 0.80× TRƯỚC ASR (khối dưới) — xử lý thẳng trên file
+        # chậm. Các mode khác: 1×; đổi tốc độ sau bằng «Áp dụng» (rebake-speed).
         match_mode = str(settings.get("matchDuration") or "preferVideo")
         user_baked = abs(float(meta.get("bakedSpeed") or 1.0) - 1.0) > 0.02
         work = Path(str(meta.get("workVideo") or ""))
@@ -142,7 +143,7 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                 video = source
                 meta["workVideo"] = str(video.resolve())
         elif user_baked and work_ok and (
-            f"preview_{preview_sec}" in work.name
+            preview_clip_matches(work.name, preview_sec)
             or work.resolve() == video.resolve()
         ):
             # Cùng cửa sổ preview + đã bake tốc độ → giữ
@@ -152,6 +153,40 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
             meta.pop("bakedSpeed", None)
             meta.pop("workDuration", None)
             meta["workVideo"] = str(video.resolve())
+
+        # «Ưu tiên chậm 0.8»: làm chậm clip TRƯỚC rồi mới ASR/dịch/OCR trên
+        # chính file đó — editor nhận đúng file đã xử lý, không remap sau.
+        if (
+            str(settings.get("matchDuration") or "") == "preferVideo"
+            and meta.get("bakedSpeed") is None
+        ):
+            from pipeline.core.media import ensure_playback_speed, speed_cache_tag
+
+            set_status(
+                project_id,
+                step="asr",
+                progress=4,
+                message="Làm chậm video 0.80× (ưu tiên chậm) trước khi dịch…",
+                running=True,
+            )
+            s080 = speed_cache_tag(0.8)
+            dest = ensure_layout(project_id) / "cache" / (
+                f"preview_{preview_sec}_{s080}.mp4"
+                if preview_sec > 0
+                else f"source_{s080}.mp4"
+            )
+            video = ensure_playback_speed(video, dest, 0.8, project_id=project_id)
+            meta["bakedPreferVideo"] = True
+            meta["bakedSpeed"] = 0.8
+            meta["workDuration"] = float(ffprobe_duration(video) or 0)
+            meta["workVideo"] = str(video.resolve())
+            meta["timelineClock"] = "display"
+
+        # Cache key theo tốc độ file thật sự ASR (0.8 bake trước ≠ cache 1×)
+        from pipeline.core.media import meta_baked_speed as _meta_baked_speed
+
+        work_speed = _meta_baked_speed(meta)
+        a_key = asr_cache_key(run_settings, source_fp, speed=work_speed)
 
         # Đồng bộ cửa sổ làm việc ngay (status/editor không kẹt Ns cũ)
         meta["previewSec"] = preview_sec
@@ -167,7 +202,7 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                 running=True,
             )
         else:
-            wav = cache_audio(project_id, audio_cache_tag(preview_sec, match_mode))
+            wav = cache_audio(project_id, audio_cache_tag(preview_sec, match_mode, speed=work_speed))
             engine = settings.get("engine", "whisper")
             use_ocr = engine in ("paddleocr", "screen")
             if not use_ocr:
@@ -452,6 +487,7 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                         project_id=project_id,
                         stable=bool(settings.get("stableCaptionLocate", False)),
                         analysis_region=settings.get("analysisRegion"),
+                        status_workers=locate_w,
                     )
                     locate_ok = True
                 except BaseException as ocr_e:

@@ -21,31 +21,21 @@ export function dubPlaybackSpeed(seg: Segment, bakedSpeed = 1): number {
 }
 
 /**
- * Playback rate preview.
- *
- * - hasBakedSpeed / bakedPreferVideo / bakedSpeed≠1 → file đã bake (kể cả 1× user lock)
- *   → rate = 1 (× videoSpeed câu nếu TTS-fit)
- * - preferVideo + chưa user-bake → soft 0.80× qua playbackRate (file vẫn 1×)
+ * Playback rate preview — khớp thước + xuất.
+ * Chỉ videoSpeed câu; không soft 0.8 ngầm. Muốn 0.80×: bấm Áp dụng (bake).
  */
 export function previewVideoRate(
-  matchDuration: string | undefined,
-  bakedPreferVideo?: boolean,
+  _matchDuration: string | undefined,
+  _bakedPreferVideo?: boolean,
   segSpeed?: number,
-  bakedSpeed?: number,
-  hasBakedSpeed?: boolean,
+  _bakedSpeed?: number,
+  _hasBakedSpeed?: boolean,
 ): number {
-  const speedOff1 =
-    typeof bakedSpeed === 'number' && bakedSpeed > 0.2 && Math.abs(bakedSpeed - 1) > 0.02
-  // User đã Áp dụng (1× hoặc ≠1) hoặc file bake ≠1 → không soft 0.8
-  const fileOrLocked =
-    Boolean(hasBakedSpeed) || Boolean(bakedPreferVideo) || speedOff1
   const vs =
     typeof segSpeed === 'number' && segSpeed > 0.2
       ? Math.max(0.35, Math.min(2, segSpeed))
       : 1
-  if (fileOrLocked) return vs
-  const base = matchDuration === 'preferVideo' ? 0.8 : 1
-  return base * vs
+  return vs
 }
 
 /** Tốc độ bake file thật (1 = file 1×). Soft preferVideo không tính. */
@@ -61,17 +51,72 @@ export function fileBakedSpeed(
   return 1
 }
 
-/** Giá trị hiển thị slider: file bake, hoặc soft 0.8 preferVideo, hoặc 1. */
+/** Slider = tốc độ file đã áp dụng (1.00× nếu chưa bake). Không giả soft 0.8. */
 export function displaySpeedDraft(
-  matchDuration: string | undefined,
+  _matchDuration: string | undefined,
   bakedSpeed?: number,
   bakedPreferVideo?: boolean,
   hasBakedSpeed?: boolean,
 ): number {
-  const file = fileBakedSpeed(bakedSpeed, bakedPreferVideo, hasBakedSpeed)
-  if (hasBakedSpeed || Math.abs(file - 1) > 0.02) return file
-  if (matchDuration === 'preferVideo') return 0.8
-  return 1
+  return fileBakedSpeed(bakedSpeed, bakedPreferVideo, hasBakedSpeed)
+}
+
+/** Format 0.80× / 1.00× / 1.15× */
+export function formatSpeedX(speed: number): string {
+  const v = Math.round(Math.max(0.5, Math.min(2, speed)) * 100) / 100
+  return `${v.toFixed(2)}×`
+}
+
+/** Tốc độ file trên đĩa sau Áp dụng (1.00 nếu chưa). */
+export function appliedFileSpeed(
+  bakedSpeed?: number,
+  bakedPreferVideo?: boolean,
+  hasBakedSpeed?: boolean,
+): number {
+  return fileBakedSpeed(bakedSpeed, bakedPreferVideo, hasBakedSpeed)
+}
+
+/**
+ * Nhãn rõ: đầu vào (file) vs đã áp dụng vs xuất = thước.
+ */
+export function speedStatusLines(
+  matchDuration: string | undefined,
+  draftSpeed: number,
+  bakedSpeed?: number,
+  bakedPreferVideo?: boolean,
+  hasBakedSpeed?: boolean,
+): { inputLine: string; appliedLine: string; exportLine: string; matchLabel: string } {
+  const draft = Math.round(Math.max(0.5, Math.min(2, draftSpeed)) * 100) / 100
+  const applied = appliedFileSpeed(bakedSpeed, bakedPreferVideo, hasBakedSpeed)
+  const locked =
+    Boolean(hasBakedSpeed)
+    || Boolean(bakedPreferVideo)
+    || Math.abs(applied - 1) > 0.02
+
+  let matchLabel = 'Khớp: theo cài đặt'
+  if (matchDuration === 'preferVideo') {
+    matchLabel = locked
+      ? `Khớp preferVideo · file ${formatSpeedX(applied)}`
+      : 'Khớp preferVideo · file 1.00× (chưa Áp dụng tốc độ)'
+  } else if (matchDuration === 'stretch') matchLabel = 'Khớp: kéo TTS · file theo Áp dụng'
+  else if (matchDuration === 'natural') matchLabel = 'Khớp: tự nhiên · file theo Áp dụng'
+  else if (matchDuration === 'none') matchLabel = 'Khớp: không · file theo Áp dụng'
+
+  const inputLine = locked
+    ? `Đầu vào (file đang phát): ${formatSpeedX(applied)}`
+    : 'Đầu vào (file đang phát): 1.00×'
+
+  const appliedLine = locked
+    ? `Đã áp dụng cho tất cả: ${formatSpeedX(applied)} (file + timeline + xuất)`
+    : Math.abs(draft - 1) > 0.02
+      ? `Đã áp dụng cho tất cả: chưa — chọn ${formatSpeedX(draft)}, bấm Áp dụng`
+      : 'Đã áp dụng cho tất cả: chưa — file 1.00×'
+
+  const exportLine = locked
+    ? `Xuất = thước timeline @ file ${formatSpeedX(applied)}`
+    : `Xuất = thước timeline @ 1.00× (bấm Áp dụng ${formatSpeedX(draft)} nếu muốn chậm/nhanh)`
+
+  return { inputLine, appliedLine, exportLine, matchLabel }
 }
 
 /** Scale media clip list theo bake speed (Video / Âm gốc local). */
@@ -81,6 +126,39 @@ export function scaleMediaClips(list: MediaClip[], scale: number): MediaClip[] {
     ...c,
     start: Math.max(0, c.start * scale),
     end: Math.max(0.05, c.end * scale),
+  }))
+}
+
+function _roundUs(t: number): number {
+  return Math.round(t * 1_000_000) / 1_000_000
+}
+
+/** Quy clip display → mốc 1× (baseline bất biến). */
+export function mediaClipsTo1xBaseline(list: MediaClip[], currentSpeed: number): MediaClip[] {
+  const s = Math.max(0.5, Math.min(2, currentSpeed || 1))
+  if (!list.length || Math.abs(s - 1) < 1e-9) {
+    return list.map((c) => ({ ...c, start: _roundUs(c.start), end: _roundUs(c.end) }))
+  }
+  return list.map((c) => ({
+    ...c,
+    start: _roundUs(c.start * s),
+    end: _roundUs(Math.max(0.05, c.end * s)),
+    // sourceStart giữ toạ độ file nguồn 1×
+  }))
+}
+
+/** Từ baseline 1× → display @ speed (mọi lần từ cùng gốc — không cascade). */
+export function mediaClipsFrom1xBaseline(baseline: MediaClip[], speed: number): MediaClip[] {
+  const s = Math.max(0.5, Math.min(2, speed || 1))
+  const scale = 1 / s
+  if (!baseline.length) return []
+  if (Math.abs(scale - 1) < 1e-9) {
+    return baseline.map((c) => ({ ...c, start: _roundUs(c.start), end: _roundUs(c.end) }))
+  }
+  return baseline.map((c) => ({
+    ...c,
+    start: _roundUs(c.start * scale),
+    end: _roundUs(Math.max(0.05, c.end * scale)),
   }))
 }
 
