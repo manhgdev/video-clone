@@ -13,7 +13,7 @@ render đều phải qua kiểm tra parity với preview (WYSIWYG).
 | P2 | Chỉ encode đoạn có cue, copy phần trống | ✅ 2026-07-27 (`f3143f7`) |
 | P1.5 | Gộp crop/scale vào burn + xử lý logo fade | ✅ 2026-07-27 (`5352464`) |
 | P3 | Đo Demucs + TTS video dài (đo trước, chưa sửa) | ✅ 2026-07-27 — bảng dưới |
-| P4 | FE: bundle split + tách nốt LivePreviewEditor | ⬜ |
+| P4 | FE: bundle split + tách nốt LivePreviewEditor | ✅ 2026-07-27 — bundle 735KB→355KB chính |
 | P5 | Vệ sinh: skipif test môi trường, app.log, git fsync | ⬜ xen kẽ |
 
 ## Số đo đã chốt (clip 30s, 1080×1920@30, GTX 1660 SUPER)
@@ -112,16 +112,16 @@ Hiện trạng: bundle >600 KB (cảnh báo vite);
 [LivePreviewEditor.tsx](frontend/src/features/editor/LivePreviewEditor.tsx) còn 6435 dòng,
 [TtsStudio.tsx](frontend/src/features/tts/TtsStudio.tsx) 1997 dòng (đã tách hook/panel đợt 1).
 
-1. `vite.config` `build.rollupOptions.output.manualChunks` hoặc dynamic
-   `import()` cho 2 màn nặng: editor (LivePreviewEditor + lib đo caption) và TtsStudio —
-   route/tab nào mở mới tải chunk đó.
-2. LivePreviewEditor tách tiếp theo seam đã khảo sát: phần render timeline canvas,
-   phần overlay caption editor, phần transport (play/seek) — mỗi phần một component
-   nhận props hẹp; hook đã tách (useSpeedTransaction/useDubAudioSync/useTimelineDrag)
-   giữ nguyên.
-3. Sau tách: `tsc --noEmit` sạch + self-check FE (`__checkOcrOverlayLayout`,
-   `__checkExportBakePlacement`) + xuất thử 1 preview so WYSIWYG.
-- DoD: build hết cảnh báo chunk; số dòng LivePreviewEditor ≤ ~3000; tsc sạch.
+**Đã làm (2026-07-27):**
+1. ✅ `React.lazy` cho LivePreviewEditor + TtsPage trong App.tsx (Suspense bọc vùng
+   page) — bundle chính 735KB → **355KB** + editor 308KB + TTS 70KB tải theo nhu cầu;
+   build hết cảnh báo 600KB; `tsc --noEmit` sạch.
+2. ✅ Tách `panelLayout.tsx` (SortablePanel, PANEL_SIZES, loadTimelineTool,
+   loadCaptionFont) khỏi LivePreviewEditor — còn 6355 dòng.
+3. ⬜ CHƯA tách sâu JSX timeline/preview/transport: các khối này tham chiếu trực tiếp
+   ~50 state/handler cục bộ — tách bây giờ = prop-drilling khổng lồ, rủi ro WYSIWYG.
+   Điều kiện tiên quyết: chuyển state editor sang store (zustand/context) trước,
+   rồi mới cắt component. Để riêng thành việc lớn khi cần sửa editor tiếp.
 
 ## P5 — Vệ sinh (xen kẽ lúc chờ)
 

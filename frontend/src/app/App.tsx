@@ -1,17 +1,22 @@
 import {
+  Suspense,
+  lazy,
   useEffect,
   useRef,
   useState,
   type MouseEvent as ReactMouseEvent,
 } from 'react'
 import Header, { type AppMode } from '@/shared/components/Header'
-import LivePreviewEditor from '@/features/editor/LivePreviewEditor'
 import ProgressPopup from '@/shared/components/ProgressPopup'
 import ProjectSidebar from '@/features/project/ProjectSidebar'
 import PipelineStepper from '@/features/project/PipelineStepper'
 import SegmentList from '@/features/project/SegmentList'
 import ConfigModal from '@/features/configuration/ConfigModal'
-import TtsPage from '@/pages/TtsPage'
+
+// Hai màn nặng nhất (editor + TTS studio) tải theo nhu cầu — bundle chính
+// không còn vượt cảnh báo 600KB của vite.
+const LivePreviewEditor = lazy(() => import('@/features/editor/LivePreviewEditor'))
+const TtsPage = lazy(() => import('@/pages/TtsPage'))
 import DownloadPage from '@/pages/DownloadPage'
 import FilmPage from '@/pages/FilmPage'
 import BatchPage from '@/pages/BatchPage'
@@ -762,6 +767,7 @@ export default function App() {
           void api.voices(l).then(setVoices).catch(() => {})
         }}
       />
+      <Suspense fallback={<div className="page-loading" role="status">Đang tải…</div>}>
       {appUsable ? (
       appMode === 'tts' ? (
         <TtsPage
@@ -964,6 +970,7 @@ export default function App() {
       </div>
       )
       ) : null}
+      </Suspense>
       {cacheToast && (
         <div className="cache-toast" role="status">
           {cacheToast}
