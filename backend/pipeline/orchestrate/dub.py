@@ -295,7 +295,7 @@ def run_dub(project_id: str, *, finalize: bool = True, nested: bool = False) -> 
         # ≤2×), không giãn video. Xuất = preview = đúng thời lượng nguồn.
         from pipeline.orchestrate.tts_fit import fit_tts_audio_to_slots
 
-        n_stretch = fit_tts_audio_to_slots(segments, root, match=match)
+        n_stretch = fit_tts_audio_to_slots(segments, root, match=match, bake=bake_now)
         meta["segments"] = segments
         # Không ép chậm 0.80× lúc dub — chỉ stretch từng câu (videoSpeed) nếu cần
         if "videoSlowFactor" in meta:

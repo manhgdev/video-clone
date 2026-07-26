@@ -26,13 +26,17 @@ def strip_auto_video_speeds(segments: list[dict[str, Any]]) -> None:
 
 
 def fit_tts_audio_to_slots(
-    segments: list[dict[str, Any]], root: Path, *, match: str
+    segments: list[dict[str, Any]], root: Path, *, match: str, bake: float = 1.0
 ) -> int:
-    """Nén wav TTS (atempo ≤2×) cho vừa khe tới câu sau. Trả số wav đã nén.
+    """Nén wav TTS (atempo) cho vừa khe tới câu sau. Trả số wav đã nén.
 
     Wav dùng chung nhiều câu (cùng text+voice) → fit theo khe HẸP NHẤT.
     Câu cuối không có câu sau → để tự nhiên. match="none": user tắt khớp —
     không đụng audio.
+
+    bake: đồng hồ lúc dub (ttsBake). Dub ở 0.8 rồi nâng 1× thì giọng sẽ
+    phát nhanh thêm ×(1/bake)=1.25 — trần nén hạ còn 2.0×bake để TỔNG tốc
+    độ giọng nghe được không vượt ~2×.
     """
     from pipeline.core.media import ffprobe_duration
     from pipeline.tts.audio_utils import fit_duration
@@ -63,6 +67,12 @@ def fit_tts_audio_to_slots(
         slot = max(0.15, next_start - start - 0.03) * manual
         by_wav[name] = min(by_wav.get(name, 1e9), slot)
 
+    # Trần nén: tổng giọng (nén × nâng-bake sau này) ≤ ~2×
+    try:
+        bk = max(0.5, min(2.0, float(bake or 1.0)))
+    except (TypeError, ValueError):
+        bk = 1.0
+    max_compress = max(1.2, 2.0 * min(1.0, bk))
     n = 0
     for name, slot in by_wav.items():
         wav = root / "tts" / name
@@ -71,7 +81,7 @@ def fit_tts_audio_to_slots(
         dur = float(ffprobe_duration(wav) or 0.0)
         if dur <= 0.05 or dur <= slot * 1.04:
             continue
-        target = max(slot, dur / 2.0)  # nén tối đa 2× — quá nữa thì chấp nhận tràn
+        target = max(slot, dur / max_compress)  # quá trần thì chấp nhận tràn nhẹ
         try:
             new_dur = float(fit_duration(wav, target, "stretch", force_refit=True))
         except Exception:

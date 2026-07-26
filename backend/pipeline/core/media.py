@@ -785,13 +785,6 @@ def _retime_segmented(
             "\n".join(f"file '{str(f).replace(chr(92), '/')}'" for f in parts) + "\n",
             encoding="utf-8",
         )
-        vcat = tdir / "vcat.mp4"
-        run_cmd(
-            project_id,
-            ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-             "-f", "concat", "-safe", "0", "-i", str(lst),
-             "-c", "copy", "-an", str(vcat)],
-        )
         if has_audio:
             afilt: list[str] = []
             albl: list[str] = []
@@ -811,15 +804,21 @@ def _retime_segmented(
                  "-i", str(video), "-filter_complex_script", str(afc),
                  "-map", "[aout]", "-c:a", "aac", "-b:a", "128k", str(aud)],
             )
+            # Nối + ghép audio một lệnh — video chỉ ghi đĩa một lượt
             run_cmd(
                 project_id,
                 ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-                 "-i", str(vcat), "-i", str(aud),
+                 "-f", "concat", "-safe", "0", "-i", str(lst), "-i", str(aud),
                  "-map", "0:v", "-map", "1:a", "-c", "copy",
                  "-map_metadata", "-1", "-map_chapters", "-1", str(tmp_out)],
             )
         else:
-            shutil.copyfile(vcat, tmp_out)
+            run_cmd(
+                project_id,
+                ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                 "-f", "concat", "-safe", "0", "-i", str(lst),
+                 "-c", "copy", "-an", str(tmp_out)],
+            )
         expect = spans[-1][4] if spans else duration
         got = ffprobe_duration(tmp_out)
         if abs(got - expect) > 0.25:

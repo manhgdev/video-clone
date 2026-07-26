@@ -635,18 +635,11 @@ def _render_segmented(
         "\n".join(f"file '{str(f).replace(chr(92), '/')}'" for f in final_parts) + "\n",
         encoding="utf-8",
     )
-    vcat = tmpdir / "vcat.mp4"
+    # Nối + ghép audio MỘT lệnh — video ~nửa GB chỉ ghi đĩa một lần
+    # (trước đây concat→vcat rồi vcat→out là hai lượt ghi).
     rc = _run_ffmpeg(
         ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-         "-f", "concat", "-safe", "0", "-i", str(lst),
-         "-c", "copy", "-an", str(vcat)],
-        project_id,
-    )
-    if rc != 0:
-        return False
-    rc = _run_ffmpeg(
-        ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-         "-i", str(vcat), "-i", str(video),
+         "-f", "concat", "-safe", "0", "-i", str(lst), "-i", str(video),
          "-map", "0:v", "-map", "1:a?",
          "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
          "-map_metadata", "-1", "-map_chapters", "-1", str(out)],
