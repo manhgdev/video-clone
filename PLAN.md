@@ -11,8 +11,8 @@ render đều phải qua kiểm tra parity với preview (WYSIWYG).
 | P0 | Gộp 4 nhánh (OCR-GPU, system_check, TtsStudio/App, LivePreviewEditor) | ✅ 2026-07-27 |
 | P1 | ffmpeg vẽ mask+chữ trong filter graph | ✅ 2026-07-27 (`e75027c`) |
 | P2 | Chỉ encode đoạn có cue, copy phần trống | ✅ 2026-07-27 (`f3143f7`) |
-| P1.5 | Gộp crop/scale vào burn + xử lý logo fade | ⬜ kế tiếp |
-| P3 | Đo Demucs + TTS video dài (đo trước, chưa sửa) | ⬜ |
+| P1.5 | Gộp crop/scale vào burn + xử lý logo fade | ✅ 2026-07-27 (`5352464`) |
+| P3 | Đo Demucs + TTS video dài (đo trước, chưa sửa) | ✅ 2026-07-27 — bảng dưới |
 | P4 | FE: bundle split + tách nốt LivePreviewEditor | ⬜ |
 | P5 | Vệ sinh: skipif test môi trường, app.log, git fsync | ⬜ xen kẽ |
 
@@ -87,16 +87,24 @@ Sau P1/P2, hai khâu này là nghẽn lớn nhất còn lại với video vài t
 4. Toàn trình: bấm giờ từng bước của một export video dài (bảng step→giây) để biết
    thứ tự nghẽn thật sau P1/P2.
 
-| Khâu | phút/giờ video | VRAM | Cache lần 2 | Ghi chú |
-|---|---|---|---|---|
-| Demucs | ? | ? | ? | |
-| TTS | ? | — | ? | |
-| retime | ? | — | — | |
-| burn (P2) | đã có | — | — | ~7–10ph/2h |
+**Kết quả đo 2026-07-27** (video thật 519s/145 câu của project 04dcfdeab58e + clip 30s):
 
-**Ứng viên sửa (chỉ chọn sau khi có số):** chunk Demucs + resume; skip Demucs khi
-mode=original; TTS batch/song song có kiểm soát; gộp retime vào graph burn.
-- DoD: bảng trên điền đủ + 1 đoạn kết luận ghi vào PLAN này, chọn tối đa 2 việc làm tiếp.
+| Khâu | Số đo | Ngoại suy /giờ video | Cache lần 2 |
+|---|---|---|---|
+| Demucs (`separate_no_vocals`) | 70,2s / 519s · VRAM đỉnh ~1,4GB | **~8 phút** | 0,00s (hit `no_vocals_{key}.wav`) |
+| TTS VieNeu | nạp model 81s (1 lần) + **3,1s/câu** khi nóng | 145 câu/8,6ph ≈ 1000 câu/giờ → **~52 phút** | ~0 (file `tts/{id}.wav` tồn tại là skip) |
+| retime (`retime_video_segments`) | no-op **0,05s** (không videoSpeed → trả nguồn); có 1 câu videoSpeed: 2,3s/30s | ~4,7 phút (re-encode toàn bộ) | — |
+| burn (P1/P2) | đã đo ở trên | ~7–10 phút | — |
+
+**Kết luận:** sau P1/P2/P1.5, **TTS là nghẽn số 1** cho lần chạy đầu (~52ph/giờ video,
+tuần tự 1 câu/lượt); Demucs (~8ph) và burn (~7–10ph) cùng hạng và đều cache tốt;
+re-export gần miễn phí ở mọi khâu. Chọn đúng 2 việc:
+1. **TTS song song có kiểm soát** — chạy 2–3 câu cùng lúc (VieNeu ~1,4GB VRAM/stream
+   ước tính, GTX 1660 6GB còn chỗ); phải đo VRAM thật trước khi chốt số luồng,
+   giữ thứ tự ghi file + cancel_check. Kỳ vọng ~2–3× → ~20ph/giờ video.
+2. **retime copy đoạn trống** — tái dùng hạ tầng segment P2: chỉ re-encode span có
+   videoSpeed≠1, copy phần còn lại (video 1 giờ chỉnh 5 câu: 4,7ph → <1ph).
+KHÔNG sửa Demucs (đã đủ nhanh + cache chuẩn, skip đúng khi mode=original).
 
 ## P4 — Frontend: bundle + hoàn tất tách file (≈1 buổi)
 
