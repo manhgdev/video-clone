@@ -19,7 +19,6 @@ import {
   PropLabel,
   TabSvg,
   coverMaskPreviewStyle,
-  dubPlaybackSpeed,
   formatSpeedX,
   formatTimecode,
   isOcrOverlayLayout,
@@ -27,6 +26,17 @@ import {
   segmentHasDub,
   speedStatusLines,
 } from '@/features/editor/lib'
+
+/** «Ưu tiên 0.8»: dub ở đồng hồ 0.8 rồi nâng 1× → giọng phát ×(bake/ttsBake).
+ *  UI Tốc độ TTS làm việc theo TỐC ĐỘ PHÁT THỰC; lưu xuống manual = eff/ratio. */
+function ttsPlayRatio(ttsBake: number | undefined, bakedSpeed: number | undefined): number {
+  const tb = typeof ttsBake === 'number' && ttsBake > 0.2 && ttsBake <= 2.5 ? ttsBake : 1
+  const bk = typeof bakedSpeed === 'number' && bakedSpeed > 0.2 ? Math.max(0.5, Math.min(2, bakedSpeed)) : 1
+  return bk / tb
+}
+
+const TTS_PRESETS = [0.75, 0.9, 1, 1.15, 1.3, 1.5]
+const clampTtsManual = (v: number) => Math.max(0.75, Math.min(1.5, Math.round(v * 1000) / 1000))
 
 type Props = {
   effectivePropTab: PropTab
@@ -1020,40 +1030,52 @@ export function EditorPropertiesPanel({
                               ))}
                             </div>
 
-                            <PropLabel label={(() => {
-                              const manual = selected.ttsSpeed ?? 1
-                              const eff = dubPlaybackSpeed(selected, bakedSpeed ?? 1)
-                              // Dub ở đồng hồ 0.8 rồi nâng 1× → giọng phát ×1.25 dù slider 1.00
-                              return Math.abs(eff - manual) > 0.02
-                                ? `Tốc độ TTS: ${manual.toFixed(2)}× · phát thực ${eff.toFixed(2)}× (nâng ${(selected.ttsBake ?? 1).toFixed(2)}→${(bakedSpeed ?? 1).toFixed(2)})`
-                                : `Tốc độ TTS: ${manual.toFixed(2)}×`
-                            })()}>
-                              <input type="range" min={0.75} max={1.5} step={0.05}
-                                className="w-full accent-primary"
-                                value={selected.ttsSpeed ?? 1}
-                                onChange={(e) => editSegment(
-                                  { ...selected, ttsSpeed: Number(e.target.value) },
-                                  { textField: 'ttsSpeed' },
-                                )}
-                              />
-                            </PropLabel>
-                            <div className="flex gap-1">
-                              {[0.75, 0.9, 1, 1.15, 1.3, 1.5].map((v) => (
-                                <button
-                                  key={v}
-                                  type="button"
-                                  className={cn(
-                                    'flex-1 rounded-sm border px-1 py-1 text-[10px] transition-colors',
-                                    (selected.ttsSpeed ?? 1) === v
-                                      ? 'border-primary text-primary bg-primary/10'
-                                      : 'border-border text-muted-foreground hover:text-foreground hover:bg-accent',
-                                  )}
-                                  onClick={() => editSegment({ ...selected, ttsSpeed: v })}
-                                >
-                                  {v}×
-                                </button>
-                              ))}
-                            </div>
+                            {(() => {
+                              const segRatio = ttsPlayRatio(selected.ttsBake, bakedSpeed)
+                              const eff = (selected.ttsSpeed ?? 1) * segRatio
+                              return (
+                                <>
+                                  <PropLabel label={Math.abs(segRatio - 1) > 0.02
+                                    ? `Tốc độ TTS (phát thực): ${eff.toFixed(2)}× — dub ở ${(selected.ttsBake ?? 1).toFixed(2)}, timeline ${(bakedSpeed ?? 1).toFixed(2)}`
+                                    : `Tốc độ TTS: ${eff.toFixed(2)}×`}>
+                                    <input type="range"
+                                      min={0.75 * segRatio} max={1.5 * segRatio} step={0.05}
+                                      className="w-full accent-primary"
+                                      value={eff}
+                                      onChange={(e) => editSegment(
+                                        { ...selected, ttsSpeed: clampTtsManual(Number(e.target.value) / segRatio) },
+                                        { textField: 'ttsSpeed' },
+                                      )}
+                                    />
+                                  </PropLabel>
+                                  <div className="flex gap-1">
+                                    {TTS_PRESETS.map((v) => {
+                                      const manual = v / segRatio
+                                      const ok = manual >= 0.749 && manual <= 1.501
+                                      return (
+                                        <button
+                                          key={v}
+                                          type="button"
+                                          disabled={!ok}
+                                          title={ok ? undefined : 'Ngoài dải nén cho phép của đồng hồ hiện tại'}
+                                          className={cn(
+                                            'flex-1 rounded-sm border px-1 py-1 text-[10px] transition-colors',
+                                            Math.abs(eff - v) < 0.03
+                                              ? 'border-primary text-primary bg-primary/10'
+                                              : ok
+                                                ? 'border-border text-muted-foreground hover:text-foreground hover:bg-accent'
+                                                : 'border-border text-muted-foreground/40',
+                                          )}
+                                          onClick={() => editSegment({ ...selected, ttsSpeed: clampTtsManual(manual) })}
+                                        >
+                                          {v}×
+                                        </button>
+                                      )
+                                    })}
+                                  </div>
+                                </>
+                              )
+                            })()}
 
                             <button
                               type="button"
@@ -1115,61 +1137,65 @@ export function EditorPropertiesPanel({
                                   ))}
                                 </div>
 
-                                <PropLabel label={(() => {
+                                {(() => {
                                   const dubRef = segments.find((s) => (s.ttsBake ?? 0) > 0)
-                                  const eff = dubRef
-                                    ? dubPlaybackSpeed({ ...dubRef, ttsSpeed: globalTtsSpeed }, bakedSpeed ?? 1)
-                                    : globalTtsSpeed
-                                  return Math.abs(eff - globalTtsSpeed) > 0.02
-                                    ? `Tốc độ TTS: ${globalTtsSpeed.toFixed(2)}× · phát thực ${eff.toFixed(2)}× · tất cả (nâng ${(dubRef?.ttsBake ?? 1).toFixed(2)}→${(bakedSpeed ?? 1).toFixed(2)})`
-                                    : `Tốc độ TTS: ${globalTtsSpeed.toFixed(2)}× · tất cả`
-                                })()}>
-                                  <input
-                                    type="range"
-                                    min={0.75}
-                                    max={1.5}
-                                    step={0.05}
-                                    className="w-full accent-primary"
-                                    value={globalTtsSpeed}
-                                    disabled={busy}
-                                    onChange={(e) => setGlobalTtsSpeed(Number(e.target.value))}
-                                    onPointerUp={(e) => {
-                                      const v = Number(e.currentTarget.value)
-                                      pushHistory()
-                                      const applied = segments.map((s) => {
-                                        if ((s.layout === 'vertical' || s.layout === 'label') && s.dub !== true) return s
-                                        return { ...s, ttsSpeed: v }
-                                      })
-                                      void onSegmentsReplace(applied)
-                                    }}
-                                  />
-                                </PropLabel>
-                                <div className="flex gap-1">
-                                  {[0.75, 0.9, 1, 1.15, 1.3, 1.5].map((v) => (
-                                    <button
-                                      key={v}
-                                      type="button"
-                                      className={cn(
-                                        'flex-1 rounded-sm border px-1 py-1 text-[10px] transition-colors',
-                                        Math.abs(globalTtsSpeed - v) < 0.001
-                                          ? 'border-primary text-primary bg-primary/10'
-                                          : 'border-border text-muted-foreground hover:text-foreground hover:bg-accent',
-                                      )}
-                                      disabled={busy}
-                                      onClick={() => {
-                                        setGlobalTtsSpeed(v)
-                                        pushHistory()
-                                        const applied = segments.map((s) => {
-                                          if ((s.layout === 'vertical' || s.layout === 'label') && s.dub !== true) return s
-                                          return { ...s, ttsSpeed: v }
-                                        })
-                                        void onSegmentsReplace(applied)
-                                      }}
-                                    >
-                                      {v}×
-                                    </button>
-                                  ))}
-                                </div>
+                                  const allRatio = ttsPlayRatio(dubRef?.ttsBake, bakedSpeed)
+                                  const effAll = globalTtsSpeed * allRatio
+                                  const applyManual = (manual: number) => {
+                                    const m = clampTtsManual(manual)
+                                    setGlobalTtsSpeed(m)
+                                    pushHistory()
+                                    const applied = segments.map((s) => {
+                                      if ((s.layout === 'vertical' || s.layout === 'label') && s.dub !== true) return s
+                                      return { ...s, ttsSpeed: m }
+                                    })
+                                    void onSegmentsReplace(applied)
+                                  }
+                                  return (
+                                    <>
+                                      <PropLabel label={Math.abs(allRatio - 1) > 0.02
+                                        ? `Tốc độ TTS (phát thực): ${effAll.toFixed(2)}× · tất cả — dub ở ${(dubRef?.ttsBake ?? 1).toFixed(2)}, timeline ${(bakedSpeed ?? 1).toFixed(2)}`
+                                        : `Tốc độ TTS: ${effAll.toFixed(2)}× · tất cả`}>
+                                        <input
+                                          type="range"
+                                          min={0.75 * allRatio}
+                                          max={1.5 * allRatio}
+                                          step={0.05}
+                                          className="w-full accent-primary"
+                                          value={effAll}
+                                          disabled={busy}
+                                          onChange={(e) => setGlobalTtsSpeed(clampTtsManual(Number(e.target.value) / allRatio))}
+                                          onPointerUp={(e) => applyManual(Number(e.currentTarget.value) / allRatio)}
+                                        />
+                                      </PropLabel>
+                                      <div className="flex gap-1">
+                                        {TTS_PRESETS.map((v) => {
+                                          const manual = v / allRatio
+                                          const ok = manual >= 0.749 && manual <= 1.501
+                                          return (
+                                            <button
+                                              key={v}
+                                              type="button"
+                                              disabled={busy || !ok}
+                                              title={ok ? undefined : 'Ngoài dải nén cho phép của đồng hồ hiện tại'}
+                                              className={cn(
+                                                'flex-1 rounded-sm border px-1 py-1 text-[10px] transition-colors',
+                                                Math.abs(effAll - v) < 0.03
+                                                  ? 'border-primary text-primary bg-primary/10'
+                                                  : ok
+                                                    ? 'border-border text-muted-foreground hover:text-foreground hover:bg-accent'
+                                                    : 'border-border text-muted-foreground/40',
+                                              )}
+                                              onClick={() => applyManual(manual)}
+                                            >
+                                              {v}×
+                                            </button>
+                                          )
+                                        })}
+                                      </div>
+                                    </>
+                                  )
+                                })()}
 
                                 <button
                                   type="button"
