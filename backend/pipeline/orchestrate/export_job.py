@@ -83,31 +83,9 @@ from pipeline.ocr.locate import attach_speech_hardsub_boxes
 from pipeline.translate import translate_segments
 from pipeline.tts import tts_cache_key, tts_segment
 
+from pipeline.orchestrate.export_outputs import _project_slug, write_export_artifacts
+from pipeline.orchestrate.export_overlays import build_text_overlay_cues
 from pipeline.orchestrate.tts_fit import assign_tts_fit_speeds
-
-
-def _logo_schedule(item: dict[str, Any], st: float, en: float, x: float, y: float) -> list[tuple[float, float, float, float, float]]:
-    if str(item.get("motion") or "fixed") != "random":
-        return [(st, en, x, y, 0.0)]
-    frames = item.get("positionKeyframes") or [{"at": st, "x": x, "y": y}]
-    visible = max(0.5, float(item.get("visibleSec") or 4))
-    fade = min(max(0.0, float(item.get("fadeSec") or 0.5)), visible / 2)
-    return [
-        (fst, min(en, fst + visible), float(frame.get("x") or 0), float(frame.get("y") or 0), fade)
-        for frame in frames
-        if (fst := max(st, float(frame.get("at") if frame.get("at") is not None else st))) < en
-    ]
-
-import re as _re
-
-def _project_slug(meta: dict) -> str:
-    """Slug an toàn từ tên file video nguồn — dùng làm subfolder trong exports."""
-    vp = str(meta.get("videoPath") or "")
-    stem = Path(vp).stem if vp else ""
-    slug = _re.sub(r"[^\w\s-]", "", stem).strip()
-    slug = _re.sub(r"[\s_]+", "-", slug)
-    slug = slug[:48].strip("-") or "project"
-    return slug.lower()
 
 
 def run_export(project_id: str, *, nested: bool = False) -> Path:
@@ -181,108 +159,16 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
         base_speed=retime_base,
     )
     vid_dur = ffprobe_duration(video) or vid_dur
-    # Free text + effect regions (làm mờ tự do): cùng hệ tọa độ pixel.
-    text_overlays: list[dict[str, Any]] = []
-    for item in meta.get("overlays") or []:
-        item_start = float(item.get("start") or 0) - export_start
-        if item_start >= vid_dur:
-            continue
-        kind = str(item.get("kind") or "text").lower()
-        x = float(item.get("x") or 0)
-        y = float(item.get("y") or 0)
-        w = float(item.get("w") or 0)
-        h = float(item.get("h") or 0)
-        if w < 4 or h < 4:
-            continue
-        st = retime_timeline_time(
-            item_start,
-            source_timeline_duration,
-            source_timeline_segments,
-            base_speed=retime_base,
-        )
-        en = retime_timeline_time(
-            float(item.get("end") or 0) - export_start,
-            source_timeline_duration,
-            source_timeline_segments,
-            base_speed=retime_base,
-        )
-        if kind == "logo":
-            asset_path = ""
-            asset_url = str(item.get("assetUrl") or "")
-            if asset_url.startswith(f"/data/{project_id}/"):
-                candidate = (root / asset_url.split(f"/data/{project_id}/", 1)[1]).resolve()
-                if root.resolve() in candidate.parents and candidate.is_file():
-                    asset_path = str(candidate)
-            for index, (fst, fen, fx, fy, fade) in enumerate(_logo_schedule(item, st, en, x, y)):
-                if fen <= fst:
-                    continue
-                source = str(item.get("logoSource") or "text")
-                text = str(item.get("text") or "Logo").strip() or "Logo"
-                fs = int(item.get("fontSize") or 42)
-                text_overlays.append({
-                    "id": f"logo-{item.get('id', '')}-{index}", "start": fst, "end": fen,
-                    "translation": text if source == "text" else "logo", "source": "", "layout": "horizontal",
-                    "fontSize": fs, "fontFamily": str(item.get("fontFamily") or "system"),
-                    "textColor": str(item.get("color") or "#ffffff"),
-                    "bbox": {"x": fx, "y": fy, "w": w, "h": h},
-                    "captionLayout": {"x": fx, "y": fy, "w": w, "h": h, "lines": [text], "fontSize": fs},
-                    "skipCoverMask": True, "logoText": source == "text",
-                    "logoAssetPath": asset_path if source != "text" else "",
-                    "logoOpacity": max(0, min(100, int(item.get("opacity") or 85))) / 100,
-                    "logoFadeInEnd": fst + fade, "logoFadeOutStart": fen - fade,
-                })
-            continue
-        if kind == "effect":
-            # Vùng hiệu ứng: chỉ mask, không chữ
-            text_overlays.append(
-                {
-                    "id": f"fx-{item.get('id', '')}",
-                    "start": st,
-                    "end": en,
-                    "coverStart": st,
-                    "coverEnd": en,
-                    "translation": "",
-                    "source": "",
-                    "layout": "horizontal",
-                    "bbox": {"x": x, "y": y, "w": w, "h": h},
-                    "maskOnly": True,
-                    "skipCoverMask": False,
-                    "coverMaskStyle": str(item.get("maskStyle") or "blur"),
-                    "coverMaskColor": str(item.get("maskColor") or "#4c1d95"),
-                    "coverMaskOpacity": int(item.get("maskOpacity") if item.get("maskOpacity") is not None else 40),
-                }
-            )
-            continue
-        text = str(item.get("text") or "").strip()
-        if not text:
-            continue
-        fs = int(item.get("fontSize") or 42)
-        lines = [ln if ln.strip() else " " for ln in text.splitlines()] or [text]
-        text_overlays.append(
-            {
-                "id": f"overlay-{item.get('id', '')}",
-                "start": st,
-                "end": en,
-                "translation": text,
-                "source": "",
-                "layout": "horizontal",
-                "fontSize": fs,
-                "textColor": str(item.get("color") or "#ffffff"),
-                "bbox": {"x": x, "y": y, "w": w, "h": h},
-                "captionLayout": {
-                    "x": x,
-                    "y": y,
-                    "w": w,
-                    "h": h,
-                    "lines": lines,
-                    "fontSize": fs,
-                },
-                # Preview không blur dưới free-text — không mask khi burn
-                "skipCoverMask": True,
-                # textarea preview: top-align + line-height 1.25 (css mode overlay)
-                "overlayText": True,
-            }
-        )
+    text_overlays = build_text_overlay_cues(
+        meta,
+        root,
+        project_id,
+        export_start=export_start,
+        vid_dur=vid_dur,
+        source_timeline_duration=source_timeline_duration,
+        source_timeline_segments=source_timeline_segments,
+        retime_base=retime_base,
+    )
     out = out_final(project_id)
 
     # Cờ xuất độc lập — mặc định video=True nếu không có gì được chọn
@@ -593,105 +479,9 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
                 crop=crop_box,
             )
 
-        # ban de tim: backend/public/exports/<slug>/<id>.mp4
-        _custom_dir = str(settings.get("exportOutputDir") or "").strip()
-        if _custom_dir:
-            exports = Path(_custom_dir)
-            _slug = _project_slug(meta)
-            exports = exports / _slug
-        else:
-            exports = PUBLIC_DATA / project_id / "exports"
-        exports.mkdir(parents=True, exist_ok=True)
-        render_id = f"{project_id}-{time.time_ns()}"
-        render_name = str(meta.pop("pendingRenderName", "")).strip() or f"Render {project_id}"
-        import re as _re_ext
-        safe_name = _re_ext.sub(r'[^\w\s-]', '', render_name).strip()
-        safe_name = _re_ext.sub(r'[-\s]+', '-', safe_name)
-        if not safe_name:
-            safe_name = project_id
-
-        img_out = None
-        if str(settings.get("coverDataUrl") or "").startswith("data:image/"):
-            try:
-                import base64
-                cover_data_url = str(settings.get("coverDataUrl"))
-                header, encoded = cover_data_url.split(",", 1)
-                img_data = base64.b64decode(encoded)
-                ext = "jpg" if "jpeg" in header else "png"
-                img_out = exports / f"{safe_name}.{ext}"
-                img_out.write_bytes(img_data)
-            except Exception as e:
-                print(f"[export] Cover image decode error: {e}", flush=True)
-
-        if do_video:
-            easy = exports / f"{safe_name}.mp4"
-            if img_out and img_out.is_file():
-                try:
-                    from pipeline.core.jobs import run_cmd as _run_cmd
-                    _run_cmd(project_id, ["ffmpeg", "-y", "-i", str(out), "-i", str(img_out), "-map", "0", "-map", "1", "-c", "copy", "-disposition:v:1", "attached_pic", str(easy)])
-                except Exception as e:
-                    print(f"[export] Cover image embed error: {e}", flush=True)
-                    shutil.copy2(out, easy)
-            else:
-                shutil.copy2(out, easy)
-            (exports / f"{safe_name}.json").write_text(
-                json.dumps({"name": render_name, "projectId": project_id}, ensure_ascii=False),
-                encoding="utf-8",
-            )
-        else:
-            easy = out  # audio/gif dung file tam; khong luu mp4 dau ra
-
-        # Xuất Âm thanh (MP3/WAV) nếu người dùng chọn
-        audio_rel = ""
-        if bool(settings.get("exportAudio", False)):
-            try:
-                from pipeline.core.jobs import run_cmd as _run_cmd
-                fmt = str(settings.get("exportAudioFormat") or "mp3").lower()
-                audio_out = exports / f"{safe_name}.{fmt}"
-                acodec = "libmp3lame" if fmt == "mp3" else "pcm_s16le" if fmt == "wav" else "aac"
-                _run_cmd(project_id, ["ffmpeg", "-y", "-i", str(out), "-vn", "-acodec", acodec, str(audio_out)])
-                if audio_out.is_file():
-                    audio_rel = export_display_path(audio_out)
-                    if not do_video:
-                        # Audio-only → ghi render JSON để xuất hiện trong danh sách
-                        (exports / f"{safe_name}.json").write_text(
-                            json.dumps({"name": render_name, "projectId": project_id, "kind": "audio"}, ensure_ascii=False),
-                            encoding="utf-8",
-                        )
-            except Exception as ae:
-                print(f"[export] Audio export error: {ae}", flush=True)
-
-        # Xuất Chú thích (SRT) nếu người dùng chọn
-        if bool(settings.get("exportSrt", False)):
-            try:
-                from pipeline.export.srt import write_srt
-                srt_out = exports / f"{safe_name}.srt"
-                cues = []
-                for s in segments:
-                    if not s.get("maskOnly") and (str(s.get("translation") or s.get("source") or "")).strip():
-                        cues.append({
-                            "start": float(s.get("start") or 0),
-                            "end": float(s.get("end") or 0),
-                            "text": (str(s.get("translation") or s.get("source") or "")).strip(),
-                        })
-                write_srt(srt_out, cues, capcut=False)
-            except Exception as se:
-                print(f"[export] SRT export error: {se}", flush=True)
-
-        # Xuất GIF nếu người dùng chọn
-        if bool(settings.get("exportGif", False)):
-            try:
-                from pipeline.core.jobs import run_cmd as _run_cmd
-                gif_out = exports / f"{safe_name}.gif"
-                res = int(settings.get("exportGifRes") or 480)
-                vf = f"fps=10,scale={res}:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse"
-                _run_cmd(project_id, ["ffmpeg", "-y", "-i", str(out), "-vf", vf, "-loop", "0", str(gif_out)])
-                if gif_out.is_file():
-                    gif_rel = export_display_path(gif_out)
-                    results.append(f"GIF    : {gif_rel}")
-            except Exception as ge:
-                print(f"[export] GIF export error: {ge}", flush=True)
-
+        exports, easy, audio_rel, render_id, render_name = write_export_artifacts(
+            meta, settings, out, project_id, segments, do_video,
+        )
         out_dur = ffprobe_duration(out)
         ow, oh = video_size(out) if do_video else (0, 0)
         easy_rel = export_display_path(easy) if do_video else audio_rel

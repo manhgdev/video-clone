@@ -72,7 +72,9 @@ backend/
 │  ├─ orchestrate/            Job nhiều bước
 │  │  ├─ asr_translate.py
 │  │  ├─ dub.py
-│  │  ├─ export_job.py
+│  │  ├─ export_job.py        run_export (điều phối)
+│  │  ├─ export_overlays.py   TextOverlay editor → cue burn
+│  │  ├─ export_outputs.py    Đóng gói mp4/cover/audio/SRT/GIF
 │  │  └─ tts_fit.py
 │  ├─ asr/                    faster-whisper
 │  ├─ ocr/                    RapidOCR + extract_parts (runtime/scan/merge/…)
@@ -80,7 +82,8 @@ backend/
 │  ├─ tts/                    manager, studio, engines (vieneu, capcut, …)
 │  ├─ export/
 │  │  ├─ burn.py              Facade cover_and_burn
-│  │  ├─ burn_parts/          ass, layout, ocr_boxes, pipeline (chuẩn bị cue), render (decode→mask→encode)
+│  │  ├─ burn_parts/          ass, layout_geo/_text (layout), draw_text (vẽ RGBA),
+│  │  │                       ocr_boxes, pipeline (chuẩn bị cue), render (decode→mask→encode)
 │  │  ├─ mux.py               Facade
 │  │  ├─ stem.py              Demucs / no_vocals
 │  │  ├─ mux_audio.py         mux_dub / mix TTS
