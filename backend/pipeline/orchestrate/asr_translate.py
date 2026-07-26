@@ -568,6 +568,8 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
             meta.pop("workDuration", None)
             meta["workVideo"] = str(base_1x.resolve())
             meta["timelineClock"] = "display"
+            # Dấu vết flow «ưu tiên 0.8»: dub sẽ mặc định giọng 1.20× (khe đã co)
+            meta["analyzedAtSpeed"] = 0.8
         save_meta(project_id, meta)
         hint = f"Preview {preview_sec}s — " if preview_sec > 0 else ""
         no_tr = str(settings.get("targetLang") or "") in ("none", "off", "source", "")

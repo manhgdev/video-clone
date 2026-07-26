@@ -35,7 +35,7 @@ function ttsPlayRatio(ttsBake: number | undefined, bakedSpeed: number | undefine
   return bk / tb
 }
 
-const TTS_PRESETS = [0.75, 0.9, 1, 1.15, 1.3, 1.5]
+const TTS_PRESETS = [0.75, 0.9, 1, 1.2, 1.3, 1.5]
 const clampTtsManual = (v: number) => Math.max(0.75, Math.min(1.5, Math.round(v * 1000) / 1000))
 
 type Props = {
