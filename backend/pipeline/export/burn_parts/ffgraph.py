@@ -706,8 +706,10 @@ def try_render_ffmpeg(
                 out.unlink(missing_ok=True)
                 return False
             out_dur = float(ffprobe_duration(out) or 0.0)
-            if src_dur > 1.0 and out_dur + 0.5 < src_dur:
-                _log(f"[ffgraph] thiếu thời lượng {out_dur:.2f}/{src_dur:.2f}s")
+            # Chặn CẢ HAI chiều: thiếu lẫn DƯ thời lượng (từng có bản +26s do
+            # drift mối nối) — lệch >0.5s là sai WYSIWYG → rơi legacy (đúng theo frame).
+            if src_dur > 1.0 and abs(out_dur - src_dur) > 0.5:
+                _log(f"[ffgraph] lệch thời lượng {out_dur:.2f}/{src_dur:.2f}s")
                 out.unlink(missing_ok=True)
                 return False
             return True
