@@ -20,6 +20,9 @@ frontend/src/
 │  ├─ editor/
 │  │  ├─ LivePreviewEditor.tsx   Timeline + preview (orchestration UI)
 │  │  └─ lib/                    Helper thuần (timeline, cover, dub math, …)
+│  │     ├─ captionMeasure.ts    Đo chữ canvas + wrap dòng (nguồn sự thật layout)
+│  │     ├─ coverBox.ts          Hình học khung che (pad/clamp/seed box)
+│  │     └─ coverLayout.ts       Quyết định layout + bake WYSIWYG xuất
 │  ├─ project/                API project, sidebar, types, compound
 │  └─ tts/                    TTS Studio UI + CSS
 └─ shared/
@@ -77,7 +80,7 @@ backend/
 │  ├─ tts/                    manager, studio, engines (vieneu, capcut, …)
 │  ├─ export/
 │  │  ├─ burn.py              Facade cover_and_burn
-│  │  ├─ burn_parts/          ass, layout, ocr_boxes, pipeline
+│  │  ├─ burn_parts/          ass, layout, ocr_boxes, pipeline (chuẩn bị cue), render (decode→mask→encode)
 │  │  ├─ mux.py               Facade
 │  │  ├─ stem.py              Demucs / no_vocals
 │  │  ├─ mux_audio.py         mux_dub / mix TTS
@@ -89,7 +92,8 @@ backend/
 │  └─ core/                   Hạ tầng dùng chung
 │     ├─ project.py           meta, layout, status
 │     ├─ jobs.py              cancel flag + kill process tree + run_cmd
-│     ├─ media.py             ffmpeg helpers, detect_device
+│     ├─ media.py             ffmpeg helpers, detect_device (facade re-export speed_timeline)
+│     ├─ speed_timeline.py    Bake speed + timeline baseline 1× (remap, meta_baked_speed)
 │     ├─ resources.py         adaptive_workers (trần CPU ~85%)
 │     ├─ accel.py             Ưu tiên CUDA/MPS/CPU (VieNeu/Whisper/…)
 │     ├─ system_check.py      checks + install AI packages
