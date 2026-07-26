@@ -1,132 +1,170 @@
-# PLAN tối ưu tốc độ — cập nhật 2026-07-27
-
-> **Tiến độ:** ✅ P0 XONG · ✅ P1 lõi XONG (2026-07-27) — ffgraph.py vẽ mask+chữ bằng
-> filter_complex, parity test 4/4, fallback legacy giữ nguyên. Đo clip 30s: burn
-> 12,3s → 5,9s tổng (phần ffmpeg thuần 2,5s — video dài tiến về ~4× nhanh hơn,
-> 2h ≈ 40ph → ~10ph). CHƯA làm trong P1: gộp crop/scale bỏ encode lần 2 (P1.5),
-> logo fade (vẫn fallback legacy).
-> ✅ P2 XONG (2026-07-27) — segment muxer cắt keyframe packet-chính-xác, chỉ encode
-> đoạn có cue, copy phần trống, concat + mux audio một lần. Kiểm chứng: 902/902
-> khung, đoạn trống bit-identical, decode sạch. Clip 30s/2 cue: 12,3s → 3,75s.
-> Kế tiếp: P1.5 (bỏ encode lần 2) hoặc P3 (đo Demucs/TTS).
+# PLAN tối ưu tốc độ — bản đầy đủ, cập nhật 2026-07-27
 
 Mục tiêu: video vài tiếng xuất xong trong **phút**, không phải giờ; máy không đơ khi chạy.
 Nguyên tắc: mỗi phase xong phải **đo số + chạy test** rồi mới sang phase sau; mọi thay đổi
 render đều phải qua kiểm tra parity với preview (WYSIWYG).
 
-Hiện trạng nhánh (quan trọng — làm P0 trước mọi thứ):
+## Tiến độ tổng
 
-| Nhánh | Chứa gì | Trạng thái |
+| Phase | Nội dung | Trạng thái |
 |---|---|---|
-| `main` (2dfeec5) | prefetch decode, cancel-kill, ttsBake, auto-bake 0.8→1×, worker python probe | đang đứng |
-| `fix/ocr-gpu-decode` (2 commit, đã push) | NVDEC batch decode (CPU 4,2→1,1 core, 41s→9,7s/48 câu), gộp 1 chế độ OCR, kẹp affinity + giới hạn luồng ONNX, nhãn GPU/CPU trên status, **fix xuất ra 0.8 khi timeline 1×**, 5+3+2 test mới | chờ merge |
-| `claude/sleepy-allen-*` | tách system_check/ package + locate_worker.py | chờ merge, SẼ conflict locate.py |
-| `claude/amazing-perlman-*` | tách TtsStudio + App | chờ merge |
-| `claude/adoring-bell-*` | tách LivePreviewEditor thành hook/panel | chờ merge |
+| P0 | Gộp 4 nhánh (OCR-GPU, system_check, TtsStudio/App, LivePreviewEditor) | ✅ 2026-07-27 |
+| P1 | ffmpeg vẽ mask+chữ trong filter graph | ✅ 2026-07-27 (`e75027c`) |
+| P2 | Chỉ encode đoạn có cue, copy phần trống | ✅ 2026-07-27 (`f3143f7`) |
+| P1.5 | Gộp crop/scale vào burn + xử lý logo fade | ⬜ kế tiếp |
+| P3 | Đo Demucs + TTS video dài (đo trước, chưa sửa) | ⬜ |
+| P4 | FE: bundle split + tách nốt LivePreviewEditor | ⬜ |
+| P5 | Vệ sinh: skipif test môi trường, app.log, git fsync | ⬜ xen kẽ |
+
+## Số đo đã chốt (clip 30s, 1080×1920@30, GTX 1660 SUPER)
+
+- Pipeline Python cũ: **69 fps** (giải mã NVDEC→RAM 85 · Pillow vẽ 72/luồng · NVENC 147);
+  gốc nghẽn: mọi khung đi GPU→RAM→Python→RAM→GPU (2h ≈ 1,3 TB qua pipe ×2 lượt).
+- ffmpeg thuần GPU: **586 fps**.
+- Burn clip 30s/2 cue: legacy **12,3s** → P1 full graph **5,9s** → P2 segmented **3,75s**.
+- P2 kiểm chứng: 902/902 khung, đoạn trống bit-identical với nguồn, decode sạch;
+  segment muxer `-segment_times (K − nửa_khung)` = cắt packet-chính-xác tại keyframe K
+  (đường `-ss/-to` lệch +2 khung vì DTS B-frame — đã loại).
+- OCR định vị 48 câu: 41s/4,2 core → **9,7s/1,1 core**, hủy ~0,5s, status hiện `GPU`.
+- Ngoại suy video 2h: bước xuất khung 52ph → **~7–10ph** (P1), phần trống gần miễn phí (P2).
 
 ---
 
-## P0 — Gộp việc đã xong (≈1 buổi, rủi ro thấp, ăn ngay)
+## P1.5 — Gộp crop/scale vào burn, xóa fallback logo (≈1 buổi)
 
-**0.1. Merge `fix/ocr-gpu-decode` → `main`.**
-- Toàn bộ đã verify từ trước (86 test pass, bench có số). Merge thẳng, chạy lại:
-  `pytest` (bỏ nhóm test môi trường), `python -m pipeline`, bench
-  `Định vị OCR` trên clip 30s — kỳ vọng ≤10s/48 câu, CPU ≤1,5 core, status hiện `GPU`.
-- Lý do làm ĐẦU TIÊN: các phase sau sửa cùng file (`locate.py`, `render.py`) —
-  merge muộn = conflict chồng conflict.
+**Hiện trạng đã khảo sát (đọc `export_job.py` + `media.py`):**
+- `encode_export_1080` ĐÃ có fast-path `-c:v copy` khi: không crop + codec h264 +
+  đúng chiều cao đích ([media.py:1107](backend/pipeline/core/media.py)). Tức là encode
+  lần 2 **chỉ** xảy ra khi người dùng đổi khung hình (aspect/crop) hoặc độ phân giải
+  khác nguồn — nhưng khi đó lại là re-encode **toàn bộ** video, phá luôn lợi ích P2
+  (đoạn trống copy xong vẫn bị encode lại ở bước sau).
+- Chuỗi hiện tại: `retime_video_segments` → `cover_and_burn` (P1/P2) →
+  `mux_dub`/`mux_original_audio` (video copy) → `encode_export_1080(out, out, target, crop)`
+  tại [export_job.py:476](backend/pipeline/orchestrate/export_job.py).
 
-**0.2. Merge 3 nhánh worktree, theo thứ tự:**
-1. `claude/sleepy-allen` (system_check + locate) — conflict `locate.py` chắc chắn:
-   giải theo hướng **giữ logic của main mới** (NVDEC batch, 1 chế độ), áp cấu trúc
-   tách file của nhánh (locate_worker.py). Sau merge: `pytest tests/ocr`, bench lại OCR.
-2. `claude/amazing-perlman` (TtsStudio + App) — `tsc --noEmit` + smoke UI.
-3. `claude/adoring-bell` (LivePreviewEditor) — `tsc --noEmit` + self-check FE
-   (`__checkOcrOverlayLayout`, `__checkExportBakePlacement`) + xuất thử 1 video preview
-   so khớp WYSIWYG.
-- DoD: `main` chứa tất cả, working tree sạch, đủ bộ test xanh.
+**Việc làm:**
+1. Truyền `crop_box` + `target_height` xuống `try_render_ffmpeg` (tính sẵn ở
+   `export_job.py` TRƯỚC khi gọi `cover_and_burn`, vì sau burn mới `video_size(out)`
+   là quá muộn — chú ý `resolve_export_crop` đang đo trên `out` sau mux; chuyển sang
+   đo trên video nguồn burn, cùng kích thước).
+2. Full graph: nối `crop=w:h:x:y,scale=…` vào cuối graph — mask/chữ vẫn tính theo
+   toạ độ NGUỒN (trước crop) nên đặt crop/scale **sau** mọi overlay; WYSIWYG giữ nguyên.
+3. Segmented + crop/scale: đoạn trống không thể copy nữa → đoạn trống encode bằng
+   graph tối giản `crop,scale` (NVENC thuần ~586 fps, vẫn nhanh hơn nhiều so với
+   để `encode_export_1080` chạy lại cả file), đoạn active nối `crop,scale` cuối graph.
+   Guard `_SEG_MIN_SAVED/_SEG_MAX_COVERAGE` tính lại theo chi phí mới (đoạn trống
+   không còn ~0 chi phí — ngưỡng "đáng làm" hạ xuống, đo rồi chỉnh).
+4. Khi burn đã ra đúng crop+resolution: `encode_export_1080` tự rơi vào fast-path copy
+   (điều kiện có sẵn) — KHÔNG bỏ hàm này, nó vẫn là lưới an toàn cho đường legacy.
+5. **Logo fade/opacity** (gap P1 còn lại — đang fallback legacy toàn bộ): map sang
+   ffmpeg `overlay` + `format=rgba,colorchannelmixer=aa=<opacity>` và fade bằng
+   `fade=t=in:alpha=1` trên nhánh logo. Nếu ăn khớp pixel với legacy (test so khung
+   giữa fade) thì xoá lý do fallback `logo` trong `_feasible()`.
+6. Kiểm tra `retime_video_segments`: khi có `videoSpeed` từng câu, nó encode một lần
+   TRƯỚC burn. Chưa đụng ở P1.5 (phức tạp, cần map thời gian phi tuyến vào graph) —
+   ghi nhận số đo: bao nhiêu % export thực tế có retime, mất bao lâu. Quyết ở P3.
 
----
+- File đụng: `burn_parts/ffgraph.py` (thêm tham số crop/scale + nhánh logo),
+  `burn_parts/pipeline.py` (chữ ký), `orchestrate/export_job.py` (tính crop sớm).
+- Test: thêm case crop 9:16→1:1 + resolution 720 vào `test_ffgraph_burn.py` —
+  so khung với đường legacy + `encode_export_1080` (pixel-diff vùng caption ≤ ngưỡng,
+  kích thước ra đúng); case logo PNG có opacity 50% + fade 0,5s.
+- DoD: export có đổi khung/resolution chỉ còn **một** lần encode; suite xanh;
+  đo clip 30s crop+720p: kỳ vọng ≤5s tổng (hiện ~9s vì double encode).
 
-## P1 — Xuất khung nhanh 6–8× (≈2–3 buổi) — ƯU TIÊN CAO NHẤT SAU P0
+## P3 — Đo Demucs + TTS cho video dài (≈1 buổi ĐO, chưa sửa)
 
-Số đo hiện tại (clip 30s, 1080×1920@30): pipeline Python **69 fps**; ffmpeg thuần GPU
-**586 fps**; mô phỏng ffmpeg blur+overlay 3 cue: **2,2s vs 13s**. Video 2h hiện ~52 phút
-chỉ riêng bước này.
+Sau P1/P2, hai khâu này là nghẽn lớn nhất còn lại với video vài tiếng. **Đo trước, không đoán.**
 
-Gốc vấn đề: mọi khung đi GPU→RAM→Python→RAM→GPU (2h ≈ 1,3 TB qua pipe ×2 lượt).
+**Giao thức đo (ghi số vào bảng dưới, dùng video thật ≥30ph):**
+1. Demucs `separate_no_vocals` ([stem.py:813](backend/pipeline/export/stem.py)):
+   phút xử lý / giờ video · VRAM đỉnh · CPU core-giây · cache theo fingerprint đã
+   hit khi re-export chưa (đo lần 2 cùng video) · có chạy vô ích khi
+   `originalAudioMode=original` không.
+2. TTS: giây/câu theo engine (vieneu/edge…) · tỉ lệ cache hit khi re-run ·
+   có batch được không.
+3. `retime_video_segments`: % project có videoSpeed ≠ 1 · thời gian encode bước này.
+4. Toàn trình: bấm giờ từng bước của một export video dài (bảng step→giây) để biết
+   thứ tự nghẽn thật sau P1/P2.
 
-**Cách làm — «Python chuẩn bị, ffmpeg vẽ»:**
-1. **Giữ nguyên** phần chuẩn bị cue/layout trong `burn_parts/pipeline.py`
-   (`cover_and_burn` đến hết đoạn tính `cue_fits`/`cue_overlays`) — đây là chỗ
-   bảo đảm WYSIWYG, không đụng.
-2. `cue_overlays` hiện là RGBA numpy → ghi ra `cache/burn_overlays/{cue_id}.png`.
-3. Sinh `filter_complex_script` (đã có mẫu ở `retime_video_segments`):
-   - mask blur: `crop` vùng + `boxblur`/`gblur` + `overlay` lại, `enable='between(t,cs,ce)'`
-   - mask solid/mosaic: `drawbox`/`pixelize` (ffmpeg ≥7) hoặc pre-render PNG mask
-   - chữ: `overlay=x:y:enable='between(t,bs,be)'` với PNG từng cue
-   - LƯU Ý ffmpeg parser: đã đo được giới hạn ~100 nhánh expr → **chia lô ≤40 cue
-     mỗi lệnh**, đoạn nào quá thì cắt video theo lô rồi concat (xem P2 — dùng chung hạ tầng).
-4. Một lệnh: `-hwaccel cuda` in → filter → `h264_nvenc` + map audio từ input gốc.
-   Frame KHÔNG rời ffmpeg.
-5. **Gộp luôn crop/scale xuất cuối vào cùng lệnh** (thêm `crop,scale` cuối graph) —
-   bỏ hẳn `encode_export_1080` lần 2 khi resolution trùng → tiết kiệm thêm ~30–40%.
-6. Fallback tự động về đường Python cũ khi: không map được style, ffmpeg lỗi,
-   hay biến `VIDEO_CLONE_LEGACY_BURN=1` (van thoát khi có bug).
-7. **Parity gate (bắt buộc):** script test render 1 frame giữa mỗi cue bằng cả 2 đường,
-   so pixel-diff vùng caption ≤ ngưỡng nhỏ; giữ nguyên `test_caption_css_parity`.
-   Cắt 1 video mẫu có đủ 4 loại cue (ngang/mid/dọc/nhãn) + logo + effect làm fixture.
+| Khâu | phút/giờ video | VRAM | Cache lần 2 | Ghi chú |
+|---|---|---|---|---|
+| Demucs | ? | ? | ? | |
+| TTS | ? | — | ? | |
+| retime | ? | — | — | |
+| burn (P2) | đã có | — | — | ~7–10ph/2h |
 
-- File đụng: `burn_parts/pipeline.py` (thêm nhánh build-filter), file mới
-  `burn_parts/ffgraph.py` (sinh graph + chạy), `render.py` giữ làm fallback.
-- DoD: clip 30s ≤3s; parity pass; 86+ test xanh; video 1h đo thật ≤6 phút bước xuất khung.
+**Ứng viên sửa (chỉ chọn sau khi có số):** chunk Demucs + resume; skip Demucs khi
+mode=original; TTS batch/song song có kiểm soát; gộp retime vào graph burn.
+- DoD: bảng trên điền đủ + 1 đoạn kết luận ghi vào PLAN này, chọn tối đa 2 việc làm tiếp.
 
-## P2 — Chỉ encode đoạn có cue, copy phần còn lại (≈1–2 buổi, sau P1)
+## P4 — Frontend: bundle + hoàn tất tách file (≈1 buổi)
 
-Video dài thường >50% thời lượng không có chữ.
-1. Lấy danh sách keyframe: `ffprobe -skip_frame nokey -show_frames` (nhanh, chỉ đọc header).
-2. Chia video thành «đoạn có cue» (mở rộng tới keyframe gần nhất 2 phía) và «đoạn trống».
-3. Đoạn có cue → pipeline P1; đoạn trống → `-c copy` (0,1s cho 30s video — đã đo).
-4. Nối bằng concat demuxer (`-f concat -safe 0 -c copy`), audio mux lại một lần cuối.
-5. Test: A/V sync tại 3 mối nối (so timestamp frame), tổng duration ±0,1s.
-- DoD: video 1h/20% cue: tổng thời gian giảm thêm ≥3×.
+Hiện trạng: bundle >600 KB (cảnh báo vite);
+[LivePreviewEditor.tsx](frontend/src/features/editor/LivePreviewEditor.tsx) còn 6435 dòng,
+[TtsStudio.tsx](frontend/src/features/tts/TtsStudio.tsx) 1997 dòng (đã tách hook/panel đợt 1).
 
-## P3 — Đo Demucs + TTS cho video dài (≈1 buổi ĐO trước, chưa sửa)
-
-Sau P1/P2, hai khâu này thành nghẽn lớn nhất còn lại. Chưa có số → **đo trước, không đoán**:
-- Demucs (`separate_no_vocals`): phút xử lý / giờ video, VRAM, đã cache theo fingerprint chưa,
-  có chạy lại vô ích khi re-export không.
-- TTS: giây / câu theo engine, tỉ lệ cache hit khi re-run.
-- Ra quyết định sau khi có số (ứng viên: chunk Demucs + resume; skip Demucs khi
-  originalAudioMode=original; TTS batch).
-- DoD: bảng số + 1 trang kết luận ghi vào PLAN này.
-
-## P4 — Frontend: bundle + hoàn tất tách file (sau P0.2)
-
-- `manualChunks` / dynamic import cho editor (bundle hiện >600 KB — cảnh báo vite).
-- LivePreviewEditor sau merge nhánh còn lại bao nhiêu dòng → tách nốt theo seam đã ghi
-  (useSpeedTransaction / useDubAudioSync / useTimelineDrag).
-- DoD: build không còn cảnh báo chunk; `tsc` sạch.
+1. `vite.config` `build.rollupOptions.output.manualChunks` hoặc dynamic
+   `import()` cho 2 màn nặng: editor (LivePreviewEditor + lib đo caption) và TtsStudio —
+   route/tab nào mở mới tải chunk đó.
+2. LivePreviewEditor tách tiếp theo seam đã khảo sát: phần render timeline canvas,
+   phần overlay caption editor, phần transport (play/seek) — mỗi phần một component
+   nhận props hẹp; hook đã tách (useSpeedTransaction/useDubAudioSync/useTimelineDrag)
+   giữ nguyên.
+3. Sau tách: `tsc --noEmit` sạch + self-check FE (`__checkOcrOverlayLayout`,
+   `__checkExportBakePlacement`) + xuất thử 1 preview so WYSIWYG.
+- DoD: build hết cảnh báo chunk; số dòng LivePreviewEditor ≤ ~3000; tsc sạch.
 
 ## P5 — Vệ sinh (xen kẽ lúc chờ)
 
-- Test môi trường đỏ → `pytest.mark.skipif` theo điều kiện thật (thiếu fastapi/GPU/mạng)
-  để `pytest -q` trần luôn xanh.
-- `.gitignore`: chặn `*.bk*`, `backend/app.log`, `backend/public/**` khỏi staging (đã có rule,
-  rà lại vì app.log đang tracked).
-- Git ref từng bị ghi rỗng (2026-07-27): nếu tái diễn — `.git/logs/HEAD` lấy sha cuối,
-  `git update-ref refs/heads/main <sha>`. Cân nhắc bật `core.fsyncMethod=fsync` trên máy này.
+1. Test môi trường đỏ → `pytest.mark.skipif` theo điều kiện thật (thiếu fastapi ở
+   Python hệ thống, không GPU, không mạng) để `pytest -q` trần luôn xanh, bỏ được
+   danh sách `--ignore` dài: test_setup_gate, test_ai_runtime_setup,
+   test_adaptive_workers_gpu, test_bundled_caption_fonts, test_logo_overlay,
+   test_rendered_videos, test_reveal_output_path, test_tts_studio_schema,
+   test_vieneu_frozen_backend, test_vieneu_backend.
+2. `backend/app.log` đang **tracked và luôn modified** — `git rm --cached backend/app.log`
+   + xác nhận `.gitignore` đã chặn (`*.log`); rà luôn `*.bk*` không lọt staging.
+3. Git ref từng bị ghi rỗng (2026-07-27): nếu tái diễn — `.git/logs/HEAD` lấy sha cuối,
+   `git update-ref refs/heads/main <sha>`. Bật `git config core.fsyncMethod=fsync`
+   (máy này từng mất ref khi crash).
+4. Dọn scratchpad bench script còn giá trị → chuyển vào `backend/tools/` nếu tái dùng
+   (bench burn, bench OCR); còn lại bỏ.
 
 ---
 
-## Thứ tự tổng & ước lượng
+## Việc đã xong (giữ làm hồ sơ)
 
-| Phase | Ăn được gì | Effort |
+**P0** — merge `fix/ocr-gpu-decode` + 3 nhánh worktree về main; conflict `locate.py`
+giải theo logic main mới (NVDEC batch, 1 chế độ OCR), áp cấu trúc tách file của nhánh.
+
+**P1** (`e75027c`) — «Python chuẩn bị, ffmpeg vẽ»: giữ nguyên phần chuẩn bị
+cue/layout/RGBA trong `burn_parts/pipeline.py` (chỗ bảo đảm WYSIWYG), file mới
+`burn_parts/ffgraph.py` sinh `filter_complex_script`: glass blur =
+crop→scale down→gblur→scale up→eq saturation→overlay; solid = drawbox; mosaic =
+pixelize+gblur; chữ = movie PNG + overlay, mỗi cue `enable='between(t,a,b)'`.
+Không `-hwaccel` (filter CPU làm hwaccel phản tác dụng). Fallback legacy khi:
+logo fade/opacity, nhãn dọc đè nguồn, >160 cue, `VIDEO_CLONE_LEGACY_BURN=1`, ffmpeg lỗi.
+Parity gate: `tests/export/test_ffgraph_burn.py` (chạy bằng `./.venv/Scripts/python.exe`).
+
+**P2** (`f3143f7`) — `_keyframe_times` (ffprobe header) → `_plan_segments`
+(đệm 0,2s, gộp khoảng <1s, căn keyframe; guard: tiết kiệm ≥5s, ≤40 đoạn, coverage <70%,
+nguồn ≥3 keyframe) → cắt segment muxer packet-chính-xác → đoạn active render graph P1
+(t dịch về 0), đoạn trống giữ packet gốc → concat demuxer → mux audio một lần cuối.
+Lỗi bất kỳ → full graph → legacy.
+
+**Giới hạn ffmpeg đã đo:** expr parser chết ở ~100 nhánh `eq()` → mọi chỗ dùng
+`select=` phải chia lô ≤48; graph burn chia lô ≤40 cue/lệnh.
+
+## Thứ tự & ước lượng còn lại
+
+| Bước | Ăn được gì | Effort |
 |---|---|---|
-| P0 | OCR nhanh 4×, máy hết đơ, hết lỗi xuất 0.8 — mọi thứ ĐÃ code xong | 1 buổi |
-| P1 | Xuất khung 6–8× (2h video: 52ph → ~7ph) | 2–3 buổi |
-| P2 | Thêm ~3× cho video nhiều khoảng trống | 1–2 buổi |
-| P3 | Số liệu để quyết Demucs/TTS | 1 buổi |
-| P4–P5 | UI mượt, repo sạch | xen kẽ |
+| P1.5 | Export đổi khung/resolution: 1 lần encode thay vì 2 (~30–40%); logo hết fallback | 1 buổi |
+| P3 | Số liệu Demucs/TTS/retime → quyết 2 việc tiếp | 1 buổi đo |
+| P4 | Bundle nhẹ, editor dễ sửa tiếp | 1 buổi |
+| P5 | Suite xanh trần, repo sạch, chống mất ref | xen kẽ |
 
-Rủi ro chính: (1) conflict `locate.py` ở P0.2 — giải theo main mới; (2) parity P1 —
-đã có gate; (3) giới hạn expr ffmpeg — đã biết ngưỡng ~100, chia lô 40.
+Rủi ro chính: (1) P1.5 crop đặt sai chỗ trong graph → lệch WYSIWYG — gate bằng test
+so khung với legacy; (2) segmented+crop làm guard "đáng làm" sai → đo lại ngưỡng;
+(3) logo fade khó khớp pixel legacy — nếu lệch quá ngưỡng thì giữ fallback, không ép.
