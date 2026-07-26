@@ -1,72 +1,94 @@
-"""TTS-fit videoSpeed assignment."""
+"""TTS fit: nén AUDIO cho vừa thước — KHÔNG bao giờ giãn video.
+
+Contract 2026-07-27 (yêu cầu user): thước timeline là bất khả xâm phạm —
+preview 8:39 thì file xuất đúng 8:39. TTS câu nào dài hơn khe (tới câu sau)
+thì atempo nén ≤2×; videoSpeed < 1 (miền auto-fit cũ) bị khai tử ở mọi nơi.
+videoSpeed ≥ 1 do user đặt qua menu «Tốc độ video» vẫn giữ nguyên.
+"""
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
-def assign_tts_fit_speeds(
-    segments: list[dict[str, Any]],
-    *,
-    match: str,
-) -> int:
-    """TTS dài hơn khe timeline → videoSpeed < 1: kéo dài span câu, đẩy trước/sau.
 
-    retime: out_span = (end-start)/speed; gap sau end giữ 1×; câu sau map_time muộn hơn.
-    stretch mode: không gán (khớp bằng atempo TTS).
-    """
-    if match == "stretch":
-        for seg in segments:
+def _drop_auto_speed(seg: dict[str, Any]) -> None:
+    """Xoá videoSpeed thuộc miền auto-fit (<1); tôn trọng speed user (≥1)."""
+    try:
+        if float(seg.get("videoSpeed") or 1) < 0.995:
             seg.pop("videoSpeed", None)
+    except (TypeError, ValueError):
+        seg.pop("videoSpeed", None)
+
+
+def strip_auto_video_speeds(segments: list[dict[str, Any]]) -> None:
+    for seg in segments:
+        _drop_auto_speed(seg)
+
+
+def fit_tts_audio_to_slots(
+    segments: list[dict[str, Any]], root: Path, *, match: str
+) -> int:
+    """Nén wav TTS (atempo ≤2×) cho vừa khe tới câu sau. Trả số wav đã nén.
+
+    Wav dùng chung nhiều câu (cùng text+voice) → fit theo khe HẸP NHẤT.
+    Câu cuối không có câu sau → để tự nhiên. match="none": user tắt khớp —
+    không đụng audio.
+    """
+    from pipeline.core.media import ffprobe_duration
+    from pipeline.tts.audio_utils import fit_duration
+
+    strip_auto_video_speeds(segments)
+    if match == "none":
         return 0
 
-    soft = 1.03
-    min_speed = 0.35  # chậm tối đa ~2.86×
     ordered = sorted(segments, key=lambda s: float(s.get("start") or 0))
-    n = 0
+    by_wav: dict[str, float] = {}
     for i, seg in enumerate(ordered):
-        # audioDuration = wav 1×; khi phát, FE (dubMath.dubAudioAbsEnd) và
-        # export (mux_audio) đều chia cho ttsSpeed thủ công — fit phải dùng
-        # cùng độ dài hiệu dụng, không thì câu chỉnh nhanh vẫn bị giãn thừa.
-        manual = float(seg.get("ttsSpeed") or 1) or 1.0
-        manual = max(0.75, min(1.5, manual))
-        ad = float(seg.get("audioDuration") or 0) / manual
-        if ad <= 0.08:
-            seg.pop("videoSpeed", None)
+        name = str(seg.get("audioFile") or "")
+        ad = float(seg.get("audioDuration") or 0)
+        if not name or ad <= 0.08:
             continue
+        # Phát chia cho ttsSpeed thủ công → khe hiệu dụng nhân lại (khớp
+        # dubAudioAbsEnd của FE và _tts_clip_plan của mux_audio).
+        manual = max(0.75, min(1.5, float(seg.get("ttsSpeed") or 1) or 1.0))
         start = float(seg.get("start") or 0)
-        end = float(seg.get("end") or start)
-        window = max(0.12, end - start)
         next_start = None
         for j in range(i + 1, len(ordered)):
             ns = float(ordered[j].get("start") or 0)
             if ns > start + 0.02:
                 next_start = ns
                 break
-        # Câu cuối: không có khe sau → gap_after=0 (trước gán 1e9 → không bao giờ giãn)
-        gap_after = max(0.0, next_start - end) if next_start is not None else 0.0
-        need_speech = max(0.12, ad - gap_after + 0.05)
-        if need_speech <= window * soft:
-            seg.pop("videoSpeed", None)
+        if next_start is None:
+            continue  # câu cuối: không ai bị đè
+        slot = max(0.15, next_start - start - 0.03) * manual
+        by_wav[name] = min(by_wav.get(name, 1e9), slot)
+
+    n = 0
+    for name, slot in by_wav.items():
+        wav = root / "tts" / name
+        if not wav.is_file():
             continue
-        speed = max(min_speed, min(1.0, window / need_speech))
-        speed = round(speed, 3)
-        if speed >= 0.995:
-            seg.pop("videoSpeed", None)
+        dur = float(ffprobe_duration(wav) or 0.0)
+        if dur <= 0.05 or dur <= slot * 1.04:
             continue
-        if next_start is not None and window / speed + gap_after < ad * 0.98:
-            extra = min(gap_after * 0.85, max(0.0, ad - window / min_speed))
-            if extra > 0.05:
-                new_end = min(next_start - 0.02, end + extra)
-                if new_end > end + 0.04:
-                    seg["end"] = round(new_end, 3)
-                    window = max(0.12, new_end - start)
-                    gap_after = max(0.0, next_start - new_end)
-                    need_speech = max(0.12, ad - gap_after + 0.05)
-                    speed = max(min_speed, min(1.0, window / need_speech))
-                    speed = round(speed, 3)
-        if speed >= 0.995:
-            seg.pop("videoSpeed", None)
+        target = max(slot, dur / 2.0)  # nén tối đa 2× — quá nữa thì chấp nhận tràn
+        try:
+            new_dur = float(fit_duration(wav, target, "stretch", force_refit=True))
+        except Exception:
             continue
-        seg["videoSpeed"] = speed
+        for seg in segments:
+            if str(seg.get("audioFile") or "") == name:
+                seg["audioDuration"] = new_dur
         n += 1
     return n
 
+
+def assign_tts_fit_speeds(
+    segments: list[dict[str, Any]], *, match: str
+) -> int:
+    """Giữ tên cũ cho call site/test cũ — giờ CHỈ dọn videoSpeed auto (<1).
+
+    Không bao giờ gán videoSpeed nữa: video không giãn theo TTS.
+    """
+    strip_auto_video_speeds(segments)
+    return 0

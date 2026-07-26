@@ -66,15 +66,42 @@ def test_write_ass_and_cover_box_over_do_not_raise(tmp_path: Path):
     assert box[2] > box[0] and box[3] > box[1]
 
 
-def test_tts_fit_uses_effective_audio_duration():
-    """audioDuration/ttsSpeed — khớp FE dubAudioAbsEnd + mux_audio."""
+def test_tts_fit_never_stretches_video():
+    """Contract 2026-07-27: thước bất khả xâm phạm — không bao giờ gán
+    videoSpeed; miền auto (<1) còn sót phải bị dọn, speed user (≥1) giữ."""
     from pipeline.orchestrate.tts_fit import assign_tts_fit_speeds
 
-    # Câu đọc nhanh 1.5×: wav 3s thực chất chiếm 2s → vừa khe 2.1s, không giãn
-    segs = [{"id": "a", "start": 0, "end": 2.1, "audioDuration": 3.0, "ttsSpeed": 1.5}]
+    segs = [{"id": "a", "start": 0, "end": 2.1, "audioDuration": 3.0}]
     assign_tts_fit_speeds(segs, match="preferVideo")
     assert "videoSpeed" not in segs[0]
-    # Cùng wav ở tốc độ thường thì phải giãn
-    segs2 = [{"id": "a", "start": 0, "end": 2.1, "audioDuration": 3.0}]
+    # videoSpeed auto cũ (<1) → dọn; user đặt 1.5× → giữ
+    segs2 = [
+        {"id": "a", "start": 0, "end": 2, "videoSpeed": 0.82},
+        {"id": "b", "start": 3, "end": 5, "videoSpeed": 1.5},
+    ]
     assign_tts_fit_speeds(segs2, match="preferVideo")
-    assert segs2[0].get("videoSpeed", 1) < 1
+    assert "videoSpeed" not in segs2[0]
+    assert segs2[1]["videoSpeed"] == 1.5
+
+
+def test_fit_tts_audio_compresses_to_slot(tmp_path):
+    """Wav dài hơn khe tới câu sau → atempo nén, audioDuration cập nhật."""
+    import subprocess
+
+    from pipeline.orchestrate.tts_fit import fit_tts_audio_to_slots
+
+    (tmp_path / "tts").mkdir()
+    wav = tmp_path / "tts" / "a.wav"
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
+         "-i", "sine=frequency=440:duration=4", str(wav)],
+        check=True, capture_output=True,
+    )
+    segs = [
+        {"id": "a", "start": 0.0, "end": 2.0, "audioFile": "a.wav", "audioDuration": 4.0},
+        {"id": "b", "start": 2.5, "end": 4.0},
+    ]
+    n = fit_tts_audio_to_slots(segs, tmp_path, match="preferVideo")
+    assert n == 1
+    # khe = 2.5 - 0.03 = 2.47; wav 4s nén còn ~2.47s (≤2×)
+    assert 2.0 < segs[0]["audioDuration"] < 2.9

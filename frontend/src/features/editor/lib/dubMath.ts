@@ -27,7 +27,9 @@ export function dubPlaybackSpeed(seg: Segment, bakedSpeed = 1): number {
 
 /**
  * Playback rate preview — khớp thước + xuất.
- * Chỉ videoSpeed câu; không soft 0.8 ngầm. Muốn 0.80×: bấm Áp dụng (bake).
+ * Thước timeline bất khả xâm phạm: videoSpeed <1 (TTS-fit cũ) đã khai tử —
+ * TTS nén bằng atempo phía BE. Chỉ tôn trọng tốc độ clip user đặt (menu ≥1).
+ * Muốn 0.80× toàn cục: bấm Áp dụng (bake vào file).
  */
 export function previewVideoRate(
   _matchDuration: string | undefined,
@@ -37,8 +39,8 @@ export function previewVideoRate(
   _hasBakedSpeed?: boolean,
 ): number {
   const vs =
-    typeof segSpeed === 'number' && segSpeed > 0.2
-      ? Math.max(0.35, Math.min(2, segSpeed))
+    typeof segSpeed === 'number' && segSpeed >= 0.995
+      ? Math.max(1, Math.min(2, segSpeed))
       : 1
   return vs
 }

@@ -148,7 +148,12 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
             s["end"] = vid_dur
     source_timeline_duration = vid_dur
     source_timeline_segments = [dict(s) for s in segments]
-    # FE timeline sau Áp dụng = chuẩn. base luôn 1.0 — chỉ nướng videoSpeed câu (TTS-fit).
+    # FE timeline sau Áp dụng = chuẩn. base luôn 1.0.
+    # videoSpeed <1 (TTS-fit cũ) đã khai tử — project cũ còn sót thì dọn ở đây
+    # để xuất đúng thước; chỉ còn nướng speed user đặt (≥1, menu Tốc độ video).
+    from pipeline.orchestrate.tts_fit import strip_auto_video_speeds
+
+    strip_auto_video_speeds(segments)
     timeline_final = _timeline_is_final(meta, video)
     retime_base = _export_retime_base(meta, video, match_mode)
     video, segments = retime_video_segments(

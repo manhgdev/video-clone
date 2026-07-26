@@ -291,16 +291,18 @@ def run_dub(project_id: str, *, finalize: bool = True, nested: bool = False) -> 
         for seg in segments:
             if seg.get("audioFile") or float(seg.get("audioDuration") or 0) > 0.05:
                 seg["ttsBake"] = bake_now
-        # TTS dài hơn cửa sổ câu → videoSpeed < 1 (kéo dài span, đẩy câu sau).
-        # Export gọi retime_video_segments — không cascade cắt audio.
-        n_stretch = assign_tts_fit_speeds(segments, match=match)
+        # Thước timeline bất khả xâm phạm: TTS dài hơn khe → NÉN AUDIO (atempo
+        # ≤2×), không giãn video. Xuất = preview = đúng thời lượng nguồn.
+        from pipeline.orchestrate.tts_fit import fit_tts_audio_to_slots
+
+        n_stretch = fit_tts_audio_to_slots(segments, root, match=match)
         meta["segments"] = segments
         # Không ép chậm 0.80× lúc dub — chỉ stretch từng câu (videoSpeed) nếu cần
         if "videoSlowFactor" in meta:
             meta.pop("videoSlowFactor", None)
         save_meta(project_id, meta)
         if finalize:
-            extra = f" · giãn {n_stretch} câu" if n_stretch else ""
+            extra = f" · nén {n_stretch} câu cho vừa khe" if n_stretch else ""
             set_status(
                 project_id,
                 step="dub",
