@@ -1,3 +1,7 @@
+import pytest
+
+pytest.importorskip("fastapi", reason="Python hệ thống thiếu fastapi — test API chạy trong venv backend")
+
 from api.deps import StudioSynthIn
 from api.routes.tts_studio import api_tts_studio_synth
 from pipeline.tts import studio

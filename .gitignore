@@ -24,3 +24,6 @@ capcut_device.json
 !backend/resources/voice-ref/adam-low-tone.wav
 *.mp3
 *.aiff
+
+# log backend (app.log tung bi track — da go cached 2026-07-27)
+*.log

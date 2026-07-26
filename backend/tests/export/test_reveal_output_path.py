@@ -3,6 +3,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
+pytest.importorskip("fastapi", reason="Python hệ thống thiếu fastapi — test API chạy trong venv backend")
+
 from api.routes import jobs
 
 

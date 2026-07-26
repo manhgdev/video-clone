@@ -12,6 +12,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+pytest.importorskip("cv2", reason="cover_and_burn cần cv2 — chạy bằng venv backend")
+
 from pipeline.export.burn import cover_and_burn
 
 pytestmark = pytest.mark.skipif(

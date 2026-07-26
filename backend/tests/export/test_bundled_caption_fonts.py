@@ -1,6 +1,10 @@
 from pathlib import Path
 import unittest
 
+import pytest
+
+pytest.importorskip("fastapi", reason="Python hệ thống thiếu fastapi — test API chạy trong venv backend")
+
 from PIL import ImageFont
 from pydantic import ValidationError
 

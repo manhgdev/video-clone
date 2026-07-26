@@ -14,7 +14,7 @@ render đều phải qua kiểm tra parity với preview (WYSIWYG).
 | P1.5 | Gộp crop/scale vào burn + xử lý logo fade | ✅ 2026-07-27 (`5352464`) |
 | P3 | Đo Demucs + TTS video dài (đo trước, chưa sửa) | ✅ 2026-07-27 — bảng dưới |
 | P4 | FE: bundle split + tách nốt LivePreviewEditor | ✅ 2026-07-27 — bundle 735KB→355KB chính |
-| P5 | Vệ sinh: skipif test môi trường, app.log, git fsync | ⬜ xen kẽ |
+| P5 | Vệ sinh: skipif test môi trường, app.log, git fsync | ✅ 2026-07-27 — `pytest -q` trần xanh cả 2 python |
 
 ## Số đo đã chốt (clip 30s, 1080×1920@30, GTX 1660 SUPER)
 
@@ -125,19 +125,21 @@ Hiện trạng: bundle >600 KB (cảnh báo vite);
 
 ## P5 — Vệ sinh (xen kẽ lúc chờ)
 
-1. Test môi trường đỏ → `pytest.mark.skipif` theo điều kiện thật (thiếu fastapi ở
-   Python hệ thống, không GPU, không mạng) để `pytest -q` trần luôn xanh, bỏ được
-   danh sách `--ignore` dài: test_setup_gate, test_ai_runtime_setup,
-   test_adaptive_workers_gpu, test_bundled_caption_fonts, test_logo_overlay,
-   test_rendered_videos, test_reveal_output_path, test_tts_studio_schema,
-   test_vieneu_frozen_backend, test_vieneu_backend.
-2. `backend/app.log` đang **tracked và luôn modified** — `git rm --cached backend/app.log`
-   + xác nhận `.gitignore` đã chặn (`*.log`); rà luôn `*.bk*` không lọt staging.
-3. Git ref từng bị ghi rỗng (2026-07-27): nếu tái diễn — `.git/logs/HEAD` lấy sha cuối,
-   `git update-ref refs/heads/main <sha>`. Bật `git config core.fsyncMethod=fsync`
-   (máy này từng mất ref khi crash).
-4. Dọn scratchpad bench script còn giá trị → chuyển vào `backend/tools/` nếu tái dùng
-   (bench burn, bench OCR); còn lại bỏ.
+**Đã làm (2026-07-27):** `pytest -q` trần xanh CẢ HAI python (system 105 pass +
+7 skip, venv 123 pass) — hết danh sách `--ignore`.
+1. ✅ 6 file lỗi collection (thiếu fastapi ở Python hệ thống) → `importorskip("fastapi")`;
+   test_ffgraph_burn thêm `importorskip("cv2")`.
+2. ✅ 8 test đỏ hoá ra KHÔNG phải test môi trường mà là test cũ lệch code:
+   - test_adaptive_workers_gpu: mock nvidia-smi sai THỨ TỰ (total,free,util) trong khi
+     `_nvidia_smi_mem` query util,free,total → util=6144% kích nhánh back-off. Đảo lại.
+   - test_vieneu_backend + frozen: mock `_torch_cuda_ready` cũ — seam thật giờ là
+     `accel.preferred_torch_device` (resolver uỷ quyền accel). Patch đúng seam.
+   - test_ai_runtime_setup: viết lại theo thiết kế hiện tại — dev mode install_ai_runtime
+     KHÔNG cài torch (giao ensure_runtime_torch + guard DLL-locked); transformers pin
+     mới `>=4.46.0`; pip đường thật là `_pip_stream` (không phải subprocess.run).
+   - test_logo_overlay: `_logo_schedule` dời sang export_overlays.py mà test trỏ đường cũ.
+3. ✅ `git rm --cached backend/app.log` + `.gitignore` thêm `*.log`.
+4. ✅ `git config core.fsyncMethod=fsync` (máy từng bị ghi rỗng ref khi crash).
 
 ---
 

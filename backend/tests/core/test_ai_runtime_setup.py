@@ -1,6 +1,14 @@
+"""Cài gói AI: kiểm theo THIẾT KẾ HIỆN TẠI.
+
+- Dev (không frozen): install_ai_runtime chỉ cài nhóm pip (Whisper/OCR/VieNeu),
+  KHÔNG đụng torch — torch giao cho ensure_runtime_torch với guard DLL-locked
+  (torch đã load bởi backend đang chạy thì tuyệt đối không pip).
+- ensure_runtime_torch chỉ cài khi torch thật sự vắng mặt và .pyd không bị lock.
+"""
 import pytest
-from pipeline.core import system_check
 from types import SimpleNamespace
+
+from pipeline.core import system_check
 
 
 def test_ai_runtime_skips_install_when_ready(monkeypatch):
@@ -18,53 +26,62 @@ def test_ai_runtime_skips_install_when_ready(monkeypatch):
     assert "VieNeu Local" in result["detail"]
 
 
-def test_ai_runtime_installs_torch_when_missing(monkeypatch):
+def test_ai_runtime_dev_delegates_torch_to_ensure(monkeypatch):
+    """Dev mode: torch thiếu → install_ai_runtime vẫn ok nhưng KHÔNG tự cài torch."""
     monkeypatch.setattr(system_check, "_nvidia_present", lambda: True)
     monkeypatch.setattr(system_check, "_torch_cuda_ready", lambda: False)
+    monkeypatch.setattr(system_check, "_torch_cuda_ready_cached", lambda: False)
+    monkeypatch.setattr(system_check, "_torch_broken", lambda: False)
     monkeypatch.setattr(
         system_check,
         "_mod_ok",
         lambda name: (name not in ("torch", "torchaudio"), "ok" if name not in ("torch", "torchaudio") else "chưa cài"),
     )
-    calls = []
-
-    def fake_run(args, **_kwargs):
-        calls.append(args)
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr(system_check.subprocess, "run", fake_run)
-    monkeypatch.setattr(system_check, "_install_runtime_torch", lambda **_kw: calls.append(["install_runtime_torch"]))
+    torch_calls = []
+    monkeypatch.setattr(system_check, "_install_runtime_torch", lambda **_kw: torch_calls.append("torch"))
+    monkeypatch.setattr(
+        system_check, "_pip_stream",
+        lambda cmd: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
     result = system_check.install_ai_runtime()
 
     assert result["ok"] is True
-    assert any("install_runtime_torch" in str(call) for call in calls)
+    assert torch_calls == [], "dev mode không được pip torch từ install_ai_runtime"
 
 
-def test_ai_runtime_upgrades_cpu_torch_on_nvidia(monkeypatch):
+def test_ensure_runtime_torch_installs_cuda_when_absent(monkeypatch):
+    """torch vắng hẳn + NVIDIA + không lock → cài bản CUDA đúng một lần."""
+    monkeypatch.setattr(system_check, "_torch_warm_done", False)
     monkeypatch.setattr(system_check, "_nvidia_present", lambda: True)
     monkeypatch.setattr(system_check, "_torch_cuda_ready", lambda: False)
-    monkeypatch.setattr(system_check, "_mod_ok", lambda _name: (True, "ok"))
+    monkeypatch.setattr(system_check, "_torch_cuda_ready_cached", lambda: False)
+    monkeypatch.setattr(system_check, "_torch_dll_locked", lambda: False)
+    monkeypatch.setattr(
+        system_check,
+        "_mod_ok",
+        lambda name: (name not in ("torch", "torchaudio"), "ok"),
+    )
     calls = []
-
-    monkeypatch.setattr(system_check, "_install_runtime_torch", lambda **_kw: calls.append("upgrade"))
-    monkeypatch.setattr(system_check, "_clear_torch_modules", lambda: None)
-    result = system_check.install_ai_runtime()
-
-    assert result["ok"] is True
-    assert calls == ["upgrade"]
-    assert "ONNX/CPU" not in result["detail"] or "cần" in result["detail"]
-
-
-def test_ensure_runtime_torch_installs_cuda_on_nvidia(monkeypatch):
-    monkeypatch.setattr(system_check, "_nvidia_present", lambda: True)
-    monkeypatch.setattr(system_check, "_torch_cuda_ready", lambda: False)
-    monkeypatch.setattr(system_check, "_mod_ok", lambda name: (name != "torchaudio", "ok"))
-    calls = []
-
     monkeypatch.setattr(system_check, "_install_runtime_torch", lambda **_kw: calls.append("cuda"))
     monkeypatch.setattr(system_check, "_clear_torch_modules", lambda: None)
     system_check.ensure_runtime_torch()
     assert calls == ["cuda"]
+
+
+def test_ensure_runtime_torch_dev_guard_skips_pip(monkeypatch):
+    """torch đã import được (backend đang chạy) → guard chặn pip, không gọi installer."""
+    monkeypatch.setattr(system_check, "_torch_warm_done", False)
+    monkeypatch.setattr(system_check, "_nvidia_present", lambda: True)
+    monkeypatch.setattr(system_check, "_torch_cuda_ready", lambda: False)
+    monkeypatch.setattr(system_check, "_torch_cuda_ready_cached", lambda: False)
+    monkeypatch.setattr(system_check, "_torch_dll_locked", lambda: False)
+    monkeypatch.setattr(system_check, "_mod_ok", lambda name: (name != "torchaudio", "ok"))
+
+    def unexpected(**_kw):
+        raise AssertionError("không được pip khi torch đang load trong process dev")
+
+    monkeypatch.setattr(system_check, "_install_runtime_torch", unexpected)
+    system_check.ensure_runtime_torch()
 
 
 def test_ensure_torchaudio_skips_when_ready(monkeypatch):
@@ -93,17 +110,17 @@ def test_ensure_runtime_transformers_installs_when_missing(monkeypatch):
         lambda *pkgs, **_kw: calls.append(pkgs),
     )
 
-    from pipeline.core import system_check
-
     with pytest.raises(RuntimeError, match="transformers"):
         system_check.ensure_runtime_transformers()
     assert calls == [
-        ("transformers==4.57.6", "huggingface-hub>=0.34,<1.0", "safetensors"),
+        ("transformers>=4.46.0", "huggingface-hub>=0.34", "safetensors"),
     ]
 
 
 def test_ai_runtime_installs_when_transformers_missing(monkeypatch):
     monkeypatch.setattr(system_check, "_runtime_torch_needs_install", lambda: False)
+    monkeypatch.setattr(system_check, "_torch_broken", lambda: False)
+    monkeypatch.setattr(system_check, "_nvidia_present", lambda: False)
     monkeypatch.setattr(
         system_check,
         "_mod_ok",
@@ -111,12 +128,13 @@ def test_ai_runtime_installs_when_transformers_missing(monkeypatch):
     )
     calls = []
 
-    def fake_run(args, **_kwargs):
-        calls.append(args)
+    def fake_pip_stream(cmd):
+        calls.append(cmd)
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(system_check.subprocess, "run", fake_run)
+    # _pip_stream mới là đường pip thật (stream log) — subprocess.run không dùng
+    monkeypatch.setattr(system_check, "_pip_stream", fake_pip_stream)
     result = system_check.install_ai_runtime()
 
     assert result["ok"] is True
-    assert calls
+    assert any("transformers" in " ".join(map(str, c)) for c in calls)

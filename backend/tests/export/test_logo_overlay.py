@@ -1,9 +1,13 @@
 import numpy as np
 from PIL import Image
 
+import pytest
+
+pytest.importorskip("fastapi", reason="Python hệ thống thiếu fastapi — test API chạy trong venv backend")
+
 from api.deps import TextOverlayIn
 from api.routes.overlays import _validate_logo
-from pipeline.orchestrate.export_job import _logo_schedule
+from pipeline.orchestrate.export_overlays import _logo_schedule
 from pipeline.export.burn_parts.layout_text import _blit_overlay, _image_overlay
 
 

@@ -6,9 +6,9 @@ from pipeline.core import resources
 
 def test_gpu_job_cap_uses_vram_when_idle(monkeypatch):
     def fake_smi(cmd, **kwargs):
-        # total, free, util — card 6GB rảnh
-        assert "memory.total" in " ".join(cmd)
-        return "6144, 5200, 12\n"
+        # Thứ tự ĐÚNG theo query của _nvidia_smi_mem: util, free, total — card 6GB rảnh
+        assert "utilization.gpu,memory.free,memory.total" in " ".join(cmd)
+        return "12, 5200, 6144\n"
 
     monkeypatch.setattr(resources.subprocess, "check_output", fake_smi)
     monkeypatch.setattr(resources.os, "cpu_count", lambda: 12)
@@ -22,8 +22,8 @@ def test_gpu_job_cap_backs_off_when_util_full(monkeypatch):
 
     def fake_smi(cmd, **kwargs):
         calls["n"] += 1
-        # total, free, util — gần full
-        return "6144, 900, 96\n"
+        # util, free, total — card gần full
+        return "96, 900, 6144\n"
 
     monkeypatch.setattr(resources.subprocess, "check_output", fake_smi)
     monkeypatch.setattr(resources.os, "cpu_count", lambda: 12)

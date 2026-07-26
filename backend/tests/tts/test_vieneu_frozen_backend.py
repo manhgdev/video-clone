@@ -2,10 +2,11 @@
 
 
 def test_frozen_resolve_backend_cuda(monkeypatch) -> None:
+    # Seam thật: resolve_backend uỷ quyền accel.preferred_vieneu_backend
     from pipeline.tts.engines import vieneu_frozen as vf
 
     monkeypatch.delenv("VIENEU_BACKEND", raising=False)
-    monkeypatch.setattr(vf, "runtime_torch_cuda_ready", lambda **_: True)
+    monkeypatch.setattr("pipeline.core.accel.preferred_torch_device", lambda **_: "cuda")
     assert vf.resolve_backend() == ("pytorch", "cuda")
 
 
@@ -13,7 +14,7 @@ def test_frozen_resolve_backend_cpu(monkeypatch) -> None:
     from pipeline.tts.engines import vieneu_frozen as vf
 
     monkeypatch.delenv("VIENEU_BACKEND", raising=False)
-    monkeypatch.setattr(vf, "runtime_torch_cuda_ready", lambda **_: False)
+    monkeypatch.setattr("pipeline.core.accel.preferred_torch_device", lambda **_: "cpu")
     assert vf.resolve_backend() == ("onnx", "cpu")
 
 
