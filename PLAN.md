@@ -1,7 +1,10 @@
 # PLAN tối ưu tốc độ — cập nhật 2026-07-27
 
-> **Tiến độ:** ✅ P0 XONG (2026-07-27) — main gộp đủ 4 nhánh, 88 test pass, build OK,
-> burn smoke OK. Đang chờ: P1 (ffmpeg vẽ — làm kế tiếp), P2, P3, P4, P5.
+> **Tiến độ:** ✅ P0 XONG · ✅ P1 lõi XONG (2026-07-27) — ffgraph.py vẽ mask+chữ bằng
+> filter_complex, parity test 4/4, fallback legacy giữ nguyên. Đo clip 30s: burn
+> 12,3s → 5,9s tổng (phần ffmpeg thuần 2,5s — video dài tiến về ~4× nhanh hơn,
+> 2h ≈ 40ph → ~10ph). CHƯA làm trong P1: gộp crop/scale bỏ encode lần 2 (P1.5),
+> logo fade (vẫn fallback legacy). Kế tiếp: P1.5 hoặc P2 (nhân thêm nhờ bỏ đoạn trống).
 
 Mục tiêu: video vài tiếng xuất xong trong **phút**, không phải giờ; máy không đơ khi chạy.
 Nguyên tắc: mỗi phase xong phải **đo số + chạy test** rồi mới sang phase sau; mọi thay đổi

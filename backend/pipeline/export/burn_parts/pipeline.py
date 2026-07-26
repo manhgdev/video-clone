@@ -760,6 +760,36 @@ def cover_and_burn(
         else:
             cue_fits.append([])
 
+    # P1: thử ffmpeg vẽ trực tiếp (nhanh 6-8×, khung không rời GPU);
+    # không khả thi / lỗi → đường Python cũ vẫn nguyên.
+    from .ffgraph import try_render_ffmpeg
+
+    if try_render_ffmpeg(
+        video,
+        out,
+        cues=cues,
+        cue_need_mask=cue_need_mask,
+        cue_fits=cue_fits,
+        cue_overlays=cue_overlays,
+        cue_segment_ids=cue_segment_ids,
+        segments_by_id=segments_by_id,
+        mask_style=mask_style,
+        mask_color=mask_color,
+        mask_opacity=mask_opacity,
+        burn=burn,
+        w=w,
+        h=h,
+        project_id=project_id,
+    ):
+        if project_id:
+            set_status(
+                project_id,
+                step="export",
+                progress=70,
+                message="Xuất khung (ffmpeg trực tiếp) xong",
+                running=True,
+            )
+        return out
     return render_burned_video(
         video,
         out,
