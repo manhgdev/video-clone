@@ -10,9 +10,7 @@ import { DndContext, closestCenter, PointerSensor, useSensor, useSensors, type D
 import { SortableContext, useSortable, arrayMove, horizontalListSortingStrategy } from '@dnd-kit/sortable'
 import { CSS as DndCSS } from '@dnd-kit/utilities'
 import { Panel } from 'react-resizable-panels'
-import { ScrollArea } from '@/shared/ui/scroll-area'
 import { fitOverlayFontPx, layoutOcrOverlay, midInsideVerticalWatermark } from '@/features/editor/ocrOverlayLayout'
-import { EditorMaskPanel } from '@/features/editor/EditorMaskPanel'
 import { ExportModal, type ExportModalOptions } from '@/features/editor/ExportModal'
 import { expandCompoundShell } from '@/features/project/expandCompound'
 import { generateLogoKeyframes, logoFrame } from '@/features/editor/lib/logoMotion'
@@ -28,15 +26,11 @@ import {
   type TrackId,
   ASPECT_PRESETS,
   ASSET_TABS,
-  AUTO_SUBTITLE_FONT,
   AspectIcon,
   aspectWindowNorm,
   centeredAspectCrop,
   BOOKMARK_EPS,
-  CAPTION_COLORS,
-  CAPTION_FONT_PRESETS,
   CAPTION_LANE_DEFS,
-  COVER_MASK_STYLES,
   EFFECT_PRESETS,
   FONT_SIZES,
   HISTORY_MAX,
@@ -70,7 +64,6 @@ import {
   fitTimelineZoom,
   formatTime,
   formatTimecode,
-  parseTimecode,
   fullMediaClip,
   isOcrOverlayLayout,
   loadBookmarks,
@@ -84,13 +77,10 @@ import {
   persistBookmarks,
   persistMediaClips,
   pickTimelineSeg,
-  displaySpeedDraft,
   fileBakedSpeed,
   formatSpeedX,
   speedStatusLines,
   appliedFileSpeed,
-  mediaClipsFrom1xBaseline,
-  mediaClipsTo1xBaseline,
   previewVideoRate,
   reindexSegments,
   resolveCaptionFontSize,
@@ -107,13 +97,11 @@ import {
   seedCoverBox,
   segmentAt,
   segmentAtCover,
-  segmentForDub,
   segmentHasDub,
   segmentWithLayout,
   setMeasureFontFamily,
   segmentsAt,
   speedSegmentAt,
-  snapBoxToCenter,
   trimSegmentsForVideoRight,
   solidMidAt,
   solidOcrAt,
@@ -123,13 +111,15 @@ import {
   videoCropStyle,
   withInferredLayout,
   PanelView,
-  PropLabel,
-  NumField,
   TrackCtrl,
   CtxItem,
   CtxSep,
   TlButton,
 } from '@/features/editor/lib'
+import { useSpeedTransaction } from '@/features/editor/useSpeedTransaction'
+import { useDubAudioSync } from '@/features/editor/useDubAudioSync'
+import { useTimelineDrag } from '@/features/editor/useTimelineDrag'
+import { EditorPropertiesPanel } from '@/features/editor/EditorPropertiesPanel'
 
 type Props = {
   videoUrl: string
@@ -436,25 +426,6 @@ export default function LivePreviewEditor({
   const [globalTtsVolume, setGlobalTtsVolume] = useState(100)
   const [globalTtsSpeed, setGlobalTtsSpeed] = useState(1)
   const [globalVoice, setGlobalVoice] = useState(() => settings.defaultVoice || '')
-  // Slider = tốc độ file đã Áp dụng (1.00× nếu chưa bake)
-  const [speedDraft, setSpeedDraft] = useState(() =>
-    displaySpeedDraft(settings.matchDuration, bakedSpeed, bakedPreferVideo, hasBakedSpeed),
-  )
-  const [speedBusy, setSpeedBusy] = useState(false)
-  const [speedCancelling, setSpeedCancelling] = useState(false)
-  const speedCancelRequestedRef = useRef(false)
-  const [speedError, setSpeedError] = useState<string | null>(null)
-  const [speedProgress, setSpeedProgress] = useState(0)
-  const [speedMessage, setSpeedMessage] = useState('')
-  /** Transaction tốc độ: chỉ revision mới nhất được commit */
-  const speedTxnRef = useRef<{
-    rev: number
-    ac: AbortController | null
-    debounce: ReturnType<typeof setTimeout> | null
-    pendingRate: number | null
-  }>({ rev: 0, ac: null, debounce: null, pendingRate: null })
-  /** Baseline clip Video/BG ở 1× — mọi bake scale từ đây, không cascade */
-  const mediaClips1xRef = useRef<{ video: MediaClip[]; bg: MediaClip[] } | null>(null)
   const [stemStatus, setStemStatus] = useState<'off' | 'loading' | 'ready' | 'error'>('off')
   const [stemProgress, setStemProgress] = useState(0)
   const [stemError, setStemError] = useState<string | null>(null)
@@ -476,6 +447,74 @@ export default function LivePreviewEditor({
   const [selectedMediaId, setSelectedMediaId] = useState<string | null>(null)
   const [videoClips, setVideoClips] = useState<MediaClip[]>([])
   const [bgClips, setBgClips] = useState<MediaClip[]>([])
+
+  const wantNoVocals =
+    settings.processOriginalAudio && settings.originalAudioMode === 'no_vocals'
+  const muteOriginal =
+    settings.processOriginalAudio &&
+    (settings.originalAudioMode === 'mute' || settings.originalAudioMode === 'no_vocals')
+
+  const videoSourceStart = videoClips.length === 1 ? (videoClips[0].sourceStart ?? 0) : 0
+  const timelineToVideoTime = (value: number) => value + videoSourceStart
+  const videoToTimelineTime = (value: number) => Math.max(0, value - videoSourceStart)
+
+  const { syncOriginalBg, pauseDubAudio, syncDubAudio } = useDubAudioSync({
+    segments,
+    settings,
+    bakedSpeed,
+    bakedPreferVideo,
+    hasBakedSpeed,
+    wantNoVocals,
+    muteOriginal,
+    stemStatus,
+    dubMuted: trackMute.dub,
+    videoToTimelineTime,
+    videoRef,
+    bgAudioRef,
+    dubAudioRef,
+    dubTokenRef,
+    dubFinishedIdsRef,
+    dubHardSyncRef,
+    videoMutedForDubRef,
+  })
+
+  const {
+    speedDraft,
+    setSpeedDraft,
+    speedBusy,
+    speedCancelling,
+    speedError,
+    setSpeedError,
+    speedProgress,
+    speedMessage,
+    applyVideoSpeed,
+    cancelVideoSpeed,
+  } = useSpeedTransaction({
+    projectId,
+    busy,
+    segments,
+    matchDuration: settings.matchDuration,
+    bakedSpeed,
+    bakedPreferVideo,
+    hasBakedSpeed,
+    wantNoVocals,
+    time,
+    setTime,
+    videoClips,
+    bgClips,
+    setVideoClips,
+    setBgClips,
+    videoRef,
+    bgAudioRef,
+    dubHardSyncRef,
+    dubFinishedIdsRef,
+    dubTokenRef,
+    pushHistory,
+    pauseDubAudio,
+    onSegmentsReplace,
+    onPreviewRebaked,
+  })
+
   const [tool, setTool] = useState<'select' | 'cover' | 'text'>('select')
   const [mainTrackMagnet, setMainTrackMagnet] = useState(() => loadTimelineTool('mainTrackMagnet'))
   const [autoSnapping, setAutoSnapping] = useState(() => loadTimelineTool('autoSnapping'))
@@ -859,9 +898,6 @@ export default function LivePreviewEditor({
 
   const selected = selectedId ? segments.find((s) => s.id === selectedId) : undefined
   const lastSegment = segments[segments.length - 1]
-  const videoSourceStart = videoClips.length === 1 ? (videoClips[0].sourceStart ?? 0) : 0
-  const timelineToVideoTime = (value: number) => value + videoSourceStart
-  const videoToTimelineTime = (value: number) => Math.max(0, value - videoSourceStart)
   const videoTrackEnd = videoClips.length ? Math.max(...videoClips.map((clip) => clip.end)) : 0
   // Preview Ns → chỉ làm việc trong Ns (khớp xuất). Dịch full → cả video.
   // Ưu tiên videoTrackEnd (sau trim right) — không phình lại full source.
@@ -1115,14 +1151,6 @@ export default function LivePreviewEditor({
       ),
     [segments, sourceHeight, sourceWidth, videoFrameReady],
   )
-  /** TTS: luôn bung children (timing từng câu). Shell mix chỉ khi không bung được. */
-  const dubPlaySegments = useMemo(() => {
-    const expanded = expandSegmentsForPlayback(segments)
-    const withDub = expanded.filter((s) => segmentHasDub(s) && s.audioUrl)
-    if (withDub.length) return withDub
-    // Fallback shell mix (không có TTS từng câu)
-    return segments.filter((s) => s.isCompound && segmentHasDub(s) && s.audioUrl)
-  }, [segments])
   // selected có thể là shell compound (rỗng chữ) — không dùng cho caption layout
   const selectedIsShell = Boolean(selected?.isCompound)
   const selectedLayout = selected && !selectedIsShell
@@ -1291,14 +1319,6 @@ export default function LivePreviewEditor({
   const logoToggleDisabled = logoApplying || (!logoToggleRemoves && (!logoDraftChanged || !logoDraft?.text.trim()))
 
   useEffect(() => {
-    setSpeedDraft(
-      displaySpeedDraft(settings.matchDuration, bakedSpeed, bakedPreferVideo, hasBakedSpeed),
-    )
-    // Đổi project → baseline clip 1× phải chụp lại
-    mediaClips1xRef.current = null
-  }, [projectId, bakedSpeed, bakedPreferVideo, hasBakedSpeed, settings.matchDuration])
-
-  useEffect(() => {
     setFontSizeDraft(selected?.fontSize ?? 0)
   }, [selected?.id, selected?.fontSize])
 
@@ -1315,12 +1335,6 @@ export default function LivePreviewEditor({
     dubTokenRef.current = ''
     dubFinishedIdsRef.current.clear()
   }, [busy])
-
-  const wantNoVocals =
-    settings.processOriginalAudio && settings.originalAudioMode === 'no_vocals'
-  const muteOriginal =
-    settings.processOriginalAudio &&
-    (settings.originalAudioMode === 'mute' || settings.originalAudioMode === 'no_vocals')
 
   // Stem xóa lời — ưu tiên cache; gen counter tránh race StrictMode / remount preview.
   const stemReadyUrlRef = useRef<string | null>(null)
@@ -1492,229 +1506,6 @@ export default function LivePreviewEditor({
     bakedPreferVideo,
   ])
 
-  function syncOriginalBg(
-    videoTime: number,
-    isPlaying: boolean,
-    dubActive: boolean,
-    playRate = 1,
-    hardSync = false,
-  ) {
-    const video = videoRef.current
-    if (!video) return
-    const volMul = Math.max(0, Math.min(2, (settings.originalAudioVolume ?? 100) / 100))
-    const bg = bgAudioRef.current
-    const playStem = wantNoVocals && stemStatus === 'ready' && !!bg
-    // Âm gốc chỉ điều khiển qua track «Âm gốc» (không duplicate mute trên Video)
-    const playVideoAudio = !muteOriginal
-    const rate = Math.max(0.5, Math.min(2, playRate))
-    // Stem file luôn 1× nguồn; timeline display sau bake → map sourceTime = t * bakedSpeed
-    const bakeSp =
-      typeof bakedSpeed === 'number' && bakedSpeed > 0.2
-        ? bakedSpeed
-        : bakedPreferVideo
-          ? 0.8
-          : 1
-
-    if (playStem && bg) {
-      video.muted = true
-      video.volume = 1
-      videoMutedForDubRef.current = true
-      bg.volume = Math.min(1, volMul * (dubActive ? 0.62 : 1))
-      // Cùng wall-clock với video bake: rate_stem = rate_video * bakeSp
-      const stemRate = Math.max(0.5, Math.min(2, rate * bakeSp))
-      if (Math.abs(bg.playbackRate - stemRate) > 0.01) bg.playbackRate = stemRate
-      if (hardSync) {
-        try {
-          bg.currentTime = Math.max(0, videoTime * bakeSp)
-        } catch { /* ignore */ }
-      }
-      if (isPlaying) {
-        if (bg.paused) void bg.play().catch(() => { /* autoplay */ })
-      } else {
-        bg.pause()
-      }
-      return
-    }
-
-    bg?.pause()
-    if (!playVideoAudio) {
-      video.muted = true
-      videoMutedForDubRef.current = true
-      return
-    }
-    video.muted = false
-    videoMutedForDubRef.current = false
-    video.volume = Math.min(1, Math.max(0, volMul * (dubActive ? 0.14 : 0.42)))
-  }
-
-  function pauseDubAudio() {
-    // Giữ token — pause/play không load lại file (tránh ngắt đầu câu)
-    dubAudioRef.current?.pause()
-    bgAudioRef.current?.pause()
-    const video = videoRef.current
-    const t = video?.currentTime ?? 0
-    const at = speedSegmentAt(segments, videoToTimelineTime(t))
-    const playRate = previewVideoRate(
-      settings.matchDuration,
-      bakedPreferVideo,
-      at?.videoSpeed,
-      bakedSpeed,
-      hasBakedSpeed,
-    )
-    syncOriginalBg(t, false, Boolean(dubTokenRef.current), playRate, false)
-  }
-
-  /** Đồng bộ clip TTS (+ nền). Free-run 1 lần / câu; không restart khi ended. */
-  function syncDubAudio(videoTime: number, isPlaying: boolean) {
-    const video = videoRef.current
-    if (!video || !isPlaying) {
-      pauseDubAudio()
-      return
-    }
-
-    // Tua ngược / ra khỏi cửa sổ → cho phép đọc lại
-    const finished = dubFinishedIdsRef.current
-    const dubSegs = dubPlaySegments
-    for (const s of dubSegs) {
-      if (!finished.has(s.id)) continue
-      if (videoTime < s.start - 0.15) finished.delete(s.id)
-    }
-
-    const hardSync = dubHardSyncRef.current
-    dubHardSyncRef.current = false
-
-    let a = dubAudioRef.current
-    if (!a) {
-      a = new Audio()
-      a.preload = 'auto'
-      a.loop = false
-      dubAudioRef.current = a
-    }
-
-    // Đang phát dở → giữ nguyên câu (không nhảy / không lặp)
-    const holdId = dubTokenRef.current.split('|')[0]
-    const held = holdId ? dubSegs.find((s) => s.id === holdId) : undefined
-    const heldClipEnded = held
-      ? videoTime >= held.start + dubClipSeconds(
-          held,
-          dubSegs,
-          previewVideoRate(settings.matchDuration, bakedPreferVideo, held.videoSpeed, bakedSpeed, hasBakedSpeed),
-          bakedSpeed,
-        ) - 0.01
-      : false
-    if (held?.audioUrl && !heldClipEnded && !a.ended && a.currentTime > 0.02 && videoTime >= held.start - 0.08) {
-      const playRate = previewVideoRate(
-        settings.matchDuration,
-        bakedPreferVideo,
-        held.videoSpeed,
-        bakedSpeed,
-        hasBakedSpeed,
-      )
-      if (Math.abs(video.playbackRate - playRate) > 0.01) video.playbackRate = playRate
-      const speed = dubPlaybackSpeed(held, bakedSpeed)
-      a.playbackRate = speed
-      a.volume = Math.min(1, Math.max(0, (held.ttsVolume ?? 100) / 100))
-      if (hardSync) {
-        // TTS wav 1×: offset = wall * bake; wall ≈ (videoTime-start)/playRate
-        const wantTime = Math.max(0, ((videoTime - held.start) / Math.max(0.2, playRate)) * speed)
-        try {
-          if (Math.abs(a.currentTime - wantTime) > 0.2) a.currentTime = wantTime
-        } catch { /* ignore */ }
-      }
-      if (a.paused) void a.play().catch(() => { /* autoplay */ })
-      syncOriginalBg(videoTime, true, true, playRate, hardSync)
-      return
-    }
-
-    // Vừa xong câu → đánh dấu, không play lại
-    if (held && (a.ended || heldClipEnded)) {
-      if (heldClipEnded) a.pause()
-      finished.add(held.id)
-      dubTokenRef.current = ''
-    }
-
-    const at = speedSegmentAt(segments, videoTime)
-    const playRateProbe = previewVideoRate(
-      settings.matchDuration,
-      bakedPreferVideo,
-      at?.videoSpeed,
-      bakedSpeed,
-      hasBakedSpeed,
-    )
-    const seg = trackMute.dub
-      ? null
-      : segmentForDub(dubSegs, videoTime, playRateProbe, finished, bakedSpeed)
-
-    if (!seg?.audioUrl) {
-      if (dubTokenRef.current) {
-        a.pause()
-        dubTokenRef.current = ''
-      }
-      const idleRate = previewVideoRate(
-        settings.matchDuration,
-        bakedPreferVideo,
-        at?.videoSpeed,
-        bakedSpeed,
-        hasBakedSpeed,
-      )
-      if (Math.abs(video.playbackRate - idleRate) > 0.01) video.playbackRate = idleRate
-      syncOriginalBg(videoTime, true, false, idleRate, hardSync)
-      return
-    }
-
-    const playRate = previewVideoRate(
-      settings.matchDuration,
-      bakedPreferVideo,
-      seg.videoSpeed,
-      bakedSpeed,
-      hasBakedSpeed,
-    )
-    if (Math.abs(video.playbackRate - playRate) > 0.01) video.playbackRate = playRate
-
-    const speed = dubPlaybackSpeed(seg, bakedSpeed)
-    const vol = Math.min(1, Math.max(0, (seg.ttsVolume ?? 100) / 100))
-    const wantTime = Math.max(0, ((videoTime - seg.start) / Math.max(0.2, playRate)) * speed)
-    const token = `${seg.id}|${seg.audioUrl}`
-
-    syncOriginalBg(videoTime, true, true, playRate, hardSync)
-
-    // Cùng token + chưa ended → chỉ resume, không gán src lại (tránh lặp đầu câu)
-    if (dubTokenRef.current === token && !a.ended) {
-      a.playbackRate = speed
-      a.volume = vol
-      if (hardSync) {
-        try {
-          if (Math.abs(a.currentTime - wantTime) > 0.2) a.currentTime = wantTime
-        } catch { /* ignore */ }
-      }
-      if (a.paused) void a.play().catch(() => { /* autoplay */ })
-      return
-    }
-
-    // Đã finished id này → bỏ
-    if (finished.has(seg.id) && !hardSync) {
-      syncOriginalBg(videoTime, true, false, playRate, hardSync)
-      return
-    }
-
-    // Đổi câu mới — play 1 lần từ đầu (hoặc scrub offset)
-    if (hardSync) finished.delete(seg.id)
-    dubTokenRef.current = token
-    a.pause()
-    a.loop = false
-    a.src = seg.audioUrl
-    a.playbackRate = speed
-    a.volume = vol
-    const startAt = () => {
-      try {
-        a.currentTime = hardSync ? wantTime : 0
-      } catch { /* ignore */ }
-      void a.play().catch(() => { /* autoplay */ })
-    }
-    if (a.readyState >= 1) startAt()
-    else a.addEventListener('loadedmetadata', startAt, { once: true })
-  }
-
   useEffect(() => {
     if (!aspectMenuOpen) return
     const close = (e: MouseEvent) => {
@@ -1749,321 +1540,75 @@ export default function LivePreviewEditor({
     void video.play().catch(() => { /* requires explicit user gesture */ })
   }
 
-  /**
-   * Kéo clip segment (Caption / TTS) — CapCut free:
-   * move/start/end trong [0, timeline]; cho chồng/gap; multi-move cả selection.
-   */
-  function beginDrag(event: ReactPointerEvent, segment: Segment, mode: 'move' | 'start' | 'end') {
-    if (timelineEditLocked || trackLocked.caption) return
-    event.preventDefault()
-    event.stopPropagation()
-    let moveIds = selectedIds.includes(segment.id)
-      ? expandGroupSelection(selectedIds)
-      : expandGroupSelection([segment.id])
-    if (selectedIds.includes(segment.id) && moveIds.length > selectedIds.length) {
-      setSelectedIds(moveIds)
-    }
-    const multi =
-      mode === 'move'
-      && moveIds.length > 1
-      && moveIds.includes(segment.id)
-    if (!multi) {
-      if (!selectedIds.includes(segment.id) || selectedIds.length <= 1) {
-        if (trackFocus === 'dub') focusDub(segment)
-        else focusCaption(segment)
-        moveIds = expandGroupSelection([segment.id])
-      } else {
-        setSelectedId(segment.id)
-      }
-    } else {
-      setSelectedId(segment.id)
-      setSelectedIds(moveIds)
-    }
-    pushHistory()
-    const original = { start: segment.start, end: segment.end }
-    const minDuration = 0.12
-    const maxT = Math.max(timelineDuration, segment.end, 1)
-
-    // ── Group move (free — chỉ clamp mép timeline) ──
-    if (multi) {
-      const group = segments.filter((s) => moveIds.includes(s.id))
-      if (group.length >= 2) {
-        const origins = Object.fromEntries(
-          group.map((s) => [s.id, { start: s.start, end: s.end }]),
-        )
-        const gStart = Math.min(...group.map((s) => s.start))
-        const gEnd = Math.max(...group.map((s) => s.end))
-        const span = gEnd - gStart
-
-        const update = (move: PointerEvent) => {
-          let delta = (move.clientX - event.clientX) / pxPerSec
-          let ns = gStart + delta
-          ns = Math.max(0, Math.min(maxT - span, ns))
-          delta = ns - gStart
-          const next: Record<string, { start: number; end: number }> = {}
-          for (const s of group) {
-            const o = origins[s.id]
-            next[s.id] = {
-              start: Math.max(0, o.start + delta),
-              end: Math.min(maxT, o.end + delta),
-            }
-          }
-          groupDraftRef.current = next
-          setGroupDraft(next)
-        }
-        const commit = () => {
-          window.removeEventListener('pointermove', update)
-          window.removeEventListener('pointerup', commit)
-          const cur = groupDraftRef.current
-          groupDraftRef.current = null
-          setGroupDraft(null)
-          if (!cur) return
-          const changed = Object.keys(cur).some((id) => {
-            const o = origins[id]
-            return Math.abs(cur[id].start - o.start) > 0.001
-          })
-          if (!changed) return
-          const nextSegs = segments.map((s) => {
-            const d = cur[s.id]
-            return d ? { ...s, start: d.start, end: d.end } : s
-          })
-          void onSegmentsReplace(reindexSegments(nextSegs))
-        }
-        window.addEventListener('pointermove', update)
-        window.addEventListener('pointerup', commit, { once: true })
-        return
-      }
-    }
-
-    // ── Single — free move / trim ──
-    const update = (move: PointerEvent) => {
-      const delta = (move.clientX - event.clientX) / pxPerSec
-      let start = original.start
-      let end = original.end
-      const dur = original.end - original.start
-      if (mode === 'move') {
-        start = Math.max(0, Math.min(maxT - dur, original.start + delta))
-        end = start + dur
-      } else if (mode === 'start') {
-        start = Math.max(0, Math.min(original.end - minDuration, original.start + delta))
-      } else {
-        end = Math.min(maxT, Math.max(original.start + minDuration, original.end + delta))
-      }
-      const next = { id: segment.id, start, end }
-      draftRef.current = next
-      setDraft(next)
-    }
-
-    const commit = () => {
-      window.removeEventListener('pointermove', update)
-      window.removeEventListener('pointerup', commit)
-      const current = draftRef.current
-      draftRef.current = null
-      setDraft(null)
-      if (
-        current?.id === segment.id &&
-        (Math.abs(current.start - original.start) > 0.001 || Math.abs(current.end - original.end) > 0.001)
-      ) {
-        editSegment({ ...segment, start: current.start, end: current.end })
-      }
-    }
-    window.addEventListener('pointermove', update)
-    window.addEventListener('pointerup', commit, { once: true })
-  }
-
-  function snapMediaRange(
-    track: 'video' | 'bg',
-    clipId: string,
-    mode: 'move' | 'start' | 'end',
-    start: number,
-    end: number,
-  ) {
-    if (!autoSnapping || pxPerSec <= 0) return { start, end }
-    const list = track === 'video' ? videoClips : bgClips
-    const points = [0, time, timelineDuration]
-    for (const clip of list) {
-      if (clip.id !== clipId) points.push(clip.start, clip.end)
-    }
-    const threshold = 8 / pxPerSec
-    const nearest = (value: number) => points.reduce(
-      (best, point) => Math.abs(point - value) < Math.abs(best - value) ? point : best,
-      value,
-    )
-    if (mode === 'start') {
-      const point = nearest(start)
-      return { start: Math.abs(point - start) <= threshold ? point : start, end }
-    }
-    if (mode === 'end') {
-      const point = nearest(end)
-      return { start, end: Math.abs(point - end) <= threshold ? point : end }
-    }
-    const startPoint = nearest(start)
-    const endPoint = nearest(end)
-    const startDelta = startPoint - start
-    const endDelta = endPoint - end
-    const delta = Math.abs(startDelta) <= Math.abs(endDelta) ? startDelta : endDelta
-    return Math.abs(delta) <= threshold ? { start: start + delta, end: end + delta } : { start, end }
-  }
-
-  /** Kéo clip Video / Âm gốc (media) — move + trim + auto snap. */
-  function beginMediaDrag(
-    event: ReactPointerEvent,
-    track: 'video' | 'bg',
-    clip: MediaClip,
-    mode: 'move' | 'start' | 'end',
-  ) {
-    if (timelineEditLocked || trackLocked[track]) return
-    event.preventDefault()
-    event.stopPropagation()
-    if (track === 'video') focusVideo(clip.id)
-    else focusBg(clip.id)
-    pushHistory()
-    const original = { start: clip.start, end: clip.end }
-    const minDuration = MIN_CLIP_SEC
-    const maxT = Math.max(timelineDuration, clip.end, 1)
-    const list = track === 'video' ? videoClips : bgClips
-    const setList = track === 'video' ? setVideoClips : setBgClips
-
-    // Multi media move
-    const multiIds =
-      mode === 'move' && selectedMediaIds.includes(clip.id) && selectedMediaIds.length > 1
-        ? selectedMediaIds
-        : [clip.id]
-    if (multiIds.length > 1) {
-      const group = list.filter((c) => multiIds.includes(c.id))
-      const origins = Object.fromEntries(group.map((c) => [c.id, { start: c.start, end: c.end }]))
-      const gStart = Math.min(...group.map((c) => c.start))
-      const gEnd = Math.max(...group.map((c) => c.end))
-      const span = gEnd - gStart
-      const update = (move: PointerEvent) => {
-        let delta = (move.clientX - event.clientX) / pxPerSec
-        let ns = Math.max(0, Math.min(maxT - span, gStart + delta))
-        delta = ns - gStart
-        const next: Record<string, { start: number; end: number }> = {}
-        for (const c of group) {
-          const o = origins[c.id]
-          next[c.id] = {
-            start: Math.max(0, o.start + delta),
-            end: Math.min(maxT, o.end + delta),
-          }
-        }
-        groupDraftRef.current = next
-        setGroupDraft(next)
-      }
-      const commit = () => {
-        window.removeEventListener('pointermove', update)
-        window.removeEventListener('pointerup', commit)
-        const cur = groupDraftRef.current
-        groupDraftRef.current = null
-        setGroupDraft(null)
-        if (!cur) return
-        setList((prev) =>
-          prev
-            .map((c) => (cur[c.id] ? { ...c, start: cur[c.id].start, end: cur[c.id].end } : c))
-            .sort((a, b) => a.start - b.start),
-        )
-      }
-      window.addEventListener('pointermove', update)
-      window.addEventListener('pointerup', commit, { once: true })
-      return
-    }
-
-    const update = (move: PointerEvent) => {
-      const delta = (move.clientX - event.clientX) / pxPerSec
-      let start = original.start
-      let end = original.end
-      const dur = original.end - original.start
-      if (mode === 'move') {
-        start = Math.max(0, Math.min(maxT - dur, original.start + delta))
-        end = start + dur
-      } else if (mode === 'start') {
-        start = Math.max(0, Math.min(original.end - minDuration, original.start + delta))
-      } else {
-        end = Math.min(maxT, Math.max(original.start + minDuration, original.end + delta))
-      }
-      const snapped = snapMediaRange(track, clip.id, mode, start, end)
-      start = snapped.start
-      end = snapped.end
-      const next = { id: clip.id, start, end }
-      draftRef.current = next
-      setDraft(next)
-    }
-    const commit = () => {
-      window.removeEventListener('pointermove', update)
-      window.removeEventListener('pointerup', commit)
-      const current = draftRef.current
-      draftRef.current = null
-      setDraft(null)
-      if (
-        current?.id === clip.id
-        && (Math.abs(current.start - original.start) > 0.001
-          || Math.abs(current.end - original.end) > 0.001)
-      ) {
-        setList((prev) =>
-          prev
-            .map((c) => (c.id === clip.id ? { ...c, start: current.start, end: current.end } : c))
-            .sort((a, b) => a.start - b.start),
-        )
-        if (track === 'video' && mediaLinked) {
-          setBgClips((prev) => prev.map((c) => {
-            if (Math.abs(c.start - original.start) > 0.02 || Math.abs(c.end - original.end) > 0.02) return c
-            return { ...c, start: current.start, end: current.end }
-          }))
-        }
-      }
-    }
-    window.addEventListener('pointermove', update)
-    window.addEventListener('pointerup', commit, { once: true })
-  }
-
-  /** Kéo clip Text trên timeline track. */
-  function beginTimelineTextDrag(
-    event: ReactPointerEvent,
-    overlay: TextOverlay,
-    mode: 'move' | 'start' | 'end',
-  ) {
-    if (timelineEditLocked || trackLocked.text) return
-    event.preventDefault()
-    event.stopPropagation()
-    focusText(overlay.id)
-    pushHistory()
-    const original = { start: overlay.start, end: overlay.end }
-    const minDuration = 0.12
-    const maxT = Math.max(timelineDuration, overlay.end, 1)
-    const update = (move: PointerEvent) => {
-      const delta = (move.clientX - event.clientX) / pxPerSec
-      let start = original.start
-      let end = original.end
-      const dur = original.end - original.start
-      if (mode === 'move') {
-        start = Math.max(0, Math.min(maxT - dur, original.start + delta))
-        end = start + dur
-      } else if (mode === 'start') {
-        start = Math.max(0, Math.min(original.end - minDuration, original.start + delta))
-      } else {
-        end = Math.min(maxT, Math.max(original.start + minDuration, original.end + delta))
-      }
-      const next = { id: overlay.id, start, end }
-      draftRef.current = next
-      setDraft(next)
-    }
-    const commit = () => {
-      window.removeEventListener('pointermove', update)
-      window.removeEventListener('pointerup', commit)
-      const current = draftRef.current
-      draftRef.current = null
-      setDraft(null)
-      if (
-        current?.id === overlay.id
-        && (Math.abs(current.start - original.start) > 0.001
-          || Math.abs(current.end - original.end) > 0.001)
-      ) {
-        editOverlay({ ...overlay, start: current.start, end: current.end })
-      }
-    }
-    window.addEventListener('pointermove', update)
-    window.addEventListener('pointerup', commit, { once: true })
-  }
+  const {
+    beginDrag,
+    beginMediaDrag,
+    beginTimelineTextDrag,
+    beginMarqueeSelect,
+    beginBboxDrag,
+  } = useTimelineDrag({
+    segments,
+    settings,
+    busy,
+    timelineEditLocked,
+    trackLocked,
+    timelineDuration,
+    pxPerSec,
+    time,
+    tool,
+    autoSnapping,
+    mediaLinked,
+    sourceWidth,
+    sourceHeight,
+    crop,
+    trackFocus,
+    selected,
+    selectedId,
+    selectedIds,
+    selectedMediaIds,
+    selectedBox,
+    fallbackBox,
+    bboxDraft,
+    videoClips,
+    bgClips,
+    tracksScrollRef,
+    tracksColRef,
+    canvasRef,
+    draftRef,
+    groupDraftRef,
+    marqueeRef,
+    bboxDraftRef,
+    setDraft,
+    setGroupDraft,
+    setMarquee,
+    setBboxDraft,
+    setDraggingBox,
+    setSnapGuides,
+    setSelectedId,
+    setSelectedIds,
+    setSelectedMediaId,
+    setSelectedMediaIds,
+    setSelectedDubIds,
+    setSelectedOverlayId,
+    setTrackFocus,
+    setPropTab,
+    setTool,
+    setVideoClips,
+    setBgClips,
+    expandGroupSelection,
+    focusCaption,
+    focusDub,
+    focusVideo,
+    focusBg,
+    focusText,
+    seekPlayhead,
+    pushHistory,
+    pushHistoryOnce,
+    editSegment,
+    editOverlay,
+    getCachedPreviewLayout,
+    onSegmentsReplace,
+  })
 
   /** Ids đang chọn + cùng groupId (OpenCut-style). */
   function expandGroupSelection(ids: string[]): string[] {
@@ -2293,161 +1838,6 @@ export default function LivePreviewEditor({
     if (!ids.size) return
     pushHistory()
     void onSegmentsReplace(segments.map((s) => (ids.has(s.id) ? patch(s) : s)))
-  }
-
-  /** Kéo khung chọn — hit Video + Caption + TTS + Âm gốc + Text (CapCut-style). */
-  function beginMarqueeSelect(event: ReactPointerEvent<HTMLElement>) {
-    if (timelineEditLocked || event.button !== 0) return
-    if ((event.target as HTMLElement).closest(
-      '[data-caption-clip],[data-media-clip],[data-dub-clip],[data-text-clip]',
-    )) return
-    const scroller = tracksScrollRef.current
-    if (!scroller) return
-    const content = scroller.firstElementChild as HTMLElement | null
-    if (!content) return
-    event.preventDefault()
-    event.stopPropagation()
-    const crect = content.getBoundingClientRect()
-    const x0 = event.clientX - crect.left + scroller.scrollLeft
-    const y0 = event.clientY - crect.top + scroller.scrollTop
-    const additive = event.ctrlKey || event.metaKey || event.shiftKey
-    marqueeRef.current = { x0, y0, x1: x0, y1: y0, additive, active: false }
-    setMarquee({ x0, y0, x1: x0, y1: y0 })
-
-    const hitBox = (el: HTMLElement, box: { left: number; top: number; right: number; bottom: number }) => {
-      const r = el.getBoundingClientRect()
-      const left = r.left - crect.left + scroller.scrollLeft
-      const top = r.top - crect.top + scroller.scrollTop
-      const right = left + r.width
-      const bottom = top + r.height
-      return left < box.right && right > box.left && top < box.bottom && bottom > box.top
-    }
-
-    const collect = (box: { left: number; top: number; right: number; bottom: number }) => {
-      const caps: string[] = []
-      const media: string[] = []
-      const dubs: string[] = []
-      const texts: string[] = []
-      content.querySelectorAll<HTMLElement>('[data-caption-clip]').forEach((el) => {
-        if (!hitBox(el, box)) return
-        const sid = el.getAttribute('data-seg-id')
-        if (sid) caps.push(sid)
-      })
-      content.querySelectorAll<HTMLElement>('[data-media-clip]').forEach((el) => {
-        if (!hitBox(el, box)) return
-        const mid = el.getAttribute('data-clip-id') || el.getAttribute('data-media-id')
-        if (mid) media.push(mid)
-      })
-      content.querySelectorAll<HTMLElement>('[data-dub-clip]').forEach((el) => {
-        if (!hitBox(el, box)) return
-        const did = el.getAttribute('data-seg-id')
-        if (did) dubs.push(did)
-      })
-      content.querySelectorAll<HTMLElement>('[data-text-clip]').forEach((el) => {
-        if (!hitBox(el, box)) return
-        const tid = el.getAttribute('data-overlay-id')
-        if (tid) texts.push(tid)
-      })
-      return {
-        caps: expandGroupSelection(caps),
-        media: [...new Set(media)],
-        dubs: [...new Set(dubs)],
-        texts: [...new Set(texts)],
-      }
-    }
-
-    const applyHits = (
-      hits: { caps: string[]; media: string[]; dubs: string[]; texts: string[] },
-      additive: boolean,
-    ) => {
-      if (additive) {
-        setSelectedIds((prev) => [...new Set([...prev, ...hits.caps])])
-        setSelectedMediaIds((prev) => [...new Set([...prev, ...hits.media])])
-        setSelectedDubIds((prev) => [...new Set([...prev, ...hits.dubs])])
-      } else {
-        setSelectedIds(hits.caps)
-        setSelectedMediaIds(hits.media)
-        setSelectedDubIds(hits.dubs)
-      }
-      if (hits.caps.length) {
-        setSelectedId(hits.caps[hits.caps.length - 1])
-        setTrackFocus('caption')
-        setSelectedOverlayId(null)
-      } else if (hits.dubs.length) {
-        setSelectedId(hits.dubs[hits.dubs.length - 1])
-        setTrackFocus('dub')
-        setSelectedOverlayId(null)
-      } else if (hits.media.length) {
-        const mid = hits.media[hits.media.length - 1]
-        setSelectedMediaId(mid)
-        // video vs bg theo clip list
-        const isBg = bgClips.some((c) => c.id === mid)
-        setTrackFocus(isBg ? 'bg' : 'video')
-        if (!additive) {
-          setSelectedId(null)
-          setSelectedOverlayId(null)
-        }
-      } else if (hits.texts.length) {
-        setSelectedOverlayId(hits.texts[hits.texts.length - 1])
-        setTrackFocus('text')
-        if (!additive) {
-          setSelectedId(null)
-          setSelectedMediaId(null)
-        }
-      } else if (!additive) {
-        setSelectedId(null)
-        setSelectedMediaId(null)
-        setSelectedOverlayId(null)
-        setSelectedMediaIds([])
-        setSelectedDubIds([])
-      }
-    }
-
-    const update = (move: PointerEvent) => {
-      const st = marqueeRef.current
-      if (!st) return
-      const crect2 = content.getBoundingClientRect()
-      const x1 = move.clientX - crect2.left + scroller.scrollLeft
-      const y1 = move.clientY - crect2.top + scroller.scrollTop
-      if (!st.active && (Math.abs(x1 - st.x0) > 4 || Math.abs(y1 - st.y0) > 4)) {
-        st.active = true
-      }
-      st.x1 = x1
-      st.y1 = y1
-      marqueeRef.current = st
-      setMarquee({ x0: st.x0, y0: st.y0, x1, y1 })
-      if (!st.active) return
-      const left = Math.min(st.x0, x1)
-      const right = Math.max(st.x0, x1)
-      const top = Math.min(st.y0, y1)
-      const bottom = Math.max(st.y0, y1)
-      applyHits(collect({ left, top, right, bottom }), st.additive)
-    }
-
-    const commit = (up: PointerEvent) => {
-      window.removeEventListener('pointermove', update)
-      window.removeEventListener('pointerup', commit)
-      const st = marqueeRef.current
-      marqueeRef.current = null
-      setMarquee(null)
-      if (st && !st.active) {
-        const sc = tracksScrollRef.current
-        const col = tracksColRef.current
-        if (sc && col && pxPerSec > 0) {
-          const rect = col.getBoundingClientRect()
-          const x = up.clientX - rect.left + sc.scrollLeft
-          const tt = Math.max(0, Math.min(timelineDuration, x / pxPerSec))
-          seekPlayhead(tt)
-        }
-        if (!st.additive) {
-          setSelectedIds([])
-          setSelectedMediaIds([])
-          setSelectedDubIds([])
-        }
-      }
-    }
-    window.addEventListener('pointermove', update)
-    window.addEventListener('pointerup', commit, { once: true })
   }
 
   function beginScrub(event: ReactPointerEvent<HTMLElement>) {
@@ -2749,132 +2139,6 @@ export default function LivePreviewEditor({
     window.addEventListener('pointerup', onUp, { once: true })
   }
 
-  function beginBboxDrag(
-    event: ReactPointerEvent,
-    mode: 'move' | 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w',
-    targetSeg?: Segment | null,
-  ) {
-    const seg = targetSeg ?? selected
-    if (!seg || busy || tool === 'text' || trackLocked.caption) return
-    if (seg.id !== selected?.id) {
-      setSelectedId(seg.id)
-      setTrackFocus('caption')
-    }
-    const canvas = canvasRef.current
-    if (!canvas) return
-    event.preventDefault()
-    event.stopPropagation()
-    setPropTab('mask')
-    setTool('cover')
-    const rect = canvas.getBoundingClientRect()
-    // Bắt đầu từ khung đang hiện (selectedBox), không nhảy về OCR raw / fitHardsub
-    const original = clampCoverBox(
-      bboxDraft ?? selectedBox ?? seg.bbox ?? fallbackBox,
-      sourceWidth,
-      sourceHeight,
-    )
-  const minSize = 12
-    const histGate = { current: false }
-    setDraggingBox(true)
-    setSnapGuides({ h: false, v: false })
-
-    const clipBox = (left: number, top: number, right: number, bottom: number): PixelBox => {
-      const x = Math.max(0, Math.min(sourceWidth - minSize, left))
-      const y = Math.max(0, Math.min(sourceHeight - minSize, top))
-      const w = Math.max(minSize, Math.min(sourceWidth - x, right - left))
-      const h = Math.max(minSize, Math.min(sourceHeight - y, bottom - top))
-      return { x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h) }
-    }
-
-    const update = (move: PointerEvent) => {
-      const dx = ((move.clientX - event.clientX) / rect.width) * crop.w
-      const dy = ((move.clientY - event.clientY) / rect.height) * crop.h
-      let left = original.x, top = original.y
-      let right = original.x + original.w, bottom = original.y + original.h
-      if (mode === 'move') {
-        left = Math.max(0, Math.min(sourceWidth - original.w, original.x + dx))
-        top = Math.max(0, Math.min(sourceHeight - original.h, original.y + dy))
-        right = left + original.w; bottom = top + original.h
-      } else {
-        if (mode.includes('w')) left = Math.max(0, Math.min(right - minSize, original.x + dx))
-        if (mode.includes('e')) right = Math.min(sourceWidth, Math.max(left + minSize, right + dx))
-        if (mode.includes('n')) top = Math.max(0, Math.min(bottom - minSize, original.y + dy))
-        if (mode.includes('s')) bottom = Math.min(sourceHeight, Math.max(top + minSize, bottom + dy))
-      }
-      let next = clipBox(left, top, right, bottom)
-      // Snap tâm chỉ khi gần giữa — Alt giữ = tắt snap (kéo thật sự tự do)
-      if (mode === 'move' && !move.altKey) {
-        const snapped = snapBoxToCenter(next, sourceWidth, sourceHeight)
-        next = snapped.box
-        setSnapGuides(snapped.guides)
-      } else {
-        setSnapGuides({ h: false, v: false })
-      }
-      if (
-        Math.abs(next.x - original.x) > 1
-        || Math.abs(next.y - original.y) > 1
-        || Math.abs(next.w - original.w) > 1
-        || Math.abs(next.h - original.h) > 1
-      ) {
-        pushHistoryOnce(histGate)
-      }
-      bboxDraftRef.current = next; setBboxDraft(next)
-    }
-
-    const commit = () => {
-      window.removeEventListener('pointermove', update)
-      window.removeEventListener('pointerup', commit)
-      setDraggingBox(false)
-      setSnapGuides({ h: false, v: false })
-      const next = bboxDraftRef.current
-      bboxDraftRef.current = null; setBboxDraft(null)
-      if (next) {
-        const norm = clampCoverBox(next, sourceWidth, sourceHeight)
-        const sizeChanged =
-          Math.abs(norm.w - original.w) > 2 || Math.abs(norm.h - original.h) > 2
-        // mid/dọc/nhãn (+ horizontal giữa khung): cover cố định = khung kéo, fit chữ trong box
-        const overlayLay =
-          effectiveOverlayLayout(seg, sourceHeight, sourceWidth)
-          ?? (isOcrOverlayLayout(seg.layout) ? seg.layout : null)
-        if (overlayLay && seg.translation.trim() && settings.burnSubs) {
-          const lockFs = resolveOverlayFontPreferred(seg)
-          const preferred = sizeChanged
-            ? lockFs
-            : (lockFs || Number(seg.captionLayout?.fontSize) || 0)
-          const laid = layoutOcrOverlay(
-            overlayLay,
-            norm,
-            seg.translation,
-            preferred,
-            sourceWidth,
-            sourceHeight,
-          )
-          editSegment(segmentWithLayout({ ...seg, bboxInherited: false }, {
-            cover: norm,
-            caption: laid.caption,
-            lines: laid.lines,
-            fontPx: laid.fontPx,
-          }, laid.fontPx), { skipHistory: histGate.current })
-          return
-        }
-        // Caption ngang: commit the exact live-drag layout; do not fit again.
-        if (seg.translation.trim() && settings.burnSubs) {
-          const live = getCachedPreviewLayout(seg, norm)
-          if (live) {
-            const fitFs = live.fontPx ?? autoFontFromBbox(live.cover, seg.translation, 0)
-            editSegment(segmentWithLayout({ ...seg, bboxInherited: false }, live, fitFs), { skipHistory: histGate.current })
-          } else {
-            editSegment({ ...seg, bbox: norm, bboxInherited: false, captionLayout: seg.captionLayout ?? null }, { skipHistory: histGate.current })
-          }
-          return
-        }
-        editSegment({ ...seg, bbox: norm, bboxInherited: false, captionLayout: seg.captionLayout ?? null }, { skipHistory: histGate.current })
-      }
-    }
-    window.addEventListener('pointermove', update)
-    window.addEventListener('pointerup', commit, { once: true })
-  }
-
   function beginOverlayDrag(event: ReactPointerEvent, overlay: TextOverlay) {
     if (timelineEditLocked || tool === 'text' || trackLocked.text) return
     const canvas = canvasRef.current
@@ -3011,248 +2275,6 @@ export default function LivePreviewEditor({
     void onSegmentsReplace(
       segments.map((s) => ({ ...s, captionLayout: null })),
     )
-  }
-
-  /** Áp dụng ngay (nút Áp dụng) — vẫn hủy txn cũ + tăng revision */
-  function applyVideoSpeed(_scope: 'one' | 'all', speed?: number) {
-    const raw = typeof speed === 'number' && Number.isFinite(speed) ? speed : speedDraft
-    const v = Math.round(Math.max(0.5, Math.min(2, raw)) * 100) / 100
-    setSpeedDraft(v)
-    speedTxnRef.current.pendingRate = v
-    if (speedTxnRef.current.debounce) {
-      clearTimeout(speedTxnRef.current.debounce)
-      speedTxnRef.current.debounce = null
-    }
-    void executeSpeedTransaction(v)
-  }
-
-  async function executeSpeedTransaction(v: number) {
-    if (busy && !speedBusy) {
-      setSpeedError('Đang có job khác — đợi xong rồi Áp dụng tốc độ.')
-      return
-    }
-    const prevBaked = effectiveBakedSpeed()
-    // Đã khóa cùng số → no-op
-    if (hasBakedSpeed && Math.abs(prevBaked - v) < 0.005) {
-      return
-    }
-
-    // Hủy transaction / request cũ
-    if (speedTxnRef.current.ac) {
-      try { speedTxnRef.current.ac.abort() } catch { /* ignore */ }
-    }
-    speedCancelRequestedRef.current = true
-    try { await api.cancel(projectId) } catch { /* ignore */ }
-    speedCancelRequestedRef.current = false
-
-    let rev = ++speedTxnRef.current.rev
-    const ac = new AbortController()
-    speedTxnRef.current.ac = ac
-
-    setSpeedBusy(true)
-    setSpeedCancelling(false)
-    setSpeedProgress(3)
-    setSpeedMessage(`Đang áp dụng ${formatSpeedX(v)}…`)
-    setSpeedError(null)
-
-    const prevT = videoRef.current?.currentTime ?? time
-    const localById = new Map(segments.map((s) => [s.id, s] as const))
-    const clipsSnap = {
-      video: videoClips.map((c) => ({ ...c })),
-      bg: bgClips.map((c) => ({ ...c })),
-    }
-
-    let pollId = 0
-    const pollStatus = () => {
-      if (rev !== speedTxnRef.current.rev || ac.signal.aborted) return
-      void api.status(projectId).then((s) => {
-        if (rev !== speedTxnRef.current.rev || ac.signal.aborted) return
-        if (typeof s.progress === 'number' && s.progress > 0) {
-          setSpeedProgress(Math.max(3, Math.min(99, s.progress)))
-        }
-        if (s.message) setSpeedMessage(s.message)
-      }).catch(() => { /* ignore */ })
-    }
-    pollId = window.setInterval(pollStatus, 400)
-    pollStatus()
-
-    const isLatest = () => rev === speedTxnRef.current.rev && !ac.signal.aborted
-
-    try {
-      await onSegmentsReplace(segments, { persist: true })
-      if (!isLatest()) return
-      setSpeedProgress((p) => Math.max(p, 12))
-      let res = await api.rebakeSpeed(projectId, v, {
-        speedRevision: rev,
-        signal: ac.signal,
-      })
-      if (!isLatest()) return
-      if (
-        res.ignored
-        && res.reason === 'STALE_SPEED_REVISION'
-        && typeof res.speedRevision === 'number'
-        && res.speedRevision >= rev
-      ) {
-        // meta lưu revision từ phiên trước; FE mới mở đếm lại từ 1 → server
-        // coi request là cũ. Đồng bộ theo server rồi thử lại đúng một lần.
-        rev = res.speedRevision + 1
-        speedTxnRef.current.rev = rev
-        res = await api.rebakeSpeed(projectId, v, {
-          speedRevision: rev,
-          signal: ac.signal,
-        })
-        if (!isLatest()) return
-      }
-      if (res.ignored) {
-        setSpeedMessage('Bỏ qua (đã có tốc độ mới hơn)')
-        return
-      }
-
-      setSpeedProgress(92)
-      setSpeedMessage('Đang cập nhật timeline…')
-      const applied =
-        typeof res.bakedSpeed === 'number' && res.bakedSpeed > 0
-          ? Math.round(res.bakedSpeed * 100) / 100
-          : v
-
-      // Commit atomic — chỉ khi vẫn là revision mới nhất
-      if (!isLatest()) return
-
-      pushHistory()
-      setSpeedDraft(applied)
-
-      if (!mediaClips1xRef.current) {
-        mediaClips1xRef.current = {
-          video: mediaClipsTo1xBaseline(clipsSnap.video, prevBaked),
-          bg: mediaClipsTo1xBaseline(clipsSnap.bg, prevBaked),
-        }
-      }
-      const nextVideo = mediaClipsFrom1xBaseline(mediaClips1xRef.current.video, applied)
-      const nextBg = mediaClipsFrom1xBaseline(mediaClips1xRef.current.bg, applied)
-      setVideoClips(nextVideo)
-      setBgClips(nextBg)
-
-      const scale =
-        typeof res.timeScale === 'number' && res.timeScale > 0
-          ? res.timeScale
-          : prevBaked / Math.max(0.5, applied)
-
-      const mergedSegs = (Array.isArray(res.segments) ? res.segments : []).map((s, i) => {
-        const loc = localById.get(s.id)
-        if (!loc) return { ...s, index: i }
-        return {
-          ...loc,
-          ...s,
-          index: i,
-          translation: (s.translation || '').trim() || loc.translation || s.translation,
-          source: (s.source || '').trim() || loc.source || s.source,
-          audioUrl: s.audioUrl || loc.audioUrl,
-          audioFile: s.audioFile || loc.audioFile,
-          audioDuration: s.audioDuration ?? loc.audioDuration,
-          bbox: s.bbox ?? loc.bbox,
-          captionLayout: s.captionLayout ?? loc.captionLayout,
-          layout: s.layout ?? loc.layout,
-          voice: s.voice || loc.voice,
-          compoundChildren: s.compoundChildren?.length
-            ? s.compoundChildren
-            : loc.compoundChildren,
-        }
-      })
-      const displayDur = Math.max(
-        0,
-        Number(res.duration) || Number(res.workClipSec) || 0,
-      )
-      if (!isLatest()) return
-
-      const mergedRes = {
-        ...res,
-        segments: mergedSegs,
-        duration: displayDur || res.duration,
-        workClipSec: displayDur || res.workClipSec,
-        bakedSpeed: applied,
-        hasBakedSpeed: true as const,
-      }
-      onPreviewRebaked?.(mergedRes)
-      if (!onPreviewRebaked) {
-        void onSegmentsReplace(mergedSegs, { persist: true })
-      }
-
-      const nextT = Math.max(0, prevT * scale)
-      const vid = videoRef.current
-      if (vid) {
-        try {
-          vid.playbackRate = 1
-          const dur = Number(vid.duration)
-          const t = Number.isFinite(dur) && dur > 0 ? Math.min(nextT, Math.max(0, dur - 0.05)) : nextT
-          vid.currentTime = t
-          setTime(t)
-        } catch {
-          setTime(nextT)
-        }
-      } else {
-        setTime(nextT)
-      }
-      dubHardSyncRef.current = true
-      dubFinishedIdsRef.current.clear()
-      dubTokenRef.current = ''
-      pauseDubAudio()
-      const bg = bgAudioRef.current
-      if (bg && wantNoVocals) {
-        try {
-          bg.currentTime = nextT * applied
-          bg.playbackRate = applied
-        } catch { /* ignore */ }
-      }
-      setSpeedProgress(100)
-      setSpeedMessage(`Đã áp dụng ${formatSpeedX(applied)}`)
-    } catch (e) {
-      if (!isLatest()) return
-      const aborted =
-        (e instanceof DOMException && e.name === 'AbortError')
-        || speedCancelRequestedRef.current
-        || ac.signal.aborted
-      if (!aborted) {
-        setSpeedError(e instanceof Error ? e.message : String(e))
-      }
-    } finally {
-      window.clearInterval(pollId)
-      if (rev === speedTxnRef.current.rev) {
-        setSpeedBusy(false)
-        setSpeedCancelling(false)
-        speedCancelRequestedRef.current = false
-        window.setTimeout(() => {
-          if (rev === speedTxnRef.current.rev) {
-            setSpeedProgress(0)
-            setSpeedMessage('')
-          }
-        }, 600)
-      }
-    }
-  }
-
-  async function cancelVideoSpeed() {
-    if (!speedBusy || speedCancelling) return
-    speedCancelRequestedRef.current = true
-    setSpeedCancelling(true)
-    setSpeedError(null)
-    if (speedTxnRef.current.debounce) {
-      clearTimeout(speedTxnRef.current.debounce)
-      speedTxnRef.current.debounce = null
-    }
-    try { speedTxnRef.current.ac?.abort() } catch { /* ignore */ }
-    speedTxnRef.current.rev += 1
-    try {
-      await api.cancel(projectId)
-    } catch (e) {
-      if (!speedCancelRequestedRef.current) {
-        setSpeedError(e instanceof Error ? e.message : String(e))
-      }
-    } finally {
-      setSpeedBusy(false)
-      setSpeedCancelling(false)
-      setSpeedProgress(0)
-      setSpeedMessage('')
-    }
   }
 
   async function previewTts(forSeg?: Segment) {
@@ -4718,29 +3740,6 @@ export default function LivePreviewEditor({
     await Promise.resolve(onExport(payload, exportEndSec, exportStartSec, options.renderName, exportOverride, options.coverDataUrl))
   }
 
-  const PROP_TABS: { key: PropTab; label: string; icon: React.ReactNode; hidden?: boolean }[] = [
-    {
-      key: 'caption', label: 'Phụ đề',
-      icon: <TabSvg><polyline points="4 7 4 4 20 4 20 7" /><line x1="9" y1="20" x2="15" y2="20" /><line x1="12" y1="4" x2="12" y2="20" /></TabSvg>,
-    },
-    {
-      key: 'video', label: 'Video',
-      icon: <TabSvg><rect x="2" y="2" width="20" height="20" rx="2.18" /><path d="M7 2v20M17 2v20M2 12h20M2 7h5M2 17h5M17 17h5M17 7h5" /></TabSvg>,
-    },
-    {
-      key: 'audio', label: 'Âm thanh',
-      icon: <TabSvg><path d="M3 14h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a9 9 0 0 1 18 0v7a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3" /></TabSvg>,
-    },
-    {
-      key: 'mask', label: 'Vùng che chữ',
-      icon: <TabSvg><rect x="4" y="4" width="16" height="16" rx="1" strokeDasharray="3 3" /></TabSvg>,
-    },
-    {
-      key: 'overlay', label: logoDraft || selectedOverlay?.kind === 'logo' ? 'Logo / Watermark' : 'Text overlay', hidden: !selectedOverlay && !logoDraft,
-      icon: <TabSvg><path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" /></TabSvg>,
-    },
-  ]
-
   return (
     <div className="live-preview-editor-root bg-background text-foreground flex h-full min-h-0 w-full flex-col overflow-hidden">
 
@@ -5932,1118 +4931,89 @@ export default function LivePreviewEditor({
                       maxSize={layoutPreset === 'vertical' ? 85 : PANEL_SIZES.properties.maxSize}
                       id="properties"
                     >
-                      <div className="panel bg-background flex h-full overflow-hidden rounded-sm border border-border">
-
-                    {/* Vertical tab rail — luôn hiện đủ tab (Âm thanh + Vùng che chữ) */}
-                    <div className="flex shrink-0 flex-col gap-0.5 border-r border-border p-1 scrollbar-hidden overflow-y-auto">
-                      {PROP_TABS.filter((t) => !t.hidden).map((tab) => (
-                        <button
-                          key={tab.key}
-                          type="button"
-                          aria-label={tab.label}
-                          title={tab.label}
-                          className={cn(
-                            'flex h-8 w-8 shrink-0 items-center justify-center rounded-md transition-colors',
-                            effectivePropTab === tab.key
-                              ? 'bg-accent text-accent-foreground'
-                              : 'text-muted-foreground hover:bg-accent/60 hover:text-foreground',
-                          )}
-                          onClick={() => {
-                            if (tab.key === 'overlay' && appliedLogo && !logoDraft) editLogo(appliedLogo.logoSource ?? 'text')
-                            else setPropTab(tab.key)
-                          }}
-                          onPointerDown={() => {
-                            if (tab.key === 'mask') setTool('cover')
-                          }}
-                        >
-                          {tab.icon}
-                        </button>
-                      ))}
-                    </div>
-
-                    {/* Tab content */}
-                    <ScrollArea className="flex-1 scrollbar-hidden">
-                      <div className="p-3 flex flex-col gap-3">
-                        <div className="text-sm text-muted-foreground pb-1 border-b border-border">
-                          {selected
-                            ? `${PROP_TABS.find((t) => t.key === effectivePropTab)?.label} — Đoạn #${String(selected.index).padStart(2, '0')}`
-                            : `${PROP_TABS.find((t) => t.key === effectivePropTab)?.label ?? 'Thuộc tính'} — Tất cả`}
-                        </div>
-
-                        {effectivePropTab === 'caption' && selected && (
-                          <>
-                            <PropLabel label="Ngôn ngữ gốc">
-                              <textarea
-                                className="w-full rounded-md border border-border bg-input px-2 py-1.5 text-xs resize-none outline-none focus:border-ring"
-                                value={selected.source}
-                                rows={2}
-                                disabled={busy}
-                                onChange={(e) => editSegment({ ...selected, source: e.target.value }, { textField: 'source' })}
-                              />
-                            </PropLabel>
-                            <PropLabel label="Bản dịch">
-                              <textarea
-                                className="w-full rounded-md border border-border bg-input px-2 py-1.5 text-xs resize-none outline-none focus:border-ring"
-                                value={selected.translation}
-                                rows={4}
-                                disabled={busy}
-                                onChange={(e) => editSegment({ ...selected, translation: e.target.value, captionLayout: null }, { textField: 'translation' })}
-                              />
-                            </PropLabel>
-
-                            {isOverlaySeg && (
-                              <label className="flex items-center gap-2 text-xs cursor-pointer py-0.5">
-                                <input
-                                  type="checkbox"
-                                  checked={dubOn}
-                                  disabled={busy}
-                                  onChange={(e) => editSegment({
-                                    ...selected,
-                                    dub: e.target.checked,
-                                    ...(e.target.checked ? {} : { audioUrl: undefined, audioFile: undefined, audioDuration: undefined }),
-                                  })}
-                                  className="accent-primary"
-                                />
-                                Lồng tiếng
-                              </label>
-                            )}
-
-                            <PropLabel label="Giọng đọc">
-                              <div className="flex items-center gap-1.5">
-                                <select
-                                  className="min-w-0 flex-1 rounded-md border border-border bg-input px-2 py-1 text-xs outline-none focus:border-ring"
-                                  value={selected.voice || settings.defaultVoice}
-                                  disabled={busy || (isOverlaySeg && !dubOn)}
-                                  onChange={(e) => editSegment({ ...selected, voice: e.target.value, ...(isOverlaySeg ? { dub: true } : {}) })}
-                                >
-                                  {voices.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
-                                </select>
-                                <button
-                                  type="button"
-                                  className="shrink-0 rounded-md border border-border bg-accent hover:bg-muted px-2.5 py-1 text-xs transition-colors disabled:opacity-50 flex items-center gap-1"
-                                  disabled={busy || ttsBusy || !selected.translation.trim() || (isOverlaySeg && !dubOn)}
-                                  title="Nghe và áp dụng TTS"
-                                  onClick={() => void previewTts()}
-                                >
-                                  {ttsBusy ? '…' : <><IconHeadphones size={13} /> Nghe và áp dụng</>}
-                                </button>
-                              </div>
-                            </PropLabel>
-                            {ttsError && <p className="text-xs text-destructive">{ttsError}</p>}
-
-                            <div className="border-t border-border pt-3 flex flex-col gap-2">
-                              <div className="grid grid-cols-[1fr_auto] gap-1.5">
-                                <PropLabel label="Phông chữ">
-                                  <select
-                                    className="w-full rounded-md border border-border bg-input px-2 py-1 text-xs outline-none focus:border-ring"
-                                    value={selected.fontFamily || settings.subtitleFontFamily || 'system'}
-                                    disabled={busy}
-                                    onChange={(e) => void applyFontFamily('one', e.target.value)}
-                                  >
-                                    {CAPTION_FONT_PRESETS.map((font) => (
-                                      <option key={font.id} value={font.id} style={{ fontFamily: font.css }}>{font.label}</option>
-                                    ))}
-                                  </select>
-                                </PropLabel>
-                                <PropLabel label="Màu chữ">
-                                  <input
-                                    type="color"
-                                    className="h-7 w-10 cursor-pointer rounded border border-border bg-transparent"
-                                    value={selected.textColor || settings.captionTextColor || '#ffffff'}
-                                    disabled={busy}
-                                    onChange={(e) => applyCaptionColor('one', e.target.value)}
-                                  />
-                                </PropLabel>
-                              </div>
-                              <div className="flex flex-wrap items-center gap-1.5">
-                                {CAPTION_COLORS.map((color) => (
-                                  <button
-                                    key={color}
-                                    type="button"
-                                    title={color}
-                                    className={cn(
-                                      'size-5 rounded-full border shrink-0',
-                                      (selected.textColor || settings.captionTextColor || '#ffffff').toLowerCase() === color
-                                        ? 'border-primary ring-1 ring-primary'
-                                        : color === '#000000' || color === '#1e293b'
-                                          ? 'border-border/80'
-                                          : 'border-border',
-                                    )}
-                                    style={{ background: color }}
-                                    disabled={busy}
-                                    onClick={() => applyCaptionColor('one', color)}
-                                  />
-                                ))}
-                              </div>
-                              <PropLabel label={`Cỡ chữ (xem trước ~${activeCaptionPx}px)`}>
-                                <select
-                                  className="w-full rounded-md border border-border bg-input px-2 py-1 text-xs outline-none focus:border-ring"
-                                  value={String(fontSizeDraft)}
-                                  disabled={busy}
-                                  onChange={(e) => applyFontSize('one', Number(e.target.value))}
-                                >
-                                  <option value="0">
-                                    {isOverlaySeg
-                                      ? 'Tự động theo khung (đủ đọc)'
-                                      : `Tự động (${AUTO_SUBTITLE_FONT}px${settings.subtitleFontSize > 0 ? ` · dự án ${settings.subtitleFontSize}px` : ''})`}
-                                  </option>
-                                  {fontSizeOptions.map((px) => (
-                                    <option key={px} value={px}>{px} px</option>
-                                  ))}
-                                </select>
-                              </PropLabel>
-                              <div className="grid grid-cols-2 gap-1.5">
-                                <button
-                                  type="button"
-                                  className="rounded-md border border-border bg-accent hover:bg-muted px-2 py-1.5 text-[11px] transition-colors disabled:opacity-50"
-                                  disabled={busy || !selected}
-                                  onClick={() => applyFontSize('one')}
-                                >
-                                  Áp dụng đoạn này
-                                </button>
-                                <button
-                                  type="button"
-                                  className="rounded-md border border-primary/40 bg-primary/10 text-primary hover:bg-primary/20 px-2 py-1.5 text-[11px] transition-colors disabled:opacity-50"
-                                  disabled={busy || !(selected || bboxSeg)}
-                                  title={`Chỉ lane «${applyAllLaneLabel}»`}
-                                  onClick={() => applyFontSize('all')}
-                                >
-                                  Áp {applyAllLaneLabel}
-                                </button>
-                              </div>
-                              {(selected?.fontSize ?? 0) > 0 && (
-                                <button
-                                  type="button"
-                                  className="text-[11px] text-muted-foreground hover:text-foreground underline-offset-2 hover:underline"
-                                  onClick={() => applyFontSize('one', 0)}
-                                >
-                                  Reset đoạn này về tự động
-                                </button>
-                              )}
-                              {isOverlaySeg && (
-                                <p className="text-[11px] text-muted-foreground leading-snug">
-                                  Đổi cỡ → áp dụng ngay. Khung dọc/mid/nhãn nới theo chữ.
-                                </p>
-                              )}
-
-                              <PropLabel label="Chèn phụ đề">
-                                <select
-                                  className="w-full rounded-md border border-border bg-input px-2 py-1 text-xs outline-none focus:border-ring"
-                                  value={
-                                    settings.coverHardsubs && settings.burnSubs ? 'cover'
-                                      : !settings.burnSubs ? 'none'
-                                      : settings.captionPlacement === 'above' ? 'above' : 'below'
-                                  }
-                                  disabled={busy || settings.targetLang === 'none'}
-                                  onChange={(e) => {
-                                    const mode = e.target.value as 'cover' | 'below' | 'above' | 'none'
-                                    applyCaptionModeAll(mode)
-                                  }}
-                                >
-                                  <option value="cover">Che chữ cũ + chèn dịch</option>
-                                  <option value="below">Chèn dịch phía dưới</option>
-                                  <option value="above">Chèn dịch phía trên</option>
-                                  <option value="none">Không chèn chữ</option>
-                                </select>
-                              </PropLabel>
-                              {showCoverBlur && (
-                                <p className="text-[10px] text-muted-foreground leading-snug">
-                                  Kéo khung <strong className="text-violet-400">tím</strong> trên preview phủ đúng chữ gốc.
-                                  Chữ dịch căn giữa khung tím. Chi tiết ở tab <strong>Vùng che chữ</strong>.
-                                </p>
-                              )}
-                            </div>
-                          </>
-                        )}
-
-                        {/* Phụ đề — Tất cả (CapCut-style) */}
-                        {effectivePropTab === 'caption' && !selected && (
-                          <>
-                            <p className="text-[11px] text-muted-foreground leading-relaxed">
-                              Style phụ đề toàn dự án — phông, màu, nền, bbox che, hiệu ứng. Áp dụng ngay khi đổi.
-                            </p>
-
-                            <PropLabel label="Chèn phụ đề">
-                              <select
-                                className="w-full rounded-md border border-border bg-input px-2 py-1 text-xs outline-none focus:border-ring"
-                                value={
-                                  settings.coverHardsubs && settings.burnSubs ? 'cover'
-                                    : !settings.burnSubs ? 'none'
-                                    : settings.captionPlacement === 'above' ? 'above' : 'below'
-                                }
-                                disabled={busy || settings.targetLang === 'none'}
-                                onChange={(e) => {
-                                  applyCaptionModeAll(e.target.value as 'cover' | 'below' | 'above' | 'none')
-                                }}
-                              >
-                                <option value="cover">Che chữ cũ + chèn dịch</option>
-                                <option value="below">Chèn dịch phía dưới</option>
-                                <option value="above">Chèn dịch phía trên</option>
-                                <option value="none">Không chèn chữ</option>
-                              </select>
-                            </PropLabel>
-
-                            <div className="border-t border-border pt-2 space-y-2">
-                              <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">Chữ</p>
-                              <div className="grid grid-cols-2 gap-1.5">
-                                <PropLabel label="Phông chữ">
-                                  <select
-                                    className="w-full rounded-md border border-border bg-input px-2 py-1 text-xs outline-none focus:border-ring"
-                                    value={settings.subtitleFontFamily || 'system'}
-                                    disabled={busy}
-                                    onChange={(e) => void applyFontFamily('all', e.target.value)}
-                                  >
-                                    {CAPTION_FONT_PRESETS.map((f) => (
-                                      <option key={f.id} value={f.id} style={{ fontFamily: f.css }}>{f.label}</option>
-                                    ))}
-                                  </select>
-                                </PropLabel>
-                                <PropLabel label="Cỡ chữ">
-                                  <select
-                                    className="w-full rounded-md border border-border bg-input px-2 py-1 text-xs outline-none focus:border-ring"
-                                    value={String(fontSizeDraft)}
-                                    disabled={busy}
-                                    onChange={(e) => {
-                                      const v = Number(e.target.value)
-                                      setFontSizeDraft(v)
-                                      if (!busy && segments.length > 0) applyFontSize('all', v)
-                                    }}
-                                  >
-                                    <option value="0">Tự động</option>
-                                    {fontSizeOptions.map((px) => (
-                                      <option key={px} value={px}>{px} px</option>
-                                    ))}
-                                  </select>
-                                </PropLabel>
-                              </div>
-                              <PropLabel label="Màu chữ">
-                                <div className="flex flex-wrap items-center gap-1.5">
-                                  <input
-                                    type="color"
-                                    className="h-7 w-8 cursor-pointer rounded border border-border bg-transparent"
-                                    value={settings.captionTextColor || '#ffffff'}
-                                    disabled={busy}
-                                    onChange={(e) => applyCaptionColor('all', e.target.value)}
-                                  />
-                                  {CAPTION_COLORS.map((color) => (
-                                    <button
-                                      key={color}
-                                      type="button"
-                                      title={color}
-                                      className={cn(
-                                        'size-5 rounded-full border shrink-0',
-                                        (settings.captionTextColor || '#ffffff').toLowerCase() === color
-                                          ? 'border-primary ring-1 ring-primary'
-                                          : color === '#000000' || color === '#1e293b'
-                                            ? 'border-border/80'
-                                            : 'border-border',
-                                      )}
-                                      style={{ background: color }}
-                                      disabled={busy}
-                                      onClick={() => applyCaptionColor('all', color)}
-                                    />
-                                  ))}
-                                </div>
-                              </PropLabel>
-                            </div>
-
-                            <div className="border-t border-border pt-2 space-y-2">
-                              <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">Bbox · che chữ gốc</p>
-                              <PropLabel label="Kiểu mặt nạ (cover)">
-                                <div className="flex gap-1">
-                                  {COVER_MASK_STYLES.map(({ id, label }) => (
-                                    <button
-                                      key={id}
-                                      type="button"
-                                      className={cn(
-                                        'flex-1 rounded-sm border px-1 py-1.5 text-[10px] transition-colors',
-                                        (settings.coverMaskStyle ?? 'blur') === id
-                                          ? 'border-primary text-primary bg-primary/10'
-                                          : 'border-border text-muted-foreground hover:bg-accent',
-                                      )}
-                                      disabled={busy}
-                                      onClick={() => onSettings({ ...settings, coverMaskStyle: id })}
-                                    >
-                                      {label}
-                                    </button>
-                                  ))}
-                                </div>
-                              </PropLabel>
-                              <div className="flex items-center gap-2">
-                                {(settings.coverMaskStyle ?? 'blur') !== 'mosaic' && (
-                                  <input
-                                    type="color"
-                                    title="Màu mask"
-                                    className="h-8 w-10 shrink-0 cursor-pointer rounded border border-border bg-transparent"
-                                    value={settings.coverMaskColor || '#4c1d95'}
-                                    disabled={busy}
-                                    onChange={(e) => onSettings({ ...settings, coverMaskColor: e.target.value })}
-                                  />
-                                )}
-                                <div className="min-w-0 flex-1 flex items-center gap-2">
-                                  <input
-                                    type="range"
-                                    min={0}
-                                    max={100}
-                                    className="min-w-0 flex-1 accent-violet-500"
-                                    value={settings.coverMaskOpacity ?? 40}
-                                    disabled={busy}
-                                    onChange={(e) => onSettings({ ...settings, coverMaskOpacity: Number(e.target.value) })}
-                                  />
-                                  <span className="shrink-0 tabular-nums text-[10px] text-muted-foreground w-8 text-right">
-                                    {settings.coverMaskOpacity ?? 40}%
-                                  </span>
-                                </div>
-                                <div
-                                  className="h-8 w-10 shrink-0 rounded border border-border overflow-hidden"
-                                  style={coverMaskPreviewStyle(
-                                    settings.coverMaskStyle ?? 'blur',
-                                    settings.coverMaskColor || '#4c1d95',
-                                    settings.coverMaskOpacity ?? 40,
-                                  )}
-                                  title="Xem trước mask"
-                                />
-                              </div>
-                              <p className="text-[10px] text-muted-foreground leading-snug">
-                                Che chữ: bật mode «Che chữ cũ». Kéo bbox trên preview / tab Vùng che chữ.
-                              </p>
-                              <button
-                                type="button"
-                                className="w-full rounded-md border border-border bg-accent hover:bg-muted px-2 py-1.5 text-[11px] disabled:opacity-50"
-                                disabled={busy}
-                                onClick={() => {
-                                  setPropTab('mask')
-                                  setTool('cover')
-                                }}
-                              >
-                                Mở tab Vùng che chữ (bbox)
-                              </button>
-                            </div>
-                          </>
-                        )}
-
-                         {effectivePropTab === 'video' && (() => {
-                          const idx = selected ? segments.findIndex((s) => s.id === selected.id) : -1
-                          const prevEnd = idx > 0 ? segments[idx - 1].end : 0
-                          const nextStart = idx >= 0 ? (segments[idx + 1]?.start ?? timelineDuration) : timelineDuration
-                          const minDur = 0.15
-                          const draftX = formatSpeedX(speedDraft)
-                          const fileX = formatSpeedX(appliedSpeedX)
-                          const draftMatchesFile = Math.abs(speedDraft - appliedSpeedX) < 0.005
-                          // Mặc định ban đầu theo Khớp thời lượng: preferVideo → 0.80×
-                          const defaultSpeedX = settings.matchDuration === 'preferVideo' ? 0.8 : 1
-                          const atDefault =
-                            Math.abs(appliedSpeedX - defaultSpeedX) < 0.005
-                            && Math.abs(speedDraft - defaultSpeedX) < 0.005
-                          return (
-                            <>
-                              <div className="rounded-md border border-border bg-muted/30 px-2 py-1.5 space-y-0.5 text-[10px] leading-snug text-muted-foreground">
-                                <p className="text-foreground/90">{speedStatus.inputLine}</p>
-                                <p>{speedStatus.appliedLine}</p>
-                                <p>{speedStatus.exportLine}</p>
-                              </div>
-                              <PropLabel label={`Chọn tốc độ: ${draftX}${draftMatchesFile ? ` (= file ${fileX})` : ` · file đang ${fileX}`}`}>
-                                <input
-                                  type="range"
-                                  min={0.5}
-                                  max={2}
-                                  step={0.01}
-                                  className="w-full accent-primary"
-                                  value={speedDraft}
-                                  disabled={busy && !speedBusy}
-                                  onChange={(e) => {
-                                    setSpeedError(null)
-                                    const n = Math.round(Number(e.target.value) * 100) / 100
-                                    // Chỉ đổi draft — bake khi bấm «Áp dụng»
-                                    setSpeedDraft(n)
-                                  }}
-                                />
-                              </PropLabel>
-                              <div className="flex gap-1">
-                                {[0.5, 0.75, 0.8, 1, 1.15, 1.5].map((v) => (
-                                  <button
-                                    key={v}
-                                    type="button"
-                                    className={cn(
-                                      'flex-1 rounded-sm border px-1 py-1 text-[10px] transition-colors',
-                                      Math.abs(speedDraft - v) < 0.005
-                                        ? 'border-primary text-primary bg-primary/10'
-                                        : 'border-border text-muted-foreground hover:text-foreground hover:bg-accent',
-                                      hasBakedSpeed && Math.abs(appliedSpeedX - v) < 0.005
-                                        && 'ring-1 ring-primary/40',
-                                    )}
-                                    disabled={busy && !speedBusy}
-                                    onClick={() => {
-                                      setSpeedError(null)
-                                      // Chỉ đổi draft — bake khi bấm «Áp dụng»
-                                      setSpeedDraft(v)
-                                    }}
-                                    title={
-                                      hasBakedSpeed && Math.abs(appliedSpeedX - v) < 0.005
-                                        ? `Đang ${formatSpeedX(v)} — chọn số khác rồi bấm Áp dụng`
-                                        : `Chọn ${formatSpeedX(v)} rồi bấm Áp dụng`
-                                    }
-                                  >
-                                    {formatSpeedX(v)}
-                                  </button>
-                                ))}
-                              </div>
-                              <button
-                                type="button"
-                                className="w-full rounded-md border border-primary/40 bg-primary/10 text-primary hover:bg-primary/20 px-2 py-1.5 text-[11px] transition-colors disabled:opacity-50"
-                                disabled={(busy && !speedBusy) || speedCancelling}
-                                title={
-                                  speedBusy
-                                    ? 'Hủy bake đang chạy (hoặc chọn tốc độ khác để thay thế)'
-                                    : `Bake @ ${draftX}`
-                                }
-                                onClick={() => {
-                                  if (speedBusy && Math.abs(speedDraft - appliedSpeedX) < 0.005) {
-                                    void cancelVideoSpeed()
-                                    return
-                                  }
-                                  // Áp dụng ngay — hủy txn cũ nếu đang chạy
-                                  applyVideoSpeed('all', speedDraft)
-                                }}
-                              >
-                                {speedCancelling
-                                  ? 'Đang hủy…'
-                                  : speedBusy
-                                    ? `Đang bake… (Hủy / chọn số khác)`
-                                    : draftMatchesFile && hasBakedSpeed
-                                      ? `Đã khóa ${fileX} — chọn số khác để đổi`
-                                      : `Áp dụng ${draftX} cho tất cả → file ${draftX}`}
-                              </button>
-                              <button
-                                type="button"
-                                className="w-full rounded-md border border-border text-muted-foreground hover:text-foreground hover:bg-accent px-2 py-1.5 text-[11px] transition-colors disabled:opacity-50"
-                                disabled={(busy && !speedBusy) || speedCancelling || speedBusy || atDefault}
-                                title={`Đặt lại tốc độ mặc định ${formatSpeedX(defaultSpeedX)} (theo Khớp thời lượng) và áp dụng cho tất cả`}
-                                onClick={() => {
-                                  setSpeedError(null)
-                                  applyVideoSpeed('all', defaultSpeedX)
-                                }}
-                              >
-                                {atDefault
-                                  ? `Đang ở mặc định ${formatSpeedX(defaultSpeedX)}`
-                                  : `Về mặc định ${formatSpeedX(defaultSpeedX)}`}
-                              </button>
-                              {speedError && (
-                                <p className="text-[10px] text-amber-600 dark:text-amber-400 leading-snug">{speedError}</p>
-                              )}
-                              <p className="text-[10px] text-muted-foreground leading-snug">
-                                Thước = xuất (cùng tốc độ file). Chưa khóa: bấm Áp dụng kể cả 1.00× / 0.80×.
-                                Đã khóa cùng số: chọn tốc độ khác rồi Áp dụng. Khớp preferVideo chỉ TTS.
-                              </p>
-
-                              {selected && (
-                              <div className="border-t border-border pt-2 space-y-2">
-                                <div className="grid grid-cols-2 gap-2">
-                                  <NumField
-                                    label="Bắt đầu"
-                                    value={selected.start}
-                                    step={0.1}
-                                    disabled={busy}
-                                    formatDisplay={formatTimecode}
-                                    parseDisplay={parseTimecode}
-                                    onCommit={(v) => editSegment({
-                                      ...selected,
-                                      start: Math.max(prevEnd, Math.min(selected.end - minDur, v)),
-                                    })}
-                                  />
-                                  <NumField
-                                    label="Kết thúc"
-                                    value={selected.end}
-                                    step={0.1}
-                                    disabled={busy}
-                                    formatDisplay={formatTimecode}
-                                    parseDisplay={parseTimecode}
-                                    onCommit={(v) => editSegment({
-                                      ...selected,
-                                      end: Math.min(nextStart, Math.max(selected.start + minDur, v)),
-                                    })}
-                                  />
-                                </div>
-                                <PropLabel label="Thời lượng">
-                                  <span className="text-xs tabular-nums font-mono">
-                                    {formatTimecode(selected.end - selected.start)}
-                                  </span>
-                                </PropLabel>
-                              </div>
-                              )}
-                            </>
-                          )
-                        })()}
-
-                        {effectivePropTab === 'audio' && (
-                          <>
-                            <div className="space-y-2 pb-2 border-b border-border">
-                              <label className="flex items-center justify-between gap-2 text-xs cursor-pointer">
-                                <span className="font-medium text-foreground">Lọc âm thanh gốc</span>
-                                <input
-                                  type="checkbox"
-                                  className="accent-primary"
-                                  checked={settings.processOriginalAudio}
-                                  disabled={busy}
-                                  onChange={(e) => {
-                                    const on = e.target.checked
-                                    onSettings({
-                                      ...settings,
-                                      processOriginalAudio: on,
-                                      originalAudioMode:
-                                        on && settings.originalAudioMode === 'original'
-                                          ? 'no_vocals'
-                                          : settings.originalAudioMode,
-                                    })
-                                  }}
-                                />
-                              </label>
-                              {settings.processOriginalAudio && (
-                                <>
-                                  <div className="flex gap-1" role="radiogroup" aria-label="Chế độ lọc âm gốc">
-                                    {(
-                                      [
-                                        ['no_vocals', 'Xóa lời'],
-                                        ['vocals', 'Chỉ giữ lời'],
-                                      ] as const
-                                    ).map(([value, label]) => (
-                                      <button
-                                        key={value}
-                                        type="button"
-                                        className={cn(
-                                          'flex-1 rounded-sm border px-1 py-1.5 text-[10px] transition-colors',
-                                          settings.originalAudioMode === value
-                                            ? 'border-primary text-primary bg-primary/10'
-                                            : 'border-border text-muted-foreground hover:text-foreground hover:bg-accent',
-                                        )}
-                                        disabled={busy}
-                                        onClick={() =>
-                                          onSettings({ ...settings, originalAudioMode: value })
-                                        }
-                                      >
-                                        {label}
-                                      </button>
-                                    ))}
-                                  </div>
-                                  <PropLabel label={`Âm lượng nền: ${Math.max(0, Math.min(200, settings.originalAudioVolume ?? 100))}%`}>
-                                    <input
-                                      type="range"
-                                      min={0}
-                                      max={100}
-                                      className="w-full accent-primary"
-                                      value={Math.max(0, Math.min(200, settings.originalAudioVolume ?? 100))}
-                                      disabled={busy || settings.originalAudioMode === 'mute'}
-                                      onChange={(e) =>
-                                        onSettings({
-                                          ...settings,
-                                          originalAudioVolume: Math.max(0, Math.min(200, Number(e.target.value) || 0)),
-                                        })
-                                      }
-                                    />
-                                  </PropLabel>
-                                  {wantNoVocals && stemStatus === 'loading' && (
-                                    <p className="text-[10px] text-muted-foreground leading-snug">
-                                      Đang tách stem xóa lời {Math.max(1, Math.min(99, stemProgress))}% (Demucs).
-                                      Lần đầu có thể cài PyTorch — chờ đến khi cột «Âm gốc» hiện «Xóa lời».
-                                    </p>
-                                  )}
-                                  {wantNoVocals && stemStatus === 'ready' && (
-                                    <p className="text-[10px] text-emerald-600 dark:text-emerald-400 leading-snug">
-                                      Preview = xuất: video đã mute, phát nền đã xóa lời (+ TTS nếu có).
-                                    </p>
-                                  )}
-                                  {wantNoVocals && stemStatus === 'error' && (
-                                    <div className="space-y-1.5">
-                                      <p className="text-[10px] text-destructive leading-snug">
-                                        Lỗi tách stem: {stemError || 'không rõ'} — tạm mute âm gốc (tránh còn lời).
-                                      </p>
-                                      <button
-                                        type="button"
-                                        className="w-full rounded-md border border-border bg-accent hover:bg-muted px-2 py-1.5 text-[11px] transition-colors"
-                                        disabled={busy}
-                                        onClick={() => setStemRetry((n) => n + 1)}
-                                      >
-                                        Thử tách lại
-                                      </button>
-                                    </div>
-                                  )}
-                                  {settings.originalAudioMode === 'vocals' && (
-                                    <p className="text-[10px] text-muted-foreground leading-snug">
-                                      «Chỉ giữ lời» áp dụng khi xuất (preview vẫn nghe bản gốc).
-                                    </p>
-                                  )}
-                                </>
-                              )}
-                              {!settings.processOriginalAudio && (
-                                <p className="text-[10px] text-muted-foreground leading-snug">
-                                  Chưa bật lọc: bản xuất vẫn trộn âm gốc (nhạc/lời) dưới TTS — xem cột «Âm gốc».
-                                </p>
-                              )}
-                            </div>
-
-                            {/* Clip lồng tiếng + giọng — 1 đoạn hoặc tất cả */}
-                            <div className="space-y-2 pb-2 border-b border-border">
-                              <PropLabel label="Clip lồng tiếng">
-                                <span className="text-xs text-muted-foreground">
-                                  {selected
-                                    ? `#${String(selected.index).padStart(2, '0')} · ${(selected.audioDuration ?? 0).toFixed(2)}s · slot ${(selected.end - selected.start).toFixed(2)}s`
-                                    : `Tất cả · ${segments.filter((s) => segmentHasDub(s)).length} đoạn bật TTS`}
-                                </span>
-                              </PropLabel>
-                              <PropLabel label="Giọng đọc">
-                                <div className="flex gap-1.5 items-stretch">
-                                  <select
-                                    className="min-w-0 flex-1 rounded-md border border-border bg-background px-2 py-1.5 text-xs"
-                                    value={
-                                      selected
-                                        ? (selected.voice || settings.defaultVoice || globalVoice)
-                                        : (globalVoice || settings.defaultVoice || '')
-                                    }
-                                    disabled={busy}
-                                    onChange={(e) => {
-                                      const v = e.target.value
-                                      setGlobalVoice(v)
-                                      if (selected) {
-                                        editSegment({
-                                          ...selected,
-                                          voice: v,
-                                          ...(isOcrOverlayLayout(selected.layout) ? { dub: true } : {}),
-                                        })
-                                      } else {
-                                        pushHistory()
-                                        const applied = segments.map((s) => {
-                                          if ((s.layout === 'vertical' || s.layout === 'label') && s.dub !== true) return s
-                                          return { ...s, voice: v }
-                                        })
-                                        void onSegmentsReplace(applied)
-                                        if (v) onSettings({ ...settings, defaultVoice: v })
-                                      }
-                                    }}
-                                  >
-                                    {voices.map((v) => (
-                                      <option key={v.id} value={v.id}>{v.name}</option>
-                                    ))}
-                                  </select>
-                                  {!selected && (
-                                    <button
-                                      type="button"
-                                      className="shrink-0 rounded-md border border-primary/40 bg-primary/10 text-primary hover:bg-primary/20 px-2.5 py-1.5 text-[11px] font-medium transition-colors disabled:opacity-50 whitespace-nowrap"
-                                      disabled={busy || !onDub || segments.length === 0}
-                                      title="Gán giọng + volume/tốc độ rồi lồng tiếng toàn bộ"
-                                      onClick={() => {
-                                        pushHistory()
-                                        const vol = Math.max(0, Math.min(200, globalTtsVolume))
-                                        const sp = Math.max(0.75, Math.min(1.5, globalTtsSpeed))
-                                        const voice = globalVoice || settings.defaultVoice
-                                        const applied = segments.map((s) => {
-                                          if ((s.layout === 'vertical' || s.layout === 'label') && s.dub !== true) {
-                                            return s
-                                          }
-                                          return {
-                                            ...s,
-                                            ttsVolume: vol,
-                                            ttsSpeed: sp,
-                                            voice,
-                                            audioFile: undefined,
-                                            audioUrl: undefined,
-                                            audioDuration: undefined,
-                                          }
-                                        })
-                                        void onSegmentsReplace(applied)
-                                        if (voice) onSettings({ ...settings, defaultVoice: voice })
-                                        window.setTimeout(() => onDub?.(), 150)
-                                      }}
-                                    >
-                                      {busy && jobStep === 'dub'
-                                        ? `${Math.round(jobProgress || 0)}%`
-                                        : 'Tạo TTS tất cả'}
-                                    </button>
-                                  )}
-                                </div>
-                              </PropLabel>
-                              {selected && segmentHasDub(selected) && (
-                                <div className="flex gap-1">
-                                  <button
-                                    type="button"
-                                    className="flex-1 rounded-md border border-border bg-accent hover:bg-muted px-2 py-1.5 text-xs transition-colors disabled:opacity-50"
-                                    disabled={busy || !selected.audioUrl}
-                                    onClick={() => playSegmentDub(selected)}
-                                  >
-                                    Phát với timeline
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className="flex-1 rounded-md border border-border bg-accent hover:bg-muted px-2 py-1.5 text-xs transition-colors disabled:opacity-50"
-                                    disabled={busy || ttsBusy || !selected.translation.trim()}
-                                    onClick={() => void previewTts()}
-                                  >
-                                    {ttsBusy ? 'Đang tạo…' : 'Tạo lại TTS'}
-                                  </button>
-                                </div>
-                              )}
-                              {selected && !segmentHasDub(selected) && (
-                                <p className="text-[11px] text-muted-foreground leading-relaxed">
-                                  Đoạn tắt lồng tiếng — bật ở tab Phụ đề.
-                                </p>
-                              )}
-                            </div>
-
-                            {selected ? (
-                              <>
-                            <PropLabel label={`Âm lượng TTS: ${selected.ttsVolume ?? 100}%`}>
-                              <input type="range" min={0} max={200}
-                                className="w-full accent-primary"
-                                value={selected.ttsVolume ?? 100}
-                                onChange={(e) => editSegment(
-                                  { ...selected, ttsVolume: Number(e.target.value) },
-                                  { textField: 'ttsVolume' },
-                                )}
-                              />
-                            </PropLabel>
-                            <div className="flex gap-1">
-                              {[0, 50, 100, 150, 200].map((v) => (
-                                <button
-                                  key={v}
-                                  type="button"
-                                  className={cn(
-                                    'flex-1 rounded-sm border px-1 py-1 text-[10px] transition-colors',
-                                    (selected.ttsVolume ?? 100) === v
-                                      ? 'border-primary text-primary bg-primary/10'
-                                      : 'border-border text-muted-foreground hover:text-foreground hover:bg-accent',
-                                  )}
-                                  onClick={() => editSegment({ ...selected, ttsVolume: v })}
-                                >
-                                  {v === 0 ? 'Tắt' : `${v}%`}
-                                </button>
-                              ))}
-                            </div>
-
-                            <PropLabel label={`Tốc độ TTS: ${(selected.ttsSpeed ?? 1).toFixed(2)}×`}>
-                              <input type="range" min={0.75} max={1.5} step={0.05}
-                                className="w-full accent-primary"
-                                value={selected.ttsSpeed ?? 1}
-                                onChange={(e) => editSegment(
-                                  { ...selected, ttsSpeed: Number(e.target.value) },
-                                  { textField: 'ttsSpeed' },
-                                )}
-                              />
-                            </PropLabel>
-                            <div className="flex gap-1">
-                              {[0.75, 0.9, 1, 1.15, 1.3, 1.5].map((v) => (
-                                <button
-                                  key={v}
-                                  type="button"
-                                  className={cn(
-                                    'flex-1 rounded-sm border px-1 py-1 text-[10px] transition-colors',
-                                    (selected.ttsSpeed ?? 1) === v
-                                      ? 'border-primary text-primary bg-primary/10'
-                                      : 'border-border text-muted-foreground hover:text-foreground hover:bg-accent',
-                                  )}
-                                  onClick={() => editSegment({ ...selected, ttsSpeed: v })}
-                                >
-                                  {v}×
-                                </button>
-                              ))}
-                            </div>
-
-                            <button
-                              type="button"
-                              className="w-full rounded-md border border-border bg-accent hover:bg-muted px-3 py-1.5 text-xs transition-colors"
-                              onClick={() => editSegment({ ...selected, ttsVolume: 100, ttsSpeed: 1 })}
-                            >
-                              Reset âm thanh mặc định
-                            </button>
-                              </>
-                            ) : (
-                              <>
-                                <p className="text-[11px] text-muted-foreground leading-relaxed">
-                                  Chọn giọng (nút <strong className="text-foreground font-medium">Tạo TTS tất cả</strong> bên phải) hoặc kéo thanh chỉnh volume/tốc độ để áp dụng cho tất cả các đoạn.
-                                </p>
-                                <PropLabel label={`Âm lượng TTS: ${globalTtsVolume}% · tất cả`}>
-                                  <input
-                                    type="range"
-                                    min={0}
-                                    max={200}
-                                    className="w-full accent-primary"
-                                    value={globalTtsVolume}
-                                    disabled={busy}
-                                    onChange={(e) => setGlobalTtsVolume(Number(e.target.value))}
-                                    onPointerUp={(e) => {
-                                      const v = Number(e.currentTarget.value)
-                                      pushHistory()
-                                      const applied = segments.map((s) => {
-                                        if ((s.layout === 'vertical' || s.layout === 'label') && s.dub !== true) return s
-                                        return { ...s, ttsVolume: v }
-                                      })
-                                      void onSegmentsReplace(applied)
-                                    }}
-                                  />
-                                </PropLabel>
-                                <div className="flex gap-1">
-                                  {[0, 50, 100, 150, 200].map((v) => (
-                                    <button
-                                      key={v}
-                                      type="button"
-                                      className={cn(
-                                        'flex-1 rounded-sm border px-1 py-1 text-[10px] transition-colors',
-                                        globalTtsVolume === v
-                                          ? 'border-primary text-primary bg-primary/10'
-                                          : 'border-border text-muted-foreground hover:text-foreground hover:bg-accent',
-                                      )}
-                                      disabled={busy}
-                                      onClick={() => {
-                                        setGlobalTtsVolume(v)
-                                        pushHistory()
-                                        const applied = segments.map((s) => {
-                                          if ((s.layout === 'vertical' || s.layout === 'label') && s.dub !== true) return s
-                                          return { ...s, ttsVolume: v }
-                                        })
-                                        void onSegmentsReplace(applied)
-                                      }}
-                                    >
-                                      {v === 0 ? 'Tắt' : `${v}%`}
-                                    </button>
-                                  ))}
-                                </div>
-
-                                <PropLabel label={`Tốc độ TTS: ${globalTtsSpeed.toFixed(2)}× · tất cả`}>
-                                  <input
-                                    type="range"
-                                    min={0.75}
-                                    max={1.5}
-                                    step={0.05}
-                                    className="w-full accent-primary"
-                                    value={globalTtsSpeed}
-                                    disabled={busy}
-                                    onChange={(e) => setGlobalTtsSpeed(Number(e.target.value))}
-                                    onPointerUp={(e) => {
-                                      const v = Number(e.currentTarget.value)
-                                      pushHistory()
-                                      const applied = segments.map((s) => {
-                                        if ((s.layout === 'vertical' || s.layout === 'label') && s.dub !== true) return s
-                                        return { ...s, ttsSpeed: v }
-                                      })
-                                      void onSegmentsReplace(applied)
-                                    }}
-                                  />
-                                </PropLabel>
-                                <div className="flex gap-1">
-                                  {[0.75, 0.9, 1, 1.15, 1.3, 1.5].map((v) => (
-                                    <button
-                                      key={v}
-                                      type="button"
-                                      className={cn(
-                                        'flex-1 rounded-sm border px-1 py-1 text-[10px] transition-colors',
-                                        Math.abs(globalTtsSpeed - v) < 0.001
-                                          ? 'border-primary text-primary bg-primary/10'
-                                          : 'border-border text-muted-foreground hover:text-foreground hover:bg-accent',
-                                      )}
-                                      disabled={busy}
-                                      onClick={() => {
-                                        setGlobalTtsSpeed(v)
-                                        pushHistory()
-                                        const applied = segments.map((s) => {
-                                          if ((s.layout === 'vertical' || s.layout === 'label') && s.dub !== true) return s
-                                          return { ...s, ttsSpeed: v }
-                                        })
-                                        void onSegmentsReplace(applied)
-                                      }}
-                                    >
-                                      {v}×
-                                    </button>
-                                  ))}
-                                </div>
-
-                                <button
-                                  type="button"
-                                  className="w-full rounded-md border border-border bg-accent hover:bg-muted px-3 py-1.5 text-xs transition-colors"
-                                  disabled={busy}
-                                  onClick={() => {
-                                    setGlobalTtsVolume(100)
-                                    setGlobalTtsSpeed(1)
-                                    setGlobalVoice(settings.defaultVoice || '')
-                                    pushHistory()
-                                    const applied = segments.map((s) => {
-                                      if ((s.layout === 'vertical' || s.layout === 'label') && s.dub !== true) return s
-                                      return { ...s, ttsVolume: 100, ttsSpeed: 1, voice: settings.defaultVoice || '' }
-                                    })
-                                    void onSegmentsReplace(applied)
-                                  }}
-                                >
-                                  Reset về 100% · 1× · giọng mặc định
-                                </button>
-                              </>
-                            )}
-                          </>
-                        )}
-
-                        {effectivePropTab === 'mask' && (
-                          <EditorMaskPanel
-                            busy={busy}
-                            settings={settings}
-                            onSettings={onSettings}
-                            coverMaskStyle={coverMaskStyle}
-                            coverMaskColor={coverMaskColor}
-                            coverMaskOpacity={coverMaskOpacity}
-                            selected={selected}
-                            bboxSeg={bboxSeg}
-                            selectedBox={selectedBox}
-                            sourceWidth={sourceWidth}
-                            sourceHeight={sourceHeight}
-                            segmentsLen={segments.length}
-                            timelineDuration={timelineDuration}
-                            playheadSec={time}
-                            commitCoverBox={commitCoverBox}
-                            stretchCoverFullWidth={stretchCoverFullWidth}
-                            applyCoverMaskToAll={applyCoverMaskToAll}
-                            resetOcrRegion={resetOcrRegion}
-                            applyAllLaneLabel={applyAllLaneLabel}
-                          />
-                        )}
-
-                        {effectivePropTab === 'overlay' && logoDraft && (
-                          <div className="logo-editor-panel">
-                            <div className="logo-editor-full"><p className="text-sm font-medium">Logo / Watermark</p><p className="text-[10px] text-muted-foreground">Bản xem trước · chưa lưu vào video</p></div>
-                            {logoDraft.logoSource === 'text' && <div className="space-y-2"><PropLabel label="Nội dung"><input className="w-full rounded-md border border-border bg-input px-2 py-2 text-xs outline-none focus:border-primary" value={logoDraft.text} onChange={(e) => setLogoDraft(fitTextLogo(logoDraft, e.target.value))} /></PropLabel><div className="grid grid-cols-[1fr_auto] gap-2"><PropLabel label="Phông chữ"><select className="w-full rounded-md border border-border bg-input px-2 py-1.5 text-xs outline-none focus:border-primary" value={logoDraft.fontFamily ?? 'system'} onChange={(e) => { const next = { ...logoDraft, fontFamily: e.target.value }; setLogoDraft(fitTextLogo(next)) }}>{CAPTION_FONT_PRESETS.map((font) => <option key={font.id} value={font.id} style={{ fontFamily: font.css }}>{font.label}</option>)}</select></PropLabel><PropLabel label="Màu chữ"><input type="color" className="h-8 w-14 cursor-pointer rounded-md border border-border bg-input" value={logoDraft.color} onChange={(e) => setLogoDraft({ ...logoDraft, color: e.target.value })} /></PropLabel></div><div className="flex gap-1">{['#ffffff', '#000000', '#ffd166', '#ef476f', '#06d6a0', '#118ab2'].map((color) => <button key={color} type="button" title={color} className={cn('size-5 rounded-full border transition-transform hover:scale-110', logoDraft.color === color ? 'border-primary ring-1 ring-primary' : 'border-border')} style={{ backgroundColor: color }} onClick={() => setLogoDraft({ ...logoDraft, color })} />)}</div></div>}
-                            <div className={cn('rounded-md border border-border p-2 space-y-2', logoDraft.logoSource !== 'text' && 'logo-editor-full')}>
-                              <PropLabel label={`Kích thước: ${logoDraft.logoSource === 'text' ? `${logoDraft.fontSize}px` : `${Math.round(logoDraft.h / Math.max(1, Math.min(sourceWidth, sourceHeight)) * 100)}%`}`}>
-                                <input type="range" min={logoDraft.logoSource === 'text' ? 6 : 2} max={logoDraft.logoSource === 'text' ? 160 : 30} value={logoDraft.logoSource === 'text' ? logoDraft.fontSize : Math.round(logoDraft.h / Math.max(1, Math.min(sourceWidth, sourceHeight)) * 100)} className="w-full accent-primary" onChange={(e) => {
-                                  const value = Number(e.target.value)
-                                  if (logoDraft.logoSource === 'text') setLogoDraft(fitTextLogo(logoDraft, logoDraft.text, value))
-                                  else { const ratio = logoDraft.w / Math.max(1, logoDraft.h); const h = Math.round(Math.min(sourceWidth, sourceHeight) * value / 100); setLogoDraft({ ...logoDraft, h, w: Math.round(h * ratio) }) }
-                                }} />
-                              </PropLabel>
-                              <details open><summary className="cursor-pointer text-[10px] text-muted-foreground hover:text-foreground">Nâng cao</summary><div className="mt-2 grid grid-cols-4 gap-1.5"><NumField label="Rộng" value={logoDraft.w} onCommit={(v) => setLogoDraft({ ...logoDraft, w: Math.max(20, Math.round(v)) })} /><NumField label="Cao" value={logoDraft.h} onCommit={(v) => setLogoDraft({ ...logoDraft, h: Math.max(20, Math.round(v)) })} /><NumField label="X" value={logoDraft.x} onCommit={(v) => setLogoDraft({ ...logoDraft, x: Math.max(0, Math.min(sourceWidth - logoDraft.w, Math.round(v))) })} /><NumField label="Y" value={logoDraft.y} onCommit={(v) => setLogoDraft({ ...logoDraft, y: Math.max(0, Math.min(sourceHeight - logoDraft.h, Math.round(v))) })} /></div></details>
-                            </div>
-                            <div className="col-span-2 rounded-md border border-border p-2 space-y-2">
-                              <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Vị trí / chuyển động</p>
-                              <div className="grid grid-cols-2 gap-1">{(['fixed', 'random'] as const).map((motion) => <button key={motion} type="button" className={cn('rounded-md border p-1.5 text-xs transition-colors hover:bg-primary/10', logoDraft.motion === motion ? 'border-primary bg-primary/15 text-primary ring-1 ring-primary' : 'border-border')} onClick={() => setLogoDraft({ ...logoDraft, motion })}>{logoDraft.motion === motion ? '✓ ' : ''}{motion === 'fixed' ? 'Cố định' : 'Ngẫu nhiên'}</button>)}</div>
-                              <div className="grid grid-cols-2 gap-1">{(['full', 'range'] as const).map((scope) => <button key={scope} type="button" className={cn('rounded-md border p-1.5 text-xs transition-colors hover:bg-primary/10', logoDraft.scope === scope ? 'border-primary bg-primary/15 text-primary ring-1 ring-primary' : 'border-border')} onClick={() => setLogoDraft({ ...logoDraft, scope, ...(scope === 'full' ? { start: 0, end: timelineDuration } : {}) })}>{logoDraft.scope === scope ? '✓ ' : ''}{scope === 'full' ? 'Toàn video' : 'Theo đoạn'}</button>)}</div>
-                              <PropLabel label={`Độ mờ: ${logoDraft.opacity ?? 85}%`}><input type="range" min={5} max={100} value={logoDraft.opacity ?? 85} className="w-full accent-primary" onChange={(e) => setLogoDraft({ ...logoDraft, opacity: Number(e.target.value) })} /></PropLabel>
-                              {logoDraft.scope === 'range' && (
-                                <div className="grid grid-cols-2 gap-2">
-                                  <NumField
-                                    label="Hiện từ"
-                                    value={logoDraft.start}
-                                    step={0.1}
-                                    formatDisplay={formatTimecode}
-                                    parseDisplay={parseTimecode}
-                                    onCommit={(v) => setLogoDraft({ ...logoDraft, start: Math.max(0, Math.min(logoDraft.end - 0.1, v)) })}
-                                  />
-                                  <NumField
-                                    label="Đến"
-                                    value={logoDraft.end}
-                                    step={0.1}
-                                    formatDisplay={formatTimecode}
-                                    parseDisplay={parseTimecode}
-                                    onCommit={(v) => setLogoDraft({ ...logoDraft, end: Math.min(timelineDuration, Math.max(logoDraft.start + 0.1, v)) })}
-                                  />
-                                </div>
-                              )}
-                              {logoDraft.motion === 'random' && <div className="grid grid-cols-[auto_1fr_2fr] items-end gap-2"><p className="pb-2 text-[10px] font-medium text-muted-foreground">Tốc độ</p><div className="grid grid-cols-3 gap-1">{[
-                                { label: 'Chậm', visibleSec: 6, hiddenSec: 3 },
-                                { label: 'Vừa', visibleSec: 4, hiddenSec: 2 },
-                                { label: 'Nhanh', visibleSec: 2.5, hiddenSec: 1 },
-                              ].map((preset) => { const active = logoDraft.visibleSec === preset.visibleSec && logoDraft.hiddenSec === preset.hiddenSec; return <button key={preset.label} type="button" className={cn('rounded-md border p-1.5 text-[10px] transition-colors hover:bg-primary/10', active ? 'border-primary bg-primary/15 text-primary ring-1 ring-primary' : 'border-border')} onClick={() => setLogoDraft({ ...logoDraft, visibleSec: preset.visibleSec, hiddenSec: preset.hiddenSec })}>{active ? '✓ ' : ''}{preset.label}</button> })}</div><div className="grid grid-cols-4 gap-1.5"><NumField label="Hiện" value={logoDraft.visibleSec ?? 4} step={0.1} formatDisplay={formatTimecode} parseDisplay={parseTimecode} onCommit={(v) => setLogoDraft({ ...logoDraft, visibleSec: Math.max(0.5, v) })} /><NumField label="Ẩn" value={logoDraft.hiddenSec ?? 2} step={0.1} formatDisplay={formatTimecode} parseDisplay={parseTimecode} onCommit={(v) => setLogoDraft({ ...logoDraft, hiddenSec: Math.max(0, v) })} /><NumField label="Fade" value={logoDraft.fadeSec ?? 0.5} step={0.1} formatDisplay={formatTimecode} parseDisplay={parseTimecode} onCommit={(v) => setLogoDraft({ ...logoDraft, fadeSec: Math.max(0, v) })} /><NumField label="Lề (%)" value={logoDraft.safeMargin ?? 4} step={1} onCommit={(v) => setLogoDraft({ ...logoDraft, safeMargin: Math.max(0, Math.min(20, v)) })} /></div></div>}
-                            </div>
-                            {logoError && <p className="col-span-2 text-[10px] text-destructive">{logoError}</p>}
-                            <button type="button" disabled={logoToggleDisabled} className={cn('col-span-2 w-full rounded-md px-3 py-2 text-xs font-medium transition-colors disabled:opacity-50', logoToggleRemoves ? 'border border-destructive/50 text-destructive hover:bg-destructive/10' : 'bg-primary text-primary-foreground hover:bg-primary/90')} onClick={() => logoToggleRemoves ? unapplyLogo() : void applyLogoDraft()}>{logoApplying ? 'Đang áp dụng…' : logoToggleRemoves ? 'Hủy áp dụng logo' : 'Áp dụng logo'}</button>
-                          </div>
-                        )}
-
-                        {effectivePropTab === 'overlay' && selectedOverlay?.kind === 'logo' && !logoDraft && (
-                          <button type="button" className="w-full rounded-md border border-destructive/50 px-3 py-2 text-xs text-destructive hover:bg-destructive/10" onClick={unapplyLogo}>Hủy áp dụng logo</button>
-                        )}
-
-                        {effectivePropTab === 'overlay' && selectedOverlay && selectedOverlay.kind !== 'logo' && !logoDraft && (
-                          <>
-                            <PropLabel label="Nội dung">
-                              <textarea
-                                className="w-full rounded-md border border-border bg-input px-2 py-1.5 text-xs resize-none outline-none focus:border-ring transition-colors"
-                                value={selectedOverlay.text}
-                                rows={3}
-                                onChange={(e) => editOverlay({ ...selectedOverlay, text: e.target.value })}
-                              />
-                            </PropLabel>
-
-                            <div className="grid grid-cols-2 gap-2">
-                              <NumField
-                                label="Hiện từ"
-                                value={selectedOverlay.start}
-                                step={0.1}
-                                formatDisplay={formatTimecode}
-                                parseDisplay={parseTimecode}
-                                onCommit={(v) => editOverlay({ ...selectedOverlay, start: Math.max(0, Math.min(selectedOverlay.end - 0.1, v)) })}
-                              />
-                              <NumField
-                                label="Đến"
-                                value={selectedOverlay.end}
-                                step={0.1}
-                                formatDisplay={formatTimecode}
-                                parseDisplay={parseTimecode}
-                                onCommit={(v) => editOverlay({ ...selectedOverlay, end: Math.min(timelineDuration, Math.max(selectedOverlay.start + 0.1, v)) })}
-                              />
-                              <NumField label="X" value={selectedOverlay.x}
-                                onCommit={(v) => editOverlay({ ...selectedOverlay, x: Math.round(Math.max(0, Math.min(sourceWidth - selectedOverlay.w, v))) })} />
-                              <NumField label="Y" value={selectedOverlay.y}
-                                onCommit={(v) => editOverlay({ ...selectedOverlay, y: Math.round(Math.max(0, Math.min(sourceHeight - selectedOverlay.h, v))) })} />
-                              <NumField label="Rộng" value={selectedOverlay.w}
-                                onCommit={(v) => editOverlay({ ...selectedOverlay, w: Math.round(Math.max(20, Math.min(sourceWidth - selectedOverlay.x, v))) })} />
-                              <NumField label="Cao" value={selectedOverlay.h}
-                                onCommit={(v) => editOverlay({ ...selectedOverlay, h: Math.round(Math.max(20, Math.min(sourceHeight - selectedOverlay.y, v))) })} />
-                            </div>
-
-                            <PropLabel label={`Cỡ chữ: ${selectedOverlay.fontSize}px`}>
-                              <input type="range" min={12} max={160} className="w-full accent-primary"
-                                value={selectedOverlay.fontSize}
-                                onChange={(e) => editOverlay({ ...selectedOverlay, fontSize: Number(e.target.value) })} />
-                            </PropLabel>
-
-                            <PropLabel label="Màu text">
-                              <div className="flex items-center gap-1.5">
-                                <input type="color" className="h-7 w-14 rounded cursor-pointer border border-border shrink-0"
-                                  value={selectedOverlay.color}
-                                  onChange={(e) => editOverlay({ ...selectedOverlay, color: e.target.value })} />
-                                {['#ffffff', '#ffd166', '#ef476f', '#06d6a0', '#118ab2', '#000000'].map((c) => (
-                                  <button
-                                    key={c}
-                                    type="button"
-                                    className={cn(
-                                      'h-5 w-5 rounded-full border transition-transform hover:scale-110',
-                                      selectedOverlay.color === c ? 'border-primary ring-1 ring-primary' : 'border-border',
-                                    )}
-                                    style={{ backgroundColor: c }}
-                                    title={c}
-                                    onClick={() => editOverlay({ ...selectedOverlay, color: c })}
-                                  />
-                                ))}
-                              </div>
-                            </PropLabel>
-
-                            <button
-                              type="button"
-                              className="w-full rounded-md border border-border bg-accent hover:bg-muted px-3 py-1.5 text-xs transition-colors"
-                              onClick={() => editOverlay({
-                                ...selectedOverlay,
-                                id: crypto.randomUUID(),
-                                start: Math.min(timelineDuration - 0.1, selectedOverlay.end),
-                                end: Math.min(timelineDuration, selectedOverlay.end + (selectedOverlay.end - selectedOverlay.start)),
-                              }, true)}
-                            >
-                              Nhân bản overlay
-                            </button>
-                            <button
-                              type="button"
-                              className="w-full rounded-md border border-destructive/50 text-destructive hover:bg-destructive/10 px-3 py-1.5 text-xs transition-colors"
-                              onClick={() => { onOverlayDelete(selectedOverlay.id); setSelectedOverlayId(null) }}
-                            >
-                              Xóa text overlay
-                            </button>
-                          </>
-                        )}
-                      </div>
-                    </ScrollArea>
-                  </div>
+                      <EditorPropertiesPanel
+                        effectivePropTab={effectivePropTab}
+                        setPropTab={setPropTab}
+                        setTool={setTool}
+                        busy={busy}
+                        segments={segments}
+                        settings={settings}
+                        onSettings={onSettings}
+                        voices={voices}
+                        selected={selected}
+                        selectedOverlay={selectedOverlay}
+                        bboxSeg={bboxSeg}
+                        isOverlaySeg={isOverlaySeg}
+                        dubOn={dubOn}
+                        timelineDuration={timelineDuration}
+                        playheadSec={time}
+                        sourceWidth={sourceWidth}
+                        sourceHeight={sourceHeight}
+                        activeCaptionPx={activeCaptionPx}
+                        fontSizeDraft={fontSizeDraft}
+                        setFontSizeDraft={setFontSizeDraft}
+                        fontSizeOptions={fontSizeOptions}
+                        applyAllLaneLabel={applyAllLaneLabel}
+                        showCoverBlur={showCoverBlur}
+                        editSegment={editSegment}
+                        editOverlay={editOverlay}
+                        onOverlayDelete={onOverlayDelete}
+                        setSelectedOverlayId={setSelectedOverlayId}
+                        onSegmentsReplace={onSegmentsReplace}
+                        pushHistory={pushHistory}
+                        ttsBusy={ttsBusy}
+                        ttsError={ttsError}
+                        previewTts={previewTts}
+                        playSegmentDub={playSegmentDub}
+                        applyFontFamily={applyFontFamily}
+                        applyFontSize={applyFontSize}
+                        applyCaptionColor={applyCaptionColor}
+                        applyCaptionModeAll={applyCaptionModeAll}
+                        speedStatus={speedStatus}
+                        speedDraft={speedDraft}
+                        setSpeedDraft={setSpeedDraft}
+                        speedBusy={speedBusy}
+                        speedCancelling={speedCancelling}
+                        speedError={speedError}
+                        setSpeedError={setSpeedError}
+                        appliedSpeedX={appliedSpeedX}
+                        hasBakedSpeed={hasBakedSpeed}
+                        applyVideoSpeed={applyVideoSpeed}
+                        cancelVideoSpeed={cancelVideoSpeed}
+                        wantNoVocals={wantNoVocals}
+                        stemStatus={stemStatus}
+                        stemProgress={stemProgress}
+                        stemError={stemError}
+                        setStemRetry={setStemRetry}
+                        globalVoice={globalVoice}
+                        setGlobalVoice={setGlobalVoice}
+                        globalTtsVolume={globalTtsVolume}
+                        setGlobalTtsVolume={setGlobalTtsVolume}
+                        globalTtsSpeed={globalTtsSpeed}
+                        setGlobalTtsSpeed={setGlobalTtsSpeed}
+                        onDub={onDub}
+                        jobStep={jobStep}
+                        jobProgress={jobProgress}
+                        coverMaskStyle={coverMaskStyle}
+                        coverMaskColor={coverMaskColor}
+                        coverMaskOpacity={coverMaskOpacity}
+                        selectedBox={selectedBox}
+                        commitCoverBox={commitCoverBox}
+                        stretchCoverFullWidth={stretchCoverFullWidth}
+                        applyCoverMaskToAll={applyCoverMaskToAll}
+                        resetOcrRegion={resetOcrRegion}
+                        logoDraft={logoDraft}
+                        setLogoDraft={setLogoDraft}
+                        fitTextLogo={fitTextLogo}
+                        logoError={logoError}
+                        logoApplying={logoApplying}
+                        logoToggleDisabled={logoToggleDisabled}
+                        logoToggleRemoves={logoToggleRemoves}
+                        unapplyLogo={unapplyLogo}
+                        applyLogoDraft={applyLogoDraft}
+                        appliedLogo={appliedLogo}
+                        editLogo={editLogo}
+                      />
                     </SortablePanel>
                     )}
                   </React.Fragment>
