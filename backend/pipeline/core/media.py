@@ -596,6 +596,240 @@ def retime_timeline_time(
     return spans[-1][4] if spans else source
 
 
+def _video_keyframes(video: Path) -> list[float]:
+    """PTS keyframe — đọc packet header, không decode (nhanh cả video dài)."""
+    try:
+        outp = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "packet=pts_time,flags", "-of", "csv=p=0", str(video)],
+            capture_output=True, text=True, timeout=600,
+            creationflags=(
+                int(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
+                if sys.platform == "win32" else 0
+            ),
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    kfs: list[float] = []
+    for line in outp.splitlines():
+        bits = line.strip().split(",")
+        if len(bits) >= 2 and "K" in bits[1]:
+            try:
+                kfs.append(float(bits[0]))
+            except ValueError:
+                pass
+    return sorted(set(kfs))
+
+
+def _strip_pix_fmt(args: list[str]) -> list[str]:
+    """Frame CUDA không nhận -pix_fmt yuv420p (nvenc tự xử lý hw frame)."""
+    out: list[str] = []
+    skip = False
+    for a in args:
+        if skip:
+            skip = False
+            continue
+        if a == "-pix_fmt":
+            skip = True
+            continue
+        out.append(a)
+    return out
+
+
+def _hw_decode_args() -> list[str]:
+    """NVDEC decode, frame ở lại GPU — chỉ cho graph KHÔNG đụng pixel
+    (trim/setpts/concat). Filter vẽ (gblur/overlay…) là CPU, đừng dùng."""
+    return (
+        ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
+        if nvenc_available()
+        else []
+    )
+
+
+def _retime_status(project_id: str | None, message: str, progress: int) -> None:
+    if not project_id:
+        return
+    from .project import set_status
+
+    set_status(project_id, step="export", progress=progress, message=message, running=True)
+
+
+def _retime_segmented(
+    video: Path,
+    tmp_out: Path,
+    spans: list[tuple[float, float, float, float, float]],
+    merged: list[tuple[float, float, float, float, float]],
+    duration: float,
+    cache_dir: Path,
+    key: str,
+    project_id: str | None,
+    has_audio: bool,
+) -> bool:
+    """Chỉ re-encode cửa sổ quanh span videoSpeed≠1 (nới về keyframe, NVDEC→NVENC),
+    copy packet phần còn lại, audio atempo một lần. False = dùng full graph."""
+    import bisect
+
+    speedy = [sp for sp in merged if abs(sp[2] - 1.0) > 0.001]
+    if not speedy:
+        return False
+    kfs = _video_keyframes(video)
+    if len(kfs) < 3:
+        return False
+    wins: list[list[float]] = []
+    for s, e, _sp, _o1, _o2 in speedy:
+        ia = bisect.bisect_right(kfs, s + 1e-6) - 1
+        ka = kfs[ia] if ia >= 0 else 0.0
+        ib = bisect.bisect_left(kfs, e - 1e-6)
+        kb = kfs[ib] if ib < len(kfs) else duration
+        if wins and ka <= wins[-1][1] + 0.5:
+            wins[-1][1] = max(wins[-1][1], kb)
+        else:
+            wins.append([ka, min(kb, duration)])
+    enc_total = sum(b - a for a, b in wins)
+    if enc_total > 0.85 * duration:
+        return False  # gần như cả video phải encode — full graph một lệnh gọn hơn
+
+    # fps → nửa khung: cắt segment muxer NGAY TRƯỚC keyframe = packet-chính-xác
+    try:
+        rate = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=r_frame_rate", "-of", "csv=p=0", str(video)],
+            capture_output=True, text=True, timeout=60,
+            creationflags=(
+                int(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
+                if sys.platform == "win32" else 0
+            ),
+        ).stdout.strip()
+        num, _s, den = rate.partition("/")
+        fps = float(num) / float(den or 1)
+    except (OSError, ValueError, ZeroDivisionError, subprocess.SubprocessError):
+        fps = 25.0
+    eps = max(0.008, 0.5 / max(1.0, fps))
+
+    pieces: list[tuple[float, float, bool]] = []
+    cur = 0.0
+    for a, b in wins:
+        if a > cur + 1e-3:
+            pieces.append((cur, a, False))
+        pieces.append((a, min(b, duration), True))
+        cur = min(b, duration)
+    if cur < duration - 1e-3:
+        pieces.append((cur, duration, False))
+
+    tdir = cache_dir / f"retime_seg_{key}"
+    shutil.rmtree(tdir, ignore_errors=True)
+    tdir.mkdir(parents=True, exist_ok=True)
+    try:
+        cuts = ",".join(f"{p[0] - eps:.6f}" for p in pieces[1:])
+        run_cmd(
+            project_id,
+            ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(video),
+             "-map", "0:v", "-an", "-c", "copy", "-f", "segment",
+             "-segment_times", cuts, "-reset_timestamps", "1",
+             str(tdir / "p_%d.mp4")],
+        )
+        files = [tdir / f"p_{i}.mp4" for i in range(len(pieces))]
+        if not all(f.is_file() for f in files):
+            return False
+
+        hw = _hw_decode_args()
+        n_win = sum(1 for p in pieces if p[2])
+        wi = 0
+        parts: list[Path] = []
+        for i, (a, b, is_win) in enumerate(pieces):
+            if not is_win:
+                parts.append(files[i])
+                continue
+            wi += 1
+            _retime_status(
+                project_id,
+                f"Giãn thời lượng theo TTS · đoạn {wi}/{n_win}"
+                + (" · GPU" if hw else ""),
+                3 + int(11 * wi / max(1, n_win)),
+            )
+            subs = [sp for sp in spans if sp[1] > a + 1e-6 and sp[0] < b - 1e-6]
+            filt: list[str] = []
+            labels: list[str] = []
+            for j, (s, e, spd, _o1, _o2) in enumerate(subs):
+                s2, e2 = max(s, a) - a, min(e, b) - a
+                filt.append(
+                    f"[0:v]trim=start={s2:.6f}:end={e2:.6f},"
+                    f"setpts=(PTS-STARTPTS)/{max(0.25, min(4.0, spd)):.6f}[v{j}]"
+                )
+                labels.append(f"[v{j}]")
+            filt.append("".join(labels) + f"concat=n={len(subs)}:v=1:a=0[vout]")
+            fc = tdir / f"fc_{i}.txt"
+            fc.write_text(";\n".join(filt) + "\n", encoding="utf-8")
+            enc = tdir / f"e_{i}.mp4"
+
+            def _enc_cmd(hw_args: list[str]) -> list[str]:
+                enc_args = h264_encoder_args(fast=True)
+                if hw_args:
+                    enc_args = _strip_pix_fmt(enc_args)
+                return ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                        *hw_args, "-i", str(files[i]),
+                        "-filter_complex_script", str(fc), "-map", "[vout]",
+                        *enc_args, "-an", str(enc)]
+
+            try:
+                run_cmd(project_id, _enc_cmd(hw))
+            except (RuntimeError, subprocess.CalledProcessError):
+                if not hw:
+                    raise
+                hw = []  # NVDEC lỗi (codec lạ…) → CPU decode, vẫn NVENC encode
+                run_cmd(project_id, _enc_cmd([]))
+            parts.append(enc)
+
+        lst = tdir / "concat.txt"
+        lst.write_text(
+            "\n".join(f"file '{str(f).replace(chr(92), '/')}'" for f in parts) + "\n",
+            encoding="utf-8",
+        )
+        vcat = tdir / "vcat.mp4"
+        run_cmd(
+            project_id,
+            ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+             "-f", "concat", "-safe", "0", "-i", str(lst),
+             "-c", "copy", "-an", str(vcat)],
+        )
+        if has_audio:
+            afilt: list[str] = []
+            albl: list[str] = []
+            for j, (s, e, spd, _o1, _o2) in enumerate(spans):
+                afilt.append(
+                    f"[0:a]atrim=start={s:.6f}:end={e:.6f},asetpts=PTS-STARTPTS,"
+                    f"{atempo_chain(max(0.25, min(4.0, spd)))}[a{j}]"
+                )
+                albl.append(f"[a{j}]")
+            afilt.append("".join(albl) + f"concat=n={len(albl)}:v=0:a=1[aout]")
+            afc = tdir / "afc.txt"
+            afc.write_text(";\n".join(afilt) + "\n", encoding="utf-8")
+            aud = tdir / "aud.m4a"
+            run_cmd(
+                project_id,
+                ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                 "-i", str(video), "-filter_complex_script", str(afc),
+                 "-map", "[aout]", "-c:a", "aac", "-b:a", "128k", str(aud)],
+            )
+            run_cmd(
+                project_id,
+                ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                 "-i", str(vcat), "-i", str(aud),
+                 "-map", "0:v", "-map", "1:a", "-c", "copy",
+                 "-map_metadata", "-1", "-map_chapters", "-1", str(tmp_out)],
+            )
+        else:
+            shutil.copyfile(vcat, tmp_out)
+        expect = spans[-1][4] if spans else duration
+        got = ffprobe_duration(tmp_out)
+        if abs(got - expect) > 0.25:
+            tmp_out.unlink(missing_ok=True)
+            return False
+        return True
+    finally:
+        shutil.rmtree(tdir, ignore_errors=True)
+
+
 def retime_video_segments(
     video: Path,
     segments: list[dict[str, Any]],
@@ -671,6 +905,28 @@ def retime_video_segments(
             else:
                 merged.append(sp)
         has_audio = _has_audio_stream(video)
+
+        # Đường nhanh: chỉ encode cửa sổ quanh span đổi tốc độ (NVDEC→NVENC),
+        # copy packet phần còn lại — video dài chỉnh vài câu gần như miễn phí.
+        seg_tmp = out.with_name(f"{out.stem}.seg_tmp{out.suffix}")
+        seg_tmp.unlink(missing_ok=True)
+        try:
+            if _retime_segmented(
+                video, seg_tmp, spans, merged, duration,
+                cache_dir, key, project_id, has_audio,
+            ):
+                _atomic_replace(seg_tmp, out)
+                return out, remapped
+        except (RuntimeError, subprocess.CalledProcessError):
+            pass  # lỗi ffmpeg thật → full graph bên dưới (Cancelled vẫn ném qua)
+        finally:
+            seg_tmp.unlink(missing_ok=True)
+        _retime_status(
+            project_id,
+            "Giãn thời lượng theo TTS (toàn bộ video"
+            + (" · GPU" if _hw_decode_args() else "") + ")…",
+            4,
+        )
         filters: list[str] = []
         labels: list[str] = []
         for i, (start, end, speed, _out_start, _out_end) in enumerate(merged):
@@ -697,12 +953,14 @@ def retime_video_segments(
         fc_path = cache_dir / f"retimed_{key}_fc.txt"
         fc_path.write_text(";\n".join(filters) + "\n", encoding="utf-8")
         try:
+            hw_args = _hw_decode_args()  # trim/setpts không đụng pixel → NVDEC được
             cmd = [
                 "ffmpeg",
                 "-y",
                 "-hide_banner",
                 "-loglevel",
                 "error",
+                *hw_args,
                 "-i",
                 str(video),
                 "-filter_complex_script",
@@ -710,25 +968,29 @@ def retime_video_segments(
                 "-map",
                 "[vout]",
             ]
+            enc_args = (
+                _strip_pix_fmt(h264_encoder_args(fast=True))
+                if hw_args
+                else h264_encoder_args(fast=True)
+            )
             if has_audio:
-                cmd += [
-                    "-map",
-                    "[aout]",
-                    *h264_encoder_args(fast=True),
-                    "-c:a",
-                    "aac",
-                    "-b:a",
-                    "128k",
-                ]
+                cmd += ["-map", "[aout]", *enc_args, "-c:a", "aac", "-b:a", "128k"]
             else:
-                cmd += [*h264_encoder_args(fast=True), "-an"]
+                cmd += [*enc_args, "-an"]
             # Ghi tmp rồi rename: huỷ/crash giữa chừng để lại file cụt mà
             # lần chạy sau vẫn coi là cache hợp lệ (gate chỉ check exists()).
             tmp_out = out.with_name(f"{out.stem}.tmp{out.suffix}")
             tmp_out.unlink(missing_ok=True)
             cmd += ["-map_metadata", "-1", "-map_chapters", "-1", str(tmp_out)]
             try:
-                run_cmd(project_id, cmd)
+                try:
+                    run_cmd(project_id, cmd)
+                except RuntimeError:
+                    if not hw_args:
+                        raise
+                    # NVDEC không ăn codec này → CPU decode, NVENC vẫn encode
+                    cmd = [c for c in cmd if c not in ("-hwaccel", "cuda", "-hwaccel_output_format")]
+                    run_cmd(project_id, cmd)
                 _atomic_replace(tmp_out, out)
             except BaseException:
                 tmp_out.unlink(missing_ok=True)
