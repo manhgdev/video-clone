@@ -377,6 +377,10 @@ def _run_ffmpeg(
     return proc.returncode
 
 
+def _nvenc_on() -> bool:
+    return "h264_nvenc" in h264_encoder_args(throughput=True)
+
+
 def _make_reporter(project_id: str | None, total: float, label: str, base: float = 0.0):
     """cb(sec) → set_status «label · x%» (throttle 1s, progress 18→68).
 
@@ -435,7 +439,7 @@ def _keyframe_times(video: Path) -> list[float]:
 _SEG_MIN_SAVED = 5.0
 _SEG_MAX_OPS = 6
 _SEG_MAX_ACTIVE = 500
-_SEG_PARALLEL = 2  # GTX consumer cho ~3 phiên NVENC; 2 lô song song chồng CPU filter
+_SEG_PARALLEL = 3  # GTX consumer ≥3 phiên NVENC (driver mới 5-8); lỗi phiên → fallback full graph
 
 
 def _chunk_window(
@@ -587,12 +591,13 @@ def _render_segmented(
         final_parts.append(None)
         jobs.append((len(final_parts) - 1, cmd, enc, b - a))
 
+    enc_label = "Xuất khung (chia lô · NVENC)" if _nvenc_on() else "Xuất khung (chia lô · CPU)"
     if len(jobs) == 1:
         # Một lô lớn → giữ % theo giây cho mượt
         idx, cmd, enc, _dur = jobs[0]
         rc = _run_ffmpeg(
             cmd, project_id,
-            progress_cb=_make_reporter(project_id, act_total, "Xuất khung (chia lô ffmpeg)"),
+            progress_cb=_make_reporter(project_id, act_total, enc_label),
         )
         if rc != 0:
             return False
@@ -600,7 +605,7 @@ def _render_segmented(
     elif jobs:
         done = [0.0]
         lock = threading.Lock()
-        report = _make_reporter(project_id, act_total, "Xuất khung (chia lô ffmpeg)")
+        report = _make_reporter(project_id, act_total, enc_label)
 
         def _encode_job(job: tuple[int, list[str], Path, float]) -> tuple[int, Path]:
             idx, cmd, enc, dur = job
@@ -757,7 +762,8 @@ def try_render_ffmpeg(
              str(out)],
             project_id,
             progress_cb=_make_reporter(
-                project_id, src_dur, "Xuất khung (ffmpeg trực tiếp)",
+                project_id, src_dur,
+                "Xuất khung (ffmpeg · NVENC)" if _nvenc_on() else "Xuất khung (ffmpeg · CPU)",
             ),
         )
         if rc != 0 or not _validate():
