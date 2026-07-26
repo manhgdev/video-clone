@@ -92,7 +92,7 @@ backend/
 │     ├─ media.py             ffmpeg helpers, detect_device
 │     ├─ resources.py         adaptive_workers (trần CPU ~85%)
 │     ├─ accel.py             Ưu tiên CUDA/MPS/CPU (VieNeu/Whisper/…)
-│     ├─ system_check.py      checks + install AI packages
+│     ├─ system_check/        probe phần cứng + install gói AI + checks (facade __init__)
 │     ├─ runtime_site.py      frozen .venv-runtime
 │     └─ …
 └─ tests/
