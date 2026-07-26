@@ -64,14 +64,6 @@ def _feasible(
     """None = chạy được bằng ffmpeg; str = lý do phải dùng đường cũ."""
     if os.environ.get("VIDEO_CLONE_LEGACY_BURN") == "1":
         return "VIDEO_CLONE_LEGACY_BURN=1"
-    active = sum(
-        1
-        for i, _c in enumerate(cues)
-        if (i < len(cue_need_mask) and cue_need_mask[i])
-        or (i < len(cue_overlays) and cue_overlays[i] is not None)
-    )
-    if active > _MAX_CUES:
-        return f"{active} cue > {_MAX_CUES} (đợi P2 chia đoạn)"
     # Title dọc + nhãn xung đột nguồn cùng khung → bản cũ ẩn dọc theo frame
     for i, ci in enumerate(cues):
         if (ci[6] if len(ci) > 6 else "") != "vertical":
@@ -429,16 +421,48 @@ def _keyframe_times(video: Path) -> list[float]:
     return sorted(set(kfs))
 
 
-# Segment hoá đáng làm khi phần trống tiết kiệm được ≥ MIN_SAVED giây encode
+# Segment hoá đáng làm khi phần trống tiết kiệm ≥ MIN_SAVED giây encode,
+# HOẶC khi nhiều cue: mọi nhánh filter (crop/scale/gblur) chạy trên TỪNG frame
+# bất kể enable — graph N cue chậm tuyến tính theo N (đo: 16 cue ≈ 1× realtime).
+# Chia lô ≤ MAX_OPS op / lệnh giữ mỗi graph nhỏ, concat packet-chính-xác.
 _SEG_MIN_SAVED = 5.0
-_SEG_MAX_ACTIVE = 40
-_SEG_MAX_COVERAGE = 0.7
+_SEG_MAX_OPS = 6
+_SEG_MAX_ACTIVE = 500
+_SEG_PARALLEL = 2  # GTX consumer cho ~3 phiên NVENC; 2 lô song song chồng CPU filter
+
+
+def _chunk_window(
+    a: float, b: float, ops: list[dict[str, Any]], keyframes: list[float]
+) -> list[list[float]]:
+    """Cắt cửa sổ active thành các lô ≤ _SEG_MAX_OPS op, biên tại keyframe."""
+    import bisect
+
+    win = sorted(
+        (o for o in ops if o["t1"] > a and o["t0"] < b), key=lambda o: o["t0"]
+    )
+    if len(win) <= _SEG_MAX_OPS:
+        return [[a, b]]
+    n_chunks = max(1, math.ceil(len(win) / _SEG_MAX_OPS))
+    pieces: list[list[float]] = []
+    cur = a
+    for k in range(1, n_chunks):
+        # biên theo op (không chia đều thời gian — cue dồn cục vẫn ≤ MAX_OPS/lô)
+        want = win[min(k * _SEG_MAX_OPS, len(win)) - 1]["t1"]
+        want = max(want, cur + 0.5)
+        ki = bisect.bisect_left(keyframes, want)
+        cut = keyframes[ki] if ki < len(keyframes) else b
+        if not (cur + 0.25 < cut < b - 0.25):
+            continue
+        pieces.append([cur, cut])
+        cur = cut
+    pieces.append([cur, b])
+    return pieces
 
 
 def _plan_segments(
     ops: list[dict[str, Any]], duration: float, keyframes: list[float]
 ) -> list[tuple[float, float, bool]] | None:
-    """Chia [0,duration) thành (a, b, active). None = không đáng segment."""
+    """Chia [0,duration) thành (a, b, active). None = full graph một lệnh."""
     if duration <= 0 or len(keyframes) < 3:
         return None
     # 1) cửa sổ op (pad nhẹ) → gộp
@@ -462,17 +486,20 @@ def _plan_segments(
             aligned[-1][1] = max(aligned[-1][1], kb)
         else:
             aligned.append([ka, kb])
-    if len(aligned) > _SEG_MAX_ACTIVE:
+    # 3) chia lô cửa sổ dày cue để mỗi lệnh ffmpeg chỉ mang graph nhỏ
+    chunked: list[list[float]] = []
+    for a, b in aligned:
+        chunked.extend(_chunk_window(a, b, ops, keyframes))
+    if len(chunked) > _SEG_MAX_ACTIVE:
         return None
-    active_total = sum(b - a for a, b in aligned)
-    if active_total / duration > _SEG_MAX_COVERAGE:
+    active_total = sum(b - a for a, b in chunked)
+    # Ít cue + chẳng tiết kiệm được gì → full graph một lệnh là nhanh nhất
+    if len(ops) <= _SEG_MAX_OPS and duration - active_total < _SEG_MIN_SAVED:
         return None
-    if duration - active_total < _SEG_MIN_SAVED:
-        return None
-    # 3) đan xen copy/active phủ kín [0, duration)
+    # 4) đan xen copy/active phủ kín [0, duration)
     spans: list[tuple[float, float, bool]] = []
     cursor = 0.0
-    for a, b in aligned:
+    for a, b in chunked:
         if a > cursor + 0.001:
             spans.append((cursor, a, False))
         spans.append((a, min(b, duration), True))
@@ -492,11 +519,15 @@ def _render_segmented(
     fps: float,
     project_id: str | None,
     tmpdir: Path,
+    post: list[str] | None = None,
 ) -> bool:
     """Cắt theo keyframe (segment muxer, packet-chính-xác), encode CHỈ đoạn
     active, concat, mux audio gốc một lần cuối. Đã kiểm chứng: 902/902 frame,
-    duration khớp từng mili, stream sạch."""
-    act_total = sum(b - a for a, b, act in spans if act)
+    duration khớp từng mili, stream sạch.
+
+    post (crop/scale): đoạn trống không copy được nữa → encode graph tối giản
+    chỉ crop,scale; đoạn active nối post vào cuối graph."""
+    act_total = sum(b - a for a, b, act in spans if act or post)
     if project_id:
         set_status(
             project_id, step="export", progress=18,
@@ -518,36 +549,70 @@ def _render_segmented(
     if not all(f.is_file() for f in seg_files):
         _log(f"[ffgraph] segment muxer trả {sum(f.is_file() for f in seg_files)}/{len(spans)} file")
         return False
-    final_parts: list[Path] = []
-    done_sec = 0.0
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    final_parts: list[Path | None] = []
+    jobs: list[tuple[int, list[str], Path, float]] = []
     for i, (a, b, active) in enumerate(spans):
-        if not active:
+        lines: list[str] = []
+        k = 0
+        extra: list[str] = []
+        if active:
+            lines, k, extra = _lines_for_ops(ops, tmpdir, w, h, a, b - a, post=post)
+        if k == 0 and not post:
             final_parts.append(seg_files[i])
             continue
-        lines, k, extra = _lines_for_ops(ops, tmpdir, w, h, a, b - a)
-        if k == 0:
-            final_parts.append(seg_files[i])
-            continue
-        script = tmpdir / f"graph_{i}.txt"
-        script.write_text(";\n".join(lines) + "\n", encoding="utf-8")
         enc = tmpdir / f"seg_{i}_e.mp4"
+        if k == 0:
+            # Đoạn trống nhưng có crop/scale xuất cuối → encode graph tối giản
+            cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                   "-i", str(seg_files[i]), "-vf", ",".join(post or []),
+                   "-an", *h264_encoder_args(throughput=True), str(enc)]
+        else:
+            script = tmpdir / f"graph_{i}.txt"
+            script.write_text(";\n".join(lines) + "\n", encoding="utf-8")
+            cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                   "-i", str(seg_files[i]), *_loop_inputs(extra),
+                   "-filter_complex_script", str(script),
+                   "-map", "[vout]", "-an",
+                   *h264_encoder_args(throughput=True), str(enc)]
+        final_parts.append(None)
+        jobs.append((len(final_parts) - 1, cmd, enc, b - a))
+
+    if len(jobs) == 1:
+        # Một lô lớn → giữ % theo giây cho mượt
+        idx, cmd, enc, _dur = jobs[0]
         rc = _run_ffmpeg(
-            ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-             "-i", str(seg_files[i]), *_loop_inputs(extra),
-             "-filter_complex_script", str(script),
-             "-map", "[vout]", "-an",
-             *h264_encoder_args(throughput=True),
-             str(enc)],
-            project_id,
-            progress_cb=_make_reporter(
-                project_id, act_total, "Xuất khung (chỉ encode đoạn có chữ)",
-                base=done_sec,
-            ),
+            cmd, project_id,
+            progress_cb=_make_reporter(project_id, act_total, "Xuất khung (chia lô ffmpeg)"),
         )
         if rc != 0:
             return False
-        done_sec += b - a
-        final_parts.append(enc)
+        final_parts[idx] = enc
+    elif jobs:
+        done = [0.0]
+        lock = threading.Lock()
+        report = _make_reporter(project_id, act_total, "Xuất khung (chia lô ffmpeg)")
+
+        def _encode_job(job: tuple[int, list[str], Path, float]) -> tuple[int, Path]:
+            idx, cmd, enc, dur = job
+            rc = _run_ffmpeg(cmd, project_id)
+            if rc != 0:
+                raise RuntimeError(f"lô {idx} rc={rc}")
+            with lock:
+                done[0] += dur
+                report(done[0])
+            return idx, enc
+
+        try:
+            with ThreadPoolExecutor(
+                max_workers=_SEG_PARALLEL, thread_name_prefix="ffseg"
+            ) as pool:
+                for idx, enc in pool.map(_encode_job, jobs):
+                    final_parts[idx] = enc
+        except RuntimeError:
+            return False  # Cancelled từ _run_ffmpeg vẫn ném xuyên qua
     if project_id:
         set_status(
             project_id, step="export", progress=68,
@@ -635,27 +700,36 @@ def try_render_ffmpeg(
                 return False
             return True
 
-        # P1.5: crop/scale xuất cuối nối vào graph → mọi frame phải encode
-        # → segment hoá (P2) hết lợi, đi thẳng full graph một lệnh.
         post = _post_chain(w, h, post_crop, post_height)
 
-        # P2: video có nhiều khoảng trống → chỉ encode đoạn có cue
+        # P2 + chia lô: đoạn trống copy (hoặc crop/scale tối giản khi có post),
+        # đoạn có cue encode theo lô ≤ _SEG_MAX_OPS op — graph nhỏ thì NVENC
+        # mới là nút cổ chai, không phải chuỗi filter CPU.
         fps = _probe_fps(video)
-        spans = None if post else _plan_segments(ops, src_dur, _keyframe_times(video))
+        spans = _plan_segments(ops, src_dur, _keyframe_times(video))
         if spans is not None:
             n_active = sum(1 for _a, _b, act in spans if act)
             act_t = sum(b - a for a, b, act in spans if act)
             _log(
-                f"[ffgraph] segmented: {n_active} đoạn encode ({act_t:.1f}s)"
-                f" / copy {src_dur - act_t:.1f}s"
+                f"[ffgraph] segmented: {n_active} lô encode ({act_t:.1f}s)"
+                f" / trống {src_dur - act_t:.1f}s ({len(ops)} op"
+                + (", +crop/scale" if post else "") + ")"
             )
-            if _render_segmented(video, out, ops, spans, w, h, fps, project_id, tmpdir) and _validate():
+            if _render_segmented(
+                video, out, ops, spans, w, h, fps, project_id, tmpdir, post=post or None
+            ) and _validate():
+                if post and render_info is not None:
+                    render_info["post_applied"] = True
                 _log(f"[ffgraph] OK segmented {len(ops)} op")
                 return True
             _log("[ffgraph] segmented thất bại → full graph")
             out.unlink(missing_ok=True)
 
-        # Full graph một lệnh (P1)
+        # Full graph một lệnh (P1) — mọi nhánh filter chạy trên TỪNG frame nên
+        # quá nhiều op thì chậm hơn cả legacy → để đường cũ xử lý.
+        if len(ops) > _MAX_CUES:
+            _log(f"[ffgraph] {len(ops)} op > {_MAX_CUES} mà không segment được → legacy")
+            return False
         lines, k, extra = _lines_for_ops(ops, tmpdir, w, h, 0.0, None, post=post)
         if k == 0:
             import shutil

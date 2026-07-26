@@ -352,33 +352,63 @@ def cover_and_burn(
     ):
         import cv2 as _cv2
 
-        _cap = _cv2.VideoCapture(str(video))
-        try:
-            import time as _time
+        # Mỗi lần seek+decode ~130-150ms (sàn cứng, song song không giúp — đã đo).
+        # Watermark/nhãn LẶP LẠI qua các câu (cùng chữ + cùng box) → chỉ dò MỘT
+        # khung cho mỗi nhãn khác nhau rồi dùng chung: 100 câu nhãn ≈ 1-2 lần dò.
+        import threading as _threading
+        import time as _time
 
-            _last_report = 0.0
-            for i, cue in enumerate(cues):
-                lay_m = cue[6] if len(cue) > 6 else "horizontal"
-                if lay_m not in ("label", "vertical"):
-                    continue
-                # Mỗi cue = 1 lần seek+decode — video dài nhiều nhãn tốn cả phút,
-                # phải báo tiến độ kẻo UI nhìn như treo ở «Chuẩn bị caption / mask».
-                if project_id and _time.monotonic() - _last_report >= 1.0:
-                    _last_report = _time.monotonic()
-                    set_status(
-                        project_id,
-                        step="export",
-                        progress=16,
-                        message=f"Chuẩn bị caption / mask · dò khung nhãn {i + 1}/{len(cues)}…",
-                        running=True,
-                    )
-                mid = (float(cue[0]) + float(cue[1])) * 0.5
-                _cap.set(_cv2.CAP_PROP_POS_MSEC, mid * 1000.0)
-                ok, fr = _cap.read()
-                if ok:
-                    label_probe_frames[i] = fr
-        finally:
-            _cap.release()
+        groups: dict[tuple, list[int]] = {}
+        for i, c in enumerate(cues):
+            if (c[6] if len(c) > 6 else "") not in ("label", "vertical"):
+                continue
+            box = _union_box(list(cue_boxes[i])) if i < len(cue_boxes) and cue_boxes[i] else None
+            key = (
+                ((c[5] if len(c) > 5 else "") or "").strip(),
+                c[6],
+                tuple(v // 8 for v in box) if box else None,  # lượng tử 8px — OCR jitter
+            )
+            groups.setdefault(key, []).append(i)
+        if groups:
+            done_n = [0]
+            lock = _threading.Lock()
+            last_report = [0.0]
+
+            def _probe_group(idxs: list[int]) -> None:
+                # dò tại cue giữa nhóm (đại diện), chia sẻ frame cho cả nhóm
+                rep = idxs[len(idxs) // 2]
+                c = cues[rep]
+                mid = (float(c[0]) + float(c[1])) * 0.5
+                cap = _cv2.VideoCapture(str(video))
+                try:
+                    cap.set(_cv2.CAP_PROP_POS_MSEC, mid * 1000.0)
+                    ok, fr = cap.read()
+                finally:
+                    cap.release()
+                with lock:
+                    if ok:
+                        for i in idxs:
+                            label_probe_frames[i] = fr
+                    done_n[0] += 1
+                    now = _time.monotonic()
+                    if project_id and now - last_report[0] >= 1.0:
+                        last_report[0] = now
+                        set_status(
+                            project_id,
+                            step="export",
+                            progress=16,
+                            message=(
+                                "Chuẩn bị caption / mask · dò khung nhãn "
+                                f"{done_n[0]}/{len(groups)}…"
+                            ),
+                            running=True,
+                        )
+
+            n_probe = min(6, max(1, len(groups)))
+            with ThreadPoolExecutor(
+                max_workers=n_probe, thread_name_prefix="probe"
+            ) as pool:
+                list(pool.map(_probe_group, list(groups.values())))
 
     cue_overlays: list[tuple[Any, int, int] | None] = []
     # mỗi cue: 1+ vùng cover (nhãn multi-box)
