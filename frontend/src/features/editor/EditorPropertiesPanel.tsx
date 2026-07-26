@@ -19,6 +19,7 @@ import {
   PropLabel,
   TabSvg,
   coverMaskPreviewStyle,
+  dubPlaybackSpeed,
   formatSpeedX,
   formatTimecode,
   isOcrOverlayLayout,
@@ -82,6 +83,8 @@ type Props = {
   setSpeedError: (e: string | null) => void
   appliedSpeedX: number
   hasBakedSpeed: boolean
+  /** Bake hiện tại của file — hiện tốc độ PHÁT thực của TTS (ttsSpeed × bake/ttsBake) */
+  bakedSpeed?: number
   applyVideoSpeed: (scope: 'one' | 'all', speed?: number) => void
   cancelVideoSpeed: () => Promise<void>
   // Âm thanh / stem
@@ -169,6 +172,7 @@ export function EditorPropertiesPanel({
   setSpeedError,
   appliedSpeedX,
   hasBakedSpeed,
+  bakedSpeed,
   applyVideoSpeed,
   cancelVideoSpeed,
   wantNoVocals,
@@ -1016,7 +1020,14 @@ export function EditorPropertiesPanel({
                               ))}
                             </div>
 
-                            <PropLabel label={`Tốc độ TTS: ${(selected.ttsSpeed ?? 1).toFixed(2)}×`}>
+                            <PropLabel label={(() => {
+                              const manual = selected.ttsSpeed ?? 1
+                              const eff = dubPlaybackSpeed(selected, bakedSpeed ?? 1)
+                              // Dub ở đồng hồ 0.8 rồi nâng 1× → giọng phát ×1.25 dù slider 1.00
+                              return Math.abs(eff - manual) > 0.02
+                                ? `Tốc độ TTS: ${manual.toFixed(2)}× · phát thực ${eff.toFixed(2)}× (nâng ${(selected.ttsBake ?? 1).toFixed(2)}→${(bakedSpeed ?? 1).toFixed(2)})`
+                                : `Tốc độ TTS: ${manual.toFixed(2)}×`
+                            })()}>
                               <input type="range" min={0.75} max={1.5} step={0.05}
                                 className="w-full accent-primary"
                                 value={selected.ttsSpeed ?? 1}
@@ -1104,7 +1115,15 @@ export function EditorPropertiesPanel({
                                   ))}
                                 </div>
 
-                                <PropLabel label={`Tốc độ TTS: ${globalTtsSpeed.toFixed(2)}× · tất cả`}>
+                                <PropLabel label={(() => {
+                                  const dubRef = segments.find((s) => (s.ttsBake ?? 0) > 0)
+                                  const eff = dubRef
+                                    ? dubPlaybackSpeed({ ...dubRef, ttsSpeed: globalTtsSpeed }, bakedSpeed ?? 1)
+                                    : globalTtsSpeed
+                                  return Math.abs(eff - globalTtsSpeed) > 0.02
+                                    ? `Tốc độ TTS: ${globalTtsSpeed.toFixed(2)}× · phát thực ${eff.toFixed(2)}× · tất cả (nâng ${(dubRef?.ttsBake ?? 1).toFixed(2)}→${(bakedSpeed ?? 1).toFixed(2)})`
+                                    : `Tốc độ TTS: ${globalTtsSpeed.toFixed(2)}× · tất cả`
+                                })()}>
                                   <input
                                     type="range"
                                     min={0.75}

@@ -4898,6 +4898,7 @@ export default function LivePreviewEditor({
                         setSpeedError={setSpeedError}
                         appliedSpeedX={appliedSpeedX}
                         hasBakedSpeed={hasBakedSpeed}
+                        bakedSpeed={bakedSpeed}
                         applyVideoSpeed={applyVideoSpeed}
                         cancelVideoSpeed={cancelVideoSpeed}
                         wantNoVocals={wantNoVocals}
