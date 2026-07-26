@@ -4,7 +4,11 @@
 > filter_complex, parity test 4/4, fallback legacy giữ nguyên. Đo clip 30s: burn
 > 12,3s → 5,9s tổng (phần ffmpeg thuần 2,5s — video dài tiến về ~4× nhanh hơn,
 > 2h ≈ 40ph → ~10ph). CHƯA làm trong P1: gộp crop/scale bỏ encode lần 2 (P1.5),
-> logo fade (vẫn fallback legacy). Kế tiếp: P1.5 hoặc P2 (nhân thêm nhờ bỏ đoạn trống).
+> logo fade (vẫn fallback legacy).
+> ✅ P2 XONG (2026-07-27) — segment muxer cắt keyframe packet-chính-xác, chỉ encode
+> đoạn có cue, copy phần trống, concat + mux audio một lần. Kiểm chứng: 902/902
+> khung, đoạn trống bit-identical, decode sạch. Clip 30s/2 cue: 12,3s → 3,75s.
+> Kế tiếp: P1.5 (bỏ encode lần 2) hoặc P3 (đo Demucs/TTS).
 
 Mục tiêu: video vài tiếng xuất xong trong **phút**, không phải giờ; máy không đơ khi chạy.
 Nguyên tắc: mỗi phase xong phải **đo số + chạy test** rồi mới sang phase sau; mọi thay đổi

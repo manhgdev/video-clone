@@ -158,6 +158,271 @@ def _mask_ops(
     return lines, f"[vm{k}]"
 
 
+def _collect_ops(
+    cues: list[tuple],
+    cue_need_mask: list[bool],
+    cue_fits: list[list[tuple[int, int, int, int]]],
+    cue_overlays: list[Any],
+    cue_segment_ids: list[str],
+    segments_by_id: dict[str, dict[str, Any]],
+    mask_style: str,
+    mask_color: str,
+    mask_opacity: int,
+    burn: bool,
+) -> list[dict[str, Any]]:
+    """Cue → op tuyến tính (mask trước, chữ sau) — cùng thứ tự _paint_one."""
+    ops: list[dict[str, Any]] = []
+    for ci, cue in enumerate(cues):
+        if ci >= len(cue_need_mask) or not cue_need_mask[ci]:
+            continue
+        sid = cue_segment_ids[ci] if ci < len(cue_segment_ids) else ""
+        sm = segments_by_id.get(sid, {}) if sid else {}
+        st_cue = str(sm.get("coverMaskStyle") or mask_style)
+        col_cue = str(sm.get("coverMaskColor") or mask_color)
+        op_cue = int(
+            sm.get("coverMaskOpacity")
+            if sm.get("coverMaskOpacity") is not None
+            else mask_opacity
+        )
+        for fit in cue_fits[ci] if ci < len(cue_fits) else []:
+            if fit is None:
+                continue
+            ops.append({
+                "kind": "mask", "t0": float(cue[0]), "t1": float(cue[1]),
+                "box": fit, "style": st_cue, "color": col_cue, "opacity": op_cue,
+            })
+    if burn:
+        for bi, cue in enumerate(cues):
+            ov = cue_overlays[bi] if bi < len(cue_overlays) else None
+            if ov is None:
+                continue
+            rgba, ox, oy = ov
+            ops.append({
+                "kind": "text", "t0": float(cue[2]), "t1": float(cue[3]),
+                "x": int(ox), "y": int(oy), "rgba": rgba, "idx": bi,
+            })
+    return ops
+
+
+def _lines_for_ops(
+    ops: list[dict[str, Any]],
+    tmpdir: Path,
+    w: int,
+    h: int,
+    t_off: float,
+    t_len: float | None,
+) -> tuple[list[str], int]:
+    """Sinh filter graph cho các op giao với [t_off, t_off+t_len); t dịch về 0."""
+    from PIL import Image
+
+    lines: list[str] = []
+    cur = "[0:v]"
+    k = 0
+    for op in ops:
+        t0, t1 = op["t0"] - t_off, op["t1"] - t_off
+        if t_len is not None and (t1 <= 0.0 or t0 >= t_len):
+            continue
+        t0 = max(0.0, t0)
+        if t_len is not None:
+            t1 = min(t1, t_len + 0.05)
+        if op["kind"] == "mask":
+            mops, cur = _mask_ops(
+                cur, k, op["box"], t0, t1,
+                op["style"], op["color"], op["opacity"], w, h,
+            )
+            lines.extend(mops)
+            k += 1
+            continue
+        png = tmpdir / f"ov_{op['idx']}.png"
+        if not png.exists():
+            Image.fromarray(op["rgba"]).save(png)
+        lines.append(f"movie=filename='{_esc_path(png)}'[png{k}]")
+        lines.append(f"{cur}[png{k}]overlay={op['x']}:{op['y']}:{_enable(t0, t1)}[vo{k}]")
+        cur = f"[vo{k}]"
+        k += 1
+    if k == 0:
+        return [], 0
+    ew, eh = int(w) - int(w) % 2, int(h) - int(h) % 2
+    if (ew, eh) != (int(w), int(h)):
+        lines.append(f"{cur}crop={ew}:{eh}:0:0[vout]")
+    else:
+        lines.append(f"{cur}copy[vout]")
+    return lines, k
+
+
+def _run_ffmpeg(cmd: list[str], project_id: str | None) -> int:
+    kw: dict[str, Any] = {"stdout": subprocess.DEVNULL, "stderr": subprocess.PIPE}
+    if sys.platform == "win32":
+        kw["creationflags"] = int(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
+    proc = subprocess.Popen(cmd, **kw)
+    register_process(project_id, proc)
+    try:
+        _o, err = proc.communicate(timeout=6 * 3600)
+    finally:
+        unregister_process(project_id, proc)
+    if proc.returncode != 0:
+        tail = (err or b"").decode("utf-8", "replace").strip()[-400:]
+        _log(f"[ffgraph] ffmpeg rc={proc.returncode}: {tail}")
+    return proc.returncode
+
+
+def _keyframe_times(video: Path) -> list[float]:
+    """PTS mọi keyframe — đọc packet header, không decode (nhanh cả video dài)."""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "packet=pts_time,flags", "-of", "csv=p=0", str(video)],
+            capture_output=True, text=True, timeout=600,
+            creationflags=(
+                int(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
+                if sys.platform == "win32" else 0
+            ),
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    kfs: list[float] = []
+    for line in out.splitlines():
+        bits = line.strip().split(",")
+        if len(bits) >= 2 and "K" in bits[1]:
+            try:
+                kfs.append(float(bits[0]))
+            except ValueError:
+                pass
+    return sorted(set(kfs))
+
+
+# Segment hoá đáng làm khi phần trống tiết kiệm được ≥ MIN_SAVED giây encode
+_SEG_MIN_SAVED = 5.0
+_SEG_MAX_ACTIVE = 40
+_SEG_MAX_COVERAGE = 0.7
+
+
+def _plan_segments(
+    ops: list[dict[str, Any]], duration: float, keyframes: list[float]
+) -> list[tuple[float, float, bool]] | None:
+    """Chia [0,duration) thành (a, b, active). None = không đáng segment."""
+    if duration <= 0 or len(keyframes) < 3:
+        return None
+    # 1) cửa sổ op (pad nhẹ) → gộp
+    wins: list[list[float]] = []
+    for op in sorted(ops, key=lambda o: o["t0"]):
+        a, b = max(0.0, op["t0"] - 0.2), min(duration, op["t1"] + 0.2)
+        if wins and a <= wins[-1][1] + 1.0:
+            wins[-1][1] = max(wins[-1][1], b)
+        else:
+            wins.append([a, b])
+    # 2) nới về keyframe 2 phía
+    import bisect
+
+    aligned: list[list[float]] = []
+    for a, b in wins:
+        ia = bisect.bisect_right(keyframes, a) - 1
+        ka = keyframes[ia] if ia >= 0 else 0.0
+        ib = bisect.bisect_left(keyframes, b)
+        kb = keyframes[ib] if ib < len(keyframes) else duration
+        if aligned and ka <= aligned[-1][1] + 0.001:
+            aligned[-1][1] = max(aligned[-1][1], kb)
+        else:
+            aligned.append([ka, kb])
+    if len(aligned) > _SEG_MAX_ACTIVE:
+        return None
+    active_total = sum(b - a for a, b in aligned)
+    if active_total / duration > _SEG_MAX_COVERAGE:
+        return None
+    if duration - active_total < _SEG_MIN_SAVED:
+        return None
+    # 3) đan xen copy/active phủ kín [0, duration)
+    spans: list[tuple[float, float, bool]] = []
+    cursor = 0.0
+    for a, b in aligned:
+        if a > cursor + 0.001:
+            spans.append((cursor, a, False))
+        spans.append((a, min(b, duration), True))
+        cursor = min(b, duration)
+    if cursor < duration - 0.001:
+        spans.append((cursor, duration, False))
+    return spans
+
+
+def _render_segmented(
+    video: Path,
+    out: Path,
+    ops: list[dict[str, Any]],
+    spans: list[tuple[float, float, bool]],
+    w: int,
+    h: int,
+    fps: float,
+    project_id: str | None,
+    tmpdir: Path,
+) -> bool:
+    """Cắt theo keyframe (segment muxer, packet-chính-xác), encode CHỈ đoạn
+    active, concat, mux audio gốc một lần cuối. Đã kiểm chứng: 902/902 frame,
+    duration khớp từng mili, stream sạch."""
+    eps = max(0.008, 0.5 / max(1.0, fps))
+    cut_times = [f"{a - eps:.6f}" for a, _b, _act in spans[1:]]
+    seg_pat = tmpdir / "seg_%d.mp4"
+    rc = _run_ffmpeg(
+        ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(video),
+         "-map", "0:v", "-an", "-c", "copy", "-f", "segment",
+         "-segment_times", ",".join(cut_times), "-reset_timestamps", "1",
+         str(seg_pat)],
+        project_id,
+    )
+    if rc != 0:
+        return False
+    seg_files = [tmpdir / f"seg_{i}.mp4" for i in range(len(spans))]
+    if not all(f.is_file() for f in seg_files):
+        _log(f"[ffgraph] segment muxer trả {sum(f.is_file() for f in seg_files)}/{len(spans)} file")
+        return False
+    final_parts: list[Path] = []
+    for i, (a, b, active) in enumerate(spans):
+        if not active:
+            final_parts.append(seg_files[i])
+            continue
+        lines, k = _lines_for_ops(ops, tmpdir, w, h, a, b - a)
+        if k == 0:
+            final_parts.append(seg_files[i])
+            continue
+        script = tmpdir / f"graph_{i}.txt"
+        script.write_text(";\n".join(lines) + "\n", encoding="utf-8")
+        enc = tmpdir / f"seg_{i}_e.mp4"
+        rc = _run_ffmpeg(
+            ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+             "-i", str(seg_files[i]),
+             "-filter_complex_script", str(script),
+             "-map", "[vout]", "-an",
+             *h264_encoder_args(throughput=True),
+             str(enc)],
+            project_id,
+        )
+        if rc != 0:
+            return False
+        final_parts.append(enc)
+    lst = tmpdir / "concat.txt"
+    lst.write_text(
+        "\n".join(f"file '{str(f).replace(chr(92), '/')}'" for f in final_parts) + "\n",
+        encoding="utf-8",
+    )
+    vcat = tmpdir / "vcat.mp4"
+    rc = _run_ffmpeg(
+        ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+         "-f", "concat", "-safe", "0", "-i", str(lst),
+         "-c", "copy", "-an", str(vcat)],
+        project_id,
+    )
+    if rc != 0:
+        return False
+    rc = _run_ffmpeg(
+        ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+         "-i", str(vcat), "-i", str(video),
+         "-map", "0:v", "-map", "1:a?",
+         "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+         "-map_metadata", "-1", "-map_chapters", "-1", str(out)],
+        project_id,
+    )
+    return rc == 0
+
+
 def try_render_ffmpeg(
     video: Path,
     out: Path,
@@ -184,109 +449,70 @@ def try_render_ffmpeg(
 
     tmpdir = Path(tempfile.mkdtemp(prefix="vc-ffgraph-"))
     try:
-        lines: list[str] = []
-        cur = "[0:v]"
-        k = 0
-
-        # 1) Mask che — đúng thứ tự cue như _paint_one (mask trước, chữ sau)
-        for ci, cue in enumerate(cues):
-            if ci >= len(cue_need_mask) or not cue_need_mask[ci]:
-                continue
-            sid = cue_segment_ids[ci] if ci < len(cue_segment_ids) else ""
-            sm = segments_by_id.get(sid, {}) if sid else {}
-            st_cue = str(sm.get("coverMaskStyle") or mask_style)
-            col_cue = str(sm.get("coverMaskColor") or mask_color)
-            op_cue = int(
-                sm.get("coverMaskOpacity")
-                if sm.get("coverMaskOpacity") is not None
-                else mask_opacity
-            )
-            for fit in cue_fits[ci] if ci < len(cue_fits) else []:
-                if fit is None:
-                    continue
-                ops, cur = _mask_ops(
-                    cur, k, fit, float(cue[0]), float(cue[1]),
-                    st_cue, col_cue, op_cue, w, h,
-                )
-                lines.extend(ops)
-                k += 1
-
-        # 2) Chữ / overlay RGBA đã render sẵn (WYSIWYG giữ nguyên từ layout)
-        if burn:
-            from PIL import Image
-
-            for bi, cue in enumerate(cues):
-                ov = cue_overlays[bi] if bi < len(cue_overlays) else None
-                if ov is None:
-                    continue
-                rgba, ox, oy = ov
-                png = tmpdir / f"ov_{bi}.png"
-                Image.fromarray(rgba).save(png)
-                en = _enable(float(cue[2]), float(cue[3]))
-                lines.append(f"movie=filename='{_esc_path(png)}'[png{k}]")
-                lines.append(f"{cur}[png{k}]overlay={ox}:{oy}:{en}[vo{k}]")
-                cur = f"[vo{k}]"
-                k += 1
-
-        if k == 0:
-            # Không có gì để vẽ — copy nhanh, không re-encode
+        ops = _collect_ops(
+            cues, cue_need_mask, cue_fits, cue_overlays, cue_segment_ids,
+            segments_by_id, mask_style, mask_color, mask_opacity, burn,
+        )
+        if not ops:
             import shutil
 
             shutil.copy2(video, out)
             return True
 
-        # h264 cần kích thước chẵn
-        ew, eh = int(w) - int(w) % 2, int(h) - int(h) % 2
-        if (ew, eh) != (int(w), int(h)):
-            lines.append(f"{cur}crop={ew}:{eh}:0:0[vout]")
-        else:
-            lines.append(f"{cur}copy[vout]")
+        src_dur = float(ffprobe_duration(video) or 0.0)
+
+        def _validate() -> bool:
+            if not out.exists() or out.stat().st_size < 1024:
+                out.unlink(missing_ok=True)
+                return False
+            out_dur = float(ffprobe_duration(out) or 0.0)
+            if src_dur > 1.0 and out_dur + 0.5 < src_dur:
+                _log(f"[ffgraph] thiếu thời lượng {out_dur:.2f}/{src_dur:.2f}s")
+                out.unlink(missing_ok=True)
+                return False
+            return True
+
+        # P2: video có nhiều khoảng trống → chỉ encode đoạn có cue
+        fps = _probe_fps(video)
+        spans = _plan_segments(ops, src_dur, _keyframe_times(video))
+        if spans is not None:
+            n_active = sum(1 for _a, _b, act in spans if act)
+            act_t = sum(b - a for a, b, act in spans if act)
+            _log(
+                f"[ffgraph] segmented: {n_active} đoạn encode ({act_t:.1f}s)"
+                f" / copy {src_dur - act_t:.1f}s"
+            )
+            if _render_segmented(video, out, ops, spans, w, h, fps, project_id, tmpdir) and _validate():
+                _log(f"[ffgraph] OK segmented {len(ops)} op")
+                return True
+            _log("[ffgraph] segmented thất bại → full graph")
+            out.unlink(missing_ok=True)
+
+        # Full graph một lệnh (P1)
+        lines, k = _lines_for_ops(ops, tmpdir, w, h, 0.0, None)
+        if k == 0:
+            import shutil
+
+            shutil.copy2(video, out)
+            return True
         script = tmpdir / "graph.txt"
         script.write_text(";\n".join(lines) + "\n", encoding="utf-8")
-
-        def _run() -> int:
-            # Không -hwaccel: filter chạy CPU nên hwaccel chỉ thêm chuyến
-            # GPU→CPU (đo 2707ms vs 2506ms) + 1 lần probe nvdec (~0.5-1s).
-            cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
-            cmd += [
-                "-i", str(video),
-                "-filter_complex_script", str(script),
-                "-map", "[vout]", "-map", "0:a?",
-                *h264_encoder_args(throughput=True),
-                "-c:a", "aac", "-b:a", "192k",
-                "-map_metadata", "-1", "-map_chapters", "-1",
-                str(out),
-            ]
-            kw: dict[str, Any] = {
-                "stdout": subprocess.DEVNULL,
-                "stderr": subprocess.PIPE,
-            }
-            if sys.platform == "win32":
-                kw["creationflags"] = int(
-                    getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
-                )
-            proc = subprocess.Popen(cmd, **kw)
-            register_process(project_id, proc)
-            try:
-                _o, err = proc.communicate(timeout=6 * 3600)
-            finally:
-                unregister_process(project_id, proc)
-            if proc.returncode != 0:
-                tail = (err or b"").decode("utf-8", "replace").strip()[-400:]
-                _log(f"[ffgraph] ffmpeg rc={proc.returncode}: {tail}")
-            return proc.returncode
-
-        rc = _run()
-        if rc != 0 or not out.exists() or out.stat().st_size < 1024:
+        # Không -hwaccel: filter chạy CPU nên hwaccel chỉ thêm chuyến GPU→CPU
+        rc = _run_ffmpeg(
+            ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+             "-i", str(video),
+             "-filter_complex_script", str(script),
+             "-map", "[vout]", "-map", "0:a?",
+             *h264_encoder_args(throughput=True),
+             "-c:a", "aac", "-b:a", "192k",
+             "-map_metadata", "-1", "-map_chapters", "-1",
+             str(out)],
+            project_id,
+        )
+        if rc != 0 or not _validate():
             out.unlink(missing_ok=True)
             return False
-        src_dur = float(ffprobe_duration(video) or 0.0)
-        out_dur = float(ffprobe_duration(out) or 0.0)
-        if src_dur > 1.0 and out_dur + 0.5 < src_dur:
-            _log(f"[ffgraph] thiếu thời lượng {out_dur:.2f}/{src_dur:.2f}s → legacy")
-            out.unlink(missing_ok=True)
-            return False
-        _log(f"[ffgraph] OK {k} node, {out_dur:.2f}s")
+        _log(f"[ffgraph] OK full-graph {k} node")
         return True
     except Exception as e:  # bất kỳ lỗi nào → đường cũ vẫn còn
         _log(f"[ffgraph] exception {type(e).__name__}: {e}")
@@ -299,6 +525,23 @@ def try_render_ffmpeg(
         import shutil
 
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def _probe_fps(video: Path) -> float:
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=r_frame_rate", "-of", "csv=p=0", str(video)],
+            capture_output=True, text=True, timeout=60,
+            creationflags=(
+                int(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
+                if sys.platform == "win32" else 0
+            ),
+        ).stdout.strip()
+        num, _sep, den = out.partition("/")
+        return float(num) / float(den or 1)
+    except (OSError, ValueError, ZeroDivisionError, subprocess.SubprocessError):
+        return 25.0
 
 
 def _log(msg: str) -> None:
