@@ -15,3 +15,45 @@
 [2026-07-26 23:32:28] [ocr-gpu] providers=['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider'] -> use_cuda=True
 [2026-07-26 23:33:49] [ocr-gpu] providers=['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider'] -> use_cuda=True
 [2026-07-26 23:34:30] [ocr-gpu] providers=['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider'] -> use_cuda=True
+[2026-07-26 23:37:24] [ocr-gpu] providers=['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider'] -> use_cuda=True
+[2026-07-26 23:42:27] [ocr-gpu] providers=['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider'] -> use_cuda=True
+[2026-07-26 23:42:27] [ocr-gpu] providers=['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider'] -> use_cuda=True
+[2026-07-26 23:42:51] [ocr-gpu] providers=['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider'] -> use_cuda=True
+[2026-07-26 23:42:51] [ocr-gpu] providers=['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider'] -> use_cuda=True
+[2026-07-26 23:45:19] [ocr-gpu] providers=['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider'] -> use_cuda=True
+[2026-07-26 23:46:16] [ocr-gpu] providers=['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider'] -> use_cuda=True
+[2026-07-26 23:48:15] [ocr-gpu] providers=['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider'] -> use_cuda=True
+[2026-07-26 23:53:07] [ocr-gpu] providers=['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider'] -> use_cuda=True
+[2026-07-26 23:54:40] [ocr-gpu] providers=['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider'] -> use_cuda=True
+[2026-07-26 23:55:57] [ocr-gpu] providers=['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider'] -> use_cuda=True
+[2026-07-26 23:57:33] [ocr-gpu] providers=['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider'] -> use_cuda=True
+[2026-07-26 23:59:23] [ocr-gpu] providers=['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider'] -> use_cuda=True
+[2026-07-26 23:59:23] [locate] OCR device=GPU providers=['CUDAExecutionProvider', 'CPUExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider']
+[2026-07-27 00:02:05] [ocr-gpu] providers=['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider'] -> use_cuda=True
+[2026-07-27 00:02:05] [locate] OCR device=GPU providers=['CUDAExecutionProvider', 'CPUExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider']
+[2026-07-27 00:02:38] [ocr-gpu] providers=['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider'] -> use_cuda=True
+[2026-07-27 00:02:38] [locate] OCR device=GPU providers=['CUDAExecutionProvider', 'CPUExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider']
+[2026-07-27 00:04:10] [ocr-gpu] providers=['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider'] -> use_cuda=True
+[2026-07-27 00:04:10] [locate] OCR device=GPU providers=['CUDAExecutionProvider', 'CPUExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider']
+[2026-07-27 00:05:47] [ocr-gpu] providers=['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider'] -> use_cuda=True
+[2026-07-27 00:05:48] [locate] OCR device=GPU providers=['CUDAExecutionProvider', 'CPUExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider']
+[2026-07-27 00:09:12] [ocr-gpu] providers=['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider'] -> use_cuda=True
+[2026-07-27 00:09:13] [locate] OCR device=GPU providers=['CUDAExecutionProvider', 'CPUExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider']
+[2026-07-27 00:10:53] [ocr-gpu] providers=['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider'] -> use_cuda=True
+[2026-07-27 00:10:54] [locate] OCR device=GPU providers=['CUDAExecutionProvider', 'CPUExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider']
+[2026-07-27 00:13:03] [ocr-gpu] providers=['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider'] -> use_cuda=True
+[2026-07-27 00:13:03] [locate] OCR device=GPU providers=['CUDAExecutionProvider', 'CPUExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider']
+[2026-07-27 00:14:56] [ocr-gpu] providers=['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider'] -> use_cuda=True
+[2026-07-27 00:14:57] [locate] OCR device=GPU providers=['CUDAExecutionProvider', 'CPUExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider']
+[2026-07-27 00:19:00] [ocr-gpu] providers=['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider'] -> use_cuda=True
+[2026-07-27 00:19:00] [locate] OCR device=GPU providers=['CUDAExecutionProvider', 'CPUExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider']
+[2026-07-27 00:25:35] [ocr-gpu] providers=['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider'] -> use_cuda=True
+[2026-07-27 00:25:35] [locate] OCR device=GPU providers=['CUDAExecutionProvider', 'CPUExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider']
+[2026-07-27 00:27:47] [ocr-gpu] providers=['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider'] -> use_cuda=True
+[2026-07-27 00:27:47] [locate] OCR device=GPU providers=['CUDAExecutionProvider', 'CPUExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider']
+[2026-07-27 00:28:29] [ocr-gpu] providers=['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider'] -> use_cuda=True
+[2026-07-27 00:28:30] [locate] OCR device=GPU providers=['CUDAExecutionProvider', 'CPUExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider']
+[2026-07-27 00:30:31] [ocr-gpu] providers=['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider'] -> use_cuda=True
+[2026-07-27 00:30:32] [locate] OCR device=GPU providers=['CUDAExecutionProvider', 'CPUExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider']
+[2026-07-27 00:32:53] [ocr-gpu] providers=['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider'] -> use_cuda=True
+[2026-07-27 00:32:54] [locate] OCR device=GPU providers=['CUDAExecutionProvider', 'CPUExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider']

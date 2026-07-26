@@ -13,7 +13,7 @@ from typing import Any
 import threading
 from functools import lru_cache
 
-from ..core.jobs import check_cancel
+from ..core.jobs import Cancelled, check_cancel
 from .extract import _ocr_join_lines, _rapidocr_labels
 from .labels import pick_label_box
 from .overlay_cover import mid_bottom_cutoff
@@ -28,7 +28,6 @@ _QUICK_PROBE_LIMIT = 64
 # Stable mode keeps first/middle/last samples but caps long timelines. The
 # remaining cues inherit from the nearest stable anchor instead of triggering
 # another OCR pass.
-_STABLE_PROBE_LIMIT = 48
 
 
 def _spread_probes(items: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
@@ -270,6 +269,14 @@ Path(sys.argv[3]).write_text(
             timeout_s = popen_kw.pop("timeout", 900)
             proc_h = subprocess.Popen(cmd, **popen_kw)
             register_process(project_id, proc_h)
+            # Decode video (OpenCV/FFmpeg) tự lấy ~8/12 core → treo cả máy.
+            # Kẹp worker vào 60% core + ưu tiên thấp: máy vẫn mượt khi OCR chạy.
+            try:
+                from pipeline.core.winproc import limit_process_cpu
+
+                limit_process_cpu(proc_h, fraction=0.6)
+            except Exception:
+                pass
             try:
                 out_s, err_s = proc_h.communicate(timeout=timeout_s)
             except subprocess.TimeoutExpired:
@@ -546,6 +553,84 @@ def _normalize_analysis_region(
     w = max(0.05, min(1.0 - x, w))
     h = max(0.05, min(1.0 - y, h))
     return (x, y, w, h)
+
+
+def _decode_frames_batch(
+    video: Path,
+    times: list[float],
+    fps: float,
+    width: int,
+    height: int,
+    *,
+    use_cuda: bool,
+):
+    """Yield (frame_index, frame_bgr) cho cac moc — ffmpeg doc tuan tu theo LO.
+
+    OpenCV seek tung moc giai ma lai tu keyframe va tu bung ~8/12 core CPU
+    (do duoc), lam treo may. ffmpeg + select filter chi giai ma mot lan; kem
+    -hwaccel cuda thi phan giai ma nam tren GPU.
+
+    ponytail: ffmpeg khong parse noi select expr qua ~100 nhanh eq() -> chia lo
+    <=48 moc, moi lo input-seek toi moc dau (pad 1s de chac co keyframe).
+    Nang cap: dung -skip_frame/-vf fps neu can lay day dac hon.
+    """
+    if fps <= 0 or width <= 0 or height <= 0 or not times:
+        return
+    frame_bytes = width * height * 3
+    wanted = sorted({max(0, int(round(t * fps))) for t in times})
+    if not wanted:
+        return
+    batch = 48
+    seek_pad = 1.0
+    for start_i in range(0, len(wanted), batch):
+        part = wanted[start_i : start_i + batch]
+        seek_t = max(0.0, part[0] / fps - seek_pad)
+        base_n = int(round(seek_t * fps))
+        rel = [max(0, idx - base_n) for idx in part]
+        expr = "+".join("eq(n\\,%d)" % i for i in rel)
+        cmd = ["ffmpeg", "-v", "error", "-threads", "1"]
+        if use_cuda:
+            cmd += ["-hwaccel", "cuda"]
+        if seek_t > 0.01:
+            cmd += ["-ss", "%.3f" % seek_t]
+        cmd += [
+            "-i", str(video),
+            "-vf", "select='%s'" % expr,
+            "-vsync", "0",
+            "-f", "rawvideo", "-pix_fmt", "bgr24", "-",
+        ]
+        kw: dict[str, Any] = {"stdout": subprocess.PIPE, "stderr": subprocess.DEVNULL}
+        if sys.platform == "win32":
+            kw["creationflags"] = int(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
+        proc = subprocess.Popen(cmd, **kw)
+        try:
+            import numpy as np
+
+            assert proc.stdout is not None
+            for idx in part:
+                buf = bytearray()
+                while len(buf) < frame_bytes:
+                    chunk = proc.stdout.read(frame_bytes - len(buf))
+                    if not chunk:
+                        break
+                    buf.extend(chunk)
+                if len(buf) < frame_bytes:
+                    break
+                yield idx, np.frombuffer(bytes(buf), dtype=np.uint8).reshape(
+                    (height, width, 3)
+                )
+        finally:
+            try:
+                if proc.stdout:
+                    proc.stdout.close()
+            except OSError:
+                pass
+            if proc.poll() is None:
+                proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                pass
 
 
 def _probe_mid_hardsub(
@@ -899,122 +984,6 @@ def _three_point_segments(
     return [segments[i] for i in (0, len(segments) // 2, len(segments) - 1)]
 
 
-def _sample_times_in_cue(s0: float, e0: float) -> list[float]:
-    """Đầu / giữa / cuối cửa sổ cue (tránh sát biên fade)."""
-    dur = max(0.05, e0 - s0)
-    if dur < 0.35:
-        return [s0 + dur * 0.5]
-    return [
-        s0 + dur * 0.12,
-        s0 + dur * 0.50,
-        s0 + dur * 0.88,
-    ]
-
-
-def _stable_box_from_hits(
-    hits: list[tuple[float, float, tuple[int, int, int, int], str]],
-    *,
-    fw: int,
-    fh: int,
-) -> tuple[int, int, int, int] | None:
-    """Majority cluster theo cy (+cx), median box — chống OCR nhảy lung tung.
-
-    hits: (t, score, xyxy, text)
-    """
-    if not hits:
-        return None
-    if len(hits) == 1:
-        return hits[0][2]
-
-    # Cluster theo cy (dải hardsub), tol ~3% chiều cao
-    tol_y = max(8.0, fh * 0.03)
-    tol_x = max(12.0, fw * 0.04)
-    clusters: list[list[tuple[float, float, tuple[int, int, int, int], str]]] = []
-    for h in hits:
-        box = h[2]
-        cx = (box[0] + box[2]) * 0.5
-        cy = (box[1] + box[3]) * 0.5
-        placed = False
-        for cl in clusters:
-            b0 = cl[0][2]
-            cx0 = (b0[0] + b0[2]) * 0.5
-            cy0 = (b0[1] + b0[3]) * 0.5
-            if abs(cy - cy0) <= tol_y and abs(cx - cx0) <= tol_x * 2:
-                cl.append(h)
-                placed = True
-                break
-        if not placed:
-            clusters.append([h])
-
-    def cl_key(cl: list[tuple[float, float, tuple[int, int, int, int], str]]) -> tuple:
-        # Ưu tiên cụm đông + điểm OCR cao
-        return (len(cl), sum(x[1] for x in cl) / len(cl))
-
-    best = max(clusters, key=cl_key)
-    # Median từng cạnh trong cụm thắng
-    xs0 = sorted(h[2][0] for h in best)
-    ys0 = sorted(h[2][1] for h in best)
-    xs1 = sorted(h[2][2] for h in best)
-    ys1 = sorted(h[2][3] for h in best)
-    mid = len(best) // 2
-    return (xs0[mid], ys0[mid], xs1[mid], ys1[mid])
-
-
-def _global_cy_band(
-    boxes: list[tuple[int, int, int, int]],
-    fh: int,
-) -> float | None:
-    """cy đa số của các probe — dùng neo inheritance ổn định."""
-    if not boxes or fh <= 0:
-        return None
-    cys = sorted((b[1] + b[3]) * 0.5 for b in boxes)
-    return cys[len(cys) // 2]
-
-
-def _snap_inherited_y(
-    segments: list[dict[str, Any]],
-    anchor_cy: float | None,
-    fh: int,
-    fw: int = 1080,
-) -> None:
-    """Neo Y chỉ cho Caption đáy (horizontal) kế thừa — không kéo CAP-MID xuống cuối."""
-    if anchor_cy is None or fh <= 0:
-        return
-    # Anchor đáy: chỉ dùng nếu dải neo thực sự gần đáy (tránh mid median kéo horizontal)
-    bottom_cutoff = mid_bottom_cutoff(fw, fh)
-    if anchor_cy < fh * bottom_cutoff:
-        return
-    tol = fh * 0.06
-    for seg in segments:
-        lay = str(seg.get("layout") or "horizontal")
-        # mid/vertical/label: giữ Y probe — snap chung sẽ nhảy xuống hardsub đáy
-        if lay in ("vertical", "label", "mid"):
-            continue
-        bb = seg.get("bbox")
-        if not isinstance(bb, dict):
-            continue
-        # Chỉ snap bản inherit (không có probe riêng)
-        if seg.get("_probeAnchored") or seg.get("bboxInherited") is False:
-            continue
-        if seg.get("bboxInherited") is not True:
-            continue
-        try:
-            y = float(bb["y"])
-            h = float(bb["h"])
-        except (KeyError, TypeError, ValueError):
-            continue
-        cy = y + h * 0.5
-        # Đã ở dải đáy thì thôi; mid-ish cy đừng kéo xuống
-        if cy < fh * bottom_cutoff:
-            continue
-        if abs(cy - anchor_cy) <= tol:
-            continue
-        new_y = max(0, min(fh - h, round(anchor_cy - h * 0.5)))
-        bb["y"] = int(new_y)
-        seg["bbox"] = bb
-        seg["layout"] = "horizontal"
-
-
 def attach_speech_hardsub_boxes(
     video: Path | str,
     segments: list[dict[str, Any]],
@@ -1027,8 +996,8 @@ def attach_speech_hardsub_boxes(
 ) -> int:
     """Whisper giữ timecode; OCR đo bbox.
 
-    stable=False (mặc định, nhanh): 1 frame giữa mỗi mốc.
-    stable=True: đầu•giữa•cuối + majority + neo Y (tối đa 48 mốc, tránh chậm video dài).
+    Luôn OCR 1 frame giữa mỗi mốc (chế độ «đầu•giữa•cuối» đã bỏ: chậm gấp 3
+    mà bbox gần như không đổi). `stable` giữ lại cho call site cũ — bỏ qua.
     analysis_region: {x,y,w,h} 0–1 — thu hẹp ROI OCR (nhanh + ít nhiễu).
 
     Frozen desktop: chạy trong subprocess .venv-runtime — crash OpenCV/RapidOCR
@@ -1190,8 +1159,20 @@ def attach_speech_hardsub_boxes_inprocess(
         cap.release()
         return n_inh
 
+    _device_label = ["CPU"]
     try:
         ocr = rapidocr_labels()
+        try:
+            from .extract_parts.runtime import engine_device_label, engine_providers
+
+            _device_label[0] = engine_device_label(ocr)
+            from pipeline.core.app_log import append_log
+
+            append_log(
+                f"[locate] OCR device={_device_label[0]} providers={engine_providers(ocr)}"
+            )
+        except Exception:
+            pass
     except ImportError:
         cap.release()
         n = _inherit_caption_bboxes(segments, fh, fw)
@@ -1238,17 +1219,16 @@ def attach_speech_hardsub_boxes_inprocess(
         from ..core.project import set_status
         from ..core.resources import progress_msg
 
-        mode_lab = "ổn định đầu•giữa•cuối" if stable else "nhanh 1 frame"
         set_status(
             project_id,
             step="translate",
             progress=pct,
-            # «Định vị OCR · 3/10 · nhanh 1 frame · 8 luồng»
+            # «Định vị OCR · 3/10 · GPU · 8 luồng»
             message=progress_msg(
                 "Định vị OCR",
                 done,
                 total,
-                extra=mode_lab,
+                extra=_device_label[0],
                 workers=status_workers or None,
             ),
             running=True,
@@ -1257,16 +1237,12 @@ def attach_speech_hardsub_boxes_inprocess(
     from .cover_timing import attach_cover_times
 
     attached = 0
-    # ponytail: quick mode OCRs at most 64 anchors; missing cues reuse the
-    # nearest anchor and recalculate width from their own CJK glyph count.
-    # Stable mode is capped too; unprobed cues inherit from nearby anchors.
-    probes = _spread_probes(
-        filtered,
-        _STABLE_PROBE_LIMIT if stable else _QUICK_PROBE_LIMIT,
-    )
+    # ponytail: OCR tối đa 64 mốc; cue còn lại kế thừa mốc gần nhất và tính
+    # lại bề ngang theo số glyph CJK của chính nó.
+    probes = _spread_probes(filtered, _QUICK_PROBE_LIMIT)
     total = len(probes)
     anchor_boxes: list[tuple[int, int, int, int]] = []
-    # Gom job (probe, moc thoi gian): quick = 1 frame giua cue; stable = 3 moc.
+    # Gom job: 1 frame giữa mỗi cue (một chế độ duy nhất).
     probe_meta: list[tuple[str, str]] = []
     jobs: list[tuple[int, float]] = []
     for si, seg in enumerate(probes):
@@ -1277,11 +1253,7 @@ def attach_speech_hardsub_boxes_inprocess(
         probe_meta.append(
             (str(seg.get("source") or "").strip(), str(seg.get("layout") or "horizontal"))
         )
-        if stable:
-            for t in _sample_times_in_cue(s0, e0):
-                jobs.append((si, t))
-        else:
-            jobs.append((si, s0 + max(0.2, e0 - s0) * 0.5))
+        jobs.append((si, s0 + max(0.2, e0 - s0) * 0.5))
 
     # Prefetch decode: 1 thread doc/seek frame truoc (cv2 chi dung trong thread
     # nay - khong thread-safe), main thread OCR. Decode chong len OCR thay vi
@@ -1302,9 +1274,48 @@ def attach_speech_hardsub_boxes_inprocess(
 
         def _decoder() -> None:
             try:
-                for si, t in jobs:
-                    check_cancel(project_id)
-                    frame_q.put((si, t, _read_frame_at(t)))
+                # Uu tien MOT process ffmpeg (NVDEC neu GPU san sang): giai ma
+                # tuan tu, CPU ~1 core thay vi ~8 core cua OpenCV seek.
+                by_index: dict[int, list[tuple[int, float]]] = {}
+                if fps > 0:
+                    for si, t in jobs:
+                        by_index.setdefault(max(0, int(round(t * fps))), []).append((si, t))
+                served: set[int] = set()
+                if by_index:
+                    try:
+                        from pipeline.core.media import nvdec_available
+
+                        use_cuda = bool(nvdec_available(Path(video)))
+                    except Exception:
+                        use_cuda = False
+                    try:
+                        for idx, frame in _decode_frames_batch(
+                            Path(video),
+                            [t for _si, t in jobs],
+                            fps,
+                            fw,
+                            fh,
+                            use_cuda=use_cuda,
+                        ):
+                            check_cancel(project_id)
+                            for si, t in by_index.get(idx, []):
+                                frame_q.put((si, t, frame))
+                            served.add(idx)
+                    except Cancelled:
+                        raise
+                    except Exception:
+                        pass
+                # Moc nao ffmpeg khong tra duoc -> fallback OpenCV seek
+                for idx, pairs in by_index.items():
+                    if idx in served:
+                        continue
+                    for si, t in pairs:
+                        check_cancel(project_id)
+                        frame_q.put((si, t, _read_frame_at(t)))
+                if not by_index:
+                    for si, t in jobs:
+                        check_cancel(project_id)
+                        frame_q.put((si, t, _read_frame_at(t)))
             except BaseException as e:  # noqa: BLE001 - day len main thread
                 decode_err.append(e)
             finally:
@@ -1339,21 +1350,7 @@ def attach_speech_hardsub_boxes_inprocess(
             ordered_hits = [
                 h for _t, h in sorted(hits_by_probe.get(si, []), key=lambda x: x[0])
             ]
-            src = probe_meta[si][0]
-            if stable:
-                # 3 frame x majority - fits-filter truoc, fallback raw hits
-                # (giu nguyen hanh vi tuan tu cu).
-                hits = []
-                for hit in ordered_hits:
-                    box = hit[2]
-                    probe_bb = {"w": box[2] - box[0], "h": box[3] - box[1]}
-                    if _bbox_fits_source(probe_bb, src, fw):
-                        hits.append(hit)
-                if not hits:
-                    hits = ordered_hits
-                stable_box = _stable_box_from_hits(hits, fw=fw, fh=fh)
-            else:
-                stable_box = ordered_hits[0][2] if ordered_hits else None
+            stable_box = ordered_hits[0][2] if ordered_hits else None
             if stable_box is None:
                 continue
             _apply_caption_box(seg, stable_box, fw, fh)
@@ -1366,20 +1363,6 @@ def attach_speech_hardsub_boxes_inprocess(
     finally:
         cap.release()
     attached += _inherit_caption_bboxes(segments, fh, fw)
-    if stable:
-        # Neo Y chỉ Caption đáy inherit — không kéo CAP-MID / tiêu đề dọc xuống đáy
-        bottom_cutoff = mid_bottom_cutoff(fw, fh)
-        bottom_boxes = [
-            b
-            for b in anchor_boxes
-            if b and (b[1] + b[3]) * 0.5 >= fh * bottom_cutoff
-        ]
-        _snap_inherited_y(
-            segments,
-            _global_cy_band(bottom_boxes or [], fh),
-            fh,
-            fw,
-        )
     _ensure_cover_times(segments, video_end)
     for seg in segments:
         seg.pop("_probeAnchored", None)

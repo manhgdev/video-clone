@@ -7,7 +7,6 @@ from pipeline.ocr.locate import (
     _apply_caption_box,
     _layout_from_cy,
     _python_can_ocr,
-    _snap_inherited_y,
     _uv_run_cmd,
 )
 from pipeline.ocr.overlay_cover import mid_bottom_cutoff
@@ -30,35 +29,6 @@ def test_dev_locate_worker_python_can_run_ocr():
     if _python_can_ocr(sys.executable)[0]:
         # sys.executable đủ điều kiện → phải ưu tiên nó (process sạch, ít bất ngờ)
         assert exe == sys.executable
-
-
-def test_snap_skips_mid_and_non_bottom_anchor():
-    fh = 1920
-    segs = [
-        {
-            "layout": "mid",
-            "bboxInherited": True,
-            "bbox": {"x": 300, "y": 1100, "w": 400, "h": 80},
-            "source": "还有竹子",
-        },
-        {
-            "layout": "horizontal",
-            "bboxInherited": True,
-            "bbox": {"x": 100, "y": 1600, "w": 800, "h": 60},
-            "source": "底部字幕",
-        },
-    ]
-    # anchor mid-ish — không snap gì
-    _snap_inherited_y(segs, fh * 0.55, fh)
-    assert segs[0]["bbox"]["y"] == 1100
-    assert segs[1]["bbox"]["y"] == 1600
-
-    # anchor đáy — mid giữ, horizontal inherit có thể neo
-    segs[0]["bbox"]["y"] = 1100
-    segs[1]["bbox"]["y"] = 1500
-    _snap_inherited_y(segs, fh * 0.88, fh)
-    assert segs[0]["bbox"]["y"] == 1100
-    assert segs[0]["layout"] == "mid"
 
 
 def test_apply_caption_box_mid_not_tall():

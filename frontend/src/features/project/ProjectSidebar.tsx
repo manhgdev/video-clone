@@ -524,11 +524,11 @@ export default function Sidebar({
       <div className="audio-filter">
         <label
           className="audio-filter-toggle"
-          title="Bật: OCR 3 frame/mốc (đầu•giữa•cuối) + majority — ổn định hơn, chậm hơn. Tắt: 1 frame — nhanh, dễ nhảy vị trí."
+          title="Bật: chỉ tìm chữ trong khung bạn vẽ — nhanh hơn và ít nhận nhầm chữ ngoài vùng. Tắt: quét cả khung hình."
         >
           <span className="field-label">
             <IconLayers size={14} />
-            Khung định vị ổn định (chỉ dịch chữ trong khung này)
+            Giới hạn khung định vị (chỉ dịch chữ trong khung này)
           </span>
           <input
             type="checkbox"
