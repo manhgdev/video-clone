@@ -1,5 +1,4 @@
 import {
-  useCallback,
   useEffect,
   useRef,
   useState,
@@ -20,265 +19,36 @@ import RendersPage from '@/pages/RendersPage'
 import VideoCleanerPage from '@/pages/VideoCleanerPage'
 import { ExportSuccessModal } from '@/features/editor/ExportSuccessModal'
 import { api } from '@/features/project/project.api'
-import { expandSegmentsForList, patchSegmentInTree } from '@/features/project/expandCompound'
-import type { HardwareInfo, JobStatus, ProjectSettings, Segment, Step, TextOverlay } from '@/features/project/project.types'
+import { expandSegmentsForList } from '@/features/project/expandCompound'
+import type { HardwareInfo, JobStatus, ProjectSettings, Step, TextOverlay } from '@/features/project/project.types'
 import { loadAppMode, persistAppMode } from '@/app/appMode'
+import {
+  applyDefaultVoice,
+  asSegmentList,
+  useSegmentEditing,
+} from '@/features/project/useSegmentEditing'
+import { useProjectMedia } from '@/features/project/useProjectMedia'
+import { useDubControl } from '@/features/project/useDubControl'
+import { useExportFlow } from '@/features/project/useExportFlow'
+import { useJobPolling } from '@/features/project/useJobPolling'
+import {
+  SIDEBAR_MAX,
+  SIDEBAR_W_LS,
+  THEME_LS,
+  SIDEBAR_MIN,
+  applyEngineProfile,
+  idleStatus,
+  loadSetupGate,
+  loadSettings,
+  loadSidebarWidth,
+  loadTheme,
+  persistSession,
+  persistSettings,
+  persistSetupGate,
+  snapshotEngineProfile,
+  useSessionRestore,
+} from '@/app/useProjectSession'
 import './App.css'
-
-const SETTINGS_LS = 'videoclone.settings'
-const SESSION_LS = 'videoclone.session'
-const SIDEBAR_W_LS = 'videoclone.sidebarWidth'
-const THEME_LS = 'videoclone.theme'
-const SETUP_GATE_LS = 'videoclone.setupGate'
-
-function loadSetupGate(): boolean {
-  try {
-    return localStorage.getItem(SETUP_GATE_LS) === '1'
-  } catch {
-    return false
-  }
-}
-
-function persistSetupGate() {
-  try {
-    localStorage.setItem(SETUP_GATE_LS, '1')
-  } catch {
-    /* ignore */
-  }
-}
-
-function loadTheme(): boolean {
-  try { return localStorage.getItem(THEME_LS) === 'dark' } catch { return false }
-}
-const SIDEBAR_MIN = 240
-const SIDEBAR_MAX = 560
-const SIDEBAR_DEFAULT = 360
-
-function loadSidebarWidth(): number {
-  try {
-    const raw = localStorage.getItem(SIDEBAR_W_LS)
-    // Number(null) === 0 — không dùng khi chưa lưu
-    if (raw != null && raw !== '') {
-      const n = Number(raw)
-      if (Number.isFinite(n) && n > 0) {
-        return Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, n))
-      }
-    }
-  } catch {
-    /* ignore */
-  }
-  return SIDEBAR_DEFAULT
-}
-
-/** Mặc định lần đầu — từng engine khác nhau (user chỉnh sau thì nhớ riêng). */
-const ENGINE_DEFAULTS = {
-  whisper: {
-    matchDuration: 'preferVideo' as const,
-    processOriginalAudio: false,
-    originalAudioMode: 'original' as const,
-    originalAudioVolume: 100,
-  },
-  paddleocr: {
-    matchDuration: 'none' as const,
-    processOriginalAudio: false,
-    originalAudioMode: 'original' as const,
-    originalAudioVolume: 100,
-  },
-}
-
-const defaultSettings: ProjectSettings = {
-  engine: 'whisper',
-  sourceLang: 'auto',
-  targetLang: 'vi',
-  translator: 'google',
-  matchDuration: ENGINE_DEFAULTS.whisper.matchDuration,
-  defaultVoice: 'cc:BV075_streaming:7102355803792740865',
-  stableCaptionLocate: false,
-  analysisRegion: null,
-  coverHardsubs: true,
-  coverMaskStyle: 'blur',
-  coverMaskColor: '#4c1d95',
-  coverMaskOpacity: 40,
-  burnSubs: true,
-  captionPlacement: 'below',
-  subtitleFontSize: 0,
-  subtitleFontFamily: 'system',
-  captionTextColor: '#ffffff',
-  captionBgStyle: 'none',
-  captionBgColor: '#000000',
-  captionBgOpacity: 55,
-  captionStroke: true,
-  processOriginalAudio: ENGINE_DEFAULTS.whisper.processOriginalAudio,
-  originalAudioMode: ENGINE_DEFAULTS.whisper.originalAudioMode,
-  originalAudioVolume: ENGINE_DEFAULTS.whisper.originalAudioVolume,
-  previewSec: 20,
-  workers: 0,
-  previewAspectRatio: 'original',
-  previewCrop: null,
-  exportResolution: '1080',
-  engineProfiles: {
-    whisper: { ...ENGINE_DEFAULTS.whisper },
-    paddleocr: { ...ENGINE_DEFAULTS.paddleocr },
-  },
-}
-
-function applyEngineProfile(s: ProjectSettings, engine: ProjectSettings['engine']): ProjectSettings {
-  const base = ENGINE_DEFAULTS[engine]
-  const saved = s.engineProfiles?.[engine]
-  return {
-    ...s,
-    engine,
-    matchDuration: saved?.matchDuration ?? base.matchDuration,
-    processOriginalAudio: saved?.processOriginalAudio ?? base.processOriginalAudio,
-    originalAudioMode: saved?.originalAudioMode ?? base.originalAudioMode,
-    originalAudioVolume: saved?.originalAudioVolume ?? base.originalAudioVolume,
-  }
-}
-
-/** Ghi profile engine đang active (matchDuration / lọc âm) — không đụng engine kia. */
-function snapshotEngineProfile(s: ProjectSettings): ProjectSettings {
-  const eng = s.engine === 'paddleocr' ? 'paddleocr' : 'whisper'
-  return {
-    ...s,
-    engineProfiles: {
-      ...s.engineProfiles,
-      [eng]: {
-        matchDuration: s.matchDuration,
-        processOriginalAudio: s.processOriginalAudio,
-        originalAudioMode: s.originalAudioMode,
-        originalAudioVolume: s.originalAudioVolume,
-      },
-    },
-  }
-}
-
-function loadSettings(): ProjectSettings {
-  try {
-    const raw = localStorage.getItem(SETTINGS_LS)
-    if (!raw) return defaultSettings
-    const s = { ...defaultSettings, ...JSON.parse(raw) } as ProjectSettings
-    if (typeof s.workers !== 'number' || Number.isNaN(s.workers) || s.workers < 0) s.workers = 0
-    if (typeof s.originalAudioVolume !== 'number' || Number.isNaN(s.originalAudioVolume)) {
-      s.originalAudioVolume = 100
-    } else {
-      s.originalAudioVolume = Math.max(0, Math.min(200, s.originalAudioVolume))
-    }
-    const okTr = [
-      'google',
-      'mymemory',
-      'tiktok',
-      'ollama',
-      'openai',
-      'gemini',
-      'deepseek',
-      'openrouter',
-      'grok',
-    ] as const
-    if (!okTr.includes(s.translator as (typeof okTr)[number])) s.translator = 'google'
-    const okMask = ['blur', 'solid', 'mosaic'] as const
-    if (!okMask.includes(s.coverMaskStyle as (typeof okMask)[number])) s.coverMaskStyle = 'blur'
-    if (typeof s.coverMaskOpacity !== 'number' || Number.isNaN(s.coverMaskOpacity)) {
-      s.coverMaskOpacity = 40
-    } else {
-      s.coverMaskOpacity = Math.max(0, Math.min(100, s.coverMaskOpacity))
-    }
-    if (typeof s.coverMaskColor !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(s.coverMaskColor)) {
-      s.coverMaskColor = '#4c1d95'
-    }
-    const okFont = [
-      'system', 'segoe', 'arial', 'bold', 'helvetica', 'verdana', 'tahoma',
-      'trebuchet', 'rounded', 'impact', 'georgia', 'times', 'palatino', 'garamond',
-      'courier', 'mono', 'comic', 'cjk', 'meiryo', 'malgun',
-    ] as const
-    if (!okFont.includes(s.subtitleFontFamily as (typeof okFont)[number])) {
-      s.subtitleFontFamily = 'system'
-    }
-    if (typeof s.captionTextColor !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(s.captionTextColor)) {
-      s.captionTextColor = '#ffffff'
-    }
-    const okBg = ['none', 'solid', 'blur', 'box'] as const
-    if (!okBg.includes(s.captionBgStyle as (typeof okBg)[number])) s.captionBgStyle = 'none'
-    if (typeof s.captionBgColor !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(s.captionBgColor)) {
-      s.captionBgColor = '#000000'
-    }
-    if (typeof s.captionBgOpacity !== 'number' || Number.isNaN(s.captionBgOpacity)) {
-      s.captionBgOpacity = 55
-    } else {
-      s.captionBgOpacity = Math.max(0, Math.min(100, s.captionBgOpacity))
-    }
-    if (typeof s.captionStroke !== 'boolean') s.captionStroke = true
-    const okAspect = [
-      'original', 'custom', '16:9', '4:3', '2.35:1', '2:1', '1.85:1',
-      '9:16', '3:4', '58inch', '1:1',
-    ] as const
-    if (!okAspect.includes(s.previewAspectRatio as (typeof okAspect)[number])) {
-      s.previewAspectRatio = 'original'
-    }
-    const okResolution = ['144', '240', '360', '480', '720', '1080', '1440', '2160', 'original'] as const
-    if (!okResolution.includes(s.exportResolution as (typeof okResolution)[number])) {
-      s.exportResolution = '1080'
-    }
-    const okMatch = ['preferVideo', 'none', 'natural', 'stretch'] as const
-    if (!okMatch.includes(s.matchDuration as (typeof okMatch)[number])) {
-      s.matchDuration = 'preferVideo'
-    }
-    // Seed profile thiếu (lần đầu / settings cũ)
-    const eng = s.engine === 'paddleocr' ? 'paddleocr' : 'whisper'
-    const profiles = {
-      whisper: {
-        ...ENGINE_DEFAULTS.whisper,
-        ...s.engineProfiles?.whisper,
-      },
-      paddleocr: {
-        ...ENGINE_DEFAULTS.paddleocr,
-        ...s.engineProfiles?.paddleocr,
-      },
-    }
-    // Migrate: giá trị đang active → profile engine hiện tại (nếu user đã chỉnh trước khi có profiles)
-    if (!s.engineProfiles?.[eng]) {
-      profiles[eng] = {
-        matchDuration: s.matchDuration,
-        processOriginalAudio: s.processOriginalAudio,
-        originalAudioMode: s.originalAudioMode,
-        originalAudioVolume: s.originalAudioVolume,
-      }
-    }
-    s.engineProfiles = profiles
-    // Active fields = profile engine đang chọn
-    const active = profiles[eng]
-    s.matchDuration = active.matchDuration ?? ENGINE_DEFAULTS[eng].matchDuration
-    s.processOriginalAudio = active.processOriginalAudio ?? ENGINE_DEFAULTS[eng].processOriginalAudio
-    s.originalAudioMode = active.originalAudioMode ?? ENGINE_DEFAULTS[eng].originalAudioMode
-    s.originalAudioVolume = active.originalAudioVolume ?? ENGINE_DEFAULTS[eng].originalAudioVolume
-    return s
-  } catch {
-    return defaultSettings
-  }
-}
-
-function persistSettings(s: ProjectSettings) {
-  try {
-    localStorage.setItem(SETTINGS_LS, JSON.stringify(snapshotEngineProfile(s)))
-  } catch {
-    /* quota / private mode */
-  }
-}
-
-function persistSession(projectId: string | null) {
-  try {
-    if (projectId) localStorage.setItem(SESSION_LS, projectId)
-    else localStorage.removeItem(SESSION_LS)
-  } catch {
-    /* ignore */
-  }
-}
-
-const idleStatus: JobStatus = {
-  step: 'video',
-  progress: 0,
-  message: 'Chọn video để bắt đầu',
-  running: false,
-}
 
 function fmtDuration(sec: number) {
   const m = Math.floor(sec / 60)
@@ -307,23 +77,8 @@ export default function App() {
   const sidebarWidthRef = useRef(sidebarWidth)
   const sidebarDrag = useRef<{ startX: number; startW: number } | null>(null)
   const [projectId, setProjectId] = useState<string | null>(null)
-  const [videoUrl, setVideoUrl] = useState<string | null>(null)
-  const [duration, setDuration] = useState(0)
-  /** Độ dài clip làm việc = lần dịch gần nhất (0 = full). Khác settings.previewSec (ô Preview). */
-  const [workClipSec, setWorkClipSec] = useState(0)
-  const workClipSecRef = useRef(0)
-  const [bakedPreferVideo, setBakedPreferVideo] = useState(false)
-  const bakedPreferVideoRef = useRef(false)
-  const [bakedSpeed, setBakedSpeed] = useState(1)
-  const [hasBakedSpeed, setHasBakedSpeed] = useState(false)
-  const [segments, setSegments] = useState<Segment[]>([])
   const [overlays, setOverlays] = useState<TextOverlay[]>([])
   const [status, setStatus] = useState<JobStatus>(idleStatus)
-  const [exportUrl, setExportUrl] = useState<string | null>(null)
-  const [exportPath, setExportPath] = useState<string | null>(null)
-  const [viewExportSrc, setViewExportSrc] = useState<string | null>(null)
-  const [exportSuccessOpen, setExportSuccessOpen] = useState(false)
-  const [lastExportedTypes, setLastExportedTypes] = useState({ video: true, audio: false, srt: false, gif: false })
   /** App desktop: file đã trên máy — chỉ Xem / Mở thư mục */
   const [isDesktopApp, setIsDesktopApp] = useState(false)
   const [previewEditorOpen, setPreviewEditorOpen] = useState(false)
@@ -331,27 +86,117 @@ export default function App() {
   const [ttsSideOpen, setTtsSideOpen] = useState(false)
   const [clearingCache, setClearingCache] = useState(false)
   const [cacheToast, setCacheToast] = useState<string | null>(null)
-  const pollRef = useRef<number | null>(null)
-  const pollInFlight = useRef(false)
-  const pollFailStreak = useRef(0)
-  const pendingExportUrl = useRef<string | null>(null)
-  const pendingExportPath = useRef<string | null>(null)
   /** Guards project/video switches from late restore, upload, and poll responses. */
   const projectSwitchRef = useRef(0)
   const activeProjectRef = useRef<string | null>(null)
-  const videoRevisionRef = useRef(0)
-  /** chặn double-click: Dịch/Xuất rồi dính nút Huỷ vừa hiện */
-  const busyAt = useRef(0)
 
-  const freshVideoUrl = (url: string) => {
-    videoRevisionRef.current += 1
-    const base = url.split('?')[0]
-    if (base.includes('/video')) {
-      const projBase = base.split('/video')[0]
-      return `${projBase}/video/${videoRevisionRef.current}`
-    }
-    return `${base}?v=${videoRevisionRef.current}`
-  }
+  const {
+    segments,
+    setSegments,
+    flushSegmentSave,
+    onSegmentChange,
+    onSegmentsReplace,
+  } = useSegmentEditing({ projectId, defaultVoice: settings.defaultVoice })
+  const {
+    videoUrl,
+    setVideoUrl,
+    duration,
+    setDuration,
+    workClipSec,
+    setWorkClipSec,
+    workClipSecRef,
+    bakedPreferVideo,
+    setBakedPreferVideo,
+    bakedPreferVideoRef,
+    bakedSpeed,
+    setBakedSpeed,
+    hasBakedSpeed,
+    setHasBakedSpeed,
+    freshVideoUrl,
+    onPreviewRebaked,
+    onRestoreBakedSpeed,
+  } = useProjectMedia({
+    projectId,
+    defaultVoice: settings.defaultVoice,
+    setSegments,
+    setOverlays,
+  })
+  const { busyAt, releaseDubLock, onDub, onCancel } = useDubControl({
+    projectId,
+    status,
+    setStatus,
+    settings,
+    setSegments,
+    setProgressMinimized,
+    flushSegmentSave,
+  })
+  const {
+    exportUrl,
+    setExportUrl,
+    exportPath,
+    setExportPath,
+    viewExportSrc,
+    setViewExportSrc,
+    exportSuccessOpen,
+    setExportSuccessOpen,
+    lastExportedTypes,
+    pendingExportUrl,
+    applyExportDone,
+    onExport,
+    onRevealOutput,
+    onViewExport,
+  } = useExportFlow({
+    projectId,
+    status,
+    setStatus,
+    settings,
+    segments,
+    setSegments,
+    busyAt,
+    setProgressMinimized,
+  })
+  useJobPolling({
+    projectId,
+    running: status.running,
+    activeProjectRef,
+    setStatus,
+    releaseDubLock,
+    defaultVoice: settings.defaultVoice,
+    setSegments,
+    workClipSecRef,
+    setWorkClipSec,
+    setDuration,
+    setVideoUrl,
+    freshVideoUrl,
+    bakedPreferVideoRef,
+    setBakedPreferVideo,
+    setBakedSpeed,
+    setHasBakedSpeed,
+    pendingExportUrl,
+    applyExportDone,
+  })
+  useSessionRestore({
+    projectSwitchRef,
+    activeProjectRef,
+    setProjectId,
+    settings,
+    setSettings,
+    setStatus,
+    setSegments,
+    workClipSecRef,
+    setWorkClipSec,
+    setDuration,
+    setVideoUrl,
+    freshVideoUrl,
+    bakedPreferVideoRef,
+    setBakedPreferVideo,
+    setBakedSpeed,
+    setHasBakedSpeed,
+    setExportUrl,
+    setExportPath,
+    releaseDubLock,
+    busyAt,
+  })
 
   useEffect(() => {
     if (status.running) setProgressMinimized(false)
@@ -452,93 +297,6 @@ export default function App() {
     }
   }, [])
 
-  // F5 / Vite HMR: mở lại project đang làm (kể cả đang export)
-  useEffect(() => {
-    const switchVersion = projectSwitchRef.current
-    let id = ''
-    try {
-      id = localStorage.getItem(SESSION_LS) || ''
-    } catch {
-      return
-    }
-    if (!id) return
-    let dead = false
-    ;(async () => {
-      try {
-        const [st, segs] = await Promise.all([api.status(id), api.segments(id)])
-        if (dead || projectSwitchRef.current !== switchVersion) return
-        activeProjectRef.current = id
-        setProjectId(id)
-        // ?t= bust cache — tránh <video> Range cũ → 416 sau đổi preview/full
-        setVideoUrl(freshVideoUrl(`/api/projects/${id}/video`))
-        const wc =
-          typeof st.workClipSec === 'number' ? Math.max(0, st.workClipSec) : 0
-        workClipSecRef.current = wc
-        setWorkClipSec(wc)
-        // duration = cửa sổ hiển thị (status đã clamp preview/bake); không lấy full source
-        const dur = Number(st.duration || 0)
-        if (wc > 0) setDuration(wc)
-        else if (dur > 0) setDuration(dur)
-        const bs =
-          typeof st.bakedSpeed === 'number' && st.bakedSpeed > 0 ? st.bakedSpeed : 1
-        const userBake = Boolean((st as { hasBakedSpeed?: boolean }).hasBakedSpeed)
-        const speedOff1 = Math.abs(bs - 1) > 0.02
-        const baked = Boolean(st.bakedPreferVideo) && speedOff1
-        bakedPreferVideoRef.current = baked
-        setBakedPreferVideo(baked)
-        setBakedSpeed(bs)
-        // hasBakedSpeed true cả khi user Áp dụng 1×
-        setHasBakedSpeed(userBake || speedOff1)
-        const extra = st as JobStatus & { settings?: Partial<ProjectSettings> }
-        const mergedVoice =
-          (extra.settings && typeof extra.settings === 'object' && extra.settings.defaultVoice) ||
-          settings.defaultVoice
-        setSegments(applyDefaultVoice(asSegmentList(segs), mergedVoice))
-        if (extra.settings && typeof extra.settings === 'object') {
-          setSettings((s) => {
-            const next = { ...s, ...extra.settings }
-            persistSettings(next)
-            return next
-          })
-        }
-        // Không restore popup từ cancel/stale/code trần "dub"
-        const rawErr = st.error && st.error !== 'cancelled' && st.error !== 'stale_job'
-          ? String(st.error)
-          : undefined
-        const errMsg =
-          rawErr === 'dub' || rawErr === 'export'
-            ? (st.message && st.message.length > 3
-                ? st.message
-                : rawErr === 'dub'
-                  ? 'Lồng tiếng thất bại — bấm Lồng tiếng để thử lại'
-                  : 'Xuất thất bại')
-            : rawErr
-        setStatus({
-          step: st.step || 'video',
-          progress: st.progress || 0,
-          message:
-            st.message
-            || (errMsg && !st.running ? errMsg : '')
-            || 'Đã mở lại project',
-          running: Boolean(st.running),
-          error: errMsg,
-          outputRel: st.outputRel,
-        })
-        if (!st.running) releaseDubLock()
-        if (st.running) busyAt.current = Date.now()
-        if (!st.running && st.outputRel && (st.progress || 0) >= 100) {
-          setExportUrl(`/api/projects/${id}/output`)
-          setExportPath(st.outputRel)
-        }
-      } catch {
-        persistSession(null)
-      }
-    })()
-    return () => {
-      dead = true
-    }
-  }, [])
-
   useEffect(() => {
     const ac = new AbortController()
     const t = window.setTimeout(() => ac.abort(), 8000)
@@ -567,148 +325,6 @@ export default function App() {
       window.clearTimeout(t)
     }
   }, [settings.targetLang])
-
-  useEffect(() => {
-    if (!projectId || !status.running) {
-      if (pollRef.current) window.clearInterval(pollRef.current)
-      pollRef.current = null
-      pollInFlight.current = false
-      pollFailStreak.current = 0
-      return
-    }
-    pollFailStreak.current = 0
-    // 1.5s: giảm storm HTTP status (Windows WinError 10055 khi quá nhiều socket)
-    pollRef.current = window.setInterval(async () => {
-      if (pollInFlight.current) return
-      pollInFlight.current = true
-      try {
-        const s = await api.status(projectId)
-        if (activeProjectRef.current !== projectId) return
-        pollFailStreak.current = 0
-        const exportDone =
-          !s.running &&
-          s.step === 'export' &&
-          s.progress >= 100 &&
-          Boolean(s.outputRel || pendingExportUrl.current)
-        setStatus(exportDone && s.error ? { ...s, error: undefined } : s)
-        if (typeof s.workClipSec === 'number') {
-          const wc = Math.max(0, s.workClipSec)
-          if (wc !== workClipSecRef.current) {
-            workClipSecRef.current = wc
-            setWorkClipSec(wc)
-            if (wc > 0) setDuration(wc)
-            // Clip preview/full đổi kích thước — phải đổi URL kẻo Range cũ 416
-            setVideoUrl(freshVideoUrl(`/api/projects/${projectId}/video`))
-          }
-        }
-        const pollDur = Number(s.duration || 0)
-        if (pollDur > 0 && !(typeof s.workClipSec === 'number' && s.workClipSec > 0)) {
-          setDuration(pollDur)
-        } else if (pollDur > 0 && typeof s.workClipSec === 'number' && s.workClipSec > 0) {
-          setDuration(Math.min(pollDur, s.workClipSec) || s.workClipSec)
-        }
-        const bs =
-          typeof s.bakedSpeed === 'number' && s.bakedSpeed > 0 ? s.bakedSpeed : 1
-        const userBake = Boolean((s as { hasBakedSpeed?: boolean }).hasBakedSpeed)
-        const speedOff1 = Math.abs(bs - 1) > 0.02
-        const baked = Boolean(s.bakedPreferVideo) && speedOff1
-        if (baked !== bakedPreferVideoRef.current) {
-          bakedPreferVideoRef.current = baked
-          setBakedPreferVideo(baked)
-          setVideoUrl(freshVideoUrl(`/api/projects/${projectId}/video`))
-        }
-        setBakedSpeed(bs)
-        setHasBakedSpeed(userBake || speedOff1)
-        if (!s.running) {
-          releaseDubLock()
-          try {
-            const segs = await api.segments(projectId)
-            if (activeProjectRef.current !== projectId) return
-            // Cache-bust ổn định theo audioDuration (không Date.now mỗi poll → storm Range)
-            const list = applyDefaultVoice(asSegmentList(segs), settings.defaultVoice).map((seg) => {
-              if (!seg.audioUrl || !seg.audioFile) return seg
-              const base = seg.audioUrl.split('?')[0]
-              const v = Math.round((seg.audioDuration || 0) * 1000)
-              return { ...seg, audioUrl: `${base}?v=${v}` }
-            })
-            // Không xóa list đang hiện nếu server trả rỗng (race / meta lock)
-            if (list.length > 0) setSegments(list)
-          } catch {
-            /* status đã xong — giữ segments local */
-          }
-          if (exportDone) {
-            const url = pendingExportUrl.current || `/api/projects/${projectId}/output`
-            setExportUrl(url)
-            setExportPath(
-              pendingExportPath.current ||
-                s.outputRel ||
-                `backend/public/exports/${projectId}.mp4`,
-            )
-            pendingExportUrl.current = null
-            pendingExportPath.current = null
-            // Hiện popup xuất xong thay vì auto-play video
-            const msg = s.message || ''
-            setLastExportedTypes({
-              video: /video/i.test(msg),
-              audio: /audio|âm thanh|mp3|wav/i.test(msg),
-              srt: /srt|chú thích/i.test(msg),
-              gif: /gif/i.test(msg),
-            })
-            setViewExportSrc(s.outputRel ? `${url}?t=${Date.now()}` : null)
-            setExportSuccessOpen(true)
-          }
-        }
-      } catch {
-        pollFailStreak.current += 1
-        // ~7.5s (5×1.5s) backend down
-        if (pollFailStreak.current >= 5) {
-          releaseDubLock()
-          setStatus((prev) => ({
-            ...prev,
-            running: false,
-            message: prev.running
-              ? 'Mất kết nối backend (đang reload?). Bấm Dịch/Xuất lại nếu cần.'
-              : prev.message,
-            error: 'backend_unreachable',
-          }))
-        }
-      } finally {
-        pollInFlight.current = false
-      }
-    }, 1500)
-    return () => {
-      if (pollRef.current) window.clearInterval(pollRef.current)
-      pollRef.current = null
-      pollInFlight.current = false
-    }
-  }, [projectId, status.running])
-
-  // phục hồi nếu state segments bị ghi nhầm (vd. onClick truyền event DOM)
-  useEffect(() => {
-    if (!projectId || Array.isArray(segments)) return
-    void api.segments(projectId)
-      .then((segs) => setSegments(applyDefaultVoice(asSegmentList(segs), settings.defaultVoice)))
-      .catch(() => setSegments([]))
-  }, [projectId, segments, settings.defaultVoice])
-
-  // Hiện ô Xem/Tải khi đã từng xuất (kể cả vừa dịch lại — bản có thể cũ)
-  useEffect(() => {
-    if (!projectId || status.running || exportUrl) return
-    if (status.outputRel && (status.progress || 0) >= 100) {
-      setExportUrl(`/api/projects/${projectId}/output`)
-      setExportPath(status.outputRel)
-    }
-  }, [projectId, status.running, status.step, status.progress, status.outputRel, exportUrl])
-
-  // ESC đóng popup xem export
-  useEffect(() => {
-    if (!viewExportSrc) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setViewExportSrc(null)
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [viewExportSrc])
 
   async function onUpload(file: File) {
     const switchVersion = ++projectSwitchRef.current
@@ -903,92 +519,6 @@ export default function App() {
     setStatus((s) => ({ ...s, running: true }))
   }
 
-  const dubLockRef = useRef(false)
-  const segSaveTimer = useRef<number | null>(null)
-  const segSavePending = useRef<{
-    projectId: string
-    wasTop: boolean
-    seg: Segment
-    nextTree: Segment[]
-  } | null>(null)
-  const projectIdRef = useRef(projectId)
-  projectIdRef.current = projectId
-
-  const flushSegmentSave = useCallback(async () => {
-    if (segSaveTimer.current != null) {
-      window.clearTimeout(segSaveTimer.current)
-      segSaveTimer.current = null
-    }
-    const p = segSavePending.current
-    segSavePending.current = null
-    if (!p) return
-    const { projectId: pid, wasTop, seg, nextTree } = p
-    try {
-      if (wasTop) await api.updateSegment(pid, seg)
-      else await api.replaceSegments(pid, nextTree)
-    } catch {
-      /* keep local */
-    }
-  }, [])
-
-  /** Mở khóa lồng tiếng — gọi mọi đường thoát job (huỷ / lỗi / xong / disconnect). */
-  function releaseDubLock() {
-    dubLockRef.current = false
-  }
-  async function onDub(opts?: { force?: boolean }) {
-    if (!projectId) return
-    // Lock đồng bộ (trước setState) — chặn double-click / spam
-    if (status.running || dubLockRef.current) return
-    dubLockRef.current = true
-    busyAt.current = Date.now()
-    setProgressMinimized(false)
-    const force = Boolean(opts?.force)
-    // Chỉ xóa audio UI khi force gen lại — lần thường giữ cache TTS trên đĩa
-    if (force) {
-      setSegments((segs) =>
-        (Array.isArray(segs) ? segs : []).map((s) => ({
-          ...s,
-          source: s.source ?? '',
-          translation: s.translation ?? '',
-          audioFile: undefined,
-          audioUrl: undefined,
-          audioDuration: undefined,
-          videoSpeed: undefined,
-        })),
-      )
-    }
-    setStatus({
-      step: 'dub',
-      progress: 0,
-      message: force ? 'Đang gen lại TTS (bỏ cache)…' : 'Đang lồng tiếng…',
-      running: true,
-      error: undefined,
-    })
-    try {
-      // Flush bản dịch đang gõ trước khi server đọc meta
-      await flushSegmentSave()
-      await api.dub(projectId, { ...settings, forceTts: force })
-      setStatus((s) => ({ ...s, running: true }))
-      // Safety: nếu poll không về (backend die) — mở khóa sau 2 phút
-      window.setTimeout(() => {
-        if (dubLockRef.current && Date.now() - busyAt.current > 110_000) {
-          releaseDubLock()
-        }
-      }, 120_000)
-    } catch (e) {
-      releaseDubLock()
-      const msg = e instanceof Error ? e.message : 'Lồng tiếng thất bại'
-      setStatus({
-        step: 'dub',
-        progress: 0,
-        message: msg,
-        running: false,
-        // message đầy đủ — không để error='dub' (popup chỉ hiện "dub")
-        error: msg,
-      })
-    }
-  }
-
   function onSettings(next: ProjectSettings) {
     const prev = settings
     // đang chạy job — đừng đổi engine (tránh xóa đoạn + nhảy về Video)
@@ -1032,305 +562,6 @@ export default function App() {
     if (out.defaultVoice === prev.defaultVoice) return
     // giọng mặc định sidebar áp dụng cả list (đổi lại = đổi hết đoạn)
     setSegments((segs) => (Array.isArray(segs) ? segs : []).map((seg) => ({ ...seg, voice: out.defaultVoice })))
-  }
-
-  /** Server hay đóng dấu Adam sau Dịch — đồng bộ về default đang chọn nếu cả loạt cùng 1 giọng */
-  function asSegmentList(raw: unknown): Segment[] {
-    if (!Array.isArray(raw)) return []
-    return raw.map((s) => {
-      if (!s || typeof s !== 'object') {
-        return {
-          id: '',
-          index: 0,
-          start: 0,
-          end: 0.1,
-          source: '',
-          translation: '',
-          voice: 'system',
-        } as Segment
-      }
-      const o = s as Segment
-      return {
-        ...o,
-        source: o.source ?? '',
-        translation: o.translation ?? '',
-        voice: o.voice ?? 'system',
-      }
-    })
-  }
-
-  function applyDefaultVoice(segs: Segment[], voice: string): Segment[] {
-    if (!voice || !segs.length) return segs
-    const uniq = new Set(segs.map((s) => (s.voice || '').trim()).filter(Boolean))
-    if (uniq.size <= 1 && (!uniq.size || !uniq.has(voice))) {
-      return segs.map((s) => ({ ...s, voice }))
-    }
-    return segs.map((s) => {
-      const v = (s.voice || '').trim()
-      if (!v || v === 'system') return { ...s, voice }
-      return s
-    })
-  }
-
-  async function onExport(exportSegments?: Segment[], exportEndSec?: number, exportStartSec?: number, renderName = '', settingsOverride?: Partial<ProjectSettings>, coverDataUrl?: string) {
-    if (!projectId || status.running) return
-    setExportUrl(null)
-    setExportPath(null)
-    setViewExportSrc(null)
-    setProgressMinimized(false)
-    busyAt.current = Date.now()
-    // Tính effectiveSettings trước để message phản ánh đúng loại xuất
-    const effectiveSettings = settingsOverride ? { ...settings, ...settingsOverride } : settings
-    const doVideo = effectiveSettings.exportVideo !== false
-    const doAudio = effectiveSettings.exportAudio === true
-    const doSrt = effectiveSettings.exportSrt === true
-    const doGif = effectiveSettings.exportGif === true
-    const audioHint =
-      effectiveSettings.processOriginalAudio && effectiveSettings.originalAudioMode === 'no_vocals'
-        ? ' · xóa lời'
-        : effectiveSettings.processOriginalAudio && effectiveSettings.originalAudioMode === 'vocals'
-          ? ' · giữ lời'
-          : effectiveSettings.processOriginalAudio && effectiveSettings.originalAudioMode === 'mute'
-            ? ' · tắt âm gốc'
-            : ''
-    // Message rõ ràng theo loại xuất được chọn
-    const typeParts: string[] = []
-    if (doVideo) typeParts.push('Video')
-    if (doAudio) typeParts.push('Audio')
-    if (doSrt) typeParts.push('SRT')
-    if (doGif) typeParts.push('GIF')
-    const typeLabel = typeParts.join(' + ') || 'Video'
-    const videoDetail =
-      doVideo && effectiveSettings.coverHardsubs && effectiveSettings.burnSubs && effectiveSettings.targetLang !== 'none'
-        ? ' (che chữ cũ + chèn bản dịch)'
-        : doVideo && effectiveSettings.burnSubs && effectiveSettings.targetLang !== 'none'
-          ? effectiveSettings.captionPlacement === 'above'
-            ? ' (chèn bản dịch phía trên)'
-            : ' (chèn bản dịch phía dưới)'
-          : doVideo && effectiveSettings.coverHardsubs
-            ? ' (che chữ cũ)'
-            : ''
-    setStatus({
-      step: 'export',
-      progress: 0,
-      message: `Đang xuất ${typeLabel}${videoDetail}${audioHint}…`,
-      running: true,
-      error: undefined,
-    })
-    const segs = Array.isArray(exportSegments) ? exportSegments : segments
-    if (Array.isArray(exportSegments)) {
-      setSegments(exportSegments)
-    }
-    const finalRenderName = renderName.trim() || `Render ${projectId}`
-    const res = await api.export(projectId, effectiveSettings, segs, exportEndSec, exportStartSec, finalRenderName, coverDataUrl)
-    pendingExportUrl.current = res.url
-    pendingExportPath.current = res.exports || res.path || null
-    setStatus((s) => ({ ...s, running: true }))
-  }
-
-  async function onRevealOutput() {
-    if (!projectId) return
-    try {
-      const res = await api.revealOutput(projectId)
-      setExportPath(res.path)
-    } catch (e) {
-      setStatus((s) => ({
-        ...s,
-        message: e instanceof Error ? e.message : 'Không mở được thư mục',
-      }))
-    }
-  }
-
-  function onViewExport() {
-    if (!projectId) return
-    setViewExportSrc(`/api/projects/${projectId}/output?t=${Date.now()}`)
-    setExportSuccessOpen(true)
-  }
-
-  async function onCancel() {
-    if (!projectId || !status.running) return
-    // chỉ chặn double-click cực sớm (mount Huỷ)
-    if (Date.now() - busyAt.current < 400) return
-    const stepNow = status.step
-    // Mở khóa lồng tiếng ngay — poll dừng khi running=false nên không clear lock được
-    releaseDubLock()
-    // optimistic — đừng chờ server
-    setStatus({
-      step: stepNow,
-      progress: 0,
-      message:
-        stepNow === 'export'
-          ? 'Đã huỷ xuất bản'
-          : stepNow === 'dub'
-            ? 'Đã huỷ lồng tiếng'
-            : 'Đang huỷ…',
-      running: false,
-      error: 'cancelled',
-    })
-    try {
-      await api.cancel(projectId)
-    } catch {
-      /* flag server có thể fail; UI đã dừng */
-    } finally {
-      releaseDubLock()
-    }
-  }
-
-  const onSegmentChange = useCallback((seg: Segment) => {
-    // Normalize text — tránh .length trên null → trắng trang
-    const safe: Segment = {
-      ...seg,
-      source: seg.source ?? '',
-      translation: seg.translation ?? '',
-      voice: seg.voice ?? 'system',
-    }
-    const pid = projectIdRef.current
-    setSegments((prev) => {
-      const list = Array.isArray(prev) ? prev : []
-      const wasTop = list.some((s) => s.id === safe.id)
-      const nextTree = wasTop
-        ? list.map((s) => (s.id === safe.id ? safe : s))
-        : patchSegmentInTree(list, safe)
-      if (pid) {
-        // Debounce PUT — 389 đoạn × mỗi phím trước đây đơ UI + lock meta
-        segSavePending.current = { projectId: pid, wasTop, seg: safe, nextTree }
-        if (segSaveTimer.current != null) window.clearTimeout(segSaveTimer.current)
-        segSaveTimer.current = window.setTimeout(() => {
-          void flushSegmentSave()
-        }, 350)
-      }
-      return nextTree
-    })
-  }, [flushSegmentSave])
-
-  async function onSegmentsReplace(next: Segment[], opts?: { persist?: boolean }) {
-    // A whole-list operation (delete/split/trim) supersedes any debounced
-    // single-segment PUT.  Leaving that timer alive can write the deleted
-    // segment back after the replace request completes.
-    if (segSaveTimer.current != null) {
-      window.clearTimeout(segSaveTimer.current)
-      segSaveTimer.current = null
-    }
-    segSavePending.current = null
-    // UI cập nhật ngay — không đợi network (tránh đơ khi merge group lớn)
-    const ordered = [...next]
-      .sort((a, b) => a.start - b.start || a.end - b.end)
-      .map((s, i) => ({ ...s, index: i }))
-    setSegments(ordered)
-    if (!projectId || opts?.persist === false) return
-    // Persist nền; không ghi đè local nếu user đã edit tiếp
-    const snap = ordered
-    void api.replaceSegments(projectId, snap).then((saved) => {
-      if (!Array.isArray(saved)) return
-      // Chỉ sync nếu list id vẫn khớp snapshot (tránh race)
-      setSegments((cur) => {
-        if (cur.length !== snap.length) return cur
-        const same =
-          cur.length === snap.length
-          && cur.every((s, i) => s.id === snap[i]?.id)
-        if (!same) return cur
-        const nextSaved = applyDefaultVoice(asSegmentList(saved), settings.defaultVoice)
-        // Giữ compoundChildren local nếu server strip (schema cũ / race)
-        return nextSaved.map((s, i) => {
-          const loc = snap[i]
-          let out = s
-          if (
-            loc?.isCompound
-            && loc.compoundChildren?.length
-            && (!s.compoundChildren?.length || s.compoundChildren.length < loc.compoundChildren.length)
-          ) {
-            out = {
-              ...out,
-              isCompound: true,
-              compoundChildren: loc.compoundChildren,
-            }
-          }
-          // Reset OCR: local đã xóa bbox — đừng nhận lại bbox cũ từ server preserve
-          if (loc && loc.bbox == null && s.bbox) {
-            out = { ...out, bbox: undefined, captionLayout: undefined, bboxInherited: undefined }
-          }
-          return out
-        })
-      })
-    }).catch(() => { /* keep local */ })
-  }
-
-  function onPreviewRebaked(res: {
-    segments: Segment[]
-    overlays?: TextOverlay[]
-    workClipSec: number
-    duration: number
-    bakedPreferVideo: boolean
-    bakedSpeed: number
-    videoUrl: string
-    timeScale?: number
-    prevBakedSpeed?: number
-    hasBakedSpeed?: boolean
-  }) {
-    // Segments/overlays đã remap — giữ text nếu list server thiếu translation
-    setSegments((prev) => {
-      const incoming = applyDefaultVoice(asSegmentList(res.segments), settings.defaultVoice)
-      if (!prev.length) return incoming
-      const byId = new Map(prev.map((s) => [s.id, s] as const))
-      return incoming.map((s) => {
-        const loc = byId.get(s.id)
-        if (!loc) return s
-        // Giữ start/end từ server (đã scale); chỉ heal text/media rỗng
-        return {
-          ...s,
-          translation: (s.translation || '').trim() || loc.translation || s.translation,
-          source: (s.source || '').trim() || loc.source || s.source,
-          audioUrl: s.audioUrl || loc.audioUrl,
-          audioFile: s.audioFile || loc.audioFile,
-          audioDuration: s.audioDuration ?? loc.audioDuration,
-          bbox: s.bbox ?? loc.bbox,
-          captionLayout: s.captionLayout ?? loc.captionLayout,
-          layout: s.layout ?? loc.layout,
-          voice: s.voice || loc.voice,
-        }
-      })
-    })
-    if (Array.isArray(res.overlays)) setOverlays(res.overlays)
-    // Cửa sổ display sau bake — thước = xuất
-    const wc = Math.max(0, Number(res.workClipSec) || Number(res.duration) || 0)
-    workClipSecRef.current = wc
-    setWorkClipSec(wc)
-    if (wc > 0) setDuration(wc)
-    else if (res.duration > 0) setDuration(res.duration)
-    const bs = res.bakedSpeed > 0 ? res.bakedSpeed : res.bakedPreferVideo ? 0.8 : 1
-    bakedPreferVideoRef.current = Boolean(res.bakedPreferVideo) && Math.abs(bs - 1) > 0.02
-    setBakedPreferVideo(bakedPreferVideoRef.current)
-    setBakedSpeed(bs)
-    setHasBakedSpeed(true)
-    setVideoUrl(freshVideoUrl(res.videoUrl))
-  }
-
-  /** Undo bake: chỉ đổi workVideo — segments giữ từ history snapshot */
-  async function onRestoreBakedSpeed(speed: number, segs?: Segment[]) {
-    if (!projectId) return
-    // Persist snapshot TRƯỚC khi rebake (tuần tự — tránh race PUT/POST ghi đè
-    // nhau): server segments + baseline pop phải theo lineage undo.
-    if (segs?.length) {
-      const ordered = [...segs]
-        .sort((a, b) => a.start - b.start || a.end - b.end)
-        .map((s, i) => ({ ...s, index: i }))
-      try {
-        await api.replaceSegments(projectId, ordered)
-      } catch {
-        // giữ undo local; export vẫn gửi segments từ editor
-      }
-    }
-    const res = await api.rebakeSpeed(projectId, speed, { skipRemap: true })
-    const wc = Math.max(0, res.workClipSec)
-    workClipSecRef.current = wc
-    setWorkClipSec(wc)
-    if (res.duration > 0) setDuration(res.duration)
-    const bs = res.bakedSpeed > 0 ? res.bakedSpeed : res.bakedPreferVideo ? 0.8 : 1
-    bakedPreferVideoRef.current = Boolean(res.bakedPreferVideo) && Math.abs(bs - 1) > 0.02
-    setBakedPreferVideo(bakedPreferVideoRef.current)
-    setBakedSpeed(bs)
-    setHasBakedSpeed(true)
-    setVideoUrl(freshVideoUrl(res.videoUrl || `/api/projects/${projectId}/video`))
   }
 
   useEffect(() => {

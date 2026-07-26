@@ -1,9 +1,33 @@
-import type { ProjectSettings } from '@/features/project/project.types'
+import type { JobStatus, ProjectSettings } from '@/features/project/project.types'
 
 export const SETTINGS_LS = 'videoclone.settings'
 export const SESSION_LS = 'videoclone.session'
 export const SIDEBAR_W_LS = 'videoclone.sidebarWidth'
 export const THEME_LS = 'videoclone.theme'
+export const SETUP_GATE_LS = 'videoclone.setupGate'
+
+export function loadSetupGate(): boolean {
+  try {
+    return localStorage.getItem(SETUP_GATE_LS) === '1'
+  } catch {
+    return false
+  }
+}
+
+export function persistSetupGate() {
+  try {
+    localStorage.setItem(SETUP_GATE_LS, '1')
+  } catch {
+    /* ignore */
+  }
+}
+
+export const idleStatus: JobStatus = {
+  step: 'video',
+  progress: 0,
+  message: 'Chọn video để bắt đầu',
+  running: false,
+}
 
 export const SIDEBAR_MIN = 240
 export const SIDEBAR_MAX = 560

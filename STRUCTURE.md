@@ -9,10 +9,10 @@ Tài liệu này mô tả **thư mục, trách nhiệm module và quy tắc ph�
 ```text
 frontend/src/
 ├─ app/
-│  ├─ App.tsx                 Shell, mode, session, poll job, ProgressPopup
+│  ├─ App.tsx                 Shell, mode, upload/switch project, ProgressPopup
 │  ├─ appMode.ts
-│  ├─ appSettings.ts
-│  └─ useProjectSession.ts
+│  ├─ appSettings.ts          load/persist settings + setup gate + idleStatus
+│  └─ useProjectSession.ts    Facade appSettings + useSessionRestore (F5 mở lại project)
 ├─ pages/                     Trang cấp cao (Clone, Download, TTS, Renders, …)
 ├─ features/
 │  ├─ configuration/          Cấu hình engine / API / setup
@@ -24,7 +24,13 @@ frontend/src/
 │  │     ├─ coverBox.ts          Hình học khung che (pad/clamp/seed box)
 │  │     └─ coverLayout.ts       Quyết định layout + bake WYSIWYG xuất
 │  ├─ project/                API project, sidebar, types, compound
+│  │  └─ use*.ts                 Hook luồng dài của App: useSegmentEditing,
+│  │                             useProjectMedia (bake/rebake), useDubControl,
+│  │                             useExportFlow, useJobPolling
 │  └─ tts/                    TTS Studio UI + CSS
+│     ├─ TtsStudio.tsx           Orchestration + state
+│     ├─ Tts*Panel / TtsIcons    Panel con (input, history, clone) + icon nội bộ
+│     └─ lib/                    Logic thuần (voiceDisplay, srt, download, format)
 └─ shared/
    ├─ api/                    HTTP helper
    ├─ components/             ProgressPopup, Icons, …
