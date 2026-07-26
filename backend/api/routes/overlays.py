@@ -36,6 +36,7 @@ from api.deps import (
 )
 from api.job_spawn import spawn
 from api.video_serve import serve_video_file
+from pipeline.core.project import apply_meta_patch
 from pipeline import (
     DATA,
     PUBLIC_DATA,
@@ -152,7 +153,9 @@ def api_create_overlay(project_id: str, body: TextOverlayIn):
     item = body.model_dump()
     overlays.append(item)
     meta["overlays"] = overlays
-    save_meta(project_id, meta)
+    # Đổi cấu trúc overlay → baseline 1× cũ hết hợp lệ (Áp dụng tốc độ sau đó
+    # sẽ revert overlay về trạng thái baseline nếu không xoá).
+    apply_meta_patch(project_id, {"overlays": overlays}, remove=("timelineBaseline",))
     return item
 
 
@@ -170,6 +173,7 @@ def api_replace_overlays(project_id: str, body: list[TextOverlayIn]):
             raise HTTPException(422, "Mỗi project chỉ có một logo")
         out = [item.model_dump() for item in body]
         meta["overlays"] = out
+        meta.pop("timelineBaseline", None)
         return out
 
     return mutate_meta(project_id, apply)
@@ -187,7 +191,7 @@ def api_update_overlay(project_id: str, overlay_id: str, body: TextOverlayIn):
         if item.get("id") == overlay_id:
             overlays[i] = body.model_dump()
             meta["overlays"] = overlays
-            save_meta(project_id, meta)
+            apply_meta_patch(project_id, {"overlays": overlays}, remove=("timelineBaseline",))
             return overlays[i]
     raise HTTPException(404, "Text overlay không tồn tại")
 
@@ -199,6 +203,6 @@ def api_delete_overlay(project_id: str, overlay_id: str):
         raise HTTPException(404)
     overlays = [item for item in (meta.get("overlays") or []) if item.get("id") != overlay_id]
     meta["overlays"] = overlays
-    save_meta(project_id, meta)
+    apply_meta_patch(project_id, {"overlays": overlays}, remove=("timelineBaseline",))
     return {"ok": True}
 

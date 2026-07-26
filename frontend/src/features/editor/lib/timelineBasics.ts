@@ -1,8 +1,10 @@
 import type { Segment } from '@/features/project/project.types'
 
 export function formatTime(value: number) {
-  const min = Math.floor(value / 60)
-  const sec = value % 60
+  // Làm tròn TRƯỚC khi tách phút/giây: 119.97 từng ra "1:60.0" thay vì "2:00.0"
+  const tenths = Math.round(Math.max(0, value) * 10)
+  const min = Math.floor(tenths / 600)
+  const sec = (tenths % 600) / 10
   return `${min}:${sec.toFixed(1).padStart(4, '0')}`
 }
 

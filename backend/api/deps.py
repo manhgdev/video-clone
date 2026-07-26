@@ -51,6 +51,9 @@ class Settings(BaseModel):
     exportAudioFormat: str = "mp3"
     exportSrt: bool = False
     exportSrtFormat: str = "srt"
+    # Thư mục xuất tùy chọn (FE gửi kèm body export) — thiếu field này
+    # Pydantic strip mất, video luôn rơi vào thư mục mặc định.
+    exportOutputDir: str = ""
     exportGif: bool = False
     exportGifRes: str = "240"
     forceTts: bool = False
@@ -257,6 +260,7 @@ SEG_PRESERVE = (
     "videoSpeed",
     "ttsVolume",
     "ttsSpeed",
+    "ttsBake",
     "fontSize",
     "fontFamily",
     "textColor",

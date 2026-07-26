@@ -248,6 +248,42 @@ def write_srt(
     path.write_text("\n".join(lines), encoding="utf-8-sig")
 
 
+def write_subtitle(
+    path: Path,
+    cues: list[dict],
+    fmt: str = "srt",
+    *,
+    capcut: bool = True,
+    wrap_line: int = 42,
+) -> None:
+    """Ghi đúng ĐỊNH DẠNG user chọn: srt | vtt | txt.
+
+    Trước đây mọi định dạng đều ghi nội dung SRT — file .vtt sai chuẩn
+    (thiếu header WEBVTT, mili-giây dùng dấu phẩy) nên player/nền tảng từ chối.
+    """
+    kind = (fmt or "srt").strip().lower()
+    if kind == "txt":
+        body = [t for c in cues if (t := str(c.get("text") or "").strip())]
+        path.write_text("\n".join(body) + "\n", encoding="utf-8")
+        return
+    if kind == "vtt":
+        lines = ["WEBVTT", ""]
+        for c in cues:
+            text = str(c.get("text") or "").strip() or "…"
+            if capcut and "\n" not in text:
+                text = wrap_capcut_text(text, max_line=wrap_line)
+            lines.append(
+                f"{_ts(float(c['start'])).replace(',', '.')}"
+                f" --> {_ts(float(c['end'])).replace(',', '.')}"
+            )
+            lines.append(text)
+            lines.append("")
+        # VTT không dùng BOM
+        path.write_text("\n".join(lines), encoding="utf-8")
+        return
+    write_srt(path, cues, capcut=capcut, wrap_line=wrap_line)
+
+
 def _ms_frac(raw: str) -> float:
     """1–3 digit fractional seconds → milliseconds (SRT standard = 3 digits)."""
     s = (raw or "0").strip()

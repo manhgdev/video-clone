@@ -76,6 +76,15 @@ function SegmentCard({
   useEffect(
     () => () => {
       if (textTimer.current != null) window.clearTimeout(textTimer.current)
+      // interval 50ms + <video> detached sống mãi nếu card unmount giữa chừng
+      if (stopTimer.current != null) window.clearInterval(stopTimer.current)
+      if (ownMedia.current) {
+        ownMedia.current.pause()
+        ownMedia.current.removeAttribute('src')
+        ownMedia.current.load()
+        if (activeMedia === ownMedia.current) activeMedia = null
+        ownMedia.current = null
+      }
     },
     [],
   )
@@ -141,6 +150,7 @@ function SegmentCard({
   const [reBusy, setReBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const stopTimer = useRef<number | null>(null)
+  const ownMedia = useRef<HTMLMediaElement | null>(null)
 
   function clearStopTimer() {
     if (stopTimer.current != null) {
@@ -158,6 +168,7 @@ function SegmentCard({
     v.src = videoUrl
     v.preload = 'auto'
     activeMedia = v
+    ownMedia.current = v
     await new Promise<void>((resolve, reject) => {
       v.onloadedmetadata = () => resolve()
       v.onerror = () => reject(new Error('Không tải được video'))
@@ -165,7 +176,8 @@ function SegmentCard({
     v.currentTime = segment.start
     await v.play()
     stopTimer.current = window.setInterval(() => {
-      if (v.currentTime >= segment.end - 0.05) {
+      // activeMedia đổi (bấm ▶ card khác) → interval này mồ côi, phải tự dọn
+      if (activeMedia !== v || v.paused || v.ended || v.currentTime >= segment.end - 0.05) {
         v.pause()
         clearStopTimer()
       }
@@ -197,6 +209,7 @@ function SegmentCard({
         onChange(updated)
         const a = new Audio(res.audioUrl)
         activeMedia = a
+        ownMedia.current = a
         await a.play()
         return
       }

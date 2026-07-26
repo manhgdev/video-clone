@@ -23,7 +23,12 @@ def assign_tts_fit_speeds(
     ordered = sorted(segments, key=lambda s: float(s.get("start") or 0))
     n = 0
     for i, seg in enumerate(ordered):
-        ad = float(seg.get("audioDuration") or 0)
+        # audioDuration = wav 1×; khi phát, FE (dubMath.dubAudioAbsEnd) và
+        # export (mux_audio) đều chia cho ttsSpeed thủ công — fit phải dùng
+        # cùng độ dài hiệu dụng, không thì câu chỉnh nhanh vẫn bị giãn thừa.
+        manual = float(seg.get("ttsSpeed") or 1) or 1.0
+        manual = max(0.75, min(1.5, manual))
+        ad = float(seg.get("audioDuration") or 0) / manual
         if ad <= 0.08:
             seg.pop("videoSpeed", None)
             continue

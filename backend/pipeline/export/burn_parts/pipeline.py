@@ -365,6 +365,10 @@ def cover_and_burn(
     cue_need_mask: list[bool] = []
     for i, (_cs, _ce, _bs, _be, text, src, lay_mode) in enumerate(cues):
         segment_id = cue_segment_ids[i] if i < len(cue_segment_ids) else ""
+        # Phải có TRƯỚC mọi nhánh: cue không burn (cover-only, maskOnly) vẫn đọc
+        # seg_meta ở phần mask/logo bên dưới — gán trong `if burn and text` gây
+        # UnboundLocalError (cue đầu) hoặc dùng meta của cue trước (stale).
+        seg_meta = segments_by_id.get(segment_id, {})
         boxes = list(cue_boxes[i] if i < len(cue_boxes) else [])
         paint = _union_box(boxes) if boxes else None
         has_manual_bbox = manual_by_idx[i] is not None
@@ -466,7 +470,6 @@ def cover_and_burn(
         cue_fs = fontsize
         used_preview_layout = False
         if burn and text:
-            seg_meta = segments_by_id.get(segment_id, {})
             cue_font_getter = _font_for_size
             cue_font_family = str(seg_meta.get("fontFamily") or "").strip()
             if cue_font_family:

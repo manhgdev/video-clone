@@ -34,6 +34,23 @@ def _is_expired(mtime: float, cutoff: float) -> bool:
     return mtime < cutoff
 
 
+# Chỉ dọn file SINH RA được (tái tạo bằng cách chạy lại). Video nguồn, meta.json,
+# giọng clone, TTS đã tổng hợp… là dữ liệu người dùng — không bao giờ tự xóa.
+_PURGEABLE_DIR_NAMES = {"cache", "tmp", "temp", "frames", "preview"}
+_PURGEABLE_SUFFIXES = {".log"}
+
+
+def _is_purgeable(path: Path, root: Path) -> bool:
+    """True khi file nằm trong thư mục cache/tmp (tái tạo được) hoặc là log."""
+    try:
+        rel_parts = path.relative_to(root).parts
+    except ValueError:
+        return False
+    if path.suffix.lower() in _PURGEABLE_SUFFIXES:
+        return True
+    return any(part.lower() in _PURGEABLE_DIR_NAMES for part in rel_parts[:-1])
+
+
 def cleanup_public_files(
     root: Path = PUBLIC_DATA,
     *,
@@ -62,7 +79,11 @@ def cleanup_public_files(
         for name in files:
             path = current_path / name
             try:
-                if path.is_symlink() or not _is_expired(path.stat().st_mtime, cutoff):
+                if (
+                    path.is_symlink()
+                    or not _is_purgeable(path, root)
+                    or not _is_expired(path.stat().st_mtime, cutoff)
+                ):
                     skipped += 1
                     continue
                 path.unlink()

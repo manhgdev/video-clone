@@ -21,6 +21,17 @@ from .text_split import split_sentences
 from .voice_store import TTS_OUTPUT, TTS_TEMP, ensure_vieneu_dirs
 
 
+def _job_dir(job_id: str) -> Path:
+    """Thư mục job đã kiểm traversal — job_id có thể đến từ body.jobId của client."""
+    from pipeline.core.config import safe_child
+
+    path = safe_child(TTS_OUTPUT, job_id)
+    if path is None:
+        raise ValueError(f"job_id không hợp lệ: {job_id!r}")
+    return path
+
+
+
 def _job_fingerprint(
     *,
     text: str,
@@ -263,7 +274,7 @@ def synth_text_job(
     if hit:
         return hit
     job_id = job_id or uuid.uuid4().hex[:12]
-    job_dir = TTS_OUTPUT / job_id
+    job_dir = _job_dir(job_id)
     job_dir.mkdir(parents=True, exist_ok=True)
     wav = job_dir / "audio.wav"
     with _jobs_lock:
@@ -412,7 +423,7 @@ def synth_srt_job(
     if hit:
         return hit
     job_id = job_id or uuid.uuid4().hex[:12]
-    job_dir = TTS_OUTPUT / job_id
+    job_dir = _job_dir(job_id)
     job_dir.mkdir(parents=True, exist_ok=True)
     with _jobs_lock:
         _running[job_id] = True
@@ -622,7 +633,7 @@ def rebuild_srt(job_id: str, srt_style: str = "hard") -> Path:
     """Re-segment existing job into a different SRT style (no TTS re-run)."""
     if srt_style not in SRT_STYLES:
         raise ValueError(f"Unknown style: {srt_style}")
-    job_dir = TTS_OUTPUT / job_id
+    job_dir = _job_dir(job_id)
     meta_p = job_dir / "meta.json"
     if not meta_p.is_file():
         raise FileNotFoundError("meta.json missing")
@@ -691,7 +702,7 @@ def rebuild_srt(job_id: str, srt_style: str = "hard") -> Path:
 
 
 def ensure_mp3(job_id: str) -> Path:
-    job_dir = TTS_OUTPUT / job_id
+    job_dir = _job_dir(job_id)
     wav = job_dir / "audio.wav"
     mp3 = job_dir / "audio.mp3"
     if not wav.is_file():
@@ -707,7 +718,7 @@ def ensure_mp3(job_id: str) -> Path:
 
 
 def ensure_zip(job_id: str, srt_style: str = "hard") -> Path:
-    job_dir = TTS_OUTPUT / job_id
+    job_dir = _job_dir(job_id)
     wav = job_dir / "audio.wav"
     if not wav.is_file():
         raise FileNotFoundError("audio.wav missing")

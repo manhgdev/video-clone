@@ -15,6 +15,24 @@ from pipeline.core.cleanup import run_public_cleanup_periodically
 from pipeline.core.config import PUBLIC_DATA
 
 
+def _allowed_origins() -> list[str]:
+    """Origin của chính app (dev Vite + webview) + cấu hình thêm qua env."""
+    import os
+
+    port = str(os.environ.get("VIDEO_CLONE_PORT") or 8787)
+    origins: list[str] = []
+    for host in ("localhost", "127.0.0.1"):
+        for p in (port, "5173", "4173"):
+            origins.append(f"http://{host}:{p}")
+    # webview desktop load từ file:// hoặc app scheme → Origin "null"
+    origins.append("null")
+    extra = (os.environ.get("VIDEO_CLONE_ALLOW_ORIGINS") or "").strip()
+    if extra:
+        origins.extend(o.strip() for o in extra.split(",") if o.strip())
+    seen: set[str] = set()
+    return [o for o in origins if not (o in seen or seen.add(o))]
+
+
 def create_app() -> FastAPI:
     # ponytail: do NOT import torch/GPU stuff here — blocks main thread 2–10s on Windows.
     # apply_gpu_process_env runs in warm-models thread below.
@@ -118,9 +136,12 @@ def create_app() -> FastAPI:
         yield
 
     app = FastAPI(title="Video-Clone Local", lifespan=lifespan)
+    # API local không có auth → chỉ nhận origin của chính app (Vite dev / webview).
+    # allow_origins=["*"] cho phép mọi trang web user đang mở gọi API (xóa
+    # project, đọc file). Thêm origin khác qua VIDEO_CLONE_ALLOW_ORIGINS.
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=_allowed_origins(),
         allow_methods=["*"],
         allow_headers=["*"],
     )
@@ -136,6 +157,14 @@ def create_app() -> FastAPI:
         return {"ok": True, "app": "videoclone", "port": port, "data": str(DATA)}
 
     app.include_router(router)
+    # StaticFiles kiểm thư mục tồn tại lúc mount → máy mới (chưa có public/)
+    # sẽ sập ngay khi khởi động. ensure_data_dirs chạy ở lifespan là quá muộn.
+    try:
+        from pipeline.core.config import ensure_data_dirs
+
+        ensure_data_dirs()
+    except OSError:
+        pass
     app.mount("/data", StaticFiles(directory=str(PUBLIC_DATA)), name="public-data")
 
     return app

@@ -227,7 +227,10 @@ def _merge_segment_content(dst: dict, src: dict, *, prefer_src: bool = False) ->
         "fontSize",
         "ttsVolume",
         "ttsSpeed",
+        "ttsBake",
         "videoSpeed",
+        "fontFamily",
+        "textColor",
         "groupId",
         "isCompound",
     ):

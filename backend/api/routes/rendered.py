@@ -26,18 +26,38 @@ class RenderRenameIn(BaseModel):
     name: str = Field(min_length=1, max_length=120)
 
 
+def _export_mp4_paths() -> list[Path]:
+    """Mọi video đã xuất: exports/ phẳng (cũ) + <project_id>/exports/ (hiện tại).
+
+    ponytail: render_id = tên file. Hai project đặt trùng tên render → bản mới
+    nhất thắng; nâng cấp thì đổi id thành '<project>__<name>' ở cả 3 chỗ dùng.
+    """
+    paths: list[Path] = []
+    flat = PUBLIC_DATA / "exports"
+    if flat.is_dir():
+        paths.extend(flat.glob("*.mp4"))
+    if PUBLIC_DATA.is_dir():
+        for project_dir in PUBLIC_DATA.iterdir():
+            if not project_dir.is_dir() or project_dir.name == "exports":
+                continue
+            sub = project_dir / "exports"
+            if sub.is_dir():
+                paths.extend(sub.glob("*.mp4"))
+    uniq = [p for p in paths if _RENDER_ID.fullmatch(p.stem)]
+    uniq.sort(key=lambda p: p.stat().st_mtime if p.is_file() else 0, reverse=True)
+    return uniq
+
+
 def _render_path(render_id: str) -> Path | None:
     if not _RENDER_ID.fullmatch(render_id):
         return None
-    path = PUBLIC_DATA / "exports" / f"{render_id}.mp4"
-    return path if path.is_file() else None
+    return next((p for p in _export_mp4_paths() if p.stem == render_id and p.is_file()), None)
 
 
 def list_rendered_videos() -> list[dict[str, Any]]:
-    exports = PUBLIC_DATA / "exports"
-    if not exports.is_dir():
+    paths = _export_mp4_paths()
+    if not paths:
         return []
-    paths = [path for path in exports.glob("*.mp4") if _RENDER_ID.fullmatch(path.stem)]
     archived_projects = {path.stem.split("-", 1)[0] for path in paths if "-" in path.stem}
     items: list[dict[str, Any]] = []
     for output in paths:
@@ -112,8 +132,15 @@ def api_rename_render(render_id: str, body: RenderRenameIn):
     if not name:
         raise HTTPException(422, "Ten render khong duoc de trong")
     sidecar = path.with_suffix(".json")
+    # Giữ projectId thật từ sidecar (tên render tự đặt không chứa project id)
+    project_id = render_id.split("-", 1)[0]
+    try:
+        if sidecar.is_file():
+            project_id = str(json.loads(sidecar.read_text(encoding="utf-8")).get("projectId") or project_id)
+    except (OSError, ValueError):
+        pass
     sidecar.write_text(
-        json.dumps({"name": name, "projectId": render_id.split("-", 1)[0]}, ensure_ascii=False),
+        json.dumps({"name": name, "projectId": project_id}, ensure_ascii=False),
         encoding="utf-8",
     )
     return {"renderId": render_id, "name": name}

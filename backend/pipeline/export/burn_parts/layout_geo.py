@@ -46,6 +46,10 @@ _ocr_mid_hardsub_boxes = ocr_mid_hardsub_boxes
 
 from pipeline.export.fonts import _font_for_preset, _subtitle_font
 
+# Khớp FE coverBox.COVER_SHADOW_BOT — chừa bóng chữ dưới đáy cover.
+_COVER_SHADOW_BOT = 4
+
+
 def _cover_max_h(frame_h: int, font_size: int = 36) -> int:
     """Đủ 1–3 dòng phụ đề — theo font, không kẹp quá thấp."""
     one = int(round(font_size * 1.45 + 10))

@@ -49,11 +49,9 @@ export function clampOverlayPad(
       } else if (o.start >= seg.end - 0.02) {
         const cut = (seg.end + o.start) * 0.5
         e = Math.min(e, cut)
-      } else if (o.start < seg.end && o.end > seg.start) {
-        // timeline đã chồng — chia đôi vùng chồng
-        if (o.start >= seg.start) e = Math.min(e, (seg.end + o.start) * 0.5)
-        else s = Math.max(s, (o.end + seg.start) * 0.5)
       }
+      // Không xử lý nhánh "đã chồng nhau": hai dòng clamp cuối (s ≤ seg.start,
+      // e ≥ seg.end) luôn phủ lại kết quả — cửa sổ tối thiểu là [start,end).
     }
   }
   if (e < s + 0.04) e = s + 0.04
@@ -67,23 +65,28 @@ export function clampOverlayPad(
 export function segmentAtCover(segments: Segment[], time: number): Segment | null {
   const hit = segmentAt(segments, time)
   if (hit) return hit
+  // Hot path (pointermove khi scrub): coverWindow là O(n) nên vòng lặp thô
+  // thành O(n²) mỗi frame. Cache theo tham chiếu mảng — segments là immutable
+  // (mọi sửa tạo mảng mới) nên cache tự vô hiệu khi timeline đổi.
+  const windows = coverWindowsOf(segments)
   let best: Segment | null = null
-  for (const s of segments) {
-    const w = coverWindow(s, segments)
+  for (let i = 0; i < segments.length; i++) {
+    const w = windows[i]
     if (time >= w.start && time < w.end) {
+      const s = segments[i]
       if (!best || s.start > best.start) best = s
     }
   }
   // Lấp khe < 0.45s giữa 2 câu hardsub (cùng logic xuất)
   if (!best) {
-    const ordered = [...segments].sort((a, b) => a.start - b.start)
-    for (let i = 0; i < ordered.length - 1; i++) {
-      const a = ordered[i]
-      const b = ordered[i + 1]
+    const order = windows.map((_, i) => i).sort((a, b) => segments[a].start - segments[b].start)
+    for (let k = 0; k < order.length - 1; k++) {
+      const a = segments[order[k]]
+      const b = segments[order[k + 1]]
       if ((a.layout || 'horizontal') !== 'horizontal') continue
       if ((b.layout || 'horizontal') !== 'horizontal') continue
-      const wa = coverWindow(a, segments)
-      const wb = coverWindow(b, segments)
+      const wa = windows[order[k]]
+      const wb = windows[order[k + 1]]
       const gap = wb.start - wa.end
       if (gap > 0 && gap < 0.45 && time >= wa.end && time < wb.start) {
         return time < (wa.end + wb.start) / 2 ? a : b
@@ -91,6 +94,16 @@ export function segmentAtCover(segments: Segment[], time: number): Segment | nul
     }
   }
   return best
+}
+
+let _coverWindowCache: { key: Segment[]; value: { start: number; end: number }[] } | null = null
+
+/** coverWindow cho cả list, cache theo tham chiếu mảng (tránh O(n²) mỗi frame). */
+export function coverWindowsOf(segments: Segment[]): { start: number; end: number }[] {
+  if (_coverWindowCache && _coverWindowCache.key === segments) return _coverWindowCache.value
+  const value = segments.map((s) => coverWindow(s, segments))
+  _coverWindowCache = { key: segments, value }
+  return value
 }
 
 export function segmentHasDub(seg: Segment | undefined): boolean {

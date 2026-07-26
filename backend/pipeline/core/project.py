@@ -264,6 +264,27 @@ def save_meta(project_id: str, meta: dict[str, Any]) -> None:
         _write_meta_file(path, meta)
 
 
+def apply_meta_patch(
+    project_id: str,
+    patch: dict[str, Any],
+    *,
+    remove: tuple[str, ...] = (),
+) -> None:
+    """Ghi ĐÚNG các key job này thay đổi lên bản meta mới nhất trên đĩa.
+
+    Job dài (bake tốc độ, compound, dịch lại) load meta lúc bắt đầu rồi chạy
+    ffmpeg vài phút; save cả snapshot cũ sẽ nuốt mất mọi thay đổi lưu trong
+    lúc đó (PUT segments/overlays, status). Patch theo key thì không.
+    """
+
+    def fn(meta: dict[str, Any]) -> None:
+        meta.update(patch)
+        for key in remove:
+            meta.pop(key, None)
+
+    mutate_meta(project_id, fn)
+
+
 def mutate_meta(project_id: str, fn: Callable[[dict[str, Any]], T]) -> T:
     """Read-modify-write atomic — tránh race khi nhiều PUT segment."""
     path = project_dir(project_id) / "meta.json"

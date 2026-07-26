@@ -160,8 +160,10 @@ def api_retranslate(project_id: str, seg_id: str, body: RetranslateIn):
 
 @router.get("/api/projects/{project_id}/tts/{name}")
 def api_tts(project_id: str, name: str):
-    path = ensure_layout(project_id) / "tts" / name
-    if not path.exists():
+    from pipeline.core.config import safe_child
+
+    path = safe_child(ensure_layout(project_id) / "tts", name)
+    if path is None or not path.is_file():
         raise HTTPException(404)
     st = path.stat()
     return FileResponse(

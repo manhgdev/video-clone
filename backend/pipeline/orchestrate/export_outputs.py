@@ -102,8 +102,12 @@ def write_export_artifacts(
     # Xuất Chú thích (SRT) nếu người dùng chọn
     if bool(settings.get("exportSrt", False)):
         try:
-            from pipeline.export.srt import write_srt
-            srt_out = exports / f"{safe_name}.srt"
+            from pipeline.export.srt import write_subtitle
+
+            fmt = str(settings.get("exportSrtFormat") or "srt").lower()
+            if fmt not in ("srt", "vtt", "txt"):
+                fmt = "srt"
+            srt_out = exports / f"{safe_name}.{fmt}"
             cues = []
             for s in segments:
                 if not s.get("maskOnly") and (str(s.get("translation") or s.get("source") or "")).strip():
@@ -112,7 +116,7 @@ def write_export_artifacts(
                         "end": float(s.get("end") or 0),
                         "text": (str(s.get("translation") or s.get("source") or "")).strip(),
                     })
-            write_srt(srt_out, cues, capcut=False)
+            write_subtitle(srt_out, cues, fmt, capcut=False)
         except Exception as se:
             print(f"[export] SRT export error: {se}", flush=True)
 

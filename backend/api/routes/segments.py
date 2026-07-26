@@ -36,6 +36,7 @@ from api.deps import (
 )
 from api.job_spawn import spawn
 from api.video_serve import serve_video_file
+from pipeline.core.project import apply_meta_patch
 from pipeline import (
     DATA,
     PUBLIC_DATA,
@@ -237,10 +238,13 @@ def api_create_compound(project_id: str, body: CompoundClipIn):
 
     # Mix TTS theo timeline compound (delay = start relative) — 1 file preview/export
     clips: list[tuple[Path, float]] = []
+    from pipeline.core.config import safe_child
+
     for ch in children:
         name = str(ch.get("audioFile") or f"{ch.get('id')}.wav")
-        p = tts_dir / name
-        if p.is_file() and p.stat().st_size > 64:
+        # audioFile đến từ client — chặn traversal trước khi đọc/mix
+        p = safe_child(tts_dir, name)
+        if p is not None and p.is_file() and p.stat().st_size > 64:
             clips.append((p, float(ch.get("start") or 0)))
 
     shell_id = f"cmp_{uuid.uuid4().hex[:12]}"
@@ -329,7 +333,8 @@ def api_create_compound(project_id: str, body: CompoundClipIn):
         s["index"] = i
 
     meta["segments"] = next_segs
-    save_meta(project_id, meta)
+    # Job dài (ffmpeg amix) — chỉ ghi segments + baseline, không nuốt thay đổi khác
+    apply_meta_patch(project_id, {"segments": next_segs}, remove=("timelineBaseline",))
     return {
         "ok": True,
         "mode": "compound",
@@ -389,6 +394,6 @@ def api_uncompound(project_id: str, seg_id: str):
         if isinstance(s, dict):
             s["index"] = i
     meta["segments"] = next_segs
-    save_meta(project_id, meta)
+    apply_meta_patch(project_id, {"segments": next_segs}, remove=("timelineBaseline",))
     return {"ok": True, "segments": next_segs, "restored": len(restored)}
 

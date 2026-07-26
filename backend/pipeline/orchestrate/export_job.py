@@ -187,7 +187,7 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
     # ── Fast path: chỉ xuất SRT (không cần render video) ──
     if do_srt and not do_video and not do_audio and not do_gif:
         try:
-            from pipeline.export.srt import write_srt
+            from pipeline.export.srt import write_subtitle
             _custom_dir = str(settings.get("exportOutputDir") or "").strip()
             _slug = _project_slug(meta)
             exports = (Path(_custom_dir) if _custom_dir else PUBLIC_DATA / "exports") / _slug
@@ -197,6 +197,8 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
             set_status(project_id, step="export", progress=50, message="Xuất chú thích (SRT)…", running=True)
             check_cancel(project_id)
             fmt = str(settings.get("exportSrtFormat") or "srt").lower()
+            if fmt not in ("srt", "vtt", "txt"):
+                fmt = "srt"
             cues = [
                 {"start": float(s.get("start") or 0), "end": float(s.get("end") or 0),
                  "text": (str(s.get("translation") or s.get("source") or "")).strip()}
@@ -210,7 +212,7 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
             if not safe_name:
                 safe_name = project_id
             srt_out     = exports / f"{safe_name}.{fmt}"
-            write_srt(srt_out, cues, capcut=False)
+            write_subtitle(srt_out, cues, fmt, capcut=False)
             (exports / f"{safe_name}.json").write_text(
                 json.dumps({"name": render_name, "projectId": project_id, "kind": "srt"}, ensure_ascii=False),
                 encoding="utf-8",

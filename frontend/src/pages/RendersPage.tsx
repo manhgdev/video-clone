@@ -147,8 +147,10 @@ export default function RendersPage({ onEdit }: { onEdit: (projectId: string) =>
                     onKeyDown={(event) => {
                       if (event.key === 'Enter') event.currentTarget.blur()
                       if (event.key === 'Escape') {
+                        // Thoát edit trực tiếp: blur() sẽ chạy saveName với
+                        // nameDraft cũ trong closure → vẫn đổi tên dù đã huỷ.
                         setNameDraft(renderName(item))
-                        event.currentTarget.blur()
+                        setEditingId(null)
                       }
                     }}
                   />

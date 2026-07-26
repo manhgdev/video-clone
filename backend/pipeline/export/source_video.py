@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from pipeline.core.media import ensure_preview_clip, meta_baked_speed, meta_has_user_bake
+from pipeline.core.media import ensure_preview_clip, meta_baked_speed, meta_has_user_bake, preview_clip_matches
 from pipeline.core.project import ensure_layout
 
 
@@ -37,7 +37,7 @@ def export_source_video(project_id: str, meta: dict[str, Any]) -> tuple[Path, in
         return source, 0
 
     # Preview N s
-    if use_work and f"preview_{preview_sec}" in work.name:
+    if use_work and preview_clip_matches(work.name, preview_sec):
         return work, preview_sec
     cache = ensure_layout(project_id) / "cache"
     if use_work or speed_off:

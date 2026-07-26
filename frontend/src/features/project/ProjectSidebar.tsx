@@ -27,6 +27,12 @@ import {
 } from '@/shared/components/Icons'
 import './ProjectSidebar.css'
 
+/** Số hợp lệ (kể cả 0) — tránh `|| default` nuốt mất giá trị 0. */
+function numOr(raw: unknown, fallback: number): number {
+  const n = Number(raw)
+  return Number.isFinite(n) ? n : fallback
+}
+
 type Props = {
   videoUrl: string | null
   settings: ProjectSettings
@@ -122,10 +128,11 @@ export default function Sidebar({
   const analysisRegion = clampRegion(
     settings.analysisRegion && typeof settings.analysisRegion === 'object'
       ? {
-          x: Number(settings.analysisRegion.x) || DEFAULT_ANALYSIS_REGION.x,
-          y: Number(settings.analysisRegion.y) || DEFAULT_ANALYSIS_REGION.y,
-          w: Number(settings.analysisRegion.w) || DEFAULT_ANALYSIS_REGION.w,
-          h: Number(settings.analysisRegion.h) || DEFAULT_ANALYSIS_REGION.h,
+          // ?? + isFinite: x/y = 0 là giá trị HỢP LỆ (mép trái/trên), `||` nuốt mất
+          x: numOr(settings.analysisRegion.x, DEFAULT_ANALYSIS_REGION.x),
+          y: numOr(settings.analysisRegion.y, DEFAULT_ANALYSIS_REGION.y),
+          w: numOr(settings.analysisRegion.w, DEFAULT_ANALYSIS_REGION.w),
+          h: numOr(settings.analysisRegion.h, DEFAULT_ANALYSIS_REGION.h),
         }
       : DEFAULT_ANALYSIS_REGION,
   )

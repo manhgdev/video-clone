@@ -141,6 +141,9 @@ export default function VoiceMetadataModal({
     setValidation('')
     try {
       await onSave(cleanName, tags, language, file)
+    } catch (err) {
+      // onSave re-throw → trước đây thành unhandled rejection, user không thấy gì
+      setValidation(err instanceof Error ? err.message : 'Không lưu được thông tin giọng')
     } finally {
       setSaving(false)
     }

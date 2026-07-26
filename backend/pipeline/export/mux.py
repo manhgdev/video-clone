@@ -7,6 +7,7 @@ Implementation split:
 from __future__ import annotations
 
 from .mux_audio import (  # noqa: F401
+    _bg_duck_expr,
     mux_dub,
     mux_original_audio,
     plan_video_slowdown_factor,

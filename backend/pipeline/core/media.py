@@ -722,8 +722,17 @@ def retime_video_segments(
                 ]
             else:
                 cmd += [*h264_encoder_args(fast=True), "-an"]
-            cmd += ["-map_metadata", "-1", "-map_chapters", "-1", str(out)]
-            run_cmd(project_id, cmd)
+            # Ghi tmp rồi rename: huỷ/crash giữa chừng để lại file cụt mà
+            # lần chạy sau vẫn coi là cache hợp lệ (gate chỉ check exists()).
+            tmp_out = out.with_name(f"{out.stem}.tmp{out.suffix}")
+            tmp_out.unlink(missing_ok=True)
+            cmd += ["-map_metadata", "-1", "-map_chapters", "-1", str(tmp_out)]
+            try:
+                run_cmd(project_id, cmd)
+                _atomic_replace(tmp_out, out)
+            except BaseException:
+                tmp_out.unlink(missing_ok=True)
+                raise
         finally:
             try:
                 fc_path.unlink(missing_ok=True)
@@ -795,6 +804,8 @@ def retime_audio_track(
     filters.append("".join(labels) + f"concat=n={len(labels)}:v=0:a=1[aout]")
     fc_path = cache_dir / f"retimed_audio_{key}_fc.txt"
     fc_path.write_text(";\n".join(filters) + "\n", encoding="utf-8")
+    tmp_out = out.with_name(f"{out.stem}.tmp{out.suffix}")
+    tmp_out.unlink(missing_ok=True)
     try:
         run_cmd(
             project_id,
@@ -812,9 +823,13 @@ def retime_audio_track(
                 "[aout]",
                 "-c:a",
                 "pcm_s16le",
-                str(out),
+                str(tmp_out),
             ],
         )
+        _atomic_replace(tmp_out, out)
+    except BaseException:
+        tmp_out.unlink(missing_ok=True)
+        raise
     finally:
         fc_path.unlink(missing_ok=True)
     return out

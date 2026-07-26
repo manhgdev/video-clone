@@ -36,6 +36,7 @@ from pipeline.ocr.locate import (
     ocr_mid_vertical,
 )
 from pipeline.translate import _clean_burn_text
+from pipeline.export.fonts import _subtitle_font
 
 # aliases — giữ tên cũ cho call sites / tests
 _clamp_label_box = clamp_label_box

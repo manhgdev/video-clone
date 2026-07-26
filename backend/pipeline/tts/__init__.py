@@ -1,7 +1,7 @@
 """TTS: VieNeu Local + CapCut + ElevenLabs + system (say/espeak)."""
 from __future__ import annotations
 
-from .eleven import EL_MODEL, EL_TTS_VER
+from .eleven import EL_MODEL, EL_TTS_VER, _el_lang_code, _el_voice_id
 from .manager import (
     CC_TTS_VER,
     engines_status,
@@ -22,6 +22,8 @@ __all__ = [
     "CC_TTS_VER",
     "EL_MODEL",
     "EL_TTS_VER",
+    "_el_lang_code",
+    "_el_voice_id",
     "engines_status",
     "list_voices",
     "resolve_voice",

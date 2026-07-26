@@ -23,6 +23,28 @@ def ensure_data_dirs() -> None:
     PUBLIC_DATA.mkdir(parents=True, exist_ok=True)
 
 
+def safe_child(base: Path, name: str) -> Path | None:
+    """Path con hợp lệ trong base — chặn traversal (.., /, \\, tên tuyệt đối).
+
+    Windows coi cả '\\' là separator, và uvicorn percent-decode '%5C' TRƯỚC khi
+    routing, nên path param có thể chứa '..\\..\\'. Trả None khi không an toàn.
+    """
+    raw = (name or "").strip()
+    if not raw or raw in (".", ".."):
+        return None
+    if "/" in raw or "\\" in raw or "\x00" in raw:
+        return None
+    candidate = base / raw
+    try:
+        resolved = candidate.resolve()
+        base_resolved = base.resolve()
+    except OSError:
+        return None
+    if resolved != base_resolved and base_resolved not in resolved.parents:
+        return None
+    return candidate
+
+
 def export_display_path(path: Path) -> str:
     """Đường dẫn hiển thị: app desktop = full path; dev = backend/public/… trong repo."""
     resolved = path.resolve()

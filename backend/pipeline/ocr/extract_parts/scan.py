@@ -289,7 +289,7 @@ def _ocr_scan_stamps(
                         continue
                     snap = frame.copy()
                     for i, t in targets[start]:
-                        pending.add(pool.submit(_job, i, t, snap))
+                        pending.add(pool.submit(_worker, (i, t, snap)))
                 else:
                     cap.set(cv2.CAP_PROP_POS_FRAMES, float(start))
                     got = int(cap.get(cv2.CAP_PROP_POS_FRAMES) or -1)
@@ -304,7 +304,7 @@ def _ocr_scan_stamps(
                             continue
                         snap = frame.copy()
                         for i, t in hits:
-                            pending.add(pool.submit(_job, i, t, snap))
+                            pending.add(pool.submit(_worker, (i, t, snap)))
                         if len(pending) >= w * 2:
                             done, pending = wait(pending, return_when=FIRST_COMPLETED)
                             _collect(done)

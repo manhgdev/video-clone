@@ -303,9 +303,14 @@ def render_burned_video(
     import threading
     from queue import Empty, Queue
 
-    batch_n = max(48, workers * 20)
+    # Trần theo BYTE, không theo số frame: 4K 16 worker từng giữ hàng chục GB
+    # (16 batch × 320 frame × 24MB). Giới hạn ~1.5GB frame đã paint đang chờ ghi.
+    frame_bytes_est = max(1, int(w) * int(h) * 3)
+    queue_budget = 1_500_000_000
+    batch_n = max(8, min(max(48, workers * 20), queue_budget // (frame_bytes_est * 4)))
     # Queue sâu hơn → NVENC ít bị đói khi paint/CPU chậm hơn encode
-    painted_q: Queue[list[bytes] | None] = Queue(maxsize=max(4, min(16, workers * 2)))
+    max_batches = max(2, min(16, queue_budget // max(1, frame_bytes_est * batch_n)))
+    painted_q: Queue[list[bytes] | None] = Queue(maxsize=max(2, min(max_batches, workers * 2)))
     read_err: list[BaseException] = []
     # ~50 cập nhật / video (theo batch, không theo frame — tránh status_every = frame_total//N
     # khiến gần như không bao giờ % khớp và UI kẹt «Dùng vùng che…»).

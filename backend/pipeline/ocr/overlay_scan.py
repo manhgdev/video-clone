@@ -11,7 +11,7 @@ import threading
 from pathlib import Path
 from typing import Any, Callable
 
-from ..core.jobs import check_cancel
+from ..core.jobs import Cancelled, check_cancel
 from ..core.resources import progress_msg
 from .cover_timing import attach_cover_times
 from .extract import (
@@ -829,7 +829,17 @@ def run_overlay_ocr(
             mid = _ensure_cover_times(mid, video_end=vend)
             vert = _ensure_cover_times(vert, video_end=vend)
             labels = _ensure_cover_times(labels, video_end=vend)
-    except Exception:
+    except Cancelled:
+        # Huỷ job là ý người dùng — phải nổi lên để orchestrator dừng đúng cách,
+        # không nuốt thành "quét xong, 0 kết quả".
+        raise
+    except Exception as scan_err:
+        try:
+            from pipeline.core.app_log import append_exception
+
+            append_exception("[overlay-scan] failed", scan_err)
+        except Exception:
+            pass
         mid, vert, labels = [], [], []
 
     return mid, vert, labels

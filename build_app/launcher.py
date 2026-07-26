@@ -171,8 +171,23 @@ if bundled_voice_refs.is_dir():
         if not source.is_file():
             continue
         target = user_voice_refs / source.name
-        if not target.exists() or source.stat().st_mtime > target.stat().st_mtime:
+        # ONEFILE giải nén lại mỗi lần chạy → mtime nguồn LUÔN mới hơn, so mtime
+        # sẽ ghi đè file người dùng đã sửa. Chỉ seed khi target chưa có, hoặc
+        # nội dung khác và target chưa từng bị sửa (cùng size = bản seed cũ).
+        if not target.exists():
             shutil.copy2(source, target)
+            (user_voice_refs / f".{source.name}.seeded").touch()
+            continue
+        try:
+            if source.stat().st_size != target.stat().st_size:
+                # Bản bundle đổi nội dung: chỉ ghi đè khi user chưa sửa gì
+                # (đánh dấu bằng file .seeded cạnh bên).
+                marker = user_voice_refs / f".{source.name}.seeded"
+                if marker.is_file():
+                    shutil.copy2(source, target)
+                    marker.touch()
+        except OSError:
+            pass
 
 # Ẩn cửa sổ console đen khi app GUI spawn ffmpeg / demucs / nvidia-smi
 if sys.platform == "win32":

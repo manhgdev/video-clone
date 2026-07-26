@@ -134,10 +134,20 @@ def api_tts_studio_history():
     return list_history(50)
 
 
+def _job_dir(job_id: str) -> Path:
+    """Thư mục job đã kiểm traversal — job_id đến từ URL path param."""
+    from pipeline.core.config import safe_child
+
+    path = safe_child(TTS_OUTPUT, job_id)
+    if path is None:
+        raise HTTPException(400, "job_id không hợp lệ")
+    return path
+
+
 @router.get("/api/tts/studio/jobs/{job_id}/audio.wav")
 def api_tts_studio_audio(job_id: str, download: int = 0):
     """Phát inline (mặc định). ?download=1 → tải file."""
-    path = TTS_OUTPUT / job_id / "audio.wav"
+    path = _job_dir(job_id) / "audio.wav"
     if not path.is_file():
         raise HTTPException(404, "Không thấy audio")
     return FileResponse(
@@ -152,6 +162,7 @@ def api_tts_studio_audio(job_id: str, download: int = 0):
 def api_tts_studio_mp3(job_id: str, download: int = 0):
     from pipeline.tts.studio import ensure_mp3
 
+    _job_dir(job_id)
     try:
         path = ensure_mp3(job_id)
     except FileNotFoundError:
@@ -173,15 +184,16 @@ def api_tts_studio_srt(job_id: str, style: str = "hard"):
 
     if style not in SRT_STYLES:
         raise HTTPException(400, f"style phải là một trong: {', '.join(SRT_STYLES)}")
+    job_dir = _job_dir(job_id)
     if style == "hard":
-        path = TTS_OUTPUT / job_id / "subs.srt"
+        path = job_dir / "subs.srt"
         if not path.is_file():
             try:
                 from pipeline.tts.studio import ensure_zip
                 ensure_zip(job_id)
             except Exception:
                 pass
-            path = TTS_OUTPUT / job_id / "subs.srt"
+            path = job_dir / "subs.srt"
     else:
         try:
             path = rebuild_srt(job_id, style)
@@ -218,7 +230,7 @@ def api_tts_studio_cancel(job_id: str):
 
 @router.delete("/api/tts/studio/jobs/{job_id}")
 def api_tts_studio_delete(job_id: str):
-    path = TTS_OUTPUT / job_id
+    path = _job_dir(job_id)
     if path.is_dir():
         shutil.rmtree(path, ignore_errors=True)
     return {"ok": True}

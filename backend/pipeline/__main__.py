@@ -35,13 +35,18 @@ def _self_check() -> None:
         "Bạn даже не осмеливаетесь смотреть",
         target_lang="vi",
     )
-    assert _bg_duck_expr([]) == "0.35"
-    assert _bg_duck_expr([{"start": 1, "end": 2}]) == "if(between(t\\,1.000\\,2.000)\\,0.12\\,0.35)"
+    # volume= expr dùng 4 chữ số thập phân (ffmpeg parse ổn định hơn)
+    assert _bg_duck_expr([]) == "0.3500"
+    assert (
+        _bg_duck_expr([{"start": 1, "end": 2}])
+        == "if(between(t\\,1.000\\,2.000)\\,0.1200\\,0.3500)"
+    )
     assert preview_tag(20) == "p20" and preview_tag(0) == "full"
-    # cover chỉ bám OCR — text_box lớn không phình ROI
+    # mode over (tight=True): cover chỉ bám OCR — text_box lớn không phình ROI.
+    # tight=False cố ý nới theo caption (below/above nằm NGOÀI dải che).
     ocr = [(100, 400, 300, 440)]
     huge = (50, 200, 900, 700)
-    fit = _cover_box_fit(ocr, huge, 1080, 1920)
+    fit = _cover_box_fit(ocr, huge, 1080, 1920, tight=True)
     assert fit is not None
     fx0, fy0, fx1, fy1 = fit
     assert fx1 - fx0 <= (300 - 100) + 20 + 2  # pad_x*2

@@ -36,6 +36,7 @@ from api.deps import (
 )
 from api.job_spawn import spawn
 from api.video_serve import serve_video_file
+from pipeline.core.project import apply_meta_patch
 from pipeline import (
     DATA,
     PUBLIC_DATA,
@@ -304,7 +305,18 @@ def api_rebake_speed(project_id: str, body: RebakeSpeedIn):
                     "prevBakedSpeed": old,
                 }
             meta["speedRevision"] = int(req_rev)
-        save_meta(project_id, meta)
+        # Patch theo key (không ghi đè cả snapshot): bake chạy vài phút, PUT
+        # segments/overlays hoặc set_status trong lúc đó không được bị nuốt.
+        _rebake_keys = (
+            "segments", "overlays", "timelineBaseline", "bakedSpeed",
+            "workVideo", "timelineClock", "speedRevision", "duration",
+            "workDuration", "bakedPreferVideo",
+        )
+        apply_meta_patch(
+            project_id,
+            {k: meta[k] for k in _rebake_keys if k in meta},
+            remove=tuple(k for k in ("bakedPreferVideo", "workDuration") if k not in meta),
+        )
     except Cancelled as e:
         set_status(
             project_id,
@@ -449,10 +461,14 @@ def api_save_settings(project_id: str, settings: Settings):
     old_default = (meta.get("settings") or {}).get("defaultVoice") or ""
     meta["settings"] = settings.model_dump()
     new_default = settings.defaultVoice or ""
-    # đổi giọng mặc định → đồng bộ đoạn đang inherit (system / default cũ)
+    # đổi giọng mặc định → CHỈ đồng bộ đoạn đang kế thừa (rỗng / system /
+    # default cũ). Giọng user gán riêng từng câu phải giữ nguyên — khớp
+    # api_dub (jobs.py) vốn đã tôn trọng lựa chọn riêng.
     if new_default and new_default != old_default:
         for seg in meta.get("segments") or []:
-            seg["voice"] = new_default
+            current = (seg.get("voice") or "").strip()
+            if not current or current == "system" or current == old_default:
+                seg["voice"] = new_default
     save_meta(project_id, meta)
     return {"ok": True, "settings": meta["settings"]}
 
