@@ -74,13 +74,83 @@ def _ocr_semaphore() -> threading.Semaphore:
     return _ocr_sem
 
 
+def engine_providers(engine: object) -> list[str]:
+    """Providers THAT cua session ONNX ben trong RapidOCR (det/cls/rec).
+
+    _rapidocr_gpu_kwargs() chi noi «da YEU CAU cuda»; ham nay doc thiet bi
+    session thuc su dung — dung de bao GPU/CPU cho nguoi dung.
+    """
+    out: list[str] = []
+    for name in ("text_det", "text_cls", "text_rec"):
+        node = getattr(engine, name, None)
+        for attr in ("session", "sess", "infer", "ort_session"):
+            node2 = getattr(node, attr, None) if node is not None else None
+            if node2 is None:
+                continue
+            sess = getattr(node2, "session", node2)
+            get = getattr(sess, "get_providers", None)
+            if callable(get):
+                try:
+                    out.extend(get())
+                except Exception:
+                    pass
+                break
+    return out
+
+
+def engine_device_label(engine: object) -> str:
+    """'GPU' khi session chay CUDA/TensorRT, nguoc lai 'CPU'."""
+    provs = engine_providers(engine)
+    if any("CUDA" in p or "Tensorrt" in p or "TensorRT" in p for p in provs):
+        return "GPU"
+    return "CPU"
+
+
 def _limit_onnx_threads() -> None:
-    """ONNX/OpenMP 1 thread / process — fan-out bằng pool, không nhân core."""
+    """ONNX/OpenMP 1 thread / process — fan-out bằng pool, không nhân core.
+
+    LƯU Ý: các biến này chỉ ăn cho BLAS/OpenMP. ONNX Runtime KHÔNG đọc env
+    (không có ORT_NUM_THREADS) — phải set qua SessionOptions, xem _ort_threads().
+    """
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     os.environ.setdefault("MKL_NUM_THREADS", "1")
     os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
     os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
-    os.environ.setdefault("ORT_NUM_THREADS", "1")
+    try:
+        import cv2
+
+        # OpenCV mặc định dùng MỌI core cho resize/threshold khi tiền xử lý ảnh
+        # → treo máy dù OCR chạy GPU.
+        cv2.setNumThreads(_cv2_thread_cap())
+    except Exception:
+        pass
+
+
+def _cv2_thread_cap() -> int:
+    """OpenCV: tối đa 2 luồng — phần nặng đã ở GPU/ffmpeg."""
+    try:
+        cores = os.cpu_count() or 4
+    except Exception:
+        cores = 4
+    return max(1, min(2, cores - 1))
+
+
+def _ort_threads(use_cuda: bool) -> dict[str, int]:
+    """Số luồng CPU cho ONNX Runtime.
+
+    Mặc định của RapidOCR là -1 = ORT tự lấy HẾT core (12 core → 12 luồng busy),
+    khiến máy đơ dù model chạy CUDA. GPU: 2 luồng đủ cho op fallback + I/O.
+    CPU-only: chừa lại ~1/3 số core cho UI/ffmpeg.
+    """
+    try:
+        cores = os.cpu_count() or 4
+    except Exception:
+        cores = 4
+    if use_cuda:
+        n = 2
+    else:
+        n = max(1, int(cores * 0.6))
+    return {"intra_op_num_threads": n, "inter_op_num_threads": 1}
 
 
 def _nvidia_bin_dirs() -> list[Path]:
@@ -264,6 +334,7 @@ def _rapidocr_labels(*, use_cuda: bool | None = None) -> Any:
     )
     return RapidOCR(
         **gpu_kwargs,
+        **_ort_threads(bool(gpu_kwargs.get("det_use_cuda"))),
         box_thresh=0.3,
         thresh=0.2,
         text_score=0.3,
@@ -316,4 +387,6 @@ __all__ = [
     'prepare_cuda_dlls',
     '_rapidocr_labels',
     '_rapidocr_gpu_kwargs',
+    'engine_providers',
+    'engine_device_label',
 ]

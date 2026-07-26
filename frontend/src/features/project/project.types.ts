@@ -110,13 +110,14 @@ export type ProjectSettings = {
   /** true khi bấm Lồng tiếng — server xóa cache TTS và gen lại */
   forceTts?: boolean
   /**
-   * Định vị hardsub ổn định (OCR đầu•giữa•cuối + majority).
-   * Tắt = nhanh hơn (1 frame/mốc, dễ nhảy vị trí).
+   * Bật khung giới hạn vùng định vị (analysisRegion bên dưới).
+   * Tên field giữ nguyên để không vỡ cấu hình đã lưu; chế độ OCR
+   * «đầu•giữa•cuối» đã bỏ — mọi lần định vị đều dùng 1 frame/mốc.
    */
   stableCaptionLocate: boolean
   /**
    * Vùng phân tích OCR (0–1, theo khung video).
-   * Chỉ dùng khi stableCaptionLocate bật — thu hẹp ROI, nhanh + ít nhiễu.
+   * Chỉ dùng khi bật khung giới hạn — thu hẹp ROI, nhanh + ít nhiễu.
    */
   analysisRegion?: { x: number; y: number; w: number; h: number } | null
   /** Che hardsub cũ (blur). Tắt = giữ chữ OCR trên khung */
