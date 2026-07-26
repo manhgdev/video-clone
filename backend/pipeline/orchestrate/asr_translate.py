@@ -493,6 +493,10 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                         status_workers=locate_w,
                     )
                     locate_ok = True
+                except Cancelled:
+                    # Huỷ là ý người dùng — phải nổi lên để job dừng hẳn,
+                    # không biến thành "Bỏ định vị OCR" rồi chạy tiếp.
+                    raise
                 except BaseException as ocr_e:
                     # BaseException: bắt cả lỗi lạ; không để kill thread/app
                     n_box = 0

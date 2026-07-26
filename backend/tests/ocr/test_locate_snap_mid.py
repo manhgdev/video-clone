@@ -6,15 +6,30 @@ import sys
 from pipeline.ocr.locate import (
     _apply_caption_box,
     _layout_from_cy,
+    _python_can_ocr,
     _snap_inherited_y,
     _uv_run_cmd,
 )
 from pipeline.ocr.overlay_cover import mid_bottom_cutoff
 
 
-def test_dev_locate_uses_clean_python_process():
-    if not getattr(sys, "frozen", False):
-        assert _uv_run_cmd() == [sys.executable]
+def test_dev_locate_worker_python_can_run_ocr():
+    """Worker OCR phải chạy bằng interpreter CÓ rapidocr/cv2 (ưu tiên CUDA).
+
+    Trước đây dùng thẳng sys.executable: server khởi động ngoài .venv thì worker
+    rơi vào Python hệ thống thiếu gói → OCR âm thầm chạy CPU hoặc trả 0 box.
+    """
+    if getattr(sys, "frozen", False):
+        return
+    cmd = _uv_run_cmd()
+    assert cmd and len(cmd) == 1, cmd
+    exe = cmd[0]
+    can_ocr, _cuda = _python_can_ocr(exe)
+    # Máy CI không cài rapidocr: chấp nhận fallback sys.executable
+    assert can_ocr or exe == sys.executable, exe
+    if _python_can_ocr(sys.executable)[0]:
+        # sys.executable đủ điều kiện → phải ưu tiên nó (process sạch, ít bất ngờ)
+        assert exe == sys.executable
 
 
 def test_snap_skips_mid_and_non_bottom_anchor():

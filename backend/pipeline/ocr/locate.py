@@ -11,7 +11,9 @@ from pathlib import Path
 from typing import Any
 
 import threading
+from functools import lru_cache
 
+from ..core.jobs import check_cancel
 from .extract import _ocr_join_lines, _rapidocr_labels
 from .labels import pick_label_box
 from .overlay_cover import mid_bottom_cutoff
@@ -38,6 +40,74 @@ def _spread_probes(items: list[dict[str, Any]], limit: int) -> list[dict[str, An
     return [items[i] for i in indices]
 
 
+def _python_can_ocr(exe: str) -> tuple[bool, bool]:
+    """(chay duoc OCR, co CUDA) — probe that trong tien trinh rieng."""
+    try:
+        proc = subprocess.run(
+            [
+                exe,
+                "-c",
+                "import cv2, rapidocr_onnxruntime, onnxruntime as ort;"
+                "print('CUDAExecutionProvider' in ort.get_available_providers())",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=90,
+            creationflags=(
+                int(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
+                if sys.platform == "win32"
+                else 0
+            ),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False, False
+    if proc.returncode != 0:
+        return False, False
+    return True, "True" in (proc.stdout or "")
+
+
+@lru_cache(maxsize=1)
+def _dev_worker_python() -> str:
+    """Interpreter chay worker OCR (dev).
+
+    sys.executable co the la Python he thong (khong co rapidocr/cv2, chi ORT CPU)
+    khi server duoc khoi dong ngoai .venv — khi do OCR am tham chay CPU hoac
+    tra 0 box. Uu tien interpreter co du goi VA co CUDA.
+    """
+    repo_backend = Path(__file__).resolve().parents[2]
+    bin_dir = "Scripts" if sys.platform == "win32" else "bin"
+    exe_name = "python.exe" if sys.platform == "win32" else "python"
+    candidates: list[str] = [sys.executable]
+    for venv in (repo_backend / ".venv", repo_backend.parent / ".venv"):
+        cand = venv / bin_dir / exe_name
+        if cand.is_file() and str(cand) not in candidates:
+            candidates.append(str(cand))
+
+    usable: list[str] = []
+    for exe in candidates:
+        ok, cuda = _python_can_ocr(exe)
+        if ok and cuda:
+            if exe != sys.executable:
+                _log_worker_python(exe, "GPU")
+            return exe
+        if ok:
+            usable.append(exe)
+    if usable:
+        # Khong co CUDA o dau — chay CPU nhung phai bao ro, dung im lang.
+        _log_worker_python(usable[0], "CPU (khong thay CUDAExecutionProvider)")
+        return usable[0]
+    return sys.executable
+
+
+def _log_worker_python(exe: str, mode: str) -> None:
+    try:
+        from pipeline.core.app_log import append_log
+
+        append_log(f"[locate] worker python={exe} -> {mode}")
+    except Exception:
+        pass
+
+
 def _uv_run_cmd() -> list[str] | None:
     """Trả prefix command [uv, run, --python, venv_path] để chạy worker
     trong .venv-runtime mà không phụ thuộc vào system Python đã cài.
@@ -45,7 +115,7 @@ def _uv_run_cmd() -> list[str] | None:
     if not getattr(sys, "frozen", False):
         # Keep RapidOCR/ONNX in a clean process: CTranslate2 Whisper may have
         # already loaded an incompatible cuDNN DLL into the server process.
-        return [sys.executable]
+        return [_dev_worker_python()]
     home = (os.environ.get("VIDEO_CLONE_HOME") or "").strip()
     if not home:
         if sys.platform == "win32":
@@ -185,7 +255,32 @@ Path(sys.argv[3]).write_text(
             }
             if sys.platform == "win32":
                 kw["creationflags"] = int(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
-            proc = subprocess.run(cmd, **kw)
+            # Popen + register: «Huỷ» phải giết được worker (subprocess.run
+            # không đăng ký nên worker OCR cứ chạy tiếp, ăn CPU sau khi huỷ).
+            from pipeline.core.jobs import (
+                is_cancelled,
+                kill_process_tree,
+                register_process,
+                unregister_process,
+            )
+
+            kw.pop("capture_output", None)
+            popen_kw = dict(kw)
+            popen_kw.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            timeout_s = popen_kw.pop("timeout", 900)
+            proc_h = subprocess.Popen(cmd, **popen_kw)
+            register_process(project_id, proc_h)
+            try:
+                out_s, err_s = proc_h.communicate(timeout=timeout_s)
+            except subprocess.TimeoutExpired:
+                kill_process_tree(proc_h)
+                out_s, err_s = "", "timeout"
+            finally:
+                unregister_process(project_id, proc_h)
+            if project_id and is_cancelled(project_id):
+                kill_process_tree(proc_h)
+                return -1
+            proc = subprocess.CompletedProcess(cmd, proc_h.returncode, out_s, err_s)
             if proc.returncode != 0 or not pout.is_file():
                 err = (proc.stderr or proc.stdout or "")[-1500:]
                 try:
@@ -949,6 +1044,11 @@ def attach_speech_hardsub_boxes(
         project_id=project_id,
         status_workers=status_workers,
     )
+    if project_id:
+        from pipeline.core.jobs import Cancelled as _C, is_cancelled as _isc
+
+        if _isc(project_id):
+            raise _C("locate cancelled")
     if n == 0 and analysis_region:
         # A stale/manual ROI can miss the actual subtitle band completely.
         # Retry once on the full frame before allowing the UI to use a bottom fallback.
@@ -967,6 +1067,13 @@ def attach_speech_hardsub_boxes(
             project_id=project_id,
             status_workers=status_workers,
         )
+    # Worker bi kill boi «Huy» -> KHONG duoc fallback chay lai in-process
+    # (dung nguyen nhan "huy roi CPU van chay").
+    if project_id:
+        from pipeline.core.jobs import Cancelled, is_cancelled
+
+        if is_cancelled(project_id):
+            raise Cancelled("locate cancelled")
     if n is not None and n >= 0:
         return n
     if getattr(sys, "frozen", False):
@@ -1091,13 +1198,18 @@ def attach_speech_hardsub_boxes_inprocess(
         _ensure_cover_times(segments, video_end)
         return n
 
-    def _read_probe(
-        t: float, src: str, lay: str
-    ) -> tuple[float, float, tuple[int, int, int, int], str] | None:
+    def _read_frame_at(t: float) -> Any | None:
+        """Seek + decode 1 frame - chi chay TUAN TU tren main thread (cv2 khong thread-safe)."""
         cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, t) * 1000.0)
         ok, frame = cap.read()
-        if not ok:
-            return None
+        return frame if ok else None
+
+    # MOT engine dung chung, OCR tuan tu. Do thuc te tren GTX 1660S: 4 session
+    # RapidOCR CUDA song song = 98s cho 3 probe, 1 session = 2.4s (tranh chap
+    # cuDNN + VRAM). Toc do den tu prefetch decode chu khong phai da luong OCR.
+    def _ocr_probe(
+        t: float, frame: Any, src: str, lay: str
+    ) -> tuple[float, float, tuple[int, int, int, int], str] | None:
         hit = _probe_mid_hardsub(
             frame,
             ocr,
@@ -1154,45 +1266,94 @@ def attach_speech_hardsub_boxes_inprocess(
     )
     total = len(probes)
     anchor_boxes: list[tuple[int, int, int, int]] = []
+    # Gom job (probe, moc thoi gian): quick = 1 frame giua cue; stable = 3 moc.
+    probe_meta: list[tuple[str, str]] = []
+    jobs: list[tuple[int, float]] = []
+    for si, seg in enumerate(probes):
+        s0 = float(seg.get("start") or 0)
+        e0 = float(seg.get("end") or s0)
+        if e0 <= s0:
+            e0 = s0 + 0.4
+        probe_meta.append(
+            (str(seg.get("source") or "").strip(), str(seg.get("layout") or "horizontal"))
+        )
+        if stable:
+            for t in _sample_times_in_cue(s0, e0):
+                jobs.append((si, t))
+        else:
+            jobs.append((si, s0 + max(0.2, e0 - s0) * 0.5))
+
+    # Prefetch decode: 1 thread doc/seek frame truoc (cv2 chi dung trong thread
+    # nay - khong thread-safe), main thread OCR. Decode chong len OCR thay vi
+    # noi tiep => nhanh hon ma GPU van 1 session duy nhat.
+    hits_by_probe: dict[
+        int, list[tuple[float, tuple[float, float, tuple[int, int, int, int], str]]]
+    ] = {}
+    jobs_per_probe: dict[int, int] = {}
+    for si, _t in jobs:
+        jobs_per_probe[si] = jobs_per_probe.get(si, 0) + 1
+    done_per_probe: dict[int, int] = {}
+    done_probes = 0
     try:
+        import queue as _queue
+
+        frame_q: _queue.Queue = _queue.Queue(maxsize=3)
+        decode_err: list[BaseException] = []
+
+        def _decoder() -> None:
+            try:
+                for si, t in jobs:
+                    check_cancel(project_id)
+                    frame_q.put((si, t, _read_frame_at(t)))
+            except BaseException as e:  # noqa: BLE001 - day len main thread
+                decode_err.append(e)
+            finally:
+                frame_q.put(None)
+
+        dec_thread = threading.Thread(
+            target=_decoder, name="ocr-locate-decode", daemon=True
+        )
+        dec_thread.start()
+        while True:
+            item = frame_q.get()
+            if item is None:
+                break
+            si, t, fr = item
+            check_cancel(project_id)
+            if fr is not None:
+                try:
+                    hit = _ocr_probe(t, fr, *probe_meta[si])
+                except Exception:
+                    hit = None
+                if hit:
+                    hits_by_probe.setdefault(si, []).append((t, hit))
+            done_per_probe[si] = done_per_probe.get(si, 0) + 1
+            if done_per_probe[si] == jobs_per_probe[si]:
+                done_probes += 1
+                _report(min(done_probes, total), total)
+        dec_thread.join(timeout=5)
+        if decode_err:
+            raise decode_err[0]
+
         for si, seg in enumerate(probes):
-            _report(si + 1, total)
-            s0 = float(seg.get("start") or 0)
-            e0 = float(seg.get("end") or s0)
-            if e0 <= s0:
-                e0 = s0 + 0.4
-            src = str(seg.get("source") or "").strip()
-            dur = max(0.2, e0 - s0)
+            ordered_hits = [
+                h for _t, h in sorted(hits_by_probe.get(si, []), key=lambda x: x[0])
+            ]
+            src = probe_meta[si][0]
             if stable:
-                # 3 frame × majority — chống OCR nhảy lung tung
-                hits: list[tuple[float, float, tuple[int, int, int, int], str]] = []
-                raw_hits: list[tuple[float, float, tuple[int, int, int, int], str]] = []
-                for t in _sample_times_in_cue(s0, e0):
-                    hit = _read_probe(t, src, seg.get("layout") or "horizontal")
-                    if not hit:
-                        continue
-                    raw_hits.append(hit)
+                # 3 frame x majority - fits-filter truoc, fallback raw hits
+                # (giu nguyen hanh vi tuan tu cu).
+                hits = []
+                for hit in ordered_hits:
                     box = hit[2]
                     probe_bb = {"w": box[2] - box[0], "h": box[3] - box[1]}
                     if _bbox_fits_source(probe_bb, src, fw):
                         hits.append(hit)
-                # Avoid OCR'ing the same three frames a second time when all
-                # detections fail the width heuristic; raw hits are a safe
-                # fallback and preserve the previous behavior.
                 if not hits:
-                    hits = raw_hits
+                    hits = ordered_hits
                 stable_box = _stable_box_from_hits(hits, fw=fw, fh=fh)
             else:
-                # 1 frame giữa cue
-                hit = _read_probe(s0 + dur * 0.5, src, seg.get("layout") or "horizontal")
-                stable_box = None
-                if hit:
-                    box = hit[2]
-                    probe_bb = {"w": box[2] - box[0], "h": box[3] - box[1]}
-                    if _bbox_fits_source(probe_bb, src, fw):
-                        stable_box = box
-                    else:
-                        stable_box = box  # vẫn dùng nếu OCR có hit
+                stable_box = ordered_hits[0][2] if ordered_hits else None
             if stable_box is None:
                 continue
             _apply_caption_box(seg, stable_box, fw, fh)
