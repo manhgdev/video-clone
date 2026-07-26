@@ -283,6 +283,14 @@ def run_dub(project_id: str, *, finalize: bool = True, nested: bool = False) -> 
                 seg["audioFile"] = job["name"]
                 seg["audioUrl"] = f"/api/projects/{project_id}/tts/{job['name']}"
                 seg["audioDuration"] = dur
+        # Fit contract: TTS phát TỰ NHIÊN trên clock hiện tại (ttsBake). Đổi bake
+        # sau khi dub → playback scale theo bake/ttsBake (dubMath + mux_audio).
+        from pipeline.core.media import meta_baked_speed
+
+        bake_now = meta_baked_speed(meta)
+        for seg in segments:
+            if seg.get("audioFile") or float(seg.get("audioDuration") or 0) > 0.05:
+                seg["ttsBake"] = bake_now
         # TTS dài hơn cửa sổ câu → videoSpeed < 1 (kéo dài span, đẩy câu sau).
         # Export gọi retime_video_segments — không cascade cắt audio.
         n_stretch = assign_tts_fit_speeds(segments, match=match)

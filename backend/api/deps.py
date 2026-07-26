@@ -76,6 +76,8 @@ class SegmentIn(BaseModel):
     videoSpeed: float | None = None
     ttsVolume: float | None = None
     ttsSpeed: float | None = None
+    # Bake speed tại thời điểm fit TTS — playback = ttsSpeed × (bake hiện tại / ttsBake)
+    ttsBake: float | None = None
     fontSize: int | None = None
     fontFamily: str | None = Field(
         default=None,

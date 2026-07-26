@@ -9,15 +9,20 @@ export function dubManualSpeed(seg: Segment): number {
 
 /**
  * playbackRate TTS thật khi preview.
- * File wav luôn 1×; timeline đã scale theo bake → phải * bakedSpeed
- * (0.8 bake → TTS chậm 0.8×, dài gấp 1.25; 2× bake → TTS nhanh 2×).
+ * TTS tự nhiên trên clock đã fit (seg.ttsBake = bake lúc Lồng tiếng);
+ * chỉ scale theo bake/ttsBake khi user đổi tốc độ SAU khi dub.
+ * Segment cũ không có ttsBake → mặc định 1 (giữ hành vi ×bake cũ).
  */
 export function dubPlaybackSpeed(seg: Segment, bakedSpeed = 1): number {
   const bake =
     typeof bakedSpeed === 'number' && bakedSpeed > 0.2
       ? Math.max(0.5, Math.min(2, bakedSpeed))
       : 1
-  return Math.max(0.5, Math.min(2, dubManualSpeed(seg) * bake))
+  const fit =
+    typeof seg.ttsBake === 'number' && seg.ttsBake > 0.2 && seg.ttsBake <= 2.5
+      ? seg.ttsBake
+      : 1
+  return Math.max(0.5, Math.min(2, dubManualSpeed(seg) * (bake / fit)))
 }
 
 /**

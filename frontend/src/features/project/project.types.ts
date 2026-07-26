@@ -25,6 +25,8 @@ export type Segment = {
   videoSpeed?: number
   ttsVolume?: number
   ttsSpeed?: number
+  /** Bake speed lúc fit TTS — playback = ttsSpeed × (bake hiện tại / ttsBake) */
+  ttsBake?: number
   /** Cỡ chữ phụ đề riêng đoạn (px); 0 = theo cài đặt dự án / tự động */
   fontSize?: number
   /** Phông chữ riêng đoạn; bỏ trống = theo cài đặt dự án. */

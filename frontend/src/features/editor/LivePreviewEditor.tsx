@@ -6330,8 +6330,9 @@ export default function LivePreviewEditor({
                           const draftX = formatSpeedX(speedDraft)
                           const fileX = formatSpeedX(appliedSpeedX)
                           const draftMatchesFile = Math.abs(speedDraft - appliedSpeedX) < 0.005
-                          // Mặc định ban đầu theo Khớp thời lượng: preferVideo → 0.80×
-                          const defaultSpeedX = settings.matchDuration === 'preferVideo' ? 0.8 : 1
+                          // Mặc định timeline luôn 1.00× — preferVideo chỉ phân tích ở 0.8
+                          // rồi tự nâng về 1× khi Dịch xong (asr_translate).
+                          const defaultSpeedX = 1
                           const atDefault =
                             Math.abs(appliedSpeedX - defaultSpeedX) < 0.005
                             && Math.abs(speedDraft - defaultSpeedX) < 0.005

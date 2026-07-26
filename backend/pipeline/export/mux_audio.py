@@ -103,6 +103,21 @@ def _atempo_chain(ratio: float) -> str:
     return atempo_chain(ratio)
 
 
+def _tts_bake_ratio(bake: float, tts_bake: Any) -> float:
+    """TTS tự nhiên trên clock đã fit (ttsBake); scale theo chênh lệch bake sau dub.
+
+    Segment cũ không có ttsBake (dub thời 1×) → mặc định 1 = hành vi cũ (× bake).
+    """
+    try:
+        fit = float(tts_bake or 0)
+    except (TypeError, ValueError):
+        fit = 0.0
+    if not (0.2 < fit <= 2.5):
+        fit = 1.0
+    b = float(bake or 1.0)
+    return max(0.25, min(4.0, b / fit))
+
+
 def plan_video_slowdown_factor(
     segments: list[dict[str, Any]],
     root: Path,
@@ -181,9 +196,10 @@ def _tts_clip_plan(
         else:
             # câu cuối / sau retime: đủ chỗ full TTS
             slot0 = max(0.15, ad + 0.15 if ad > 0.05 else end - start + 0.12)
-        # Lồng tiếng: manual * bake (khớp frontend dubPlaybackSpeed)
+        # Lồng tiếng: manual × (bake / ttsBake) — khớp frontend dubPlaybackSpeed.
+        # TTS tự nhiên trên clock đã fit; chỉ scale khi đổi tốc độ SAU khi dub.
         manual = max(0.75, min(1.5, _num(seg.get("ttsSpeed"), 1)))
-        manual = max(0.5, min(2.0, manual * bake))
+        manual = max(0.5, min(2.0, manual * _tts_bake_ratio(bake, seg.get("ttsBake"))))
         raw.append(
             (
                 wav,

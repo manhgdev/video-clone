@@ -154,12 +154,15 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
             meta.pop("workDuration", None)
             meta["workVideo"] = str(video.resolve())
 
-        # «Ưu tiên chậm 0.8»: làm chậm clip TRƯỚC rồi mới ASR/dịch/OCR trên
-        # chính file đó — editor nhận đúng file đã xử lý, không remap sau.
+        # «Ưu tiên chậm 0.8»: làm chậm clip TRƯỚC rồi ASR/dịch/OCR trên chính
+        # file đó (cửa sổ đo rộng 1.25×); PHÂN TÍCH XONG tự nâng timeline về
+        # 1.00× (khối cuối) — editor/xuất luôn ở tốc độ thật.
+        auto_baked_08 = False
         if (
             str(settings.get("matchDuration") or "") == "preferVideo"
             and meta.get("bakedSpeed") is None
         ):
+            auto_baked_08 = True
             from pipeline.core.media import ensure_playback_speed, speed_cache_tag
 
             set_status(
@@ -537,6 +540,30 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
         meta["workVideo"] = str(video.resolve())
         # ASR/dịch mới → baseline bake cũ (id/time khác) không còn hợp lệ
         meta.pop("timelineBaseline", None)
+        # Phân tích 0.8 xong → nâng timeline + work file về 1.00× (yêu cầu:
+        # đầu vào 0.8 chỉ để đo; vào editor là tốc độ thật, khỏi nâng tay).
+        # Cache dịch (run_caches) giữ clock 0.8 khớp asrKey s080 cho lần chạy sau.
+        if auto_baked_08:
+            from pipeline.core.media import (
+                preview_1x_path,
+                remap_timeline_for_speed_change,
+            )
+
+            set_status(
+                project_id,
+                step="translate",
+                progress=98,
+                message="Phân tích xong — nâng timeline về 1.00×…",
+                running=True,
+            )
+            remap_timeline_for_speed_change(meta, 0.8, 1.0)
+            segments = meta.get("segments") or segments
+            base_1x = preview_1x_path(project_id, meta)
+            meta["bakedSpeed"] = 1.0
+            meta.pop("bakedPreferVideo", None)
+            meta.pop("workDuration", None)
+            meta["workVideo"] = str(base_1x.resolve())
+            meta["timelineClock"] = "display"
         save_meta(project_id, meta)
         hint = f"Preview {preview_sec}s — " if preview_sec > 0 else ""
         no_tr = str(settings.get("targetLang") or "") in ("none", "off", "source", "")
