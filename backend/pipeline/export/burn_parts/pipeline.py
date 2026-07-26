@@ -354,10 +354,24 @@ def cover_and_burn(
 
         _cap = _cv2.VideoCapture(str(video))
         try:
+            import time as _time
+
+            _last_report = 0.0
             for i, cue in enumerate(cues):
                 lay_m = cue[6] if len(cue) > 6 else "horizontal"
                 if lay_m not in ("label", "vertical"):
                     continue
+                # Mỗi cue = 1 lần seek+decode — video dài nhiều nhãn tốn cả phút,
+                # phải báo tiến độ kẻo UI nhìn như treo ở «Chuẩn bị caption / mask».
+                if project_id and _time.monotonic() - _last_report >= 1.0:
+                    _last_report = _time.monotonic()
+                    set_status(
+                        project_id,
+                        step="export",
+                        progress=16,
+                        message=f"Chuẩn bị caption / mask · dò khung nhãn {i + 1}/{len(cues)}…",
+                        running=True,
+                    )
                 mid = (float(cue[0]) + float(cue[1])) * 0.5
                 _cap.set(_cv2.CAP_PROP_POS_MSEC, mid * 1000.0)
                 ok, fr = _cap.read()
@@ -370,7 +384,21 @@ def cover_and_burn(
     # mỗi cue: 1+ vùng cover (nhãn multi-box)
     cue_fits: list[list[tuple[int, int, int, int]]] = []
     cue_need_mask: list[bool] = []
+    import time as _time_prep
+
+    _prep_last = 0.0
     for i, (_cs, _ce, _bs, _be, text, src, lay_mode) in enumerate(cues):
+        # Layout + render chữ RGBA từng cue — video nhiều câu tốn chục giây,
+        # báo x/y để UI không đứng im một message.
+        if project_id and _time_prep.monotonic() - _prep_last >= 1.0:
+            _prep_last = _time_prep.monotonic()
+            set_status(
+                project_id,
+                step="export",
+                progress=17,
+                message=f"Chuẩn bị caption / mask · {i + 1}/{len(cues)} câu…",
+                running=True,
+            )
         segment_id = cue_segment_ids[i] if i < len(cue_segment_ids) else ""
         # Phải có TRƯỚC mọi nhánh: cue không burn (cover-only, maskOnly) vẫn đọc
         # seg_meta ở phần mask/logo bên dưới — gán trong `if burn and text` gây

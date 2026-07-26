@@ -21,10 +21,17 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
-from pipeline.core.jobs import register_process, unregister_process
+from pipeline.core.jobs import (
+    Cancelled,
+    is_cancelled,
+    register_process,
+    unregister_process,
+)
+from pipeline.core.project import set_status
 from pipeline.core.media import ffprobe_duration, h264_encoder_args
 from pipeline.export.cover_mask import (
     _blur_css_radius,
@@ -333,20 +340,68 @@ def _loop_inputs(extra: list[str]) -> list[str]:
     return out
 
 
-def _run_ffmpeg(cmd: list[str], project_id: str | None) -> int:
-    kw: dict[str, Any] = {"stdout": subprocess.DEVNULL, "stderr": subprocess.PIPE}
+def _run_ffmpeg(
+    cmd: list[str],
+    project_id: str | None,
+    progress_cb: Any | None = None,
+) -> int:
+    """Chạy ffmpeg; progress_cb(sec) được gọi theo out_time (qua -progress pipe:1)
+    để UI không đứng im suốt lệnh encode dài. Hủy job → kill (đã register)."""
+    if progress_cb is not None:
+        cmd = [cmd[0], "-progress", "pipe:1", "-nostats", *cmd[1:]]
+    kw: dict[str, Any] = {
+        "stdout": subprocess.PIPE if progress_cb is not None else subprocess.DEVNULL,
+        "stderr": subprocess.PIPE,
+    }
     if sys.platform == "win32":
         kw["creationflags"] = int(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
     proc = subprocess.Popen(cmd, **kw)
     register_process(project_id, proc)
     try:
+        if progress_cb is not None and proc.stdout is not None:
+            for raw in proc.stdout:
+                line = raw.decode("utf-8", "replace").strip()
+                if line.startswith("out_time_ms="):
+                    try:
+                        progress_cb(int(line.split("=", 1)[1]) / 1e6)
+                    except ValueError:
+                        pass
         _o, err = proc.communicate(timeout=6 * 3600)
     finally:
         unregister_process(project_id, proc)
     if proc.returncode != 0:
+        # Hủy job: process bị kill → ĐỪNG để caller rơi sang đường legacy
+        if is_cancelled(project_id):
+            raise Cancelled("ffgraph: đã hủy")
         tail = (err or b"").decode("utf-8", "replace").strip()[-400:]
         _log(f"[ffgraph] ffmpeg rc={proc.returncode}: {tail}")
     return proc.returncode
+
+
+def _make_reporter(project_id: str | None, total: float, label: str, base: float = 0.0):
+    """cb(sec) → set_status «label · x%» (throttle 1s, progress 18→68).
+
+    base: số giây đã encode xong ở các đoạn trước (đường segmented cộng dồn).
+    """
+    last = [0.0]
+
+    def cb(sec: float) -> None:
+        if not project_id or total <= 0:
+            return
+        now = time.monotonic()
+        if now - last[0] < 1.0:
+            return
+        last[0] = now
+        pct = max(0.0, min(1.0, (base + sec) / total))
+        set_status(
+            project_id,
+            step="export",
+            progress=int(18 + 50 * pct),
+            message=f"{label} · {int(pct * 100)}%",
+            running=True,
+        )
+
+    return cb
 
 
 def _keyframe_times(video: Path) -> list[float]:
@@ -441,6 +496,12 @@ def _render_segmented(
     """Cắt theo keyframe (segment muxer, packet-chính-xác), encode CHỈ đoạn
     active, concat, mux audio gốc một lần cuối. Đã kiểm chứng: 902/902 frame,
     duration khớp từng mili, stream sạch."""
+    act_total = sum(b - a for a, b, act in spans if act)
+    if project_id:
+        set_status(
+            project_id, step="export", progress=18,
+            message="Cắt video theo keyframe (đoạn trống giữ nguyên)…", running=True,
+        )
     eps = max(0.008, 0.5 / max(1.0, fps))
     cut_times = [f"{a - eps:.6f}" for a, _b, _act in spans[1:]]
     seg_pat = tmpdir / "seg_%d.mp4"
@@ -458,6 +519,7 @@ def _render_segmented(
         _log(f"[ffgraph] segment muxer trả {sum(f.is_file() for f in seg_files)}/{len(spans)} file")
         return False
     final_parts: list[Path] = []
+    done_sec = 0.0
     for i, (a, b, active) in enumerate(spans):
         if not active:
             final_parts.append(seg_files[i])
@@ -477,10 +539,20 @@ def _render_segmented(
              *h264_encoder_args(throughput=True),
              str(enc)],
             project_id,
+            progress_cb=_make_reporter(
+                project_id, act_total, "Xuất khung (chỉ encode đoạn có chữ)",
+                base=done_sec,
+            ),
         )
         if rc != 0:
             return False
+        done_sec += b - a
         final_parts.append(enc)
+    if project_id:
+        set_status(
+            project_id, step="export", progress=68,
+            message="Nối đoạn + ghép audio gốc…", running=True,
+        )
     lst = tmpdir / "concat.txt"
     lst.write_text(
         "\n".join(f"file '{str(f).replace(chr(92), '/')}'" for f in final_parts) + "\n",
@@ -603,6 +675,9 @@ def try_render_ffmpeg(
              "-map_metadata", "-1", "-map_chapters", "-1",
              str(out)],
             project_id,
+            progress_cb=_make_reporter(
+                project_id, src_dur, "Xuất khung (ffmpeg trực tiếp)",
+            ),
         )
         if rc != 0 or not _validate():
             out.unlink(missing_ok=True)
@@ -611,6 +686,10 @@ def try_render_ffmpeg(
             render_info["post_applied"] = True
         _log(f"[ffgraph] OK full-graph {k} node" + (" +crop/scale" if post else ""))
         return True
+    except Cancelled:
+        # Hủy job: dọn và ném tiếp — TUYỆT ĐỐI không rơi sang legacy render
+        out.unlink(missing_ok=True)
+        raise
     except Exception as e:  # bất kỳ lỗi nào → đường cũ vẫn còn
         _log(f"[ffgraph] exception {type(e).__name__}: {e}")
         try:
