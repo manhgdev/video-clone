@@ -80,8 +80,15 @@ def cover_and_burn(
     caption_bg_color: str = "#000000",
     caption_bg_opacity: int = 55,
     caption_stroke: bool = True,
+    post_crop: tuple[int, int, int, int] | None = None,
+    post_height: int | None = None,
+    render_info: dict[str, Any] | None = None,
 ) -> Path:
-    """cover = blur hardsub; burn = đè chữ dịch. placement: below|above khi không cover."""
+    """cover = blur hardsub; burn = đè chữ dịch. placement: below|above khi không cover.
+
+    post_crop/post_height (P1.5): đường ffmpeg gộp luôn crop+scale xuất cuối và
+    báo qua render_info["post_applied"] — đường legacy bỏ qua (caller tự encode).
+    """
     import cv2
     from PIL import ImageFont
 
@@ -780,6 +787,9 @@ def cover_and_burn(
         w=w,
         h=h,
         project_id=project_id,
+        post_crop=post_crop,
+        post_height=post_height,
+        render_info=render_info,
     ):
         if project_id:
             set_status(

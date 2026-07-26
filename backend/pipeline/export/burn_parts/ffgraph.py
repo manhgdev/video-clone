@@ -5,10 +5,14 @@ file này chỉ chuyển kết quả đó thành filter_complex để khung hìn
 đi vòng GPU→RAM→Python→RAM→GPU (đo: 69fps → ~400fps trên 1080×1920).
 
 Không xử lý được (trả False → pipeline dùng render_burned_video cũ):
-- logo có fade/opacity theo thời gian (cần alpha ramp từng frame)
 - cặp title dọc + nhãn xung đột nguồn (logic ẩn theo frame của bản cũ)
 - quá 160 cue hoạt động (đợi P2 chia đoạn)
 - VIDEO_CLONE_LEGACY_BURN=1 (van thoát khi nghi bug)
+
+P1.5: nhận post_crop/post_height — nối crop,scale vào cuối graph để bỏ hẳn
+lần encode thứ hai (encode_export_1080 chỉ còn copy). Logo opacity tĩnh nướng
+vào alpha PNG; logo fade dùng input `-loop 1` + fade=alpha (ramp tuyến tính
+y hệt _blit_overlay của render.py).
 """
 from __future__ import annotations
 
@@ -49,8 +53,6 @@ def _feasible(
     cues: list[tuple],
     cue_need_mask: list[bool],
     cue_overlays: list[Any],
-    cue_segment_ids: list[str],
-    segments_by_id: dict[str, dict[str, Any]],
 ) -> str | None:
     """None = chạy được bằng ffmpeg; str = lý do phải dùng đường cũ."""
     if os.environ.get("VIDEO_CLONE_LEGACY_BURN") == "1":
@@ -63,18 +65,6 @@ def _feasible(
     )
     if active > _MAX_CUES:
         return f"{active} cue > {_MAX_CUES} (đợi P2 chia đoạn)"
-    for i, _c in enumerate(cues):
-        sid = cue_segment_ids[i] if i < len(cue_segment_ids) else ""
-        sm = segments_by_id.get(sid, {}) if sid else {}
-        if sm.get("logoAssetPath"):
-            return "logo overlay (fade theo frame)"
-        if sm.get("logoFadeInEnd") or sm.get("logoFadeOutStart"):
-            return "logo fade"
-        try:
-            if float(sm.get("logoOpacity", 1.0)) < 0.999:
-                return "logo opacity"
-        except (TypeError, ValueError):
-            pass
     # Title dọc + nhãn xung đột nguồn cùng khung → bản cũ ẩn dọc theo frame
     for i, ci in enumerate(cues):
         if (ci[6] if len(ci) > 6 else "") != "vertical":
@@ -197,11 +187,62 @@ def _collect_ops(
             if ov is None:
                 continue
             rgba, ox, oy = ov
-            ops.append({
+            sid = cue_segment_ids[bi] if bi < len(cue_segment_ids) else ""
+            sm = segments_by_id.get(sid, {}) if sid else {}
+            # Cùng công thức _blit_overlay của render.py: alpha tĩnh × ramp
+            # tuyến tính [start→fadeInEnd] và [fadeOutStart→end].
+            try:
+                alpha = max(0.0, min(1.0, float(sm.get("logoOpacity", 1.0))))
+            except (TypeError, ValueError):
+                alpha = 1.0
+            s0 = float(sm.get("start") or 0.0)
+            s1 = float(sm.get("end") or cue[3])
+            try:
+                fin = float(sm.get("logoFadeInEnd") or s0)
+            except (TypeError, ValueError):
+                fin = s0
+            try:
+                fout = float(sm.get("logoFadeOutStart") or s1)
+            except (TypeError, ValueError):
+                fout = s1
+            op: dict[str, Any] = {
                 "kind": "text", "t0": float(cue[2]), "t1": float(cue[3]),
                 "x": int(ox), "y": int(oy), "rgba": rgba, "idx": bi,
-            })
+                "alpha": alpha,
+            }
+            if fin > s0 + 1e-3:
+                op["fade_in"] = (s0, fin - s0)
+            if s1 - 1e-3 > fout:
+                op["fade_out"] = (fout, s1 - fout)
+            ops.append(op)
     return ops
+
+
+def _post_chain(
+    w: int, h: int,
+    crop: tuple[int, int, int, int] | None,
+    target_height: int | None,
+) -> list[str]:
+    """crop+scale cuối graph — cùng công thức encode_export_1080 (media.py).
+
+    Rỗng = không cần hậu xử lý (encode_export_1080 sẽ tự copy) — caller
+    không được đánh dấu post_applied khi rỗng.
+    """
+    parts: list[str] = []
+    if crop is not None:
+        cx, cy, cw, ch = (int(v) for v in crop)
+        parts.append(f"crop={cw}:{ch}:{cx}:{cy}")
+        in_w, in_h = cw, ch
+    else:
+        in_w, in_h = int(w), int(h)
+    if target_height:
+        th = int(target_height)
+        if in_h >= in_w:
+            if crop is not None or in_w != th:
+                parts.append(f"scale={th}:-2")
+        elif crop is not None or in_h != th:
+            parts.append(f"scale=-2:{th}")
+    return parts
 
 
 def _lines_for_ops(
@@ -211,11 +252,18 @@ def _lines_for_ops(
     h: int,
     t_off: float,
     t_len: float | None,
-) -> tuple[list[str], int]:
-    """Sinh filter graph cho các op giao với [t_off, t_off+t_len); t dịch về 0."""
+    post: list[str] | None = None,
+) -> tuple[list[str], int, list[str]]:
+    """Sinh filter graph cho các op giao với [t_off, t_off+t_len); t dịch về 0.
+
+    Trả (lines, số node, extra_inputs) — extra_inputs là PNG cần thêm vào lệnh
+    dạng `-loop 1 -i png` (logo fade cần stream theo thời gian, movie= chỉ ra
+    1 frame pts=0 nên fade= không chạy được trên nó).
+    """
     from PIL import Image
 
     lines: list[str] = []
+    extra_inputs: list[str] = []
     cur = "[0:v]"
     k = 0
     for op in ops:
@@ -233,21 +281,56 @@ def _lines_for_ops(
             lines.extend(mops)
             k += 1
             continue
+        alpha = float(op.get("alpha", 1.0))
+        fade_in = op.get("fade_in")
+        fade_out = op.get("fade_out")
         png = tmpdir / f"ov_{op['idx']}.png"
         if not png.exists():
-            Image.fromarray(op["rgba"]).save(png)
-        lines.append(f"movie=filename='{_esc_path(png)}'[png{k}]")
+            rgba = op["rgba"]
+            if alpha < 0.999 and not (fade_in or fade_out):
+                # Opacity tĩnh: nướng thẳng vào kênh alpha = _blit_overlay(alpha)
+                rgba = rgba.copy()
+                rgba[..., 3] = (rgba[..., 3].astype("float32") * alpha).astype("uint8")
+            Image.fromarray(rgba).save(png)
+        if fade_in or fade_out:
+            n = len(extra_inputs) + 1  # [0] luôn là video
+            extra_inputs.append(str(png))
+            chain = "format=rgba"
+            if alpha < 0.999:
+                chain += f",colorchannelmixer=aa={alpha:.3f}"
+            if fade_in:
+                fst, fd = fade_in
+                chain += f",fade=t=in:st={max(0.0, fst - t_off):.3f}:d={max(0.033, fd):.3f}:alpha=1"
+            if fade_out:
+                fst, fd = fade_out
+                chain += f",fade=t=out:st={max(0.0, fst - t_off):.3f}:d={max(0.033, fd):.3f}:alpha=1"
+            # trim chặn stream -loop 1 vô hạn — bảo đảm ffmpeg luôn kết thúc
+            chain += f",trim=duration={t1 + 0.5:.3f}"
+            lines.append(f"[{n}:v]{chain}[png{k}]")
+        else:
+            lines.append(f"movie=filename='{_esc_path(png)}'[png{k}]")
         lines.append(f"{cur}[png{k}]overlay={op['x']}:{op['y']}:{_enable(t0, t1)}[vo{k}]")
         cur = f"[vo{k}]"
         k += 1
     if k == 0:
-        return [], 0
-    ew, eh = int(w) - int(w) % 2, int(h) - int(h) % 2
-    if (ew, eh) != (int(w), int(h)):
-        lines.append(f"{cur}crop={ew}:{eh}:0:0[vout]")
+        return [], 0, []
+    tail = list(post) if post else []
+    if not tail:
+        ew, eh = int(w) - int(w) % 2, int(h) - int(h) % 2
+        if (ew, eh) != (int(w), int(h)):
+            tail = [f"crop={ew}:{eh}:0:0"]
+    if tail:
+        lines.append(f"{cur}{','.join(tail)}[vout]")
     else:
         lines.append(f"{cur}copy[vout]")
-    return lines, k
+    return lines, k, extra_inputs
+
+
+def _loop_inputs(extra: list[str]) -> list[str]:
+    out: list[str] = []
+    for p in extra:
+        out += ["-loop", "1", "-i", p]
+    return out
 
 
 def _run_ffmpeg(cmd: list[str], project_id: str | None) -> int:
@@ -379,7 +462,7 @@ def _render_segmented(
         if not active:
             final_parts.append(seg_files[i])
             continue
-        lines, k = _lines_for_ops(ops, tmpdir, w, h, a, b - a)
+        lines, k, extra = _lines_for_ops(ops, tmpdir, w, h, a, b - a)
         if k == 0:
             final_parts.append(seg_files[i])
             continue
@@ -388,7 +471,7 @@ def _render_segmented(
         enc = tmpdir / f"seg_{i}_e.mp4"
         rc = _run_ffmpeg(
             ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-             "-i", str(seg_files[i]),
+             "-i", str(seg_files[i]), *_loop_inputs(extra),
              "-filter_complex_script", str(script),
              "-map", "[vout]", "-an",
              *h264_encoder_args(throughput=True),
@@ -440,9 +523,17 @@ def try_render_ffmpeg(
     w: int,
     h: int,
     project_id: str | None,
+    post_crop: tuple[int, int, int, int] | None = None,
+    post_height: int | None = None,
+    render_info: dict[str, Any] | None = None,
 ) -> bool:
-    """True = đã ghi `out` bằng filter graph; False = caller dùng đường cũ."""
-    reason = _feasible(cues, cue_need_mask, cue_overlays, cue_segment_ids, segments_by_id)
+    """True = đã ghi `out` bằng filter graph; False = caller dùng đường cũ.
+
+    post_crop/post_height: gộp crop+scale xuất cuối vào cùng lệnh (P1.5) —
+    khi áp dụng xong sẽ ghi render_info["post_applied"]=True để caller bỏ
+    encode_export_1080 lần hai.
+    """
+    reason = _feasible(cues, cue_need_mask, cue_overlays)
     if reason is not None:
         _log(f"[ffgraph] fallback legacy: {reason}")
         return False
@@ -472,9 +563,13 @@ def try_render_ffmpeg(
                 return False
             return True
 
+        # P1.5: crop/scale xuất cuối nối vào graph → mọi frame phải encode
+        # → segment hoá (P2) hết lợi, đi thẳng full graph một lệnh.
+        post = _post_chain(w, h, post_crop, post_height)
+
         # P2: video có nhiều khoảng trống → chỉ encode đoạn có cue
         fps = _probe_fps(video)
-        spans = _plan_segments(ops, src_dur, _keyframe_times(video))
+        spans = None if post else _plan_segments(ops, src_dur, _keyframe_times(video))
         if spans is not None:
             n_active = sum(1 for _a, _b, act in spans if act)
             act_t = sum(b - a for a, b, act in spans if act)
@@ -489,7 +584,7 @@ def try_render_ffmpeg(
             out.unlink(missing_ok=True)
 
         # Full graph một lệnh (P1)
-        lines, k = _lines_for_ops(ops, tmpdir, w, h, 0.0, None)
+        lines, k, extra = _lines_for_ops(ops, tmpdir, w, h, 0.0, None, post=post)
         if k == 0:
             import shutil
 
@@ -500,7 +595,7 @@ def try_render_ffmpeg(
         # Không -hwaccel: filter chạy CPU nên hwaccel chỉ thêm chuyến GPU→CPU
         rc = _run_ffmpeg(
             ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-             "-i", str(video),
+             "-i", str(video), *_loop_inputs(extra),
              "-filter_complex_script", str(script),
              "-map", "[vout]", "-map", "0:a?",
              *h264_encoder_args(throughput=True),
@@ -512,7 +607,9 @@ def try_render_ffmpeg(
         if rc != 0 or not _validate():
             out.unlink(missing_ok=True)
             return False
-        _log(f"[ffgraph] OK full-graph {k} node")
+        if post and render_info is not None:
+            render_info["post_applied"] = True
+        _log(f"[ffgraph] OK full-graph {k} node" + (" +crop/scale" if post else ""))
         return True
     except Exception as e:  # bất kỳ lỗi nào → đường cũ vẫn còn
         _log(f"[ffgraph] exception {type(e).__name__}: {e}")

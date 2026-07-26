@@ -265,6 +265,23 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
             message=msg,
             running=True,
         )
+        # P1.5: tính crop khung + resolution TRƯỚC burn để ffgraph gộp vào
+        # cùng lệnh (video sau retime cùng kích thước với burned/out sau mux).
+        crop_box = None
+        target_height = None
+        aspect = str(settings.get("previewAspectRatio") or "original")
+        if do_video:
+            custom_crop = settings.get("previewCrop")
+            if aspect not in ("", "original") and (aspect != "custom" or custom_crop):
+                sw, sh = video_size(video)
+                crop_box = resolve_export_crop(sw, sh, aspect, custom_crop)
+            resolution = str(settings.get("exportResolution") or "1080").lower()
+            allowed_resolutions = {"144", "240", "360", "480", "720", "1080", "1440", "2160"}
+            if resolution != "original" and resolution not in allowed_resolutions:
+                resolution = "1080"
+            target_height = None if resolution == "original" else int(resolution)
+        render_info: dict[str, Any] = {}
+
         burned = out_burned(project_id)
         if not do_video:
             # Audio-only: không cần render video frame → copy nguồn làm temp để trích audio
@@ -305,6 +322,9 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
                 caption_bg_color=str(settings.get("captionBgColor") or "#000000"),
                 caption_bg_opacity=int(settings.get("captionBgOpacity", 55)),
                 caption_stroke=bool(settings.get("captionStroke", True)),
+                post_crop=crop_box,
+                post_height=target_height,
+                render_info=render_info,
             )
         else:
             # Không burn/cover — remux bỏ metadata (không copy2 nguyên file nguồn)
@@ -450,35 +470,28 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
             shutil.copy2(burned, out)
 
         if do_video:
-            # Crop khung + encode độ phân giải trong **một** pass (tránh encode 2 lần → chậm)
-            aspect = str(settings.get("previewAspectRatio") or "original")
-            custom_crop = settings.get("previewCrop")
-            crop_box = None
-            if aspect not in ("", "original") and (aspect != "custom" or custom_crop):
-                sw, sh = video_size(out)
-                crop_box = resolve_export_crop(sw, sh, aspect, custom_crop)
-
-            resolution = str(settings.get("exportResolution") or "1080").lower()
-            allowed_resolutions = {"144", "240", "360", "480", "720", "1080", "1440", "2160"}
-            if resolution != "original" and resolution not in allowed_resolutions:
-                resolution = "1080"
-            target_height = None if resolution == "original" else int(resolution)
             resolution_label = "gốc" if target_height is None else f"{target_height}p"
             aspect_hint = f" · khung {aspect}" if crop_box else ""
+            post_done = bool(render_info.get("post_applied"))
             set_status(
                 project_id,
                 step="export",
                 progress=90,
-                message=progress_msg(f"Encode {resolution_label}", extra=aspect_hint.strip(" ·") or None),
+                message=progress_msg(
+                    "Đóng gói video" if post_done else f"Encode {resolution_label}",
+                    extra=aspect_hint.strip(" ·") or None,
+                ),
                 running=True,
             )
             check_cancel(project_id)
+            # P1.5: ffgraph đã gộp crop+scale vào lệnh burn → chỉ còn remux
+            # (video copy, audio chuẩn hoá aac) thay vì encode toàn bộ lần 2.
             encode_export_1080(
                 out,
                 out,
                 project_id=project_id,
-                target_height=target_height,
-                crop=crop_box,
+                target_height=None if post_done else target_height,
+                crop=None if post_done else crop_box,
             )
 
         exports, easy, audio_rel, render_id, render_name = write_export_artifacts(

@@ -185,3 +185,84 @@ def test_segmented_path_exact_frames_and_untouched_gaps(gop_clip, tmp_path):
     assert np.abs(out_mid[280:330, 60:580] - src_mid[280:330, 60:580]).mean() > 8
     src_far, out_far = _grab(gop_clip, 15.0), _grab(out, 15.0)
     assert np.abs(out_far - src_far).mean() < 1.5, "đoạn trống bị re-encode?"
+
+
+def _size_of(video: Path) -> tuple[int, int]:
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=width,height", "-of", "csv=p=0", str(video)],
+        capture_output=True, text=True, check=True).stdout.strip()
+    a, b = out.split(",")[:2]
+    return int(a), int(b)
+
+
+def _grab_wh(video: Path, t: float, w: int, h: int) -> np.ndarray:
+    raw = subprocess.run(
+        ["ffmpeg", "-v", "error", "-ss", f"{t:.3f}", "-i", str(video),
+         "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+        capture_output=True, check=True,
+    ).stdout
+    return np.frombuffer(raw[: w * h * 3], np.uint8).reshape((h, w, 3)).astype(np.int16)
+
+
+def test_post_crop_scale_single_encode(clip, tmp_path):
+    """P1.5: crop+scale gộp vào lệnh burn phải ra y hệt legacy + encode_export_1080."""
+    from pipeline.core.media import encode_export_1080
+
+    crop = (100, 60, 400, 240)
+    target = 240
+
+    info: dict = {}
+    ff = tmp_path / "ff_post.mp4"
+    cover_and_burn(clip, _segments(), ff, cover=True, burn=True,
+                   project_id=None, workers=2,
+                   post_crop=crop, post_height=target, render_info=info)
+    assert info.get("post_applied") is True, "ffgraph không áp crop/scale"
+
+    legacy = tmp_path / "legacy_post.mp4"
+    os.environ["VIDEO_CLONE_LEGACY_BURN"] = "1"
+    try:
+        cover_and_burn(clip, _segments(), legacy, cover=True, burn=True,
+                       project_id=None, workers=2)
+    finally:
+        os.environ.pop("VIDEO_CLONE_LEGACY_BURN", None)
+    encode_export_1080(legacy, legacy, target_height=target, crop=crop)
+
+    assert _size_of(ff) == _size_of(legacy), "kích thước ra khác nhau"
+    ow, oh = _size_of(ff)
+    for t in (2.0, 5.0, 7.0):
+        a = _grab_wh(ff, t, ow, oh)
+        b = _grab_wh(legacy, t, ow, oh)
+        assert np.abs(a - b).mean() < 12, f"t={t}: lệch {np.abs(a - b).mean():.1f}"
+
+
+def test_logo_fade_opacity_matches_legacy(clip, tmp_path):
+    """P1.5: logo fade in/out + opacity — ffgraph phải khớp ramp của _blit_overlay."""
+    from pipeline.export.burn_parts.ffgraph import try_render_ffmpeg
+    from pipeline.export.burn_parts.render import render_burned_video
+
+    rgba = np.zeros((80, 100, 4), np.uint8)
+    rgba[..., 0] = 220  # đỏ đặc
+    rgba[..., 3] = 255
+    cues = [(1.0, 7.0, 1.0, 7.0, "", "", "horizontal")]
+    sm = {"lg": {"start": 1.0, "end": 7.0, "logoAssetPath": "x",
+                 "logoOpacity": 0.6, "logoFadeInEnd": 3.0, "logoFadeOutStart": 5.0}}
+    kw = dict(cues=cues, cue_need_mask=[False], cue_fits=[[]],
+              cue_overlays=[(rgba, 400, 100)], cue_segment_ids=["lg"],
+              segments_by_id=sm, mask_style="blur", mask_color="#000000",
+              mask_opacity=40, burn=True, w=W, h=H, project_id=None)
+
+    ff = tmp_path / "ff_logo.mp4"
+    assert try_render_ffmpeg(clip, ff, **kw), "ffgraph từ chối logo fade"
+    legacy = tmp_path / "legacy_logo.mp4"
+    render_burned_video(clip, legacy, workers=2, **kw)
+
+    y0, y1, x0, x1 = 100, 180, 400, 500
+    for t, label in ((2.0, "giữa fade-in ~30%"), (4.0, "alpha tĩnh 60%"),
+                     (6.0, "giữa fade-out ~30%")):
+        a = _grab(ff, t)[y0:y1, x0:x1]
+        b = _grab(legacy, t)[y0:y1, x0:x1]
+        assert np.abs(a - b).mean() < 10, f"t={t} ({label}): lệch {np.abs(a - b).mean():.1f}"
+    # logo thật sự hiện lúc alpha đỉnh
+    src = _grab(clip, 4.0)[y0:y1, x0:x1]
+    assert np.abs(_grab(ff, 4.0)[y0:y1, x0:x1] - src).mean() > 8
