@@ -294,10 +294,9 @@ def run_dub(project_id: str, *, finalize: bool = True, nested: bool = False) -> 
         # Flow «ưu tiên 0.8»: phân tích ở 0.8 rồi nâng timeline 1× → mọi khe co
         # 0.8. Giọng mặc định 1.20× (user chốt) — đều toàn bài, đỡ nén lệch
         # từng câu; user chỉnh khác 1× thì tôn trọng.
-        if match == "preferVideo" and (
-            abs(float(meta.get("analyzedAtSpeed") or 0) - 0.8) < 0.01
-            or str(meta.get("timelineClock") or "") == "display"
-        ):
+        # CHỈ khi dub trên đồng hồ đã nâng (bake≈1) — dub trước khi nâng thì
+        # ttsBake tự lo phần ×1.25, gán thêm 1.2 sẽ thành ~1.5 (quá nhanh).
+        if match == "preferVideo" and abs(bake_now - 1.0) <= 0.02:
             for seg in segments:
                 if seg.get("audioFile") and float(seg.get("ttsSpeed") or 1) == 1.0:
                     seg["ttsSpeed"] = 1.2

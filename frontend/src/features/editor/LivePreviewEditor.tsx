@@ -345,18 +345,23 @@ export default function LivePreviewEditor({
   /** Draft TTS toàn cục khi không chọn đoạn — Áp dụng cho tất cả */
   const [globalTtsVolume, setGlobalTtsVolume] = useState(100)
   const [globalTtsSpeed, setGlobalTtsSpeed] = useState(1)
-  // Panel «tất cả» phản chiếu tốc độ đang dùng thật của các câu (flow ưu tiên
-  // 0.8 dub xong mặc định 1.20 — nút 1.2× phải sáng, không đứng im ở 1×).
+  // Panel «tất cả» phản chiếu tốc độ thật của các câu. Flow «ưu tiên 0.8»
+  // (matchDuration=preferVideo): khe đã co khi nâng 1× → mặc định 1.20 NGAY
+  // từ trước khi dub — nút 1.2× sáng, dub dùng đúng 1.2; mode khác giữ 1×.
   useEffect(() => {
     const vals = segments
-      .map((s) => (typeof s.ttsSpeed === 'number' && s.ttsSpeed > 0 ? s.ttsSpeed : 1))
-    if (!vals.length) return
+      .filter((s) => typeof s.ttsSpeed === 'number' && s.ttsSpeed > 0)
+      .map((s) => s.ttsSpeed as number)
+    if (!vals.length) {
+      setGlobalTtsSpeed(settings.matchDuration === 'preferVideo' ? 1.2 : 1)
+      return
+    }
     const freq = new Map<number, number>()
     for (const v of vals) freq.set(v, (freq.get(v) ?? 0) + 1)
     const common = [...freq.entries()].sort((a, b) => b[1] - a[1])[0][0]
     setGlobalTtsSpeed(common)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [segments])
+  }, [segments, settings.matchDuration])
   const [globalVoice, setGlobalVoice] = useState(() => settings.defaultVoice || '')
   const [stemStatus, setStemStatus] = useState<'off' | 'loading' | 'ready' | 'error'>('off')
   const [stemProgress, setStemProgress] = useState(0)
