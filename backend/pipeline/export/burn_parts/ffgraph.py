@@ -129,13 +129,20 @@ def _mask_ops(
     css_to_src = max(1.0, min(w, h) / 560.0)
     radius = css_blur * css_to_src
     down = max(1.0, radius / 8.0)
+    # gblur (IIR) sinh rác xanh lá khi plane quá nhỏ so với sigma (đã tái hiện:
+    # 121×12 + sigma 4 → bậc thang xanh ở góc). Giữ trung gian ≥24 và sigma ≤ cạnh/3.
+    down = max(1.0, min(down, mh / 24.0, mw / 24.0))
     sw = max(4, int(round(mw / down)))
     sh = max(4, int(round(mh / down)))
     sigma = max(0.5, radius / (2.0 * down))
+    sigma = min(sigma, max(0.5, sh / 3.0), max(0.5, sw / 3.0))
     tint = _blur_tint_alpha(opacity)
     lines.append(f"{label_in}split=2[bg{k}][fg{k}]")
+    # format=yuv444p TRƯỚC scale nhỏ: yuv420 co về (vd 121×12) làm plane chroma
+    # chỉ còn ~60×6 — scaler/gblur sinh rác bậc thang XANH LÁ bất định trên vùng
+    # che (đã tái hiện + đo). 444 giữ chroma cùng cỡ luma → sạch, overlay tự đổi lại.
     lines.append(
-        f"[fg{k}]crop={mw}:{mh}:{x0}:{y0},"
+        f"[fg{k}]crop={mw}:{mh}:{x0}:{y0},format=yuv444p,"
         f"scale={sw}:{sh}:flags=area,gblur=sigma={sigma:.2f},"
         f"scale={mw}:{mh}:flags=bilinear,eq=saturation=0.88[reg{k}]"
     )
