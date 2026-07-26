@@ -8,13 +8,11 @@ import {
   loadTtsSettings,
   persistTtsSettings,
 } from './ttsSettings'
-import VoiceMetadataModal, {
-  VOICE_TAGS,
-  VoiceTagPicker,
-  canonicalVoiceTags,
-  type VoiceTagLabel,
-} from './VoiceMetadataModal'
+import VoiceMetadataModal, { VOICE_TAGS, type VoiceTagLabel } from './VoiceMetadataModal'
 import DashPanel from './DashPanel'
+import TtsHistoryPanel from './TtsHistoryPanel'
+import VoiceClonePanel from './VoiceClonePanel'
+import TtsInputPanel from './TtsInputPanel'
 import {
   DEFAULT_DASH_LAYOUT,
   loadDashLayout,
@@ -22,79 +20,34 @@ import {
   type DashId,
   type DashLayout,
 } from './ttsDashboardLayout'
+import type { EngineStatus, HistoryItem, Voice } from './tts.types'
+import { voiceDisplayName, voiceEngineBucket, voiceMetadata } from './lib/voiceDisplay'
+import { SRT_STYLE_OPTIONS, looksLikeSrt, srtPreviewLines } from './lib/srt'
+import { downloadWavHref, triggerDownload as startDownload } from './lib/download'
+import { HISTORY_MAX, fmtDur, previewSampleFor } from './lib/format'
+import {
+  IconClock,
+  IconClone,
+  IconDownload,
+  IconFile,
+  IconGear,
+  IconHelp,
+  IconKb,
+  IconList,
+  IconPause,
+  IconPlay,
+  IconUsers,
+} from './TtsIcons'
 import './TtsStudio.css'
 
-type Voice = {
-  id: string
-  name: string
-  type?: string
-  engine?: string
-  mode?: string
-  available?: boolean
-  previewUrl?: string
-  description?: string
-  gender?: string
-  language?: string
-  accent?: string
-  age?: string
-  style?: string
-  category?: string
-  tags?: string[]
-  favorite?: boolean
-}
-
 const FAVORITE_LS_KEY = 'video-clone:tts-voice-favorites'
-type EngineStatus = {
-  id?: string
-  name?: string
-  local?: boolean
-  installed?: boolean
-  ready?: boolean
-  loaded?: boolean
-  loadState?: string
-  device?: string
-  model?: string
-  version?: string
-  message?: string
-  presetCount?: number
-  installHint?: string
-  cloneRequiresPytorch?: boolean
-}
-type HistoryItem = {
-  id: string
-  title?: string
-  voice?: string
-  voiceName?: string
-  engine?: string
-  duration?: number
-  createdAt?: string
-  audioUrl?: string
-  mp3Url?: string
-  srtUrl?: string
-  zipUrl?: string
-  text?: string
-}
+
 type Props = {
   voices: Voice[]
   onRefreshVoices?: (lang?: string) => void
   /** Mobile drawer — controlled từ Header ☰ */
   sideOpen?: boolean
   onSideOpenChange?: (open: boolean) => void
-}
-type SrtStyle = 'hard' | 'v916' | 'h169' | 'clause' | 'sentence'
-const SRT_STYLE_OPTIONS: { id: SrtStyle; label: string }[] = [
-  { id: 'hard', label: 'Cue ngắn (mặc định)' },
-  { id: 'v916', label: 'Video dọc 9:16' },
-  { id: 'h169', label: 'Video ngang 16:9' },
-  { id: 'clause', label: 'Ngắt câu ngắn' },
-  { id: 'sentence', label: 'Ngắt câu hợp lý' },
-]
-
-function fmtDur(sec = 0) {
-  const s = Math.max(0, Math.floor(sec))
-  const m = Math.floor(s / 60)
-  const r = s % 60
-  return `${String(m).padStart(2, '0')}:${String(r).padStart(2, '0')}`
 }
 
 function SliderNumber({
@@ -143,301 +96,11 @@ function SliderNumber({
   )
 }
 
-function engineOf(voiceId: string) {
-  if (!voiceId) return '—'
-  if (voiceId.startsWith('vn:clone:')) return 'Clone'
-  if (voiceId.startsWith('vn:')) return 'VieNeu Local'
-  if (voiceId.startsWith('cc:')) return 'CapCut TTS'
-  if (voiceId.startsWith('el:')) return 'ElevenLabs'
-  if (voiceId.startsWith('win:') || voiceId === 'system' || voiceId.startsWith('espeak:')) return 'System'
-  // bare id = giọng tham chiếu zmAI
-  return 'zmAI'
-}
-
-/** Bucket rõ ràng — clone không lẫn VieNeu Local / zmAI. */
-function voiceEngineBucket(v: Voice): TtsEngine {
-  if (v.type === 'zmAI' || v.engine === 'zmai') return 'zmai'
-  if (v.type === 'clone' || v.engine === 'clone' || v.id.startsWith('vn:clone:')) return 'clone'
-  if (v.engine === 'capcut' || v.id.startsWith('cc:')) return 'capcut'
-  if (v.id.startsWith('el:')) return 'eleven'
-  if (v.type === 'preset' || v.engine === 'vieneu' || v.id.startsWith('vn:')) return 'vieneu'
-  return 'system'
-}
-
-type VoiceTag = { label: string; kind: 'source' | 'gender' | 'accent' | 'category' | 'language' | 'editable' }
-
-const LANGUAGE_NAMES: Record<string, string> = {
-  vi: 'Tiếng Việt',
-  en: 'Tiếng Anh',
-  zh: 'Tiếng Trung',
-  ja: 'Tiếng Nhật',
-  ko: 'Tiếng Hàn',
-  th: 'Tiếng Thái',
-  id: 'Tiếng Indonesia',
-  es: 'Tiếng Tây Ban Nha',
-  fr: 'Tiếng Pháp',
-  de: 'Tiếng Đức',
-  pt: 'Tiếng Bồ Đào Nha',
-}
-const VOICE_TRAIT_NAMES: Record<string, string> = {
-  male: '👨 Nam',
-  female: '👩 Nữ',
-  bac: '🏔️ Miền Bắc',
-  bắc: '🏔️ Miền Bắc',
-  nam: '🌴 Miền Nam',
-  tu_nhien: 'Tự nhiên',
-  tin_tuc: '📰 Tin tức',
-  doc_truyen: 'Kể chuyện',
-  doc_tho: '📜 Đọc thơ',
-  quang_cao: '📢 Quảng cáo',
-  tre_em: '👶 Trẻ em',
-  young: '👶 Trẻ em',
-  old: '👴 Người già',
-  elderly: '👴 Người già',
-  review: '⭐ Review',
-}
-function voiceMetadata(v: Voice): { description: string; tags: VoiceTag[] } {
-  const bucket = voiceEngineBucket(v)
-  const source =
-    bucket === 'zmai' ? 'zmAI' :
-      bucket === 'vieneu' ? 'VieNeu Local' :
-        bucket === 'clone' ? 'Clone' :
-          bucket === 'capcut' ? 'CapCut' :
-            bucket === 'eleven' ? 'ElevenLabs' : 'Hệ thống'
-  const description = v.description?.trim() ||
-    (bucket === 'clone' ? 'Giọng tùy chỉnh được tạo từ audio mẫu.' :
-      bucket === 'zmai' ? 'Giọng tham chiếu cục bộ của zmAI.' :
-        bucket === 'system' ? 'Giọng hệ thống theo ngôn ngữ đích.' :
-          `Giọng từ ${source}.`)
-  const tags: VoiceTag[] = [{ label: source, kind: 'source' }]
-  const editableTags = canonicalVoiceTags(v.tags)
-  if (editableTags.length) {
-    tags.push(...editableTags.map((label) => ({ label, kind: 'editable' as const })))
-    return { description, tags }
-  }
-  const add = (raw: string | undefined, kind: VoiceTag['kind'], map = true) => {
-    const value = raw?.trim()
-    if (!value) return
-    const key = value.toLowerCase().replace(/\s+/g, '_')
-    const label = map ? (VOICE_TRAIT_NAMES[key] || value) : value
-    if (!tags.some((tag) => tag.label.toLowerCase() === label.toLowerCase())) tags.push({ label, kind })
-  }
-  add(v.gender, 'gender')
-  add(v.accent, 'accent')
-  add(v.style, 'category')
-  add(v.category, 'category')
-  add(v.age, 'category')
-  const languageCode = v.language?.toLowerCase().split(/[-_]/)[0]
-  if (languageCode) add(LANGUAGE_NAMES[languageCode] || v.language, 'language', false)
-  return { description, tags }
-}
-
-function engineLabel(engine?: string, voiceId?: string) {
-  const e = (engine || '').toLowerCase()
-  if (e === 'zmai' || e === 'zmai_ref' || e === 'reference') return 'zmAI'
-  if (e === 'clone') return 'Clone'
-  if (e === 'vieneu' || e === 'vn') {
-    // meta cũ gộp hết vào vieneu — suy ra đúng bucket từ voice id
-    if (voiceId?.startsWith('vn:clone:')) return 'Clone'
-    if (voiceId && !voiceId.startsWith('vn:')) return 'zmAI'
-    return 'VieNeu Local'
-  }
-  if (e === 'capcut' || e === 'cc') return 'CapCut TTS'
-  if (e === 'elevenlabs' || e === 'eleven' || e === 'el') return 'ElevenLabs'
-  if (e === 'system') return 'System'
-  if (voiceId) return engineOf(voiceId)
-  return engine || '—'
-}
-
-/** Bỏ prefix engine lặp (VieNeu · Clone · …) — kể cả đã stack nhiều lần. */
-function stripEngineNamePrefix(name: string): string {
-  let s = name.trim().replace(/\s+/g, ' ')
-  const re =
-    /^(?:VieNeu\s*[·•.\-]\s*(?:Clone\s*[·•.\-]\s*)?|CapCut\s*[·•.\-]\s*|ElevenLabs\s*[·•.\-]\s*|macOS\s*[·•.\-]\s*)+/i
-  for (let i = 0; i < 8; i++) {
-    const next = s.replace(re, '').replace(/^[·•.\-\s]+/, '').trim()
-    if (next === s) break
-    s = next
-  }
-  return s
-}
-
-/** Tên hiển thị: meta.voiceName → list voices → fallback id */
-function voiceDisplayName(
-  voiceId: string | undefined,
-  voices: Voice[],
-  voiceName?: string,
-): string {
-  if (voiceName?.trim()) {
-    const cleaned = stripEngineNamePrefix(voiceName)
-    if (cleaned) return cleaned
-  }
-  if (!voiceId) return '—'
-  const hit = voices.find((v) => v.id === voiceId)
-  if (hit?.name) {
-    const cleaned = stripEngineNamePrefix(hit.name)
-    if (cleaned) return cleaned
-  }
-  if (voiceId.startsWith('cc:')) {
-    // cc:voice_type:resource_id → voice_type dễ đọc hơn rid
-    const rest = voiceId.slice(3)
-    const type = rest.includes(':') ? rest.slice(0, rest.lastIndexOf(':')) : rest
-    return type || rest
-  }
-  return voiceId.replace(/^vn:clone:/, '').replace(/^vn:|^el:/, '')
-}
-
-function IconFile({ size = 14 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-      <path d="M14 2v6h6M16 13H8M16 17H8M10 9H8" />
-    </svg>
-  )
-}
-function IconList({ size = 14 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" />
-    </svg>
-  )
-}
-function IconClock({ size = 14 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <circle cx="12" cy="12" r="10" />
-      <path d="M12 6v6l4 2" />
-    </svg>
-  )
-}
-function IconUsers({ size = 14 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
-      <circle cx="9" cy="7" r="4" />
-      <path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" />
-    </svg>
-  )
-}
-function IconClone({ size = 14 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <rect x="9" y="9" width="13" height="13" rx="2" />
-      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-    </svg>
-  )
-}
-function IconGear({ size = 14 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <circle cx="12" cy="12" r="3" />
-      <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
-    </svg>
-  )
-}
-function IconUpload({ size = 18 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" />
-    </svg>
-  )
-}
-function IconPlay({ size = 16 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor">
-      <path d="M8 5v14l11-7z" />
-    </svg>
-  )
-}
-function IconPause({ size = 16 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor">
-      <path d="M6 5h4v14H6zM14 5h4v14h-4z" />
-    </svg>
-  )
-}
-function IconDownload({ size = 14 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" />
-    </svg>
-  )
-}
-function IconPaste({ size = 12 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
-      <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
-      <rect x="8" y="2" width="8" height="4" rx="1" />
-    </svg>
-  )
-}
-
-/** Heuristic: nội dung clipboard/file có phải SRT không */
-function looksLikeSrt(raw: string): boolean {
-  const t = raw.trim()
-  if (!t) return false
-  if (/\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}\s*-->\s*\d{1,2}:\d{2}:\d{2}/.test(t)) return true
-  if (/^\d+\s*\r?\n\d{1,2}:\d{2}/m.test(t) && t.includes('-->')) return true
-  return false
-}
-
-function srtPreviewLines(raw: string): string {
-  return raw
-    .split(/\r?\n/)
-    .filter((ln) => ln.trim() && !/^\d+$/.test(ln.trim()) && !/-->/.test(ln))
-    .join('\n')
-}
-function IconTrash({ size = 14 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6" />
-    </svg>
-  )
-}
-function IconHelp({ size = 14 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <circle cx="12" cy="12" r="10" />
-      <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3M12 17h.01" />
-    </svg>
-  )
-}
-function IconKb({ size = 14 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <rect x="2" y="6" width="20" height="12" rx="2" />
-      <path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M8 14h8" />
-    </svg>
-  )
-}
-
 const WAVE_BARS = Array.from({ length: 180 }, (_, i) => {
   const t = i / 180
   const taper = 0.5 + Math.sin(Math.PI * Math.min(1, t * 1.15)) * 0.5
   return 3 + (Math.abs(Math.sin(t * 43)) * 12 + Math.abs(Math.cos(t * 91)) * 5) * taper
 })
-
-/** Placeholder / fallback «Nghe thử» theo ngôn ngữ — ô nhập mặc định trống. */
-const PREVIEW_SAMPLES: Record<string, string> = {
-  vi: 'Xin chào, đây là giọng thử của Text to Speech Studio.',
-  en: 'Hello, this is a sample voice preview from Text to Speech Studio.',
-  zh: '你好，这是语音试听示例。',
-  ja: 'こんにちは。これは音声プレビューのサンプルです。',
-  ko: '안녕하세요. 이것은 음성 미리듣기 샘플입니다.',
-  th: 'สวัสดี นี่คือตัวอย่างเสียงทดลองฟัง',
-  id: 'Halo, ini adalah contoh pratinjau suara.',
-  es: 'Hola, esta es una muestra de vista previa de voz.',
-  fr: 'Bonjour, ceci est un aperçu vocal d’exemple.',
-  de: 'Hallo, dies ist eine Beispiel-Stimmvorschau.',
-  pt: 'Olá, esta é uma amostra de prévia de voz.',
-}
-
-const HISTORY_PAGE_SIZE = 10
-const HISTORY_MAX = 50
-
-function previewSampleFor(lang: string): string {
-  return PREVIEW_SAMPLES[lang] || PREVIEW_SAMPLES.vi
-}
 
 /** Full dashboard (1–7): Tổng quan + Tạo giọng nói */
 const FULL_DASHBOARD = new Set(['overview', 'make'])
@@ -543,8 +206,6 @@ export default function TtsStudio({
   const [dashLayout, setDashLayout] = useState<DashLayout>(() => loadDashLayout())
   const [dashActive, setDashActive] = useState<DashId | null>(null)
   const dashRef = useRef<HTMLDivElement>(null)
-  const fileRef = useRef<HTMLInputElement>(null)
-  const srtRef = useRef<HTMLInputElement>(null)
   const audioRef = useRef<HTMLAudioElement>(null)
   const voicePreviewRef = useRef<HTMLAudioElement | null>(null)
 
@@ -637,19 +298,6 @@ export default function TtsStudio({
   )
   const selectedVoice = useMemo(() => voices.find((v) => v.id === voice), [voices, voice])
   const isVieneuVoice = selectedVoice ? voiceEngineBucket(selectedVoice) === 'vieneu' : false
-
-  const historyCapped = useMemo(() => history.slice(0, HISTORY_MAX), [history])
-  const historyTotalPages = Math.max(1, Math.ceil(historyCapped.length / HISTORY_PAGE_SIZE) || 1)
-  const historyPageSafe = Math.min(Math.max(1, historyPage), historyTotalPages)
-  const historyPageItems = useMemo(() => {
-    const start = (historyPageSafe - 1) * HISTORY_PAGE_SIZE
-    return historyCapped.slice(start, start + HISTORY_PAGE_SIZE)
-  }, [historyCapped, historyPageSafe])
-  const historyOffset = (historyPageSafe - 1) * HISTORY_PAGE_SIZE
-
-  useEffect(() => {
-    if (historyPage > historyTotalPages) setHistoryPage(historyTotalPages)
-  }, [historyPage, historyTotalPages])
 
   useEffect(() => {
     setSelectedVoiceIds(new Set())
@@ -833,47 +481,9 @@ export default function TtsStudio({
     setDuration(res.duration)
   }
 
-  function downloadWavHref(url: string | null) {
-    if (!url) return undefined
-    const u = url.replace(/([?&])t=\d+/, '').replace(/\?$/, '')
-    return `${u}${u.includes('?') ? '&' : '?'}download=1`
-  }
-
-  /** URL tải theo loại file cho 1 job lịch sử */
-  function historyDownloadUrl(
-    h: HistoryItem,
-    kind: 'wav' | 'mp3' | 'srt' | 'zip',
-    style: SrtStyle = 'hard',
-  ): string | undefined {
-    if (!h.id && !h.audioUrl) return undefined
-    const jobIdFromUrl = h.audioUrl?.match(/\/jobs\/([^/]+)\//)?.[1]
-    const id = h.id || jobIdFromUrl || ''
-    if (!id) return undefined
-    const t = Date.now()
-    if (kind === 'wav') {
-      const base = h.audioUrl || `/api/tts/studio/jobs/${id}/audio.wav`
-      return downloadWavHref(base)
-    }
-    if (kind === 'mp3') {
-      const base = h.mp3Url || `/api/tts/studio/jobs/${id}/audio.mp3`
-      const clean = base.replace(/([?&])t=\d+/, '').replace(/([?&])download=1/, '')
-      return `${clean}${clean.includes('?') ? '&' : '?'}download=1&t=${t}`
-    }
-    if (kind === 'srt') {
-      return `/api/tts/studio/jobs/${id}/subs.srt?style=${style}&t=${t}`
-    }
-    return `/api/tts/studio/jobs/${id}/bundle.zip?style=${style}&t=${t}`
-  }
-
+  /** Tải file rồi đóng mọi menu tải đang mở (lib startDownload là DOM thuần). */
   function triggerDownload(url: string | undefined, filename: string) {
-    if (!url) return
-    const a = document.createElement('a')
-    a.href = url
-    a.download = filename
-    a.rel = 'noopener'
-    document.body.appendChild(a)
-    a.click()
-    a.remove()
+    startDownload(url, filename)
     setDownloadMenuId(null)
     setHistorySrtMenuId(null)
     setMainSrtMenuOpen(false)
@@ -1357,202 +967,24 @@ export default function TtsStudio({
           ? 'Đang tạo giọng VieNeu (lần đầu có thể nạp model)…'
           : 'Đang tạo giọng nói…'
 
-  function renderHistoryBody() {
-    return (
-      <>
-        <div className="tts-history-wrap">
-          <table className="tts-history">
-            <thead>
-              <tr>
-                <th>#</th>
-                <th>Tiêu đề / tên</th>
-                <th>Engine</th>
-                <th>Giọng</th>
-                <th>Thời lượng</th>
-                <th>Ngày tạo</th>
-                <th>File audio</th>
-                <th>File SRT</th>
-                <th>Trạng thái</th>
-                <th>Hành động</th>
-              </tr>
-            </thead>
-            <tbody>
-              {historyPageItems.length === 0 && (
-                <tr>
-                  <td colSpan={10} className="tts-empty">Chưa có lịch sử — tạo giọng nói để bắt đầu</td>
-                </tr>
-              )}
-              {historyPageItems.map((h, i) => (
-                <tr key={h.id}>
-                  <td>{historyOffset + i + 1}</td>
-                  <td style={{ fontWeight: 600 }}>{h.title || h.id}</td>
-                  <td>{engineLabel(h.engine, h.voice)}</td>
-                  <td
-                    style={{ color: 'var(--tts-muted)', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis' }}
-                    title={voiceDisplayName(h.voice, voices, h.voiceName)}
-                  >
-                    {voiceDisplayName(h.voice, voices, h.voiceName)}
-                  </td>
-                  <td>{fmtDur(h.duration)}</td>
-                  <td style={{ color: 'var(--tts-muted)', whiteSpace: 'nowrap' }}>{h.createdAt || '—'}</td>
-                  <td>
-                    {h.audioUrl ? (
-                      <button
-                        type="button"
-                        className="link"
-                        style={{ background: 'none', border: 0, cursor: 'pointer', padding: 0, font: 'inherit' }}
-                        onClick={() => playHistoryItem(h)}
-                      >
-                        {(h.title || h.id).slice(0, 16)}.wav
-                      </button>
-                    ) : '—'}
-                  </td>
-                  <td style={{ color: 'var(--tts-muted)' }}>—</td>
-                  <td className="tts-tag-ok">Hoàn thành</td>
-                  <td>
-                    <div className="tts-act" data-dl-menu>
-                      {h.audioUrl && (
-                        <button type="button" title="Nghe" onClick={() => playHistoryItem(h)}>
-                          <IconPlay size={12} />
-                        </button>
-                      )}
-                      {h.audioUrl && (
-                        <div className="tts-dl-wrap">
-                          <button
-                            type="button"
-                            title="Tải xuống — chọn định dạng"
-                            className={downloadMenuId === h.id ? 'is-open' : undefined}
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              setDownloadMenuId((cur) => (cur === h.id ? null : h.id))
-                              setHistorySrtMenuId(null)
-                            }}
-                          >
-                            <IconDownload size={12} />
-                          </button>
-                          {downloadMenuId === h.id && (
-                            <div className="tts-dl-menu" role="menu">
-                              <button
-                                type="button"
-                                role="menuitem"
-                                onClick={() =>
-                                  triggerDownload(
-                                    historyDownloadUrl(h, 'wav'),
-                                    `${(h.title || h.id).slice(0, 40)}.wav`,
-                                  )
-                                }
-                              >
-                                WAV
-                              </button>
-                              <button
-                                type="button"
-                                role="menuitem"
-                                onClick={() =>
-                                  triggerDownload(
-                                    historyDownloadUrl(h, 'mp3'),
-                                    `${(h.title || h.id).slice(0, 40)}.mp3`,
-                                  )
-                                }
-                              >
-                                MP3
-                              </button>
-                              <div className="tts-dl-subwrap">
-                                <button
-                                  type="button"
-                                  role="menuitem"
-                                  aria-haspopup="menu"
-                                  aria-expanded={historySrtMenuId === h.id}
-                                  onClick={(e) => {
-                                    e.stopPropagation()
-                                    setHistorySrtMenuId((cur) => (cur === h.id ? null : h.id))
-                                  }}
-                                >
-                                  SRT CapCut <span className="tts-menu-arrow">‹</span>
-                                </button>
-                                {historySrtMenuId === h.id && (
-                                  <div className="tts-dl-menu tts-dl-submenu" role="menu">
-                                    {SRT_STYLE_OPTIONS.map((opt) => (
-                                      <button
-                                        key={opt.id}
-                                        type="button"
-                                        role="menuitem"
-                                        onClick={() =>
-                                          triggerDownload(
-                                            historyDownloadUrl(h, 'srt', opt.id),
-                                            `${(h.title || h.id).slice(0, 40)}-${opt.id}.srt`,
-                                          )
-                                        }
-                                      >
-                                        {opt.label}
-                                      </button>
-                                    ))}
-                                  </div>
-                                )}
-                              </div>
-                              <button
-                                type="button"
-                                role="menuitem"
-                                onClick={() =>
-                                  triggerDownload(
-                                    historyDownloadUrl(h, 'zip'),
-                                    `${(h.title || h.id).slice(0, 40)}.zip`,
-                                  )
-                                }
-                              >
-                                ZIP (Audio + SRT)
-                              </button>
-                            </div>
-                          )}
-                        </div>
-                      )}
-                      <button
-                        type="button"
-                        title="Xóa"
-                        onClick={() => { void api.ttsStudioDelete(h.id).then(loadHistory) }}
-                      >
-                        <IconTrash size={12} />
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        {historyCapped.length > 0 && (
-          <div className="tts-pager">
-            <span className="tts-pager-info">
-              {historyOffset + 1}–{Math.min(historyOffset + HISTORY_PAGE_SIZE, historyCapped.length)}
-              {' / '}
-              {historyCapped.length}
-              {historyCapped.length >= HISTORY_MAX ? ` (tối đa ${HISTORY_MAX})` : ''}
-            </span>
-            <div className="tts-pager-btns">
-              <button
-                type="button"
-                className="tts-btn tts-btn-ghost"
-                disabled={historyPageSafe <= 1}
-                onClick={() => setHistoryPage((p) => Math.max(1, p - 1))}
-              >
-                Trước
-              </button>
-              <span className="tts-pager-page">
-                Trang {historyPageSafe}/{historyTotalPages}
-              </span>
-              <button
-                type="button"
-                className="tts-btn tts-btn-ghost"
-                disabled={historyPageSafe >= historyTotalPages}
-                onClick={() => setHistoryPage((p) => Math.min(historyTotalPages, p + 1))}
-              >
-                Sau
-              </button>
-            </div>
-          </div>
-        )}
-      </>
-    )
-  }
+  const historyPanel = (
+    <TtsHistoryPanel
+      history={history}
+      voices={voices}
+      page={historyPage}
+      setPage={setHistoryPage}
+      downloadMenuId={downloadMenuId}
+      historySrtMenuId={historySrtMenuId}
+      onToggleDownloadMenu={(id) => {
+        setDownloadMenuId((cur) => (cur === id ? null : id))
+        setHistorySrtMenuId(null)
+      }}
+      onToggleSrtMenu={(id) => setHistorySrtMenuId((cur) => (cur === id ? null : id))}
+      onPlay={playHistoryItem}
+      onDelete={(h) => { void api.ttsStudioDelete(h.id).then(loadHistory) }}
+      onDownload={triggerDownload}
+    />
+  )
 
   function onLoadTxt(file: File) {
     const reader = new FileReader()
@@ -1765,130 +1197,6 @@ export default function TtsStudio({
           </div>
         )}
 
-        {(section === 'input' || section === 'srt') && (
-          <div className="tts-page-panel">
-            <section className="tts-card" id="tts-input">
-              <h3 className="tts-card-title">
-                <span className="tts-step">1</span>
-                {section === 'srt' ? 'Nhập SRT / Phụ đề' : 'Nhập văn bản'}
-              </h3>
-              <div className="tts-tabs">
-                <button type="button" className={section === 'input' ? 'active' : ''} onClick={() => go('input')}>
-                  <IconFile size={12} /> Nhập văn bản
-                </button>
-                <button type="button" className={section === 'srt' ? 'active' : ''} onClick={() => go('srt')}>
-                  <IconList size={12} /> Nhập SRT
-                </button>
-                <button type="button" onClick={() => fileRef.current?.click()}>
-                  <IconFile size={12} /> Nhập TXT
-                </button>
-                <button
-                  type="button"
-                  onClick={async () => {
-                    try {
-                      const t = await navigator.clipboard.readText()
-                      if (t) setText(t)
-                    } catch {
-                      setError('Không đọc được clipboard')
-                    }
-                  }}
-                >
-                  Dán clipboard
-                </button>
-              </div>
-              <input ref={fileRef} type="file" accept=".txt,text/plain" hidden onChange={(e) => { const f = e.target.files?.[0]; if (f) onLoadTxt(f) }} />
-              <input ref={srtRef} type="file" accept=".srt,text/plain" hidden onChange={(e) => { const f = e.target.files?.[0]; if (f) onLoadSrt(f) }} />
-              {section === 'srt' ? (
-                <textarea
-                  className="tts-textarea"
-                  style={{ minHeight: 200 }}
-                  value={srtRaw}
-                  onChange={(e) => {
-                    const v = e.target.value
-                    setSrtRaw(v)
-                    setKeepTimeline(true)
-                    const lines = v
-                      .split(/\r?\n/)
-                      .filter((ln) => ln.trim() && !/^\d+$/.test(ln.trim()) && !/-->/.test(ln))
-                    setText(lines.join('\n'))
-                  }}
-                  placeholder={"1\n00:00:01,000 --> 00:00:04,000\nDán SRT chuẩn — 1 cue = 1 câu TTS, giữ timestamp gốc…"}
-                  spellCheck={false}
-                />
-              ) : (
-                <textarea
-                  className="tts-textarea"
-                  style={{ minHeight: 200 }}
-                  value={text}
-                  onChange={(e) => {
-                    setText(e.target.value)
-                    setSrtRaw('')
-                  }}
-                  placeholder="Nhập hoặc dán văn bản của bạn ở đây…"
-                />
-              )}
-              <div className="tts-foot-row">
-                <span>
-                  {(section === 'srt' ? srtRaw : text).length} ký tự
-                  {srtRaw ? ' · SRT mode' : ''}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setText('')
-                    setSrtRaw('')
-                  }}
-                >
-                  Xóa nội dung
-                </button>
-              </div>
-              {section !== 'srt' ? (
-                <div className="tts-split-row">
-                  <label className="tts-split-field">
-                    Tùy chọn tách câu
-                    <select
-                      value={autoSplit ? 'auto' : 'off'}
-                      onChange={(e) => setAutoSplit(e.target.value === 'auto')}
-                    >
-                      <option value="auto">Tự động tách câu (khuyến nghị)</option>
-                      <option value="off">Không tách</option>
-                    </select>
-                  </label>
-                  <button
-                    type="button"
-                    className={autoSplit ? 'tts-switch is-on' : 'tts-switch'}
-                    role="switch"
-                    aria-checked={autoSplit}
-                    title={autoSplit ? 'Tắt tách câu' : 'Bật tách câu'}
-                    onClick={() => setAutoSplit((v) => !v)}
-                  >
-                    <span className="tts-switch-track" />
-                  </button>
-                </div>
-              ) : (
-                <p style={{ margin: '10px 0 0', fontSize: '0.78rem', color: 'var(--tts-muted)' }}>
-                  SRT mode: mỗi cue = 1 câu TTS · timestamp/text giữ nguyên file gốc
-                  {keepTimeline ? ' · timeline tuyệt đối' : ' · nối tuần tự'}
-                  {matchSrt ? ' · khớp thời lượng slot' : ''}.
-                </p>
-              )}
-              <div style={{ marginTop: 16, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                <button
-                  type="button"
-                  className="tts-btn tts-btn-blue"
-                  disabled={busy || !voice || (!text.trim() && !srtRaw.trim())}
-                  onClick={() => void onSynth()}
-                >
-                  {busy ? 'Đang tạo…' : section === 'srt' ? 'Tạo giọng từ SRT' : 'Tạo giọng nói'}
-                </button>
-                <button type="button" className="tts-btn tts-btn-ghost" onClick={() => go('overview')}>
-                  Về Tổng quan
-                </button>
-              </div>
-            </section>
-          </div>
-        )}
-
         {section === 'voice' && (
           <div className="tts-page-panel tts-voice-page">
             <section className="tts-card" id="tts-voice-list">
@@ -2016,62 +1324,19 @@ export default function TtsStudio({
 
         {section === 'clone' && (
           <div className="tts-page-panel" style={{ maxWidth: 520 }}>
-            <section className="tts-card" id="tts-clone">
-              <h3 className="tts-card-title">
-                <span className="tts-step">4</span> Clone giọng nói (TTS)
-                <span className="tts-badge-new">Mới</span>
-              </h3>
-              <p style={{ margin: '0 0 10px', fontSize: '0.78rem', color: 'var(--tts-muted)' }}>
-                Tạo giọng nói tùy chỉnh từ giọng của bạn
-                {cloneCount > 0 ? (
-                  <>
-                    {' · '}
-                    <button
-                      type="button"
-                      className="link"
-                      style={{ background: 'none', border: 0, cursor: 'pointer', padding: 0, font: 'inherit', color: 'inherit' }}
-                      onClick={() => go('voice')}
-                    >
-                      {cloneCount} giọng đã lưu
-                    </button>
-                  </>
-                ) : null}
-              </p>
-              <div className="tts-drop">
-                <div className="ico"><IconUpload size={20} /></div>
-                <p>Kéo & thả file audio vào đây<br />hoặc</p>
-                <button
-                  type="button"
-                  className="tts-btn tts-btn-ghost"
-                  onClick={() => document.getElementById('tts-clone-file')?.click()}
-                >
-                  Chọn file audio
-                </button>
-                <input
-                  id="tts-clone-file"
-                  type="file"
-                  accept="audio/*,.wav,.mp3,.m4a"
-                  hidden
-                  onChange={(e) => setCloneFile(e.target.files?.[0] || null)}
-                />
-                <div className="hint">
-                  {cloneFile ? cloneFile.name : 'Định dạng hỗ trợ: WAV, MP3, M4A · Tối thiểu 10 giây, tối đa 5 phút'}
-                </div>
-              </div>
-              <label className="tts-field">
-                <span>Tên giọng</span>
-                <input type="text" value={cloneName} placeholder="Ví dụ: Giọng của tôi" onChange={(e) => setCloneName(e.target.value)} />
-              </label>
-              <VoiceTagPicker value={cloneTags} onChange={setCloneTags} />
-              <button
-                type="button"
-                className="tts-btn tts-btn-primary tts-btn-block"
-                disabled={busy || !cloneFile || !cloneName.trim()}
-                onClick={() => void onClone()}
-              >
-                Tạo giọng clone
-              </button>
-            </section>
+            <VoiceClonePanel
+              variant="page"
+            cloneName={cloneName}
+            cloneFile={cloneFile}
+            cloneTags={cloneTags}
+            cloneCount={cloneCount}
+            busy={busy}
+            onNameChange={setCloneName}
+            onFileChange={setCloneFile}
+            onTagsChange={setCloneTags}
+            onSubmit={() => void onClone()}
+            onOpenVoiceList={() => go('voice')}
+            />
           </div>
         )}
 
@@ -2079,7 +1344,7 @@ export default function TtsStudio({
           <div className="tts-page-panel tts-history-page">
             <section className="tts-card tts-history-card" id="tts-history">
               <h3 className="tts-card-title"><span className="tts-step">7</span> Lịch sử tạo giọng</h3>
-              {renderHistoryBody()}
+              {historyPanel}
             </section>
           </div>
         )}
@@ -2096,141 +1361,35 @@ export default function TtsStudio({
             onActive={setDashActive}
             onChange={setDashLayoutSafe}
           >
-          <section className="tts-card" id="tts-input">
-            <h3 className="tts-card-title"><span className="tts-step">1</span> Nhập nội dung</h3>
-            <div className="tts-tabs">
-              <button
-                type="button"
-                className={inputMode === 'text' ? 'active' : undefined}
-                onClick={() => switchInputMode('text')}
-              >
-                <IconFile size={12} /> Nhập văn bản
-              </button>
-              <button
-                type="button"
-                className={inputMode === 'srt' ? 'active' : undefined}
-                title="Mở mode SRT — chọn file hoặc dán nội dung .srt"
-                onClick={() => {
-                  switchInputMode('srt')
-                  if (!srtRaw.trim()) srtRef.current?.click()
-                }}
-              >
-                <IconList size={12} /> Nhập SRT
-              </button>
-              <button type="button" onClick={() => fileRef.current?.click()}>
-                <IconFile size={12} /> Nhập TXT
-              </button>
-              <button type="button" onClick={() => void onPasteClipboard()}>
-                <IconPaste size={12} /> Dán clipboard
-              </button>
-            </div>
-            <input
-              ref={fileRef}
-              type="file"
-              accept=".txt,text/plain"
-              hidden
-              onChange={(e) => {
-                const f = e.target.files?.[0]
-                if (f) {
-                  setInputMode('text')
-                  setSrtRaw('')
-                  onLoadTxt(f)
-                }
-                e.target.value = ''
-              }}
-            />
-            <input
-              ref={srtRef}
-              type="file"
-              accept=".srt,text/plain,.vtt"
-              hidden
-              onChange={(e) => {
-                const f = e.target.files?.[0]
-                if (f) onLoadSrt(f)
-                e.target.value = ''
-              }}
-            />
-            {inputMode === 'srt' ? (
-              <>
-                <textarea
-                  className="tts-textarea"
-                  value={srtRaw}
-                  onChange={(e) => {
-                    const v = e.target.value
-                    setSrtRaw(v)
-                    setText(srtPreviewLines(v))
-                  }}
-                  spellCheck={false}
-                  placeholder={
-                    '1\n00:00:01,000 --> 00:00:04,000\nXin chào…\n\n(dán SRT đầy đủ — 1 cue = 1 câu TTS, giữ timestamp)'
-                  }
-                />
-                <div className="tts-foot-row">
-                  <span>
-                    {srtRaw.length} ký tự
-                    {srtRaw.trim() ? ' · mode SRT' : ''}
-                    {keepTimeline ? ' · giữ timeline' : ''}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSrtRaw('')
-                      setText('')
-                    }}
-                  >
-                    Xóa nội dung
-                  </button>
-                </div>
-                <p style={{ margin: '6px 0 0', fontSize: '0.72rem', color: 'var(--tts-muted)' }}>
-                  SRT: 1 cue = 1 dòng TTS; xuất phụ đề giữ start/end gốc khi bật « Giữ nguyên timeline SRT ».
-                  Không tách câu CapCut.
-                </p>
-              </>
-            ) : (
-              <>
-                <textarea
-                  className="tts-textarea"
-                  value={text}
-                  onChange={(e) => {
-                    setText(e.target.value)
-                    if (srtRaw) setSrtRaw('')
-                  }}
-                  placeholder="Nhập hoặc dán văn bản của bạn ở đây…"
-                />
-                <div className="tts-foot-row">
-                  <span>{text.length} ký tự</span>
-                  <button type="button" onClick={() => setText('')}>
-                    Xóa nội dung
-                  </button>
-                </div>
-                <div className="tts-split-row">
-                  <label className="tts-split-field">
-                    Tùy chọn tách câu
-                    <select
-                      value={autoSplit ? 'auto' : 'off'}
-                      onChange={(e) => setAutoSplit(e.target.value === 'auto')}
-                    >
-                      <option value="auto">Tự động tách câu (khuyến nghị)</option>
-                      <option value="off">Không tách</option>
-                    </select>
-                  </label>
-                  <button
-                    type="button"
-                    className={autoSplit ? 'tts-switch is-on' : 'tts-switch'}
-                    role="switch"
-                    aria-checked={autoSplit}
-                    title={autoSplit ? 'Tắt tách câu' : 'Bật tách câu'}
-                    onClick={() => setAutoSplit((v) => !v)}
-                  >
-                    <span className="tts-switch-track" />
-                  </button>
-                </div>
-                <p style={{ margin: '6px 0 0', fontSize: '0.72rem', color: 'var(--tts-muted)' }}>
-                  Hệ thống tự động tách văn bản thành các câu hợp lý.
-                </p>
-              </>
-            )}
-          </section>
+          <TtsInputPanel
+            inputMode={inputMode}
+            text={text}
+            srtRaw={srtRaw}
+            keepTimeline={keepTimeline}
+            autoSplit={autoSplit}
+            setAutoSplit={setAutoSplit}
+            onSwitchMode={switchInputMode}
+            onPickTxt={(f) => {
+              setInputMode('text')
+              setSrtRaw('')
+              onLoadTxt(f)
+            }}
+            onPickSrt={onLoadSrt}
+            onTextChange={(v) => {
+              setText(v)
+              if (srtRaw) setSrtRaw('')
+            }}
+            onSrtChange={(v) => {
+              setSrtRaw(v)
+              setText(srtPreviewLines(v))
+            }}
+            onClearText={() => setText('')}
+            onClearSrt={() => {
+              setSrtRaw('')
+              setText('')
+            }}
+            onPasteClipboard={() => void onPasteClipboard()}
+          />
           </DashPanel>
 
           <DashPanel
@@ -2480,62 +1639,19 @@ export default function TtsStudio({
             onActive={setDashActive}
             onChange={setDashLayoutSafe}
           >
-          <section className="tts-card" id="tts-clone">
-            <h3 className="tts-card-title">
-              <span className="tts-step">4</span> Clone giọng nói (TTS)
-              <span className="tts-badge-new">Mới</span>
-            </h3>
-            <p style={{ margin: '0 0 12px', fontSize: '0.8rem', color: 'var(--tts-muted)', lineHeight: 1.6, letterSpacing: '0.02em' }}>
-              Tạo giọng nói tùy chỉnh từ giọng của bạn
-              {cloneCount > 0 ? (
-                <>
-                  {' · '}
-                  <button
-                    type="button"
-                    className="link"
-                    style={{ background: 'none', border: 0, cursor: 'pointer', padding: 0, font: 'inherit', color: 'inherit' }}
-                    onClick={() => go('voice')}
-                  >
-                    {cloneCount} giọng đã lưu — quản lý
-                  </button>
-                </>
-              ) : null}
-            </p>
-            <div className="tts-drop">
-              <div className="ico"><IconUpload size={20} /></div>
-              <p>Kéo & thả file audio vào đây<br />hoặc</p>
-              <button
-                type="button"
-                className="tts-btn tts-btn-ghost"
-                onClick={() => document.getElementById('tts-clone-file-dash')?.click()}
-              >
-                Chọn file audio
-              </button>
-              <input
-                id="tts-clone-file-dash"
-                type="file"
-                accept="audio/*,.wav,.mp3,.m4a"
-                hidden
-                onChange={(e) => setCloneFile(e.target.files?.[0] || null)}
-              />
-              <div className="hint">
-                {cloneFile ? cloneFile.name : 'Định dạng hỗ trợ: WAV, MP3, M4A · Tối thiểu 10 giây, tối đa 5 phút'}
-              </div>
-            </div>
-            <label className="tts-field">
-              <span>Tên giọng</span>
-              <input type="text" value={cloneName} placeholder="Ví dụ: Giọng của tôi" onChange={(e) => setCloneName(e.target.value)} />
-            </label>
-            <VoiceTagPicker value={cloneTags} onChange={setCloneTags} />
-            <button
-              type="button"
-              className="tts-btn tts-btn-primary tts-btn-block"
-              disabled={busy || !cloneFile || !cloneName.trim()}
-              onClick={() => void onClone()}
-            >
-              Tạo giọng clone
-            </button>
-          </section>
+          <VoiceClonePanel
+            variant="dash"
+          cloneName={cloneName}
+          cloneFile={cloneFile}
+          cloneTags={cloneTags}
+          cloneCount={cloneCount}
+          busy={busy}
+          onNameChange={setCloneName}
+          onFileChange={setCloneFile}
+          onTagsChange={setCloneTags}
+          onSubmit={() => void onClone()}
+          onOpenVoiceList={() => go('voice')}
+          />
           </DashPanel>
 
 <DashPanel
@@ -2798,7 +1914,7 @@ export default function TtsStudio({
 
         <section className="tts-card tts-history-card" id="tts-history">
           <h3 className="tts-card-title"><span className="tts-step">7</span> Lịch sử tạo giọng</h3>
-          {renderHistoryBody()}
+          {historyPanel}
         </section>
         </>
         )}
