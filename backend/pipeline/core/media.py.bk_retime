@@ -1,0 +1,1262 @@
+"""ffmpeg/ffprobe helpers and hardware probe."""
+from __future__ import annotations
+
+import os
+import platform
+import hashlib
+import json
+import shutil
+import subprocess
+import sys
+import time
+from functools import lru_cache
+from pathlib import Path
+from typing import Any
+
+from .jobs import run_cmd
+
+
+def _atomic_replace(src: Path, dst: Path, *, attempts: int = 30) -> None:
+    """Replace dst with src; retry when Windows locks final.mp4 (preview/player/AV)."""
+    src_p, dst_p = Path(src), Path(dst)
+    if not src_p.is_file():
+        raise FileNotFoundError(str(src_p))
+    dst_p.parent.mkdir(parents=True, exist_ok=True)
+    last: BaseException | None = None
+    for attempt in range(max(1, attempts)):
+        try:
+            os.replace(str(src_p), str(dst_p))
+            return
+        except PermissionError as exc:
+            last = exc
+        except OSError as exc:
+            win = getattr(exc, "winerror", None)
+            if win not in (5, 32) and getattr(exc, "errno", None) not in (13, 11):
+                raise
+            last = exc
+        if attempt >= 1 and dst_p.exists():
+            try:
+                dst_p.unlink()
+                os.replace(str(src_p), str(dst_p))
+                return
+            except OSError as exc:
+                last = exc
+        time.sleep(min(1.25, 0.04 * (attempt + 1)))
+    # Some readers hold a share that blocks rename but allows overwrite-copy.
+    try:
+        shutil.copyfile(str(src_p), str(dst_p))
+        try:
+            src_p.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return
+    except OSError as exc:
+        last = exc
+    assert last is not None
+    raise last
+
+
+def atempo_chain(ratio: float) -> str:
+    """ffmpeg atempo chỉ [0.5, 100] — chain nhiều bước khi ngoài khoảng."""
+    try:
+        r = float(ratio)
+    except (TypeError, ValueError):
+        return "anull"
+    if r <= 0 or abs(r - 1.0) < 0.01:
+        return "anull"
+    parts: list[str] = []
+    while r > 2.0 + 1e-9:
+        parts.append("atempo=2.0")
+        r /= 2.0
+    while r < 0.5 - 1e-9:
+        parts.append("atempo=0.5")
+        r *= 2.0
+    r = min(100.0, max(0.5, r))
+    if abs(r - 1.0) >= 0.01:
+        parts.append(f"atempo={r:.4f}")
+    return ",".join(parts) if parts else "anull"
+
+
+@lru_cache(maxsize=1)
+def nvenc_available() -> bool:
+    """Probe the encoder, not just ffmpeg's compiled encoder list."""
+    try:
+        return subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", "color=size=256x256:rate=1",
+                "-frames:v", "1", "-c:v", "h264_nvenc", "-f", "null", "-",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        ).returncode == 0
+    except (FileNotFoundError, subprocess.SubprocessError, OSError):
+        return False
+
+
+def nvdec_available(path: Path) -> bool:
+    """Probe CUDA/NVDEC against the actual input codec."""
+    try:
+        return subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
+                "-i", str(path), "-frames:v", "1",
+                "-vf", "hwdownload,format=nv12",
+                "-f", "null", "-",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=15,
+        ).returncode == 0
+    except (FileNotFoundError, subprocess.SubprocessError, OSError):
+        return False
+
+
+def h264_encoder_args(*, fast: bool = False, throughput: bool = False) -> list[str]:
+    if nvenc_available():
+        if throughput:
+            # Bản trung gian (burn raw→mp4): ưu tiên fps nuôi NVENC, chất lượng để encode 1080 cuối.
+            return [
+                "-c:v", "h264_nvenc", "-preset", "p1",
+                "-tune", "ll", "-rc", "vbr", "-cq", "28", "-b:v", "0",
+                "-pix_fmt", "yuv420p",
+            ]
+        return [
+            "-c:v", "h264_nvenc", "-preset", "p3" if fast else "p5",
+            "-tune", "hq", "-rc", "vbr", "-cq", "18", "-b:v", "0",
+            "-pix_fmt", "yuv420p",
+        ]
+    return [
+        "-c:v", "libx264", "-preset", "ultrafast" if throughput else ("veryfast" if fast else "fast"),
+        "-crf", "26" if throughput else "18", "-pix_fmt", "yuv420p",
+    ]
+
+def detect_device() -> dict[str, Any]:
+    """Probe OS + GPU cho Thiết lập / cài đặt đúng backend.
+
+    Trả về đủ để UI quyết định: Windows/macOS/Linux, có GPU không, GPU gì,
+    và gói nên cài (OCR CUDA / Demucs CUDA / demucs-mlx).
+    """
+    system = platform.system()
+    machine = platform.machine()
+    if system == "Darwin":
+        os_id, os_label = "macos", "macOS"
+    elif system == "Windows":
+        os_id, os_label = "windows", "Windows"
+    elif system == "Linux":
+        os_id, os_label = "linux", "Linux"
+    else:
+        os_id, os_label = "unknown", system or "Unknown"
+
+    arch = machine or "?"
+    apple_silicon = system == "Darwin" and machine.lower() in ("arm64", "aarch64")
+
+    gpu_kind = "none"
+    gpu_name = ""
+    vram_mb: int | None = None
+    driver = ""
+    accel = "cpu"
+
+    if apple_silicon:
+        gpu_kind = "apple"
+        accel = "metal"
+        chip = ""
+        try:
+            chip = subprocess.check_output(
+                ["sysctl", "-n", "machdep.cpu.brand_string"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+            ).strip()
+        except (FileNotFoundError, subprocess.SubprocessError, OSError):
+            pass
+        gpu_name = chip or f"Apple Silicon ({machine})"
+    else:
+        try:
+            out = subprocess.check_output(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=name,memory.total,driver_version",
+                    "--format=csv,noheader,nounits",
+                ],
+                text=True,
+                stderr=subprocess.DEVNULL,
+                timeout=3,
+            ).strip()
+            if out:
+                line = out.splitlines()[0]
+                parts = [p.strip() for p in line.split(",")]
+                gpu_kind = "nvidia"
+                accel = "cuda"
+                gpu_name = parts[0] if parts else "NVIDIA GPU"
+                if len(parts) > 1:
+                    try:
+                        vram_mb = int(float(parts[1]))
+                    except ValueError:
+                        vram_mb = None
+                if len(parts) > 2:
+                    driver = parts[2]
+        except (FileNotFoundError, subprocess.SubprocessError, OSError):
+            pass
+
+        # Fallback: non-NVIDIA GPU → wmic (Windows) / lspci (Linux)
+        if gpu_kind == "none":
+            if system == "Windows":
+                try:
+                    out = subprocess.check_output(
+                        ["wmic", "path", "win32_VideoController",
+                         "get", "Name,AdapterRAM", "/format:csv"],
+                        text=True, stderr=subprocess.DEVNULL, timeout=4,
+                    ).strip()
+                    for row in out.splitlines():
+                        cols = [c.strip() for c in row.split(",")]
+                        # csv: Node,AdapterRAM,Name
+                        if len(cols) < 3 or not cols[-1] or cols[-1].lower() == "name":
+                            continue
+                        gpu_name = cols[-1]
+                        gpu_kind = "other"
+                        accel = "directml"
+                        try:
+                            ram = int(cols[1])
+                            if ram > 0:
+                                vram_mb = ram // (1024 * 1024)
+                        except (ValueError, IndexError):
+                            pass
+                        break
+                except (FileNotFoundError, subprocess.SubprocessError, OSError):
+                    pass
+            elif system == "Linux":
+                try:
+                    out = subprocess.check_output(
+                        ["lspci", "-mm"], text=True, stderr=subprocess.DEVNULL, timeout=3,
+                    )
+                    for line in out.splitlines():
+                        if any(k in line for k in ("VGA", "Display", "3D controller")):
+                            parts = line.split('"')
+                            gpu_name = (f"{parts[3]} {parts[5]}".strip()
+                                        if len(parts) >= 6 else line.split()[-1])
+                            gpu_kind = "other"
+                            break
+                except (FileNotFoundError, subprocess.SubprocessError, OSError):
+                    pass
+
+    if gpu_kind == "nvidia":
+        demucs_label = "Cài Demucs CUDA"
+        demucs_backend = "cuda"
+        ocr_action = "ocr_cuda"
+        ocr_label = "Cài OCR CUDA"
+        install_summary = f"{os_label} + {gpu_name} → OCR CUDA + Demucs CUDA"
+        install_hint = "Máy có NVIDIA — nên cài GPU tăng tốc OCR và Demucs CUDA."
+    elif gpu_kind == "apple":
+        demucs_label = "Cài Demucs (Apple Metal)"
+        demucs_backend = "mlx"
+        ocr_action = ""
+        ocr_label = ""
+        install_summary = f"{os_label} Apple Silicon ({gpu_name}) → Demucs-MLX (Metal)"
+        install_hint = "Mac Apple Silicon — OCR chạy CPU/ANE; tách lời dùng demucs-mlx (Metal)."
+    elif gpu_kind == "other":
+        demucs_label = "Cài Demucs (CPU)"
+        demucs_backend = "cpu"
+        ocr_action = ""
+        ocr_label = ""
+        install_summary = f"{os_label} + {gpu_name} — CUDA chưa hỗ trợ loại GPU này"
+        install_hint = f"GPU: {gpu_name}. Chạy CPU mode; CUDA chỉ hỗ trợ NVIDIA."
+    else:
+        demucs_label = "Cài Demucs (CPU)"
+        demucs_backend = "cpu"
+        ocr_action = ""
+        ocr_label = ""
+        install_summary = f"{os_label} · CPU ({arch}) — không phát hiện GPU tăng tốc"
+        install_hint = "Không thấy NVIDIA/Apple GPU — Demucs chạy CPU (chậm hơn)."
+
+    # ── Kế hoạch cài TẤT CẢ mục Thiết lập theo OS/GPU ──
+    if os_id == "macos":
+        py_link = "https://www.python.org/downloads/macos/"
+        ff_cmd = "brew install ffmpeg"
+        ff_link = ""
+        ff_label = "Cài ffmpeg (brew)"
+        ollama_link = "https://ollama.com/download/mac"
+        node_link = "https://nodejs.org/en/download"
+        tts_id, tts_name, tts_hint = "say", "macOS say", "TTS hệ thống macOS (có sẵn)."
+        tts_install, tts_label = "", ""
+    elif os_id == "windows":
+        py_link = "https://www.python.org/downloads/windows/"
+        ff_cmd = ""
+        ff_link = "https://www.gyan.dev/ffmpeg/builds/"
+        ff_label = "Tải ffmpeg (Windows)"
+        ollama_link = "https://ollama.com/download/windows"
+        node_link = "https://nodejs.org/en/download"
+        tts_id, tts_name = "espeak", "espeak-ng"
+        tts_hint = "TTS hệ thống Windows/Linux (tuỳ chọn)."
+        tts_install = "https://github.com/espeak-ng/espeak-ng/releases"
+        tts_label = "Tải espeak-ng"
+    else:  # linux / unknown
+        py_link = "https://www.python.org/downloads/"
+        ff_cmd = "sudo apt install ffmpeg"
+        ff_link = ""
+        ff_label = "Cài ffmpeg (apt)"
+        ollama_link = "https://ollama.com/download/linux"
+        node_link = "https://nodejs.org/en/download"
+        tts_id, tts_name = "espeak", "espeak-ng"
+        tts_hint = "TTS hệ thống Linux: sudo apt install espeak-ng"
+        tts_install = "sudo apt install espeak-ng"
+        tts_label = "Cài espeak-ng"
+
+    pip = f'"{sys.executable}" -m pip install' if os_id == "windows" else f"{sys.executable} -m pip install"
+
+    items_plan: dict[str, dict[str, Any]] = {
+        "python": {
+            "kind": "url",
+            "value": py_link,
+            "label": f"Tải Python ({os_label})",
+            "hint": f"Cần Python ≥ 3.10 trên {os_label}.",
+        },
+        "ffmpeg": {
+            "kind": "cmd" if ff_cmd else "url",
+            "value": ff_cmd or ff_link,
+            "label": ff_label,
+            "hint": "Bắt buộc cắt audio / burn / mux.",
+        },
+        "ffprobe": {
+            "kind": "cmd" if ff_cmd else "url",
+            "value": ff_cmd or ff_link,
+            "label": ff_label,
+            "hint": "Thường đi kèm ffmpeg.",
+        },
+        "faster_whisper": {
+            "kind": "cmd",
+            "value": f"{pip} faster-whisper",
+            "label": "Cài faster-whisper",
+            "hint": "ASR giọng nói (Whisper).",
+        },
+        "rapidocr_onnxruntime": {
+            "kind": "cmd",
+            "value": f"{pip} rapidocr-onnxruntime",
+            "label": "Cài RapidOCR",
+            "hint": "OCR hardsub / nhãn trên khung.",
+        },
+        "httpx": {
+            "kind": "cmd",
+            "value": f"{pip} httpx",
+            "label": "Cài httpx",
+            "hint": "Gọi API dịch / TTS cloud.",
+        },
+        "PIL": {
+            "kind": "cmd",
+            "value": f"{pip} pillow",
+            "label": "Cài Pillow",
+            "hint": "Vẽ caption khi burn.",
+        },
+        "cv2": {
+            "kind": "cmd",
+            "value": f"{pip} opencv-python-headless",
+            "label": "Cài OpenCV",
+            "hint": "Xử lý khung OCR.",
+        },
+        "ocr_cuda": {
+            "kind": "action",
+            "value": ocr_action,
+            "label": ocr_label or "OCR CUDA (không cần)",
+            "hint": (
+                "ONNX Runtime CUDA — chỉ NVIDIA."
+                if gpu_kind == "nvidia"
+                else "Máy này không dùng OCR CUDA."
+            ),
+            "relevant": gpu_kind == "nvidia",
+        },
+        "demucs": {
+            "kind": "action",
+            "value": "demucs_cuda",
+            "label": demucs_label,
+            "hint": install_hint,
+            "relevant": True,
+            "backend": demucs_backend,
+        },
+        tts_id: {
+            "kind": "url" if (tts_install or "").startswith("http") else ("cmd" if tts_install else "none"),
+            "value": tts_install,
+            "label": tts_label or tts_name,
+            "hint": tts_hint,
+            "relevant": True,
+            "name": tts_name,
+        },
+        "ollama": {
+            "kind": "url",
+            "value": ollama_link,
+            "label": f"Tải Ollama ({os_label})",
+            "hint": "Dịch local (tuỳ chọn).",
+        },
+        "node": {
+            "kind": "url",
+            "value": node_link,
+            "label": f"Tải Node.js ({os_label})",
+            "hint": "Chỉ cần khi dev UI (npm run dev).",
+        },
+        "data": {
+            "kind": "none",
+            "value": "",
+            "label": "",
+            "hint": "Thư mục lưu project / cache / xuất.",
+        },
+    }
+
+    actions = []
+    if ocr_action:
+        actions.append({"id": ocr_action, "label": ocr_label})
+    actions.append({"id": "demucs_cuda", "label": demucs_label})
+
+    vram_txt = f"{vram_mb} MB" if vram_mb else ""
+    label_bits = [os_label, arch]
+    if gpu_name:
+        label_bits.append(gpu_name)
+    if vram_txt:
+        label_bits.append(vram_txt)
+    label = " · ".join(label_bits)
+
+    return {
+        "os": os_id,
+        "osLabel": os_label,
+        "arch": arch,
+        "appleSilicon": apple_silicon,
+        "gpuKind": gpu_kind,
+        "gpuName": gpu_name,
+        "vramMb": vram_mb,
+        "driver": driver,
+        "accel": accel,
+        "label": label,
+        "hasGpu": gpu_kind in ("nvidia", "apple"),
+        "install": {
+            "ocr": ocr_action,
+            "ocrLabel": ocr_label,
+            "demucs": "demucs_cuda",
+            "demucsLabel": demucs_label,
+            "demucsBackend": demucs_backend,
+            "summary": install_summary,
+            "hint": install_hint,
+            "actions": actions,
+            "items": items_plan,
+        },
+    }
+
+
+def hardware() -> dict[str, str]:
+    d = detect_device()
+    return {
+        "label": d["label"],
+        "accel": str(d["accel"]),
+        "os": str(d["os"]),
+        "gpuKind": str(d["gpuKind"]),
+        "gpuName": str(d.get("gpuName") or ""),
+    }
+
+
+def ffprobe_duration(path: Path) -> float:
+    """Độ dài giây; file hỏng / ffprobe fail → 0.0 (không raise)."""
+    try:
+        out = subprocess.check_output(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return 0.0
+    try:
+        return float(out)
+    except ValueError:
+        return 0.0
+
+
+def _has_audio_stream(path: Path) -> bool:
+    try:
+        out = subprocess.check_output(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "a",
+                "-show_entries",
+                "stream=index",
+                "-of",
+                "csv=p=0",
+                str(path),
+            ],
+            text=True,
+            timeout=15,
+        )
+        return bool(out.strip())
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return False
+
+
+def _retime_spans(
+    duration: float,
+    ordered: list[dict[str, Any]],
+    base: float,
+) -> list[tuple[float, float, float, float, float]]:
+    """Build the same piecewise clock the Editor uses while playing.
+
+    Segments are allowed to overlap (for example a long vertical OCR lane
+    underneath a short Mid caption).  The old cursor walk consumed the first
+    segment and silently ignored the later one, while the Editor deliberately
+    prefers Mid, then label, then horizontal, then vertical.  Split at every
+    boundary and choose one active lane for each interval so both paths use
+    one clock.
+    """
+    if duration <= 0:
+        return []
+
+    def _num(value: Any, fallback: float = 0.0) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return fallback
+
+    def _lane(segment: dict[str, Any]) -> int:
+        # Keep this ordering in lock-step with frontend pickTimelineSeg().
+        layout = str(segment.get("layout") or "horizontal").lower()
+        return {"mid": 0, "label": 1, "horizontal": 2, "vertical": 3}.get(layout, 4)
+
+    def _active_at(value: float) -> dict[str, Any] | None:
+        active = [
+            segment
+            for segment in ordered
+            if value >= max(0.0, _num(segment.get("start")))
+            and value < min(duration, _num(segment.get("end"), _num(segment.get("start"))))
+        ]
+        if not active:
+            return None
+        best_lane = min(_lane(segment) for segment in active)
+        candidates = [segment for segment in active if _lane(segment) == best_lane]
+        if best_lane == 0:
+            # solidMidAt() chooses the nearest start (the later Mid when
+            # intervals overlap); stable order breaks exact ties.
+            return max(
+                enumerate(candidates),
+                key=lambda item: (_num(item[1].get("start")), item[0]),
+            )[1]
+        # labels/horizontal/vertical use the first hit in the Editor's
+        # segment order, matching Array.find() in pickTimelineSeg().
+        return candidates[0]
+
+    boundaries = {0.0, float(duration)}
+    for segment in ordered:
+        start = max(0.0, min(float(duration), _num(segment.get("start"))))
+        end = max(start, min(float(duration), _num(segment.get("end"), start)))
+        boundaries.add(start)
+        boundaries.add(end)
+    points = sorted(boundaries)
+    raw: list[tuple[float, float, float]] = []
+    for start, end in zip(points, points[1:]):
+        if end <= start + 0.001:
+            continue
+        active = _active_at((start + end) / 2)
+        segment_speed = _num(active.get("videoSpeed"), 1.0) if active else 1.0
+        speed = max(0.25, min(2.0, base * segment_speed))
+        if raw and abs(raw[-1][2] - speed) < 1e-6 and abs(raw[-1][1] - start) < 1e-6:
+            raw[-1] = (raw[-1][0], end, speed)
+        else:
+            raw.append((start, end, speed))
+
+    spans: list[tuple[float, float, float, float, float]] = []
+    out_cursor = 0.0
+    for start, end, speed in raw:
+        out_end = out_cursor + (end - start) / speed
+        spans.append((start, end, speed, out_cursor, out_end))
+        out_cursor = out_end
+    return spans
+
+
+def retime_timeline_time(
+    value: float,
+    duration: float,
+    segments: list[dict[str, Any]],
+    *,
+    base_speed: float = 1.0,
+) -> float:
+    """Map one source timeline timestamp through the preview playback rates."""
+    base = max(0.25, min(2.0, float(base_speed or 1.0)))
+    ordered = sorted((dict(s) for s in segments), key=lambda s: float(s.get("start") or 0))
+    spans = _retime_spans(max(0.0, duration), ordered, base)
+    source = max(0.0, min(max(0.0, duration), float(value or 0)))
+    for source_start, source_end, speed, output_start, _output_end in spans:
+        if source <= source_end + 1e-6:
+            return output_start + max(0.0, min(source_end - source_start, source - source_start)) / speed
+    return spans[-1][4] if spans else source
+
+
+def retime_video_segments(
+    video: Path,
+    segments: list[dict[str, Any]],
+    cache_dir: Path,
+    project_id: str | None = None,
+    *,
+    base_speed: float = 1.0,
+) -> tuple[Path, list[dict[str, Any]]]:
+    """Retime speech spans and return segments mapped onto output timeline.
+
+    ``base_speed`` mirrors the Editor's soft prefer-video playback rate; the
+    per-segment ``videoSpeed`` is multiplied on top of it.
+    """
+    duration = ffprobe_duration(video)
+    base = max(0.25, min(2.0, float(base_speed or 1.0)))
+    ordered = sorted((dict(s) for s in segments), key=lambda s: float(s.get("start") or 0))
+    if duration <= 0 or (
+        abs(base - 1.0) <= 0.001
+        and not any(abs(float(s.get("videoSpeed") or 1) - 1.0) > 0.001 for s in ordered)
+    ):
+        return video, ordered
+
+    stat = video.stat()
+    signature = [
+         (s.get("id"), round(float(s.get("start") or 0), 4), round(float(s.get("end") or 0), 4),
+         round(base * float(s.get("videoSpeed") or 1), 3))
+        for s in ordered
+    ]
+    key = hashlib.sha1(
+        json.dumps([str(video.resolve()), stat.st_size, stat.st_mtime_ns, signature]).encode()
+    ).hexdigest()[:16]
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    out = cache_dir / f"retimed_{key}.mp4"
+
+    spans = _retime_spans(duration, ordered, base)
+
+    def map_time(value: float) -> float:
+        for source_start, source_end, speed, output_start, output_end in spans:
+            if value <= source_end + 1e-6:
+                return output_start + max(0.0, min(source_end - source_start, value - source_start)) / speed
+        return spans[-1][4] if spans else value
+
+    remapped = []
+    for segment in ordered:
+        mapped = dict(segment)
+        mapped["start"] = map_time(float(segment.get("start") or 0))
+        mapped["end"] = map_time(float(segment.get("end") or 0))
+        if segment.get("coverStart") is not None:
+            try:
+                mapped["coverStart"] = map_time(float(segment["coverStart"]))
+            except (TypeError, ValueError):
+                pass
+        if segment.get("coverEnd") is not None:
+            try:
+                mapped["coverEnd"] = map_time(float(segment["coverEnd"]))
+            except (TypeError, ValueError):
+                pass
+        # speed đã “nướng” vào timeline — đừng retime lần 2
+        mapped.pop("videoSpeed", None)
+        remapped.append(mapped)
+
+    if not out.exists():
+        # Gộp span liền kề cùng speed → ít node filter (tránh WinError 206)
+        merged: list[tuple[float, float, float, float, float]] = []
+        for sp in spans:
+            if (
+                merged
+                and abs(merged[-1][2] - sp[2]) < 1e-6
+                and abs(merged[-1][1] - sp[0]) < 1e-4
+            ):
+                prev = merged[-1]
+                merged[-1] = (prev[0], sp[1], prev[2], prev[3], sp[4])
+            else:
+                merged.append(sp)
+        has_audio = _has_audio_stream(video)
+        filters: list[str] = []
+        labels: list[str] = []
+        for i, (start, end, speed, _out_start, _out_end) in enumerate(merged):
+            sp = max(0.25, min(4.0, float(speed) or 1.0))
+            filters.append(
+                f"[0:v]trim=start={start:.6f}:end={end:.6f},"
+                f"setpts=(PTS-STARTPTS)/{sp:.6f}[v{i}]"
+            )
+            if has_audio:
+                a_chain = atempo_chain(sp)
+                filters.append(
+                    f"[0:a]atrim=start={start:.6f}:end={end:.6f},asetpts=PTS-STARTPTS,"
+                    f"{a_chain}[a{i}]"
+                )
+                labels.append(f"[v{i}][a{i}]")
+            else:
+                labels.append(f"[v{i}]")
+        n = len(merged)
+        if has_audio:
+            filters.append("".join(labels) + f"concat=n={n}:v=1:a=1[vout][aout]")
+        else:
+            filters.append("".join(labels) + f"concat=n={n}:v=1:a=0[vout]")
+        # Script file — không nhét filter_complex vào argv (Windows MAX_PATH / 206)
+        fc_path = cache_dir / f"retimed_{key}_fc.txt"
+        fc_path.write_text(";\n".join(filters) + "\n", encoding="utf-8")
+        try:
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                str(video),
+                "-filter_complex_script",
+                str(fc_path),
+                "-map",
+                "[vout]",
+            ]
+            if has_audio:
+                cmd += [
+                    "-map",
+                    "[aout]",
+                    *h264_encoder_args(fast=True),
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "128k",
+                ]
+            else:
+                cmd += [*h264_encoder_args(fast=True), "-an"]
+            # Ghi tmp rồi rename: huỷ/crash giữa chừng để lại file cụt mà
+            # lần chạy sau vẫn coi là cache hợp lệ (gate chỉ check exists()).
+            tmp_out = out.with_name(f"{out.stem}.tmp{out.suffix}")
+            tmp_out.unlink(missing_ok=True)
+            cmd += ["-map_metadata", "-1", "-map_chapters", "-1", str(tmp_out)]
+            try:
+                run_cmd(project_id, cmd)
+                _atomic_replace(tmp_out, out)
+            except BaseException:
+                tmp_out.unlink(missing_ok=True)
+                raise
+        finally:
+            try:
+                fc_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+    return out, remapped
+
+
+def retime_audio_track(
+    audio: Path,
+    segments: list[dict[str, Any]],
+    cache_dir: Path,
+    project_id: str | None = None,
+    *,
+    base_speed: float = 1.0,
+    source_start: float = 0.0,
+    source_duration: float | None = None,
+) -> Path:
+    """Apply the video preview clock to a cached external stem track."""
+    full_duration = ffprobe_duration(audio)
+    offset = max(0.0, float(source_start or 0))
+    duration = max(
+        0.0,
+        min(
+            full_duration - offset,
+            float(source_duration) if source_duration is not None else full_duration - offset,
+        ),
+    )
+    base = max(0.25, min(2.0, float(base_speed or 1.0)))
+    ordered = sorted((dict(s) for s in segments), key=lambda s: float(s.get("start") or 0))
+    has_speed = any(abs(float(s.get("videoSpeed") or 1) - 1.0) > 0.001 for s in ordered)
+    if duration <= 0 or (
+        offset <= 0.001
+        and abs(duration - full_duration) <= 0.02
+        and abs(base - 1.0) <= 0.001
+        and not has_speed
+    ):
+        return audio
+
+    stat = audio.stat()
+    signature = [
+        (
+            s.get("id"),
+            round(float(s.get("start") or 0), 4),
+            round(float(s.get("end") or 0), 4),
+            round(base * float(s.get("videoSpeed") or 1), 3),
+        )
+        for s in ordered
+    ]
+    key = hashlib.sha1(
+        json.dumps(
+            [str(audio.resolve()), stat.st_size, stat.st_mtime_ns, offset, duration, signature]
+        ).encode()
+    ).hexdigest()[:16]
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    out = cache_dir / f"retimed_audio_{key}.wav"
+    if out.exists():
+        return out
+
+    spans = _retime_spans(duration, ordered, base)
+    filters: list[str] = []
+    labels: list[str] = []
+    for i, (start, end, speed, _out_start, _out_end) in enumerate(spans):
+        filters.append(
+            f"[0:a]atrim=start={offset + start:.6f}:end={offset + end:.6f},"
+            f"asetpts=PTS-STARTPTS,{atempo_chain(speed)}[a{i}]"
+        )
+        labels.append(f"[a{i}]")
+    filters.append("".join(labels) + f"concat=n={len(labels)}:v=0:a=1[aout]")
+    fc_path = cache_dir / f"retimed_audio_{key}_fc.txt"
+    fc_path.write_text(";\n".join(filters) + "\n", encoding="utf-8")
+    tmp_out = out.with_name(f"{out.stem}.tmp{out.suffix}")
+    tmp_out.unlink(missing_ok=True)
+    try:
+        run_cmd(
+            project_id,
+            [
+                "ffmpeg",
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                str(audio),
+                "-filter_complex_script",
+                str(fc_path),
+                "-map",
+                "[aout]",
+                "-c:a",
+                "pcm_s16le",
+                str(tmp_out),
+            ],
+        )
+        _atomic_replace(tmp_out, out)
+    except BaseException:
+        tmp_out.unlink(missing_ok=True)
+        raise
+    finally:
+        fc_path.unlink(missing_ok=True)
+    return out
+
+
+def ensure_preview_clip(
+    source: Path, dest: Path, sec: float, project_id: str | None = None, *, start: float = 0
+) -> Path:
+    """Cắt N giây đầu để thử nhanh; cache theo dest path.
+
+    Ghi *.tmp.mp4 rồi rename — tránh Range vào file đang ghi (416).
+    Không dùng .mp4.tmp: ffmpeg/nvenc không nhận extension → exit -22.
+    """
+    if dest.exists() and dest.stat().st_mtime >= source.stat().st_mtime:
+        return dest
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(f"{dest.stem}.tmp{dest.suffix}")  # preview_10.tmp.mp4
+    try:
+        if tmp.exists():
+            tmp.unlink()
+    except OSError:
+        pass
+    # ponytail: -c copy nhanh; lỗi codec thì re-encode
+    try:
+        run_cmd(
+            project_id,
+            [
+                "ffmpeg",
+                "-y",
+                "-ss",
+                str(start),
+                "-t",
+                str(sec),
+                "-i",
+                str(source),
+                "-c",
+                "copy",
+                str(tmp),
+            ],
+        )
+    except Exception:
+        run_cmd(
+            project_id,
+            [
+                "ffmpeg",
+                "-y",
+                "-ss",
+                str(start),
+                "-t",
+                str(sec),
+                "-i",
+                str(source),
+                *h264_encoder_args(fast=True),
+                "-c:a",
+                "aac",
+                str(tmp),
+            ],
+        )
+    _atomic_replace(tmp, dest)
+    return dest
+
+
+def ensure_playback_speed(
+    source: Path,
+    dest: Path,
+    speed: float = 0.80,
+    project_id: str | None = None,
+    *,
+    force: bool = False,
+) -> Path:
+    """Bake tốc độ phát vào file (preferVideo 0.80×) — chạy TRƯỚC ASR/OCR.
+
+    speed < 1 = chậm hơn (dài hơn): setpts *= 1/speed, atempo = speed.
+
+    Encode trung gian: ultrafast/p1 + CRF cao — chỉ phục vụ ASR/timeline,
+    không phải file xuất cuối (xuất encode lại sau).
+    """
+    speed = max(0.5, min(2.0, float(speed)))
+    if abs(speed - 1.0) < 0.001:
+        return source
+    if (
+        not force
+        and dest.exists()
+        and dest.stat().st_mtime >= source.stat().st_mtime
+        and dest.stat().st_size > 1024
+    ):
+        return dest
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(f"{dest.stem}.tmp{dest.suffix}")
+    try:
+        if tmp.exists():
+            tmp.unlink()
+    except OSError:
+        pass
+    pts = 1.0 / speed
+    has_a = _has_audio_stream(source)
+    # Bake pipeline: ưu tiên tốc độ, chất lượng vừa đủ cho Whisper/OCR
+    if nvenc_available():
+        vcodec = [
+            "-c:v",
+            "h264_nvenc",
+            "-preset",
+            "p1",
+            "-tune",
+            "ll",
+            "-rc",
+            "vbr",
+            "-cq",
+            "28",
+            "-b:v",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+        ]
+    else:
+        vcodec = [
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-crf",
+            "28",
+            "-pix_fmt",
+            "yuv420p",
+            "-threads",
+            "0",
+        ]
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(source),
+        "-filter:v",
+        f"setpts={pts:.6f}*PTS",
+        *vcodec,
+        "-map_metadata",
+        "-1",
+        "-map_chapters",
+        "-1",
+    ]
+    if has_a:
+        # atempo chỉ 0.5–2.0 — speed 0.80 ok 1 bước; AAC 128k đủ cho ASR
+        cmd += ["-filter:a", f"atempo={speed:.6f}", "-c:a", "aac", "-b:a", "128k"]
+    else:
+        cmd += ["-an"]
+    cmd.append(str(tmp))
+    try:
+        run_cmd(project_id, cmd)
+        _atomic_replace(tmp, dest)
+    except Exception:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+    return dest
+
+
+# Facade: speed/timeline-baseline chuyển sang core/speed_timeline.py —
+# giữ import cũ `from pipeline.core.media import ...` hoạt động.
+from .speed_timeline import (  # noqa: F401
+    _SEG_TIME_KEYS,
+    apply_timeline_from_baseline,
+    clamp_playback_speed,
+    ensure_project_initial_playback_rate,
+    ensure_timeline_baseline,
+    initial_rate_from_match_duration,
+    invalidate_timeline_baseline,
+    meta_baked_speed,
+    meta_has_user_bake,
+    preview_1x_path,
+    preview_clip_matches,
+    remap_timeline_for_speed_change,
+    scale_time_fields,
+    speed_cache_tag,
+    _snapshot_timeline_1x,
+)
+
+
+def extract_audio(video: Path, wav: Path, project_id: str | None = None) -> None:
+    run_cmd(
+        project_id,
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(video),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            str(wav),
+        ],
+    )
+
+def video_size(path: Path) -> tuple[int, int]:
+    out = subprocess.check_output(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=p=0:s=x",
+            str(path),
+        ],
+        text=True,
+    ).strip()
+    w, h = out.split("x")
+    return int(w), int(h)
+
+
+def video_codec(path: Path) -> str:
+    return subprocess.check_output(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=codec_name",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        text=True,
+    ).strip().lower()
+
+
+def encode_export_1080(
+    src: Path,
+    dst: Path,
+    project_id: str | None = None,
+    target_height: int | None = 1080,
+    *,
+    crop: tuple[int, int, int, int] | None = None,
+) -> Path:
+    """Encode H.264 cuối: crop (tuỳ chọn) + scale trong **một** pass ffmpeg.
+
+    crop = (x, y, w, h) pixel nguồn — gộp với scale để khỏi encode 2 lần.
+    """
+    w, h = video_size(src)
+    # Sau crop: kích thước frame đầu vào scale
+    if crop is not None:
+        _cx, _cy, cw, ch = crop
+        in_w, in_h = int(cw), int(ch)
+    else:
+        in_w, in_h = w, h
+
+    vf_parts: list[str] = []
+    if crop is not None:
+        cx, cy, cw, ch = crop
+        vf_parts.append(f"crop={cw}:{ch}:{cx}:{cy}")
+
+    if target_height is None:
+        scale_vf = None
+        already_target = crop is None
+    elif in_h >= in_w:
+        scale_vf = f"scale={target_height}:-2"
+        already_target = crop is None and w == target_height
+    else:
+        scale_vf = f"scale=-2:{target_height}"
+        already_target = crop is None and h == target_height
+    if scale_vf:
+        vf_parts.append(scale_vf)
+
+    if already_target and crop is None and video_codec(src) == "h264":
+        video_args = ["-c:v", "copy"]
+    elif vf_parts:
+        video_args = ["-vf", ",".join(vf_parts), *h264_encoder_args()]
+    else:
+        video_args = h264_encoder_args()
+
+    tmp = dst.with_suffix(".tmp_export.mp4")
+    tmp.unlink(missing_ok=True)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    run_cmd(
+        project_id,
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(src),
+            *video_args,
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-movflags",
+            "+faststart",
+            "-map_metadata",
+            "-1",
+            "-map_chapters",
+            "-1",
+            str(tmp),
+        ],
+    )
+    _atomic_replace(tmp, dst)
+    return dst
+
+
+# Khớp LivePreviewEditor.ASPECT_PRESETS (w/h ratio)
+_ASPECT_PRESETS: dict[str, tuple[float, float]] = {
+    "16:9": (16, 9),
+    "4:3": (4, 3),
+    "2.35:1": (235, 100),
+    "2:1": (2, 1),
+    "1.85:1": (185, 100),
+    "9:16": (9, 16),
+    "3:4": (3, 4),
+    "58inch": (108, 234),
+    "1:1": (1, 1),
+}
+
+
+def resolve_export_crop(
+    source_w: int,
+    source_h: int,
+    preset_id: str,
+    custom: dict[str, float] | None = None,
+) -> tuple[int, int, int, int] | None:
+    """Crop giống resolveCropRect FE — preset + pan (previewCrop x/y) hoặc custom."""
+    if source_w <= 0 or source_h <= 0:
+        return None
+    key = (preset_id or "original").strip()
+    if key == "custom" and custom:
+        x = max(0.0, min(0.95, float(custom.get("x", 0)))) * source_w
+        y = max(0.0, min(0.95, float(custom.get("y", 0)))) * source_h
+        w = max(0.05, min(1.0 - x / source_w, float(custom.get("w", 1)))) * source_w
+        h = max(0.05, min(1.0 - y / source_h, float(custom.get("h", 1)))) * source_h
+    elif key in ("", "original", "custom"):
+        return None
+    else:
+        dims = _ASPECT_PRESETS.get(key)
+        if not dims:
+            return None
+        tw, th = dims
+        target = tw / th
+        source = source_w / source_h
+        if source >= target:
+            h = float(source_h)
+            w = h * target
+        else:
+            w = float(source_w)
+            h = w / target
+        # Pan từ previewCrop (x,y normalized) — mặc định giữa
+        if custom is not None:
+            try:
+                nx = float(custom.get("x", (source_w - w) / 2.0 / source_w))
+                ny = float(custom.get("y", (source_h - h) / 2.0 / source_h))
+            except (TypeError, ValueError):
+                nx = (source_w - w) / 2.0 / max(1.0, float(source_w))
+                ny = (source_h - h) / 2.0 / max(1.0, float(source_h))
+            max_nx = max(0.0, 1.0 - w / source_w)
+            max_ny = max(0.0, 1.0 - h / source_h)
+            x = max(0.0, min(max_nx, nx)) * source_w
+            y = max(0.0, min(max_ny, ny)) * source_h
+        else:
+            x = (source_w - w) / 2.0
+            y = (source_h - h) / 2.0
+    xi = max(0, int(round(x)))
+    yi = max(0, int(round(y)))
+    wi = int(round(w))
+    hi = int(round(h))
+    # H.264 cần chẵn
+    wi -= wi % 2
+    hi -= hi % 2
+    xi -= xi % 2
+    yi -= yi % 2
+    xi = max(0, min(source_w - wi, xi))
+    yi = max(0, min(source_h - hi, yi))
+    if wi < 2 or hi < 2:
+        return None
+    if wi >= source_w - 1 and hi >= source_h - 1:
+        return None
+    return xi, yi, wi, hi
+
+
+def crop_export_aspect(
+    src: Path,
+    dst: Path,
+    preset_id: str,
+    *,
+    custom: dict[str, float] | None = None,
+    project_id: str | None = None,
+) -> Path:
+    """Cắt khung theo previewAspectRatio (sau burn, trước encode 1080)."""
+    sw, sh = video_size(src)
+    crop = resolve_export_crop(sw, sh, preset_id, custom)
+    if crop is None:
+        if src.resolve() != dst.resolve():
+            import shutil
+
+            shutil.copy2(src, dst)
+        return dst
+    x, y, w, h = crop
+    tmp = dst.with_suffix(".tmpcrop.mp4")
+    tmp.unlink(missing_ok=True)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    run_cmd(
+        project_id,
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(src),
+            "-vf",
+            f"crop={w}:{h}:{x}:{y}",
+            *h264_encoder_args(),
+            "-c:a",
+            "copy",
+            "-movflags",
+            "+faststart",
+            "-map_metadata",
+            "-1",
+            "-map_chapters",
+            "-1",
+            str(tmp),
+        ],
+    )
+    _atomic_replace(tmp, dst)
+    return dst

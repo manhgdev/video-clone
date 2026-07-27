@@ -1,7 +1,7 @@
 {
   "name": "video-clone",
   "private": true,
-  "version": "2.9.1",
+  "version": "2.9.4",
   "type": "module",
   "scripts": {
     "setup": "node scripts/setup.mjs",
