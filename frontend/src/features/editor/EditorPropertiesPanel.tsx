@@ -329,12 +329,34 @@ export function EditorPropertiesPanel({
                                 >
                                   {voices.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
                                 </select>
+                                <select
+                                  className="w-[72px] shrink-0 rounded-md border border-border bg-input px-1.5 py-1 text-xs outline-none focus:border-ring"
+                                  value={String(selected.ttsSpeed ?? 1.1)}
+                                  disabled={busy || (isOverlaySeg && !dubOn)}
+                                  title="Tốc độ TTS"
+                                  aria-label="Tốc độ TTS"
+                                  onChange={(e) => editSegment({
+                                    ...selected,
+                                    ttsSpeed: Number(e.target.value),
+                                    ...(isOverlaySeg ? { dub: true } : {}),
+                                  }, { textField: 'ttsSpeed' })}
+                                >
+                                  {Array.from(
+                                    { length: 16 },
+                                    (_, i) => Number((0.75 + i * 0.05).toFixed(2)),
+                                  ).map((speed) => (
+                                    <option key={speed} value={speed}>{speed.toFixed(2)}×</option>
+                                  ))}
+                                </select>
                                 <button
                                   type="button"
                                   className="shrink-0 rounded-md border border-border bg-accent hover:bg-muted px-2.5 py-1 text-xs transition-colors disabled:opacity-50 flex items-center gap-1"
                                   disabled={busy || ttsBusy || !selected.translation.trim() || (isOverlaySeg && !dubOn)}
                                   title="Nghe và áp dụng TTS"
-                                  onClick={() => void previewTts()}
+                                  onClick={() => void previewTts({
+                                    ...selected,
+                                    ttsSpeed: selected.ttsSpeed ?? 1.1,
+                                  })}
                                 >
                                   {ttsBusy ? '…' : <><IconHeadphones size={13} /> Nghe và áp dụng</>}
                                 </button>
@@ -647,9 +669,44 @@ export function EditorPropertiesPanel({
                           const atDefault =
                             Math.abs(appliedSpeedX - defaultSpeedX) < 0.005
                             && Math.abs(speedDraft - defaultSpeedX) < 0.005
-                          return (
-                            <>
-                              <div className="rounded-md border border-border bg-muted/30 px-2 py-1.5 space-y-0.5 text-[10px] leading-snug text-muted-foreground">
+                            return (
+                              <>
+                                <div className="rounded-md border border-border bg-muted/20 p-2 space-y-2">
+                                  <div className="flex items-center justify-between gap-3">
+                                    <span className="text-xs font-medium">Biến đổi</span>
+                                  </div>
+                                  <PropLabel label={`Thu phóng ngang: ${Math.round(settings.videoScaleX ?? settings.videoScale ?? 100)}%`}>
+                                    <input
+                                      type="range"
+                                      min={1}
+                                      max={500}
+                                      step={1}
+                                      value={settings.videoScaleX ?? settings.videoScale ?? 100}
+                                      disabled={busy}
+                                      className="w-full accent-primary"
+                                      onChange={(e) => onSettings({
+                                        ...settings,
+                                        videoScaleX: Number(e.target.value),
+                                      })}
+                                    />
+                                  </PropLabel>
+                                  <PropLabel label={`Thu phóng dọc: ${Math.round(settings.videoScaleY ?? settings.videoScale ?? 100)}%`}>
+                                    <input
+                                      type="range"
+                                      min={1}
+                                      max={500}
+                                      step={1}
+                                      value={settings.videoScaleY ?? settings.videoScale ?? 100}
+                                      disabled={busy}
+                                      className="w-full accent-primary"
+                                      onChange={(e) => onSettings({
+                                        ...settings,
+                                        videoScaleY: Number(e.target.value),
+                                      })}
+                                    />
+                                  </PropLabel>
+                                </div>
+                                <div className="rounded-md border border-border bg-muted/30 px-2 py-1.5 space-y-0.5 text-[10px] leading-snug text-muted-foreground">
                                 <p className="text-foreground/90">{speedStatus.inputLine}</p>
                                 <p>{speedStatus.appliedLine}</p>
                                 <p>{speedStatus.exportLine}</p>

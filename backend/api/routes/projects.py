@@ -142,6 +142,7 @@ async def api_upload(file: UploadFile = File(...)):
         "duration": duration,
         "cached": False,
         "segments": [],
+        "settings": init_settings,
     }
 
 
@@ -493,4 +494,3 @@ def api_clear_project_cache(project_id: str, body: ClearCacheBody | None = None)
     parts = body.parts if body else None
     result = clear_project_cache(project_id, parts=parts)
     return result
-

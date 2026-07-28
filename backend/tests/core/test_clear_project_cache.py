@@ -50,6 +50,10 @@ def _setup(tmp_path, monkeypatch):
                     }
                 },
                 "timelineBaseline": {"x": 1},
+                "logoDetection": {
+                    "version": 1,
+                    "bbox": {"x": 0.8, "y": 0.1, "w": 0.1, "h": 0.1},
+                },
                 "settings": {"engine": "whisper"},
                 "status": {"step": "translate", "running": False},
                 "workVideo": str(root / "cache" / "preview_20.mp4"),
@@ -76,6 +80,7 @@ def test_clear_project_cache_keeps_source(tmp_path, monkeypatch):
     assert "workVideo" not in meta
     assert "translationCaches" not in meta
     assert "timelineBaseline" not in meta
+    assert "logoDetection" not in meta
     assert Path(meta["videoPath"]).is_file()
     assert meta["settings"]["engine"] == "whisper"
 
@@ -94,3 +99,4 @@ def test_clear_covers_only_keeps_segments(tmp_path, monkeypatch):
     assert "captionLayout" not in seg
     assert seg.get("translation") == "xin"
     assert "timelineBaseline" not in meta
+    assert "logoDetection" not in meta

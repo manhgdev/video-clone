@@ -120,6 +120,8 @@ export type ProjectSettings = {
    * Chỉ dùng khi bật khung giới hạn — thu hẹp ROI, nhanh + ít nhiễu.
    */
   analysisRegion?: { x: number; y: number; w: number; h: number } | null
+  /** Tự động tìm một logo cố định và xóa bằng native inpainting khi xuất. */
+  coverLogo: boolean
   /** Che hardsub cũ (blur). Tắt = giữ chữ OCR trên khung */
   coverHardsubs: boolean
   /** Kiểu mặt nạ che chữ gốc khi cover: blur | solid | mosaic */
@@ -165,6 +167,11 @@ export type ProjectSettings = {
   previewAspectRatio: string
   /** Vùng cắt tự do, tọa độ chuẩn hóa 0–1 theo video gốc. */
   previewCrop?: { x: number; y: number; w: number; h: number } | null
+  /** Thu phóng ngang/dọc lớp video trong khung xuất, 1–500%. */
+  videoScaleX: number
+  videoScaleY: number
+  /** Legacy: dữ liệu project tạo trước khi tách hai chiều. */
+  videoScale?: number
   /** Độ phân giải cạnh chuẩn khi xuất; original = giữ kích thước sau crop. */
   exportResolution: '144' | '240' | '360' | '480' | '720' | '1080' | '1440' | '2160' | 'original'
   exportVideo?: boolean

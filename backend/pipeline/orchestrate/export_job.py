@@ -88,6 +88,77 @@ from pipeline.orchestrate.export_overlays import build_text_overlay_cues
 from pipeline.orchestrate.tts_fit import assign_tts_fit_speeds
 
 
+def _logo_mask_cue(
+    meta: dict[str, Any],
+    video: Path,
+    duration: float,
+    project_id: str,
+) -> dict[str, Any] | None:
+    settings = meta.get("settings") or {}
+    if not bool(settings.get("coverLogo", False)):
+        return None
+    detection = meta.get("logoDetection")
+    bbox = detection.get("bbox") if isinstance(detection, dict) else None
+    if not isinstance(bbox, dict):
+        from pipeline.ocr.locate_worker import _detect_logo_via_runtime_subprocess
+
+        set_status(
+            project_id,
+            step="export",
+            progress=12,
+            message="Định vị logo trước khi xuất…",
+            running=True,
+        )
+        detection = _detect_logo_via_runtime_subprocess(
+            video,
+            project_id=project_id,
+            segments=meta.get("segments") if isinstance(meta.get("segments"), list) else [],
+        )
+        if not detection:
+            set_status(
+                project_id,
+                step="export",
+                progress=14,
+                message="Không tìm thấy logo — tiếp tục xuất…",
+                running=True,
+            )
+            return None
+        meta["logoDetection"] = detection
+        save_meta(project_id, meta)
+        bbox = detection.get("bbox")
+    if not isinstance(bbox, dict):
+        return None
+    try:
+        x = max(0.0, min(1.0, float(bbox.get("x") or 0)))
+        y = max(0.0, min(1.0, float(bbox.get("y") or 0)))
+        bw = max(0.0, min(1.0 - x, float(bbox.get("w") or 0)))
+        bh = max(0.0, min(1.0 - y, float(bbox.get("h") or 0)))
+    except (TypeError, ValueError):
+        return None
+    if bw < 0.002 or bh < 0.002:
+        return None
+    fw, fh = video_size(video)
+    return {
+        "id": "detected-logo-mask",
+        "start": 0.0,
+        "end": max(0.04, float(duration)),
+        "coverStart": 0.0,
+        "coverEnd": max(0.04, float(duration)),
+        "translation": "",
+        "source": "",
+        "layout": "horizontal",
+        "bbox": {
+            "x": round(x * fw),
+            "y": round(y * fh),
+            "w": max(2, round(bw * fw)),
+            "h": max(2, round(bh * fh)),
+        },
+        "maskOnly": True,
+        "coverMaskStyle": "inpaint",
+        "coverMaskOpacity": 100,
+    }
+
+
 def run_export(project_id: str, *, nested: bool = False) -> Path:
     job_gen: int | None = None
     if not nested:
@@ -183,6 +254,10 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
     do_gif   = bool(settings.get("exportGif",   False))
     if not any([do_video, do_audio, do_srt, do_gif]):
         do_video = True
+    if do_video:
+        logo_mask = _logo_mask_cue(meta, video, vid_dur, project_id)
+        if logo_mask:
+            text_overlays.append(logo_mask)
 
     # cover / burn độc lập; "Không dịch" → không chèn caption
     no_translate = str(settings.get("targetLang") or "") in ("none", "off", "source", "")
@@ -274,6 +349,9 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
         # cùng lệnh (video sau retime cùng kích thước với burned/out sau mux).
         crop_box = None
         target_height = None
+        legacy_scale = float(settings.get("videoScale") or 100.0)
+        video_scale_x = max(1.0, min(500.0, float(settings.get("videoScaleX") or legacy_scale)))
+        video_scale_y = max(1.0, min(500.0, float(settings.get("videoScaleY") or legacy_scale)))
         aspect = str(settings.get("previewAspectRatio") or "original")
         if do_video:
             custom_crop = settings.get("previewCrop")
@@ -329,6 +407,8 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
                 caption_stroke=bool(settings.get("captionStroke", True)),
                 post_crop=crop_box,
                 post_height=target_height,
+                video_scale_x=video_scale_x,
+                video_scale_y=video_scale_y,
                 render_info=render_info,
             )
         else:
@@ -497,6 +577,8 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
                 project_id=project_id,
                 target_height=None if post_done else target_height,
                 crop=None if post_done else crop_box,
+                video_scale_x=100.0 if post_done else video_scale_x,
+                video_scale_y=100.0 if post_done else video_scale_y,
             )
 
         exports, easy, audio_rel, render_id, render_name = write_export_artifacts(
@@ -566,4 +648,3 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
     finally:
         if not nested and job_gen is not None:
             clear_job(project_id, job_gen)
-

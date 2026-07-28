@@ -24,6 +24,7 @@ import {
   IconTranslate,
   IconTrash,
   IconType,
+  IconWand,
 } from '@/shared/components/Icons'
 import './ProjectSidebar.css'
 
@@ -521,14 +522,14 @@ export default function Sidebar({
         </Field>
       </div>
 
-      <div className="audio-filter">
+      <div className="audio-filter locate-logo-filter">
         <label
           className="audio-filter-toggle"
-          title="Bật: chỉ tìm chữ trong khung bạn vẽ — nhanh hơn và ít nhận nhầm chữ ngoài vùng. Tắt: quét cả khung hình."
+          title="Chỉ dịch chữ trong khung này. Kéo khung trên video để chọn vùng OCR."
         >
           <span className="field-label">
             <IconLayers size={14} />
-            Giới hạn khung định vị (chỉ dịch chữ trong khung này)
+            Giới hạn khung định vị
           </span>
           <input
             type="checkbox"
@@ -544,6 +545,23 @@ export default function Sidebar({
                   ? (settings.analysisRegion || { ...DEFAULT_ANALYSIS_REGION })
                   : settings.analysisRegion,
               })
+            }}
+          />
+        </label>
+        <label
+          className="audio-filter-toggle"
+          title="Tự động tìm một logo cố định và tái tạo nền để xóa logo khi xuất."
+        >
+          <span className="field-label">
+            <IconWand size={14} />
+            Che Logo
+          </span>
+          <input
+            type="checkbox"
+            checked={Boolean(settings.coverLogo)}
+            disabled={busy}
+            onChange={(e) => {
+              if (!busy) onSettings({ ...settings, coverLogo: e.target.checked })
             }}
           />
         </label>

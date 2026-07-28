@@ -6,15 +6,23 @@ Logic OCR probe nằm ở locate.py; file này chỉ lo:
 """
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
+import uuid
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+
+from .logo import detect_logo_bbox_inprocess as _bundled_logo_detector  # noqa: F401
+
+_LOCATE_TIMEOUT_SECONDS = 120
 
 
 def _python_can_ocr(exe: str) -> tuple[bool, bool]:
@@ -226,7 +234,7 @@ Path(sys.argv[3]).write_text(
                 "text": True,
                 "encoding": "utf-8",
                 "errors": "replace",
-                "timeout": 900,
+                "timeout": _LOCATE_TIMEOUT_SECONDS,
                 "cwd": str(pipeline_root),
                 "env": env,
             }
@@ -310,3 +318,352 @@ Path(sys.argv[3]).write_text(
         except Exception:
             pass
         return -1  # exception khi spawn — phân biệt với None
+
+
+_warm_worker_lock = threading.Lock()
+_warm_worker: subprocess.Popen[str] | None = None
+_warm_worker_temp: tempfile.TemporaryDirectory[str] | None = None
+_warm_worker_key: tuple[str, ...] | None = None
+
+_WARM_WORKER_SRC = '''# vc-locate-warm-worker
+import json, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root))
+from pipeline.ocr.locate import attach_speech_hardsub_boxes_inprocess
+from pipeline.ocr.logo import detect_logo_bbox_inprocess
+for line in sys.stdin:
+    request = json.loads(line)
+    pin, pout = Path(request["in"]), Path(request["out"])
+    try:
+        data = json.loads(pin.read_text(encoding="utf-8-sig"))
+        if data.get("op") == "logo":
+            result = {"logo": detect_logo_bbox_inprocess(
+                data["video"],
+                project_id=data.get("project_id"),
+                segments=data.get("segments"),
+            )}
+        else:
+            n = attach_speech_hardsub_boxes_inprocess(
+                data["video"],
+                data["segments"],
+                only_missing=bool(data.get("only_missing", True)),
+                project_id=data.get("project_id"),
+                stable=bool(data.get("stable", False)),
+                analysis_region=data.get("analysis_region"),
+                status_workers=int(data.get("status_workers") or 0),
+            )
+            result = {"n": int(n), "segments": data["segments"]}
+    except BaseException as exc:
+        result = {"error": type(exc).__name__ + ": " + str(exc)}
+    pout.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+'''
+
+
+def _stop_warm_worker() -> None:
+    global _warm_worker, _warm_worker_temp, _warm_worker_key
+    proc, temp = _warm_worker, _warm_worker_temp
+    _warm_worker = None
+    _warm_worker_temp = None
+    _warm_worker_key = None
+    if proc is not None and proc.poll() is None:
+        try:
+            proc.terminate()
+            proc.wait(timeout=3)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    if temp is not None:
+        try:
+            temp.cleanup()
+        except Exception:
+            pass
+
+
+atexit.register(_stop_warm_worker)
+
+
+def _warm_worker_env(pipeline_root: Path, meipass: str | None) -> dict[str, str]:
+    from pipeline.core.config import DATA, PUBLIC_DATA, SERVER_ROOT
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(pipeline_root) + os.pathsep + env.get("PYTHONPATH", "")
+    if meipass:
+        env["VIDEO_CLONE_MEIPASS"] = str(meipass)
+    env["VIDEO_CLONE_HOME"] = str(SERVER_ROOT)
+    env["VIDEO_CLONE_DATA"] = str(DATA)
+    env["VIDEO_CLONE_PUBLIC_DATA"] = str(PUBLIC_DATA)
+    env.pop("VIDEO_CLONE_DESKTOP", None)
+    env["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "threads;1"
+    env["OPENCV_FFMPEG_MULTITHREADED"] = "0"
+    if sys.platform == "win32":
+        env["OPENCV_VIDEOIO_PRIORITY_MSMF"] = "0"
+        env["OPENCV_VIDEOIO_PRIORITY_FFMPEG"] = "100"
+    return env
+
+
+def _get_warm_worker(
+    uv_cmd: list[str], pipeline_root: Path, meipass: str | None
+) -> tuple[subprocess.Popen[str], Path]:
+    global _warm_worker, _warm_worker_temp, _warm_worker_key
+    key = (*uv_cmd, str(pipeline_root))
+    if (
+        _warm_worker is not None
+        and _warm_worker.poll() is None
+        and _warm_worker_temp is not None
+        and _warm_worker_key == key
+    ):
+        return _warm_worker, Path(_warm_worker_temp.name)
+
+    _stop_warm_worker()
+    temp = tempfile.TemporaryDirectory(prefix="vc-locate-warm-")
+    tdir = Path(temp.name)
+    script = tdir / "worker.py"
+    script.write_text(_WARM_WORKER_SRC, encoding="utf-8")
+    cmd = [*uv_cmd, str(script), str(pipeline_root)]
+    kw: dict[str, Any] = {
+        "stdin": subprocess.PIPE,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "text": True,
+        "encoding": "utf-8",
+        "cwd": str(pipeline_root),
+        "env": _warm_worker_env(pipeline_root, meipass),
+    }
+    if sys.platform == "win32":
+        kw["creationflags"] = int(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
+    proc = subprocess.Popen(cmd, **kw)
+    try:
+        from pipeline.core.winproc import limit_process_cpu
+
+        limit_process_cpu(proc, fraction=0.6)
+    except Exception:
+        pass
+    _warm_worker = proc
+    _warm_worker_temp = temp
+    _warm_worker_key = key
+    return proc, tdir
+
+
+def _copy_worker_segments(
+    segments: list[dict[str, Any]], out: dict[str, Any]
+) -> int:
+    segs_out = out.get("segments")
+    if isinstance(segs_out, list) and len(segs_out) == len(segments):
+        for dst, src in zip(segments, segs_out):
+            if not isinstance(src, dict) or not isinstance(dst, dict):
+                continue
+            for key in (
+                "bbox",
+                "bboxInherited",
+                "layout",
+                "captionLayout",
+                "coverStart",
+                "coverEnd",
+                "_probeAnchored",
+            ):
+                if key in src:
+                    dst[key] = src[key]
+    return int(out.get("n") or 0)
+
+
+# Override the one-shot implementation above. Keeping it as a fallback avoids
+# widening the failure surface for unusual frozen/runtime installations.
+_locate_via_runtime_subprocess_oneshot = _locate_via_runtime_subprocess
+
+
+def _locate_via_runtime_subprocess(
+    video: Path | str,
+    segments: list[dict[str, Any]],
+    *,
+    only_missing: bool,
+    stable: bool,
+    analysis_region: Any,
+    project_id: str | None = None,
+    status_workers: int = 0,
+) -> int | None:
+    uv_cmd = _uv_run_cmd()
+    if uv_cmd is None:
+        return None
+    meipass = getattr(sys, "_MEIPASS", None)
+    exe_dir = Path(sys.executable).parent if getattr(sys, "frozen", False) else None
+    pipeline_root = next(
+        (
+            cand
+            for cand in (
+                Path(meipass) if meipass else None,
+                exe_dir / "_internal" if exe_dir else None,
+                exe_dir,
+                Path(__file__).resolve().parents[2],
+            )
+            if cand and (cand / "pipeline" / "ocr" / "locate.py").is_file()
+        ),
+        None,
+    )
+    if pipeline_root is None:
+        return None
+
+    payload = {
+        "video": str(Path(video).resolve()),
+        "segments": segments,
+        "only_missing": only_missing,
+        "stable": stable,
+        "analysis_region": analysis_region,
+        "project_id": project_id,
+        "status_workers": int(status_workers or 0),
+    }
+    from pipeline.core.jobs import (
+        is_cancelled,
+        kill_process_tree,
+        register_process,
+        unregister_process,
+    )
+
+    with _warm_worker_lock:
+        try:
+            proc, tdir = _get_warm_worker(uv_cmd, pipeline_root, meipass)
+            token = uuid.uuid4().hex
+            pin, pout = tdir / f"{token}.in.json", tdir / f"{token}.out.json"
+            pin.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            assert proc.stdin is not None
+            proc.stdin.write(json.dumps({"in": str(pin), "out": str(pout)}) + "\n")
+            proc.stdin.flush()
+            register_process(project_id, proc)
+            deadline = time.monotonic() + _LOCATE_TIMEOUT_SECONDS
+            while not pout.is_file():
+                if project_id and is_cancelled(project_id):
+                    kill_process_tree(proc)
+                    _stop_warm_worker()
+                    return -1
+                if proc.poll() is not None:
+                    _stop_warm_worker()
+                    return -1
+                if time.monotonic() >= deadline:
+                    kill_process_tree(proc)
+                    _stop_warm_worker()
+                    return -1
+                time.sleep(0.05)
+            out = json.loads(pout.read_text(encoding="utf-8"))
+            if out.get("error"):
+                raise RuntimeError(str(out["error"]))
+            result = _copy_worker_segments(segments, out)
+            try:
+                from pipeline.core.app_log import append_log
+
+                append_log(f"[locate-warm-worker] ok n={result}")
+            except Exception:
+                pass
+            return result
+        except (OSError, subprocess.SubprocessError, ValueError, RuntimeError) as exc:
+            _stop_warm_worker()
+            try:
+                from pipeline.core.app_log import append_exception
+
+                append_exception("[locate-warm-worker] fallback one-shot", exc)
+            except Exception:
+                pass
+            return _locate_via_runtime_subprocess_oneshot(
+                video,
+                segments,
+                only_missing=only_missing,
+                stable=stable,
+                analysis_region=analysis_region,
+                project_id=project_id,
+                status_workers=status_workers,
+            )
+        finally:
+            unregister_process(project_id, locals().get("proc"))
+            for path_name in ("pin", "pout"):
+                path = locals().get(path_name)
+                if isinstance(path, Path):
+                    path.unlink(missing_ok=True)
+
+
+def _detect_logo_via_runtime_subprocess(
+    video: Path | str,
+    *,
+    project_id: str | None = None,
+    segments: list[dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    """Detect one persistent logo in the same warm OCR process."""
+    uv_cmd = _uv_run_cmd()
+    if uv_cmd is None:
+        return None
+    meipass = getattr(sys, "_MEIPASS", None)
+    exe_dir = Path(sys.executable).parent if getattr(sys, "frozen", False) else None
+    pipeline_root = next(
+        (
+            cand
+            for cand in (
+                Path(meipass) if meipass else None,
+                exe_dir / "_internal" if exe_dir else None,
+                exe_dir,
+                Path(__file__).resolve().parents[2],
+            )
+            if cand and (cand / "pipeline" / "ocr" / "logo.py").is_file()
+        ),
+        None,
+    )
+    if pipeline_root is None:
+        return None
+    from pipeline.core.jobs import (
+        is_cancelled,
+        kill_process_tree,
+        register_process,
+        unregister_process,
+    )
+
+    with _warm_worker_lock:
+        try:
+            proc, tdir = _get_warm_worker(uv_cmd, pipeline_root, meipass)
+            token = uuid.uuid4().hex
+            pin, pout = tdir / f"{token}.in.json", tdir / f"{token}.out.json"
+            pin.write_text(
+                json.dumps(
+                    {
+                        "op": "logo",
+                        "video": str(Path(video).resolve()),
+                        "project_id": project_id,
+                        "segments": segments or [],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            assert proc.stdin is not None
+            proc.stdin.write(json.dumps({"in": str(pin), "out": str(pout)}) + "\n")
+            proc.stdin.flush()
+            register_process(project_id, proc)
+            deadline = time.monotonic() + 900
+            while not pout.is_file():
+                if project_id and is_cancelled(project_id):
+                    kill_process_tree(proc)
+                    _stop_warm_worker()
+                    return None
+                if proc.poll() is not None or time.monotonic() >= deadline:
+                    kill_process_tree(proc)
+                    _stop_warm_worker()
+                    return None
+                time.sleep(0.05)
+            out = json.loads(pout.read_text(encoding="utf-8"))
+            if out.get("error"):
+                raise RuntimeError(str(out["error"]))
+            logo = out.get("logo")
+            return logo if isinstance(logo, dict) else None
+        except (OSError, subprocess.SubprocessError, ValueError, RuntimeError) as exc:
+            _stop_warm_worker()
+            try:
+                from pipeline.core.app_log import append_exception
+
+                append_exception("[logo-warm-worker] detection failed", exc)
+            except Exception:
+                pass
+            return None
+        finally:
+            unregister_process(project_id, locals().get("proc"))
+            for path_name in ("pin", "pout"):
+                path = locals().get(path_name)
+                if isinstance(path, Path):
+                    path.unlink(missing_ok=True)

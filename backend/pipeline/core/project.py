@@ -587,9 +587,12 @@ def clear_project_cache(
                 s.pop("captionLayout", None)
             m["segments"] = segs
             m.pop("timelineBaseline", None)
+            m.pop("logoDetection", None)
         elif scrub_segments:
             m["segments"] = []
             m.pop("timelineBaseline", None)
+            if all_on or "ocr" in want or "covers" in want:
+                m.pop("logoDetection", None)
 
         if scrub_tts_meta:
             segs = m.get("segments") or []

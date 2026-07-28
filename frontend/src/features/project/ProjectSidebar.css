@@ -566,6 +566,41 @@
   accent-color: var(--primary);
 }
 
+.locate-logo-filter {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(128px, 2fr);
+  gap: 8px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  overflow: visible;
+}
+
+.locate-logo-filter .audio-filter-toggle {
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.locate-logo-filter .audio-filter-toggle:last-child {
+  border-left: 1px solid var(--line);
+}
+
+.locate-logo-filter .audio-filter-toggle input {
+  order: initial;
+  flex: 0 0 auto;
+  margin: 0;
+}
+
+.locate-logo-filter .field-label {
+  min-width: 0;
+  white-space: nowrap;
+}
+
 .audio-filter-options {
   display: grid;
   grid-template-columns: 1fr 1fr;

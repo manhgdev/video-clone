@@ -47,6 +47,26 @@ from pipeline.tts import tts_cache_key, tts_segment
 
 from pipeline.orchestrate.tts_fit import assign_tts_fit_speeds
 
+_PREFER_VIDEO_DEFAULT_TTS_SPEED = 1.1
+
+
+def _segment_playback(seg: dict[str, Any]) -> tuple[float, float]:
+    """Giá trị editor lưu theo × và %, manager nhận × và 0–2."""
+    try:
+        speed = max(0.5, min(2.0, float(seg.get("ttsSpeed") or 1.0)))
+    except (TypeError, ValueError):
+        speed = 1.0
+    try:
+        raw_volume = seg.get("ttsVolume")
+        volume = max(
+            0.0,
+            min(2.0, float(100.0 if raw_volume is None else raw_volume) / 100.0),
+        )
+    except (TypeError, ValueError):
+        volume = 1.0
+    return speed, volume
+
+
 def run_dub(project_id: str, *, finalize: bool = True, nested: bool = False) -> None:
     meta = load_meta(project_id)
     segments = meta.get("segments") or []
@@ -74,8 +94,8 @@ def run_dub(project_id: str, *, finalize: bool = True, nested: bool = False) -> 
         # Một cache key có thể được nhiều segment dùng chung; chỉ synthesize 1 lần.
         jobs: dict[str, dict[str, Any]] = {}
         # Slot TTS = min(end-start, đến start câu sau) — fit đọc hết, ít đè
-        # preferVideo/none: không ép atempo theo slot
-        soft_match = match in ("none", "preferVideo")
+        # Chỉ none bỏ fit; preferVideo dùng phần video đã chậm rồi tăng TTS nếu vẫn tràn.
+        soft_match = match == "none"
         ordered = sorted(segments, key=lambda s: float(s.get("start") or 0))
         if force_tts:
             # Xóa file wav/mp3 TTS cũ — tránh preview lệch timeline mới
@@ -111,6 +131,7 @@ def run_dub(project_id: str, *, finalize: bool = True, nested: bool = False) -> 
             text = seg.get("translation") or seg.get("source") or "."
             voice = inherit_voice(seg.get("voice"), default_voice)
             seg["voice"] = voice
+            tts_speed, tts_volume = _segment_playback(seg)
             start = float(seg.get("start") or 0)
             end = float(seg.get("end") or start)
             window = max(0.12, end - start)
@@ -125,7 +146,12 @@ def run_dub(project_id: str, *, finalize: bool = True, nested: bool = False) -> 
                 target = max(0.15, next_start - start - 0.03)
             else:
                 target = max(0.15, window)
-            key = tts_cache_key(text, voice, lang, match)
+            key = tts_cache_key(
+                text,
+                voice,
+                lang,
+                f"{match}|speed={tts_speed:.3f}|volume={tts_volume:.3f}",
+            )
             name = f"{key}.wav"
             job = jobs.setdefault(
                 key,
@@ -135,6 +161,8 @@ def run_dub(project_id: str, *, finalize: bool = True, nested: bool = False) -> 
                     "name": name,
                     "wav": root / "tts" / name,
                     "target": target,
+                    "speed": tts_speed,
+                    "volume": tts_volume,
                     "segments": [],
                 },
             )
@@ -163,6 +191,8 @@ def run_dub(project_id: str, *, finalize: bool = True, nested: bool = False) -> 
                         match,
                         lang=lang,
                         force_refit=True,
+                        speed=float(job["speed"]),
+                        volume=float(job["volume"]),
                         cancel_check=lambda: is_cancelled(project_id),
                     )
                 except Exception:
@@ -181,6 +211,8 @@ def run_dub(project_id: str, *, finalize: bool = True, nested: bool = False) -> 
                         target,
                         match,
                         lang=lang,
+                        speed=float(job["speed"]),
+                        volume=float(job["volume"]),
                         cancel_check=lambda: is_cancelled(project_id),
                     )
                 except Exception as exc:
@@ -292,14 +324,14 @@ def run_dub(project_id: str, *, finalize: bool = True, nested: bool = False) -> 
             if seg.get("audioFile") or float(seg.get("audioDuration") or 0) > 0.05:
                 seg["ttsBake"] = bake_now
         # Flow «ưu tiên 0.8»: phân tích ở 0.8 rồi nâng timeline 1× → mọi khe co
-        # 0.8. Giọng mặc định 1.20× (user chốt) — đều toàn bài, đỡ nén lệch
+        # 0.8. Giọng mặc định 1.10× — đều toàn bài, đỡ nén lệch
         # từng câu; user chỉnh khác 1× thì tôn trọng.
         # CHỈ khi dub trên đồng hồ đã nâng (bake≈1) — dub trước khi nâng thì
-        # ttsBake tự lo phần ×1.25, gán thêm 1.2 sẽ thành ~1.5 (quá nhanh).
+        # ttsBake tự lo phần ×1.25, không cộng mặc định khi dub trước lúc nâng.
         if match == "preferVideo" and abs(bake_now - 1.0) <= 0.02:
             for seg in segments:
                 if seg.get("audioFile") and float(seg.get("ttsSpeed") or 1) == 1.0:
-                    seg["ttsSpeed"] = 1.2
+                    seg["ttsSpeed"] = _PREFER_VIDEO_DEFAULT_TTS_SPEED
 
         # Thước timeline bất khả xâm phạm: TTS dài hơn khe → NÉN AUDIO (atempo
         # ≤2×), không giãn video. Xuất = preview = đúng thời lượng nguồn.

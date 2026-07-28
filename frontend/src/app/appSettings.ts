@@ -58,6 +58,7 @@ export const defaultSettings: ProjectSettings = {
   defaultVoice: 'cc:BV075_streaming:7102355803792740865',
   stableCaptionLocate: false,
   analysisRegion: null,
+  coverLogo: false,
   coverHardsubs: true,
   coverMaskStyle: 'blur',
   coverMaskColor: '#4c1d95',
@@ -78,6 +79,8 @@ export const defaultSettings: ProjectSettings = {
   workers: 0,
   previewAspectRatio: 'original',
   previewCrop: null,
+  videoScaleX: 100,
+  videoScaleY: 100,
   exportResolution: '1080',
   engineProfiles: {
     whisper: { ...ENGINE_DEFAULTS.whisper },
@@ -147,6 +150,7 @@ export function loadSettings(): ProjectSettings {
     if (!raw) return defaultSettings
     const s = { ...defaultSettings, ...JSON.parse(raw) } as ProjectSettings
     if (typeof s.stableCaptionLocate !== 'boolean') s.stableCaptionLocate = false
+    if (typeof s.coverLogo !== 'boolean') s.coverLogo = false
     if (s.analysisRegion != null && typeof s.analysisRegion === 'object') {
       const r = s.analysisRegion as { x?: number; y?: number; w?: number; h?: number }
       const x = Math.max(0, Math.min(1, Number(r.x) || 0))
@@ -214,6 +218,15 @@ export function loadSettings(): ProjectSettings {
     if (!okAspect.includes(s.previewAspectRatio as (typeof okAspect)[number])) {
       s.previewAspectRatio = 'original'
     }
+    const legacyVideoScale = typeof s.videoScale === 'number' && Number.isFinite(s.videoScale)
+      ? s.videoScale
+      : 100
+    s.videoScaleX = typeof s.videoScaleX === 'number' && Number.isFinite(s.videoScaleX)
+      ? Math.max(1, Math.min(500, s.videoScaleX))
+      : Math.max(1, Math.min(500, legacyVideoScale))
+    s.videoScaleY = typeof s.videoScaleY === 'number' && Number.isFinite(s.videoScaleY)
+      ? Math.max(1, Math.min(500, s.videoScaleY))
+      : Math.max(1, Math.min(500, legacyVideoScale))
     const okResolution = ['144', '240', '360', '480', '720', '1080', '1440', '2160', 'original'] as const
     if (!okResolution.includes(s.exportResolution as (typeof okResolution)[number])) {
       s.exportResolution = '1080'

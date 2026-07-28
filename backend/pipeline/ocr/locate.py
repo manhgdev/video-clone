@@ -1,12 +1,14 @@
 """OCR định vị hardsub / nhãn / title dọc trên khung (dùng lúc burn)."""
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -21,13 +23,13 @@ from .overlay_cover import mid_bottom_cutoff
 # Lock: chỉ một request được chạy OCR in-process — native ext crash khi song song.
 _inprocess_lock = threading.Lock()
 
-# Quick mode samples the whole timeline instead of invoking OCR for every cue.
-# 64 anchors keep style/location changes within a few neighbouring captions
-# while bounding long-video model calls.
-_QUICK_PROBE_LIMIT = 64
-# Stable mode keeps first/middle/last samples but caps long timelines. The
-# remaining cues inherit from the nearest stable anchor instead of triggering
-# another OCR pass.
+# Whisper captions normally stay in one lane. Probe 3/5 representative cues,
+# then bisect only intervals whose measured lanes differ.
+_SHORT_VIDEO_SECONDS = 10 * 60
+_QUICK_PROBE_LIMIT = 16
+_FRAME_SEEK_TIMEOUT_SECONDS = 5.0
+_locate_ocr: Any = None
+_locate_ocr_lock = threading.Lock()
 
 
 def _spread_probes(items: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
@@ -37,6 +39,106 @@ def _spread_probes(items: list[dict[str, Any]], limit: int) -> list[dict[str, An
     last = len(items) - 1
     indices = sorted({round(i * last / (limit - 1)) for i in range(limit)})
     return [items[i] for i in indices]
+
+
+def _initial_anchor_indices(
+    items: list[dict[str, Any]], video_end: float | None
+) -> list[int]:
+    """Choose 3 short-video or 5 long-video anchors by timeline position."""
+    if not items:
+        return []
+    count = 3 if float(video_end or 0) < _SHORT_VIDEO_SECONDS else 5
+    if len(items) <= count:
+        return list(range(len(items)))
+    mids = [
+        (float(item.get("start") or 0) + float(item.get("end") or 0)) * 0.5
+        for item in items
+    ]
+    lo, hi = mids[0], mids[-1]
+    if hi <= lo:
+        return sorted({round(i * (len(items) - 1) / (count - 1)) for i in range(count)})
+    targets = [lo + (hi - lo) * i / (count - 1) for i in range(count)]
+    return sorted({min(range(len(mids)), key=lambda j: abs(mids[j] - t)) for t in targets})
+
+
+def _same_caption_lane(
+    a: tuple[int, int, int, int] | None,
+    b: tuple[int, int, int, int] | None,
+    fw: int,
+    fh: int,
+) -> bool:
+    """Ignore text-dependent width; compare the stable lane geometry."""
+    if a is None or b is None:
+        return False
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ah, bh = max(1, ay2 - ay1), max(1, by2 - by1)
+    acy, bcy = (ay1 + ay2) * 0.5, (by1 + by2) * 0.5
+    acx, bcx = (ax1 + ax2) * 0.5, (bx1 + bx2) * 0.5
+    return (
+        _layout_from_cy(acy, fh, fw) == _layout_from_cy(bcy, fh, fw)
+        and abs(acy - bcy) <= max(fh * 0.045, max(ah, bh) * 1.25)
+        and abs(acx - bcx) <= fw * 0.15
+        and max(ah, bh) / min(ah, bh) <= 1.8
+    )
+
+
+def _refinement_indices(
+    anchor_boxes: dict[int, tuple[int, int, int, int] | None],
+    item_count: int,
+    fw: int,
+    fh: int,
+    *,
+    decode_failed: set[int] | None = None,
+) -> list[int]:
+    """Bisect changed lanes; retry a missed anchor at its nearest cue."""
+    used = set(anchor_boxes)
+    failed = decode_failed or set()
+    out: list[int] = []
+    ordered = sorted(used)
+    for idx in ordered:
+        if anchor_boxes[idx] is not None or idx in failed:
+            continue
+        for candidate in (idx - 1, idx + 1):
+            if 0 <= candidate < item_count and candidate not in used:
+                out.append(candidate)
+                break
+    successful = [idx for idx in ordered if anchor_boxes[idx] is not None]
+    for left, right in zip(successful, successful[1:]):
+        if right - left > 1 and not _same_caption_lane(
+            anchor_boxes[left], anchor_boxes[right], fw, fh
+        ):
+            middle = (left + right) // 2
+            if middle not in used:
+                out.append(middle)
+    return list(dict.fromkeys(out))
+
+
+def _lane_region_from_box(
+    box: tuple[int, int, int, int],
+    fw: int,
+    fh: int,
+    base: tuple[float, float, float, float] | None = None,
+) -> dict[str, float]:
+    """Dải OCR quanh lane đã thấy; giữ nguyên giới hạn ngang của người dùng."""
+    x1, y1, x2, y2 = box
+    bh = max(8, y2 - y1)
+    pad_y = max(fh * 0.035, bh * 1.5)
+    top = max(0.0, y1 - pad_y)
+    bottom = min(float(fh), y2 + pad_y)
+    if base:
+        bx, by, bw, bh_norm = base
+        left, right = bx, bx + bw
+        top = max(top, by * fh)
+        bottom = min(bottom, (by + bh_norm) * fh)
+    else:
+        left, right = 0.04, 0.96
+    return {
+        "x": left,
+        "y": top / max(1, fh),
+        "w": max(0.05, right - left),
+        "h": max(0.05, (bottom - top) / max(1, fh)),
+    }
 
 
 # Worker subprocess tách sang locate_worker.py — re-export giữ import cũ
@@ -67,7 +169,12 @@ def _source_matches(text: str, source: str) -> bool:
 
 def rapidocr_labels() -> Any:
     """OCR lỏng cho nhãn / 1 chữ — default RapidOCR bỏ sót glyph nhỏ."""
-    return _rapidocr_labels()
+    global _locate_ocr
+    if _locate_ocr is None:
+        with _locate_ocr_lock:
+            if _locate_ocr is None:
+                _locate_ocr = _rapidocr_labels()
+    return _locate_ocr
 
 
 def ocr_mid_labels(
@@ -269,6 +376,20 @@ def _normalize_analysis_region(
     return (x, y, w, h)
 
 
+def _group_frame_indices(
+    wanted: list[int], fps: float, *, batch: int = 48, max_gap_s: float = 10.0
+) -> list[list[int]]:
+    """Keep dense marks together; sparse marks must input-seek independently."""
+    parts: list[list[int]] = []
+    max_gap_frames = max(1, round(fps * max_gap_s))
+    for idx in wanted:
+        if not parts or len(parts[-1]) >= batch or idx - parts[-1][-1] > max_gap_frames:
+            parts.append([idx])
+        else:
+            parts[-1].append(idx)
+    return parts
+
+
 def _decode_frames_batch(
     video: Path,
     times: list[float],
@@ -277,74 +398,85 @@ def _decode_frames_batch(
     height: int,
     *,
     use_cuda: bool,
+    project_id: str | None = None,
+    timeout: float = _FRAME_SEEK_TIMEOUT_SECONDS,
 ):
-    """Yield (frame_index, frame_bgr) cho cac moc — ffmpeg doc tuan tu theo LO.
-
-    OpenCV seek tung moc giai ma lai tu keyframe va tu bung ~8/12 core CPU
-    (do duoc), lam treo may. ffmpeg + select filter chi giai ma mot lan; kem
-    -hwaccel cuda thi phan giai ma nam tren GPU.
-
-    ponytail: ffmpeg khong parse noi select expr qua ~100 nhanh eq() -> chia lo
-    <=48 moc, moi lo input-seek toi moc dau (pad 1s de chac co keyframe).
-    Nang cap: dung -skip_frame/-vf fps neu can lay day dac hon.
-    """
+    """Yield frame theo thứ tự hoàn tất; mỗi seek FFmpeg có timeout riêng."""
     if fps <= 0 or width <= 0 or height <= 0 or not times:
         return
     frame_bytes = width * height * 3
     wanted = sorted({max(0, int(round(t * fps))) for t in times})
     if not wanted:
         return
-    batch = 48
-    seek_pad = 1.0
-    for start_i in range(0, len(wanted), batch):
-        part = wanted[start_i : start_i + batch]
-        seek_t = max(0.0, part[0] / fps - seek_pad)
-        base_n = int(round(seek_t * fps))
-        rel = [max(0, idx - base_n) for idx in part]
-        expr = "+".join("eq(n\\,%d)" % i for i in rel)
-        cmd = ["ffmpeg", "-v", "error", "-threads", "1"]
-        if use_cuda:
-            cmd += ["-hwaccel", "cuda"]
-        if seek_t > 0.01:
-            cmd += ["-ss", "%.3f" % seek_t]
-        cmd += [
-            "-i", str(video),
-            "-vf", "select='%s'" % expr,
-            "-vsync", "0",
-            "-f", "rawvideo", "-pix_fmt", "bgr24", "-",
+
+    # ponytail: 3/5 anchor độc lập nhanh hơn scan timeline và không để một pipe
+    # treo khóa cả lượt. Nếu sau này probe dày, thêm lại decoder tuần tự có watchdog.
+    def _one(idx: int):
+        from pipeline.core.jobs import (
+            kill_process_tree,
+            register_process,
+            unregister_process,
+        )
+
+        cmd = [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-threads",
+            "1",
+            "-ss",
+            "%.3f" % (idx / fps),
+            "-i",
+            str(video),
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "bgr24",
+            "-",
         ]
-        kw: dict[str, Any] = {"stdout": subprocess.PIPE, "stderr": subprocess.DEVNULL}
+        kw: dict[str, Any] = {
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.DEVNULL,
+        }
         if sys.platform == "win32":
             kw["creationflags"] = int(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
         proc = subprocess.Popen(cmd, **kw)
+        register_process(project_id, proc)
         try:
             import numpy as np
 
-            assert proc.stdout is not None
-            for idx in part:
-                buf = bytearray()
-                while len(buf) < frame_bytes:
-                    chunk = proc.stdout.read(frame_bytes - len(buf))
-                    if not chunk:
-                        break
-                    buf.extend(chunk)
-                if len(buf) < frame_bytes:
-                    break
-                yield idx, np.frombuffer(bytes(buf), dtype=np.uint8).reshape(
-                    (height, width, 3)
-                )
+            try:
+                buf, _stderr = proc.communicate(timeout=max(0.1, timeout))
+            except subprocess.TimeoutExpired:
+                kill_process_tree(proc)
+                proc.communicate()
+                return None
+            if proc.returncode != 0 or len(buf) < frame_bytes:
+                return None
+            return idx, np.frombuffer(buf[:frame_bytes], dtype=np.uint8).reshape(
+                (height, width, 3)
+            )
         finally:
-            try:
-                if proc.stdout:
-                    proc.stdout.close()
-            except OSError:
-                pass
             if proc.poll() is None:
-                proc.terminate()
+                kill_process_tree(proc)
+            unregister_process(project_id, proc)
+
+    # CPU decode song song, GPU được dành riêng cho RapidOCR.
+    _ = use_cuda  # giữ tương thích caller cũ; cố ý không dùng NVDEC tại đây.
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=min(5, len(wanted)), thread_name_prefix="ocr-frame"
+    ) as pool:
+        futures = [pool.submit(_one, idx) for idx in wanted]
+        for future in concurrent.futures.as_completed(futures):
+            check_cancel(project_id)
             try:
-                proc.wait(timeout=5)
+                item = future.result()
             except Exception:
-                pass
+                item = None
+            if item is not None:
+                yield item
 
 
 def _probe_mid_hardsub(
@@ -873,6 +1005,8 @@ def attach_speech_hardsub_boxes_inprocess(
         cap.release()
         return n_inh
 
+    locate_started = time.perf_counter()
+    perf = {"ocr_calls": 0, "ocr_seconds": 0.0, "lane_retries": 0}
     _device_label = ["CPU"]
     try:
         ocr = rapidocr_labels()
@@ -903,17 +1037,42 @@ def attach_speech_hardsub_boxes_inprocess(
     # RapidOCR CUDA song song = 98s cho 3 probe, 1 session = 2.4s (tranh chap
     # cuDNN + VRAM). Toc do den tu prefetch decode chu khong phai da luong OCR.
     def _ocr_probe(
-        t: float, frame: Any, src: str, lay: str
+        t: float,
+        frame: Any,
+        src: str,
+        lay: str,
+        region_override: dict[str, float] | None = None,
     ) -> tuple[float, float, tuple[int, int, int, int], str] | None:
+        region = region_override or (
+            {"x": roi[0], "y": roi[1], "w": roi[2], "h": roi[3]} if roi else None
+        )
+        ocr_started = time.perf_counter()
         hit = _probe_mid_hardsub(
             frame,
             ocr,
             source=src,
-            analysis_region=(
-                {"x": roi[0], "y": roi[1], "w": roi[2], "h": roi[3]} if roi else None
-            ),
+            analysis_region=region,
             layout=lay,
         )
+        perf["ocr_calls"] += 1
+        perf["ocr_seconds"] += time.perf_counter() - ocr_started
+        # Lane hẹp trượt thì quét lại vùng gốc đúng một lần. Không vượt ra
+        # ngoài Giới hạn khung định vị nếu người dùng đã chọn.
+        fallback_region = (
+            {"x": roi[0], "y": roi[1], "w": roi[2], "h": roi[3]} if roi else None
+        )
+        if not hit and region_override:
+            perf["lane_retries"] += 1
+            ocr_started = time.perf_counter()
+            hit = _probe_mid_hardsub(
+                frame,
+                ocr,
+                source=src,
+                analysis_region=fallback_region,
+                layout=lay,
+            )
+            perf["ocr_calls"] += 1
+            perf["ocr_seconds"] += time.perf_counter() - ocr_started
         if not hit:
             return None
         score, box, text = hit
@@ -942,8 +1101,7 @@ def attach_speech_hardsub_boxes_inprocess(
                 "Định vị OCR",
                 done,
                 total,
-                extra=_device_label[0],
-                workers=status_workers or None,
+                extra=("CPU + GPU" if _device_label[0] == "GPU" else "CPU"),
             ),
             running=True,
         )
@@ -951,129 +1109,91 @@ def attach_speech_hardsub_boxes_inprocess(
     from .cover_timing import attach_cover_times
 
     attached = 0
-    # ponytail: OCR tối đa 64 mốc; cue còn lại kế thừa mốc gần nhất và tính
-    # lại bề ngang theo số glyph CJK của chính nó.
-    probes = _spread_probes(filtered, _QUICK_PROBE_LIMIT)
-    total = len(probes)
-    anchor_boxes: list[tuple[int, int, int, int]] = []
-    # Gom job: 1 frame giữa mỗi cue (một chế độ duy nhất).
-    probe_meta: list[tuple[str, str]] = []
-    jobs: list[tuple[int, float]] = []
-    for si, seg in enumerate(probes):
-        s0 = float(seg.get("start") or 0)
-        e0 = float(seg.get("end") or s0)
-        if e0 <= s0:
-            e0 = s0 + 0.4
-        probe_meta.append(
-            (str(seg.get("source") or "").strip(), str(seg.get("layout") or "horizontal"))
-        )
-        jobs.append((si, s0 + max(0.2, e0 - s0) * 0.5))
+    # ponytail: Whisper captions rarely move. Start with 3/5 anchors and only
+    # bisect changed intervals; 16 is the explicit ceiling for unusual videos.
+    anchor_hits: dict[int, tuple[int, int, int, int] | None] = {}
+    decode_failed: set[int] = set()
+    pending = _initial_anchor_indices(filtered, video_end)
+    lane_region: dict[str, float] | None = None
 
-    # Prefetch decode: 1 thread doc/seek frame truoc (cv2 chi dung trong thread
-    # nay - khong thread-safe), main thread OCR. Decode chong len OCR thay vi
-    # noi tiep => nhanh hon ma GPU van 1 session duy nhat.
-    hits_by_probe: dict[
-        int, list[tuple[float, tuple[float, float, tuple[int, int, int, int], str]]]
-    ] = {}
-    jobs_per_probe: dict[int, int] = {}
-    for si, _t in jobs:
-        jobs_per_probe[si] = jobs_per_probe.get(si, 0) + 1
-    done_per_probe: dict[int, int] = {}
-    done_probes = 0
-    try:
-        import queue as _queue
+    def _jobs(indices: list[int]) -> list[tuple[int, float]]:
+        out: list[tuple[int, float]] = []
+        for si in indices:
+            seg = filtered[si]
+            s0 = float(seg.get("start") or 0)
+            e0 = float(seg.get("end") or s0)
+            if e0 <= s0:
+                e0 = s0 + 0.4
+            out.append((si, s0 + max(0.2, e0 - s0) * 0.5))
+        return out
 
-        frame_q: _queue.Queue = _queue.Queue(maxsize=3)
-        decode_err: list[BaseException] = []
-
-        def _decoder() -> None:
-            try:
-                # Uu tien MOT process ffmpeg (NVDEC neu GPU san sang): giai ma
-                # tuan tu, CPU ~1 core thay vi ~8 core cua OpenCV seek.
-                by_index: dict[int, list[tuple[int, float]]] = {}
-                if fps > 0:
-                    for si, t in jobs:
-                        by_index.setdefault(max(0, int(round(t * fps))), []).append((si, t))
-                served: set[int] = set()
-                if by_index:
-                    try:
-                        from pipeline.core.media import nvdec_available
-
-                        use_cuda = bool(nvdec_available(Path(video)))
-                    except Exception:
-                        use_cuda = False
-                    try:
-                        for idx, frame in _decode_frames_batch(
-                            Path(video),
-                            [t for _si, t in jobs],
-                            fps,
-                            fw,
-                            fh,
-                            use_cuda=use_cuda,
-                        ):
-                            check_cancel(project_id)
-                            for si, t in by_index.get(idx, []):
-                                frame_q.put((si, t, frame))
-                            served.add(idx)
-                    except Cancelled:
-                        raise
-                    except Exception:
-                        pass
-                # Moc nao ffmpeg khong tra duoc -> fallback OpenCV seek
-                for idx, pairs in by_index.items():
-                    if idx in served:
-                        continue
-                    for si, t in pairs:
-                        check_cancel(project_id)
-                        frame_q.put((si, t, _read_frame_at(t)))
-                if not by_index:
-                    for si, t in jobs:
-                        check_cancel(project_id)
-                        frame_q.put((si, t, _read_frame_at(t)))
-            except BaseException as e:  # noqa: BLE001 - day len main thread
-                decode_err.append(e)
-            finally:
-                frame_q.put(None)
-
-        dec_thread = threading.Thread(
-            target=_decoder, name="ocr-locate-decode", daemon=True
-        )
-        dec_thread.start()
-        while True:
-            item = frame_q.get()
-            if item is None:
-                break
-            si, t, fr = item
+    def _run_probe_round(indices: list[int], total: int) -> None:
+        nonlocal lane_region
+        jobs = _jobs(indices)
+        by_index: dict[int, list[tuple[int, float]]] = {}
+        for si, t in jobs:
+            by_index.setdefault(max(0, int(round(t * fps))), []).append((si, t))
+        served: set[int] = set()
+        for idx, frame in _decode_frames_batch(
+            Path(video),
+            [t for _si, t in jobs],
+            fps,
+            fw,
+            fh,
+            use_cuda=False,
+            project_id=project_id,
+        ):
             check_cancel(project_id)
-            if fr is not None:
+            for si, t in by_index.get(idx, []):
+                served.add(si)
+                seg = filtered[si]
                 try:
-                    hit = _ocr_probe(t, fr, *probe_meta[si])
+                    hit = _ocr_probe(
+                        t,
+                        frame,
+                        str(seg.get("source") or "").strip(),
+                        str(seg.get("layout") or "horizontal"),
+                        lane_region,
+                    )
                 except Exception:
                     hit = None
-                if hit:
-                    hits_by_probe.setdefault(si, []).append((t, hit))
-            done_per_probe[si] = done_per_probe.get(si, 0) + 1
-            if done_per_probe[si] == jobs_per_probe[si]:
-                done_probes += 1
-                _report(min(done_probes, total), total)
-        dec_thread.join(timeout=5)
-        if decode_err:
-            raise decode_err[0]
+                anchor_hits[si] = hit[2] if hit else None
+                if hit and lane_region is None:
+                    lane_region = _lane_region_from_box(hit[2], fw, fh, roi)
+                _report(len(anchor_hits), total)
+        for si, _t in jobs:
+            if si not in served:
+                anchor_hits[si] = None
+                decode_failed.add(si)
+                _report(len(anchor_hits), total)
 
-        for si, seg in enumerate(probes):
-            ordered_hits = [
-                h for _t, h in sorted(hits_by_probe.get(si, []), key=lambda x: x[0])
+    try:
+        while pending and len(anchor_hits) < _QUICK_PROBE_LIMIT:
+            current = [idx for idx in pending if idx not in anchor_hits][
+                : _QUICK_PROBE_LIMIT - len(anchor_hits)
             ]
-            stable_box = ordered_hits[0][2] if ordered_hits else None
+            if not current:
+                break
+            total = min(_QUICK_PROBE_LIMIT, len(anchor_hits) + len(current))
+            _run_probe_round(current, total)
+            pending = _refinement_indices(
+                anchor_hits,
+                len(filtered),
+                fw,
+                fh,
+                decode_failed=decode_failed,
+            )
+
+        for si, stable_box in sorted(anchor_hits.items()):
             if stable_box is None:
                 continue
+            seg = filtered[si]
             _apply_caption_box(seg, stable_box, fw, fh)
             seg["_probeAnchored"] = True
             seg.pop("captionLayout", None)
             attach_cover_times(seg, video_end=video_end)
-            anchor_boxes.append(stable_box)
             attached += 1
-        _report(total, total)
+        _report(len(anchor_hits), len(anchor_hits))
     finally:
         cap.release()
     attached += _inherit_caption_bboxes(segments, fh, fw)
@@ -1082,4 +1202,15 @@ def attach_speech_hardsub_boxes_inprocess(
         seg.pop("_probeAnchored", None)
         seg.pop("_fromInherit", None)
         _retag_layout_from_bbox(seg, fh, fw)
+    try:
+        from pipeline.core.app_log import append_log
+
+        append_log(
+            "[locate-perf] "
+            f"anchors={len(anchor_hits)} calls={int(perf['ocr_calls'])} "
+            f"retries={int(perf['lane_retries'])} "
+            f"ocr={perf['ocr_seconds']:.2f}s total={time.perf_counter() - locate_started:.2f}s"
+        )
+    except Exception:
+        pass
     return attached

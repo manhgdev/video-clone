@@ -221,6 +221,42 @@ def _solid_region(
     return frame_bgr
 
 
+def _inpaint_region(frame_bgr: Any, box: tuple[int, int, int, int]) -> Any:
+    """Remove a small fixed logo by reconstructing it from surrounding pixels."""
+    import cv2
+    import numpy as np
+
+    h, w = frame_bgr.shape[:2]
+    x0, y0, x1, y1 = (
+        max(0, box[0]),
+        max(0, box[1]),
+        min(w, box[2]),
+        min(h, box[3]),
+    )
+    bw, bh = x1 - x0, y1 - y0
+    if bw < 3 or bh < 3:
+        return frame_bgr
+    pad = max(8, round(min(bw, bh) * 0.45))
+    ex0, ey0 = max(0, x0 - pad), max(0, y0 - pad)
+    ex1, ey1 = min(w, x1 + pad), min(h, y1 + pad)
+    crop = frame_bgr[ey0:ey1, ex0:ex1]
+    mask = np.zeros(crop.shape[:2], np.uint8)
+    lx0, ly0 = x0 - ex0, y0 - ey0
+    lx1, ly1 = x1 - ex0, y1 - ey0
+    mask[ly0:ly1, lx0:lx1] = 255
+    dilate = max(3, (round(min(bw, bh) * 0.08) | 1))
+    mask = cv2.dilate(mask, np.ones((dilate, dilate), np.uint8))
+    radius = max(3.0, min(9.0, min(bw, bh) * 0.12))
+    rebuilt = cv2.inpaint(crop, mask, radius, cv2.INPAINT_TELEA)
+    feather = max(3, (round(min(bw, bh) * 0.10) | 1))
+    alpha = cv2.GaussianBlur(mask, (feather, feather), 0).astype(np.float32) / 255.0
+    a3 = alpha[..., None]
+    frame_bgr[ey0:ey1, ex0:ex1] = (
+        rebuilt.astype(np.float32) * a3 + crop.astype(np.float32) * (1.0 - a3)
+    ).astype(np.uint8)
+    return frame_bgr
+
+
 def _apply_cover_mask(
     frame_bgr: Any,
     box: tuple[int, int, int, int],
@@ -230,6 +266,8 @@ def _apply_cover_mask(
     opacity_pct: int = 40,
 ) -> Any:
     st = (style or "blur").lower()
+    if st == "inpaint":
+        return _inpaint_region(frame_bgr, box)
     if st == "solid":
         return _solid_region(frame_bgr, box, color_hex, opacity_pct)
     if st == "mosaic":

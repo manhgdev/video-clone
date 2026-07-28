@@ -353,7 +353,7 @@ export default function LivePreviewEditor({
       .filter((s) => typeof s.ttsSpeed === 'number' && s.ttsSpeed > 0)
       .map((s) => s.ttsSpeed as number)
     if (!vals.length) {
-      setGlobalTtsSpeed(settings.matchDuration === 'preferVideo' ? 1.2 : 1)
+      setGlobalTtsSpeed(settings.matchDuration === 'preferVideo' ? 1.1 : 1)
       return
     }
     const freq = new Map<number, number>()
@@ -2222,12 +2222,14 @@ export default function LivePreviewEditor({
     pauseDubAudio()
     try {
       const voice = target.voice || settings.defaultVoice
+      const speed = target.ttsSpeed ?? 1.1
       const result = await api.previewTts(projectId, target.id, {
         text: target.translation,
         voice,
         lang: settings.targetLang === 'none' ? 'vi' : settings.targetLang,
+        speed,
       })
-      editSegment({ ...target, audioUrl: result.audioUrl, audioDuration: result.duration })
+      editSegment({ ...target, ttsSpeed: speed, audioUrl: result.audioUrl, audioDuration: result.duration })
       audioRef.current?.pause()
       audioRef.current = new Audio(result.audioUrl)
       await audioRef.current.play()
@@ -4133,7 +4135,13 @@ export default function LivePreviewEditor({
                           key={videoUrl}
                           ref={videoRef}
                           className="absolute max-w-none pointer-events-none select-none"
-                          style={videoCropStyle(sourceWidth, sourceHeight, crop)}
+                          style={videoCropStyle(
+                            sourceWidth,
+                            sourceHeight,
+                            crop,
+                            settings.videoScaleX ?? settings.videoScale ?? 100,
+                            settings.videoScaleY ?? settings.videoScale ?? 100,
+                          )}
                           src={videoUrl}
                           controls={false}
                           playsInline

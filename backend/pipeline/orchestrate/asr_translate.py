@@ -524,6 +524,41 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                     running=True,
                 )
 
+        if (
+            engine not in ("paddleocr", "screen")
+            and bool(settings.get("coverLogo", False))
+            and not (
+                isinstance(meta.get("logoDetection"), dict)
+                and isinstance(meta["logoDetection"].get("bbox"), dict)
+            )
+        ):
+            try:
+                from pipeline.ocr.locate_worker import _detect_logo_via_runtime_subprocess
+
+                set_status(
+                    project_id,
+                    step="translate",
+                    progress=98,
+                    message="Định vị logo…",
+                    running=True,
+                )
+                logo_detection = _detect_logo_via_runtime_subprocess(
+                    video, project_id=project_id, segments=segments
+                )
+                if logo_detection:
+                    meta["logoDetection"] = logo_detection
+                else:
+                    meta.pop("logoDetection", None)
+            except Cancelled:
+                raise
+            except Exception as logo_e:
+                try:
+                    from pipeline.core.app_log import append_exception
+
+                    append_exception("[translate] logo detection failed", logo_e)
+                except Exception:
+                    pass
+
         meta["segments"] = segments
         # Ô Preview UI (settings.previewSec) giữ số user gõ — không ghi đè bằng 0 (full)
         prev_settings = meta.get("settings") if isinstance(meta.get("settings"), dict) else {}
@@ -615,4 +650,3 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
         )
     finally:
         clear_job(project_id, job_gen)
-

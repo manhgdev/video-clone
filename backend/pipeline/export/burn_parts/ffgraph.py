@@ -32,7 +32,7 @@ from pipeline.core.jobs import (
     unregister_process,
 )
 from pipeline.core.project import set_status
-from pipeline.core.media import ffprobe_duration, h264_encoder_args
+from pipeline.core.media import export_transform_filters, ffprobe_duration, h264_encoder_args
 from pipeline.export.cover_mask import (
     _blur_css_radius,
     _blur_tint_alpha,
@@ -228,27 +228,17 @@ def _post_chain(
     w: int, h: int,
     crop: tuple[int, int, int, int] | None,
     target_height: int | None,
+    video_scale_x: float = 100.0,
+    video_scale_y: float = 100.0,
 ) -> list[str]:
     """crop+scale cuối graph — cùng công thức encode_export_1080 (media.py).
 
     Rỗng = không cần hậu xử lý (encode_export_1080 sẽ tự copy) — caller
     không được đánh dấu post_applied khi rỗng.
     """
-    parts: list[str] = []
-    if crop is not None:
-        cx, cy, cw, ch = (int(v) for v in crop)
-        parts.append(f"crop={cw}:{ch}:{cx}:{cy}")
-        in_w, in_h = cw, ch
-    else:
-        in_w, in_h = int(w), int(h)
-    if target_height:
-        th = int(target_height)
-        if in_h >= in_w:
-            if crop is not None or in_w != th:
-                parts.append(f"scale={th}:-2")
-        elif crop is not None or in_h != th:
-            parts.append(f"scale=-2:{th}")
-    return parts
+    return export_transform_filters(
+        w, h, crop, target_height, video_scale_x, video_scale_y
+    )
 
 
 def _lines_for_ops(
@@ -667,6 +657,8 @@ def try_render_ffmpeg(
     project_id: str | None,
     post_crop: tuple[int, int, int, int] | None = None,
     post_height: int | None = None,
+    video_scale_x: float = 100.0,
+    video_scale_y: float = 100.0,
     render_info: dict[str, Any] | None = None,
 ) -> bool:
     """True = đã ghi `out` bằng filter graph; False = caller dùng đường cũ.
@@ -707,7 +699,9 @@ def try_render_ffmpeg(
                 return False
             return True
 
-        post = _post_chain(w, h, post_crop, post_height)
+        post = _post_chain(
+            w, h, post_crop, post_height, video_scale_x, video_scale_y
+        )
 
         # P2 + chia lô: đoạn trống copy (hoặc crop/scale tối giản khi có post),
         # đoạn có cue encode theo lô ≤ _SEG_MAX_OPS op — graph nhỏ thì NVENC

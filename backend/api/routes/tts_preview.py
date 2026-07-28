@@ -90,15 +90,24 @@ def api_preview_tts(project_id: str, seg_id: str, body: PreviewTtsIn):
         raise HTTPException(400, "Thiếu nội dung để đọc")
     settings = meta.get("settings") or {}
     lang = body.lang or settings.get("targetLang") or "vi"
+    speed = min(2.0, max(0.5, float(body.speed)))
     root = ensure_layout(project_id)
-    key = tts_cache_key(text, body.voice or "system", lang, "none")
+    key = tts_cache_key(text, body.voice or "system", lang, f"none|speed={speed:g}")
     name = f"{key}.wav"
     wav = root / "tts" / name
     try:
         if wav.exists():
             dur = ffprobe_duration(wav)
         else:
-            dur = tts_segment(text, body.voice or "system", wav, None, "none", lang=lang)
+            dur = tts_segment(
+                text,
+                body.voice or "system",
+                wav,
+                None,
+                "none",
+                lang=lang,
+                speed=speed,
+            )
     except Exception as e:
         raise HTTPException(500, str(e)) from e
     return {

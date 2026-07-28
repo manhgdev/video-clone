@@ -82,6 +82,8 @@ def cover_and_burn(
     caption_stroke: bool = True,
     post_crop: tuple[int, int, int, int] | None = None,
     post_height: int | None = None,
+    video_scale_x: float = 100.0,
+    video_scale_y: float = 100.0,
     render_info: dict[str, Any] | None = None,
 ) -> Path:
     """cover = blur hardsub; burn = đè chữ dịch. placement: below|above khi không cover.
@@ -847,6 +849,8 @@ def cover_and_burn(
         project_id=project_id,
         post_crop=post_crop,
         post_height=post_height,
+        video_scale_x=video_scale_x,
+        video_scale_y=video_scale_y,
         render_info=render_info,
     ):
         if project_id:

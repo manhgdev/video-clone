@@ -294,13 +294,23 @@ export function sourceToDisplayStyle(
   }
 }
 
-export function videoCropStyle(sourceW: number, sourceH: number, crop: CropRect): React.CSSProperties {
+export function videoCropStyle(
+  sourceW: number,
+  sourceH: number,
+  crop: CropRect,
+  scaleXPercent = 100,
+  scaleYPercent = 100,
+): React.CSSProperties {
+  const scaleX = Math.max(0.01, Math.min(5, scaleXPercent / 100))
+  const scaleY = Math.max(0.01, Math.min(5, scaleYPercent / 100))
   return {
     width: `${(sourceW / crop.w) * 100}%`,
     height: `${(sourceH / crop.h) * 100}%`,
     left: `${(-crop.x / crop.w) * 100}%`,
     top: `${(-crop.y / crop.h) * 100}%`,
     objectFit: 'fill',
+    transform: `scale(${scaleX}, ${scaleY})`,
+    transformOrigin: `${((crop.x + crop.w / 2) / sourceW) * 100}% ${((crop.y + crop.h / 2) / sourceH) * 100}%`,
   }
 }
 

@@ -14,9 +14,9 @@ def fit_duration(
     *,
     force_refit: bool = False,
 ) -> float:
-    """preferVideo/none: no atempo. natural ≤1.25×. stretch: fit slot."""
+    """none: giữ nguyên. preferVideo/stretch: fit slot. natural ≤1.25×."""
     dur = ffprobe_duration(wav)
-    if match in ("none", "preferVideo"):
+    if match == "none":
         return dur
     if not target_sec or target_sec <= 0.08 or dur <= 0.05:
         return dur

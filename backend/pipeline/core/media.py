@@ -1335,6 +1335,8 @@ def encode_export_1080(
     target_height: int | None = 1080,
     *,
     crop: tuple[int, int, int, int] | None = None,
+    video_scale_x: float = 100.0,
+    video_scale_y: float = 100.0,
 ) -> Path:
     """Encode H.264 cuối: crop (tuỳ chọn) + scale trong **một** pass ffmpeg.
 
@@ -1348,22 +1350,10 @@ def encode_export_1080(
     else:
         in_w, in_h = w, h
 
-    vf_parts: list[str] = []
-    if crop is not None:
-        cx, cy, cw, ch = crop
-        vf_parts.append(f"crop={cw}:{ch}:{cx}:{cy}")
-
-    if target_height is None:
-        scale_vf = None
-        already_target = crop is None
-    elif in_h >= in_w:
-        scale_vf = f"scale={target_height}:-2"
-        already_target = crop is None and w == target_height
-    else:
-        scale_vf = f"scale=-2:{target_height}"
-        already_target = crop is None and h == target_height
-    if scale_vf:
-        vf_parts.append(scale_vf)
+    vf_parts = export_transform_filters(
+        w, h, crop, target_height, video_scale_x, video_scale_y
+    )
+    already_target = not vf_parts
 
     if already_target and crop is None and video_codec(src) == "h264":
         video_args = ["-c:v", "copy"]
@@ -1398,6 +1388,43 @@ def encode_export_1080(
     )
     _atomic_replace(tmp, dst)
     return dst
+
+
+def export_transform_filters(
+    source_w: int,
+    source_h: int,
+    crop: tuple[int, int, int, int] | None,
+    target_height: int | None,
+    video_scale_x: float = 100.0,
+    video_scale_y: float = 100.0,
+) -> list[str]:
+    """FFmpeg transform khớp preview: scale lớp video rồi crop/pad vào canvas."""
+    zx = max(0.01, min(5.0, float(video_scale_x) / 100.0))
+    zy = max(0.01, min(5.0, float(video_scale_y) / 100.0))
+    cx, cy, cw, ch = crop or (0, 0, source_w, source_h)
+    parts: list[str] = []
+    if abs(zx - 1.0) < 1e-6 and abs(zy - 1.0) < 1e-6:
+        if crop is not None:
+            parts.append(f"crop={cw}:{ch}:{cx}:{cy}")
+    else:
+        sw = max(2, int(round(source_w * zx)) // 2 * 2)
+        sh = max(2, int(round(source_h * zy)) // 2 * 2)
+        cut_w, cut_h = min(cw, sw), min(ch, sh)
+        center_x = (cx + cw / 2) * zx
+        center_y = (cy + ch / 2) * zy
+        x = max(0, min(sw - cut_w, int(round(center_x - cut_w / 2))))
+        y = max(0, min(sh - cut_h, int(round(center_y - cut_h / 2))))
+        parts.extend([
+            f"scale={sw}:{sh}",
+            f"crop={cut_w}:{cut_h}:{x}:{y}",
+            f"pad={cw}:{ch}:(ow-iw)/2:(oh-ih)/2:black",
+        ])
+    if target_height:
+        if ch >= cw and cw != int(target_height):
+            parts.append(f"scale={int(target_height)}:-2")
+        elif ch < cw and ch != int(target_height):
+            parts.append(f"scale=-2:{int(target_height)}")
+    return parts
 
 
 # Khớp LivePreviewEditor.ASPECT_PRESETS (w/h ratio)

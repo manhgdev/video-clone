@@ -589,7 +589,7 @@ export const api = {
   previewTts: (
     projectId: string,
     segId: string,
-    body: { text: string; voice: string; lang: string },
+    body: { text: string; voice: string; lang: string; speed?: number },
   ) =>
     fetchJson<{ audioUrl: string; duration: number }>(
       `${base}/projects/${projectId}/segments/${segId}/preview-tts`,

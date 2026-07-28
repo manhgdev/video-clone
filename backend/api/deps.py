@@ -44,6 +44,9 @@ class Settings(BaseModel):
     workers: int = 0
     previewAspectRatio: str = "original"
     previewCrop: dict[str, float] | None = None
+    videoScaleX: float = 100.0
+    videoScaleY: float = 100.0
+    videoScale: float | None = None
     exportResolution: str = "1080"
     exportVideo: bool = True
     exportVideoFormat: str = "mp4"
@@ -154,6 +157,7 @@ class PreviewTtsIn(BaseModel):
     text: str
     voice: str = "el:pNInz6obpgDQGcFmaJgB"
     lang: str = "vi"
+    speed: float = 1.0
 
 
 class RebakeSpeedIn(BaseModel):
