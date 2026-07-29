@@ -284,6 +284,7 @@ export type SystemCheckItem = {
 }
 
 export type SystemChecks = {
+  loading?: boolean
   ok: boolean
   platform: string
   python: string

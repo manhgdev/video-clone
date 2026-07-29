@@ -166,22 +166,6 @@ def _system_checks_uncached(*, fast: bool = True) -> dict[str, Any]:
         )
     )
 
-    # Python
-    py_ok = sys.version_info >= (3, 10)
-    py_inst, py_lab, py_hint = _install_from_plan(plan, "python")
-    items.append(
-        _item(
-            id="python",
-            name="Python",
-            ok=py_ok,
-            required=True,
-            detail=f"{sys.executable} · {platform.python_version()}",
-            hint=py_hint or "Cần Python ≥ 3.10 cho backend FastAPI.",
-            install=py_inst,
-            installLabel=py_lab,
-        )
-    )
-
     # ffmpeg / ffprobe
     ff_inst, ff_lab, ff_hint = _install_from_plan(plan, "ffmpeg")
     items.append(
@@ -218,7 +202,7 @@ def _system_checks_uncached(*, fast: bool = True) -> dict[str, Any]:
         torch_cuda_ok = True
         if getattr(sys, "frozen", False):
             runtime_ok, runtime_detail = _runtime_venv_fast()
-            runtime_missing = [] if runtime_ok else ["ai_runtime"]
+            runtime_missing = [] if runtime_ok else list(_AI_RUNTIME_MODULES)
         else:
             runtime_missing = [
                 mid for mid in _AI_RUNTIME_MODULES if not _mod_ok_fast(mid)[0]
@@ -326,7 +310,7 @@ def _system_checks_uncached(*, fast: bool = True) -> dict[str, Any]:
             )
         )
 
-    # OCR CUDA — chỉ relevant trên NVIDIA
+    # OCR GPU — CUDA trên NVIDIA, DirectML trên AMD/Intel Windows.
     ocr_inst, ocr_lab, ocr_hint = _install_from_plan(plan, "ocr_cuda")
     items.append(
         _item(
@@ -338,9 +322,13 @@ def _system_checks_uncached(*, fast: bool = True) -> dict[str, Any]:
                 cuda_detail
                 if nvidia
                 else (
+                    f"DirectML · {device.get('gpuName')}"
+                    if device.get("accel") == "directml"
+                    else (
                     "Apple Silicon — không dùng CUDA"
                     if device.get("gpuKind") == "apple"
                     else "Không có NVIDIA — OCR chạy CPU"
+                    )
                 )
             ),
             hint=ocr_hint,

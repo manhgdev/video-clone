@@ -75,6 +75,11 @@ check('ffprobe bundled', existsSync(ffprobe), size(ffprobe))
 // 6. uv
 const uv = path.join(internalDir, isWin ? 'uv.exe' : 'uv')
 check('uv bundled', existsSync(uv), size(uv))
+check(
+  'embedded Python runtime DLL',
+  !isWin || existsSync(path.join(internalDir, 'python312.dll')),
+  isWin ? size(path.join(internalDir, 'python312.dll')) : '',
+)
 
 // 7. pipeline directory (app logic)
 const pipeDir = path.join(internalDir, 'pipeline')

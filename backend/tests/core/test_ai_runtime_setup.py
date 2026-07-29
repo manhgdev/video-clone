@@ -7,8 +7,68 @@
 """
 import pytest
 from types import SimpleNamespace
+from pathlib import Path
 
 from pipeline.core import system_check
+from pipeline.core.media import _gpu_kind_from_name
+
+
+def test_frozen_runtime_provisions_managed_python(monkeypatch, tmp_path):
+    calls = []
+    py = tmp_path / ".venv-runtime" / "Scripts" / "python.exe"
+
+    def fake_stream(cmd, **_kwargs):
+        calls.append(cmd)
+        if "venv" in cmd:
+            py.parent.mkdir(parents=True)
+            py.touch()
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(system_check, "_pip_stream", fake_stream)
+    result = system_check._ensure_frozen_runtime_venv("uv.exe", tmp_path / ".venv-runtime")
+
+    assert result == py
+    assert calls[0][:3] == ["uv.exe", "python", "install"]
+    assert calls[1][:2] == ["uv.exe", "venv"]
+
+
+def test_runtime_ort_accel_uses_detected_hardware(monkeypatch):
+    monkeypatch.setattr(
+        "pipeline.core.media.detect_device",
+        lambda: {"gpuKind": "amd", "accel": "directml"},
+    )
+    assert system_check._runtime_ort_accel() == "directml"
+
+
+def test_demucs_refresh_drops_cached_missing_venv(monkeypatch):
+    from pipeline.core.system_check import probe
+
+    probe._DEMUCS_PY_CACHE = (float("inf"), None)
+    monkeypatch.setattr(
+        probe,
+        "_demucs_check_uncached",
+        lambda: (probe._DEMUCS_PY_CACHE is None, "fresh"),
+    )
+
+    assert probe._demucs_check(refresh=True) == (True, "fresh")
+
+
+@pytest.mark.parametrize(
+    ("name", "kind"),
+    [
+        ("NVIDIA GeForce RTX 4090", "nvidia"),
+        ("NVIDIA RTX A6000", "nvidia"),
+        ("Tesla T4", "nvidia"),
+        ("AMD Radeon RX 7900 XTX", "amd"),
+        ("Radeon PRO W7900", "amd"),
+        ("AMD FirePro W9100", "amd"),
+        ("Intel(R) UHD Graphics 770", "intel"),
+        ("Intel Iris Xe Graphics", "intel"),
+        ("Intel Arc A770", "intel"),
+    ],
+)
+def test_gpu_family_classification(name, kind):
+    assert _gpu_kind_from_name(name) == kind
 
 
 def test_ai_runtime_skips_install_when_ready(monkeypatch):

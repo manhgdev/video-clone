@@ -32,6 +32,7 @@ os.environ.setdefault("VIDEO_CLONE_HOME", str(home))
 os.environ.setdefault("VIDEO_CLONE_DATA", str(home / "data"))
 os.environ.setdefault("VIDEO_CLONE_PUBLIC_DATA", str(home / "public_data"))
 os.environ.setdefault("CAPCUT_DEVICE_JSON", str(home / "capcut_device.json"))
+os.environ.setdefault("UV_PYTHON_INSTALL_DIR", str(home / ".python-runtime"))
 # Ưu tiên GPU (CUDA/MPS); giới hạn thread CPU phụ — tránh đơ máy
 os.environ.setdefault("VIENEU_BACKEND", "auto")
 os.environ.setdefault("OMP_NUM_THREADS", "2")
@@ -352,7 +353,57 @@ def centered_xy(width: int, height: int) -> tuple[int, int]:
     return x, y
 
 
+_single_instance_handle = None
+
+
+def _activate_existing_window() -> None:
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+        def visit(hwnd, _lparam):
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length:
+                title = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(hwnd, title, length + 1)
+                if title.value.startswith("VideoClone v"):
+                    user32.ShowWindow(hwnd, 9)
+                    user32.SetForegroundWindow(hwnd)
+                    return False
+            return True
+
+        user32.EnumWindows(callback_type(visit), 0)
+    except Exception:
+        pass
+
+
+def acquire_single_instance() -> bool:
+    """Only one desktop window; a second launch focuses the existing instance."""
+    global _single_instance_handle
+    if sys.platform != "win32":
+        return True
+    import ctypes
+
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.CreateMutexW(None, False, "Local\\VideoClone.Desktop")
+    if not handle:
+        return True
+    if kernel32.GetLastError() == 183:
+        kernel32.CloseHandle(handle)
+        _activate_existing_window()
+        return False
+    _single_instance_handle = handle
+    return True
+
+
 def run_desktop() -> int:
+    if not acquire_single_instance():
+        return 0
     try:
         from pipeline.core.app_log import append_log, install_process_hooks
 
@@ -411,7 +462,7 @@ def run_desktop() -> int:
         try:
             webview.create_window(
                 f"VideoClone v{APP_VERSION}",
-                base,
+                f"{base}/?v={APP_VERSION}",
                 **win_kw,
             )
         except TypeError:
@@ -419,7 +470,7 @@ def run_desktop() -> int:
             win_kw.pop("icon", None)
             webview.create_window(
                 f"VideoClone v{APP_VERSION}",
-                base,
+                f"{base}/?v={APP_VERSION}",
                 **win_kw,
             )
         # webview.start() chặn đến khi user đóng cửa sổ — không thoát vì lỗi job nền

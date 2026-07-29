@@ -126,9 +126,20 @@ _PKG_VIENEU  = (
 _VIENEU_PACKAGE = "vieneu>=3.2.0"
 _TORCH_CUDA_INDEX = "https://download.pytorch.org/whl/cu124"
 _TORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
+_TORCH_ROCM_INDEX = "https://download.pytorch.org/whl/rocm6.2"
 # onnxruntime-gpu cho CUDA 12.x (torch cu124) — bản 1.27+ yêu cầu CUDA 13
 _ORT_GPU_CUDA12_INDEX = "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/"
 _ORT_GPU_PKG = "onnxruntime-gpu==1.19.2"
+_ORT_DIRECTML_PKG = "onnxruntime-directml"
+
+
+def _runtime_ort_accel() -> str:
+    try:
+        from ..media import detect_device
+
+        return str(detect_device().get("accel") or "cpu")
+    except Exception:
+        return "cuda" if _nvidia_present() else "cpu"
 # ponytail: chỉ dùng trong dev mode — map module → package spec để chỉ
 # cài đúng gói thiếu (không --upgrade cả lô). Frozen dùng base_cmd đủ bộ.
 _MODULE_TO_PACKAGE: dict[str, str] = {
@@ -143,14 +154,39 @@ _MODULE_TO_PACKAGE: dict[str, str] = {
 }
 
 
+def _ensure_frozen_runtime_venv(uv: str, venv: Path) -> Path:
+    """Provision APP-owned Python; the destination machine needs no system Python."""
+    py = venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+    if py.is_file():
+        return py
+    version = f"{sys.version_info.major}.{sys.version_info.minor}"
+    managed = _pip_stream([uv, "python", "install", version], timeout=1800)
+    if managed.returncode:
+        raise RuntimeError(
+            "Không tải được Python runtime. Kiểm tra Internet rồi thử lại.\n"
+            + (managed.stdout or managed.stderr)[-2000:]
+        )
+    created = _pip_stream(
+        [uv, "venv", "--python", version, "--seed", str(venv)],
+        timeout=900,
+    )
+    if created.returncode or not py.is_file():
+        raise RuntimeError(
+            "Không tạo được Python runtime riêng cho APP.\n"
+            + (created.stdout or created.stderr)[-2000:]
+        )
+    return py
+
+
 def _runtime_pip_cmd(*extra: str) -> list[str]:
     if getattr(sys, "frozen", False):
         home = _video_clone_home()
         venv = home / ".venv-runtime"
         py = venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
         uv = shutil.which("uv")
-        if not uv or not py.is_file():
+        if not uv:
             raise RuntimeError("Bản ứng dụng thiếu uv hoặc venv runtime — vào Thiết lập → Cài gói AI")
+        py = _ensure_frozen_runtime_venv(uv, venv)
         return [uv, "pip", "install", "--python", str(py), *extra]
     return [sys.executable, "-m", "pip", "install", *extra]
 
@@ -161,8 +197,9 @@ def _runtime_pip_uninstall_cmd(*packages: str) -> list[str]:
         venv = home / ".venv-runtime"
         py = venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
         uv = shutil.which("uv")
-        if not uv or not py.is_file():
+        if not uv:
             raise RuntimeError("Bản ứng dụng thiếu uv hoặc venv runtime — vào Thiết lập → Cài gói AI")
+        py = _ensure_frozen_runtime_venv(uv, venv)
         return [uv, "pip", "uninstall", "--python", str(py), "-y", *packages]
     return [sys.executable, "-m", "pip", "uninstall", "-y", *packages]
 
@@ -201,6 +238,11 @@ def _install_runtime_torch(*, accel: str | None = None) -> None:
         return
     if wanted == "mac":
         _runtime_pip_install("torch", "torchaudio", timeout=1200)
+        return
+    if wanted == "rocm":
+        _runtime_pip_install(
+            "torch", "torchaudio", index_url=_TORCH_ROCM_INDEX, timeout=2400
+        )
         return
     idx = None if sys.platform == "darwin" else _TORCH_CPU_INDEX
     _runtime_pip_install("torch", "torchaudio", index_url=idx, timeout=1200)
@@ -317,7 +359,8 @@ def install_ai_runtime() -> dict[str, Any]:
                 "detail": detail,
             }
         missing = list(_AI_RUNTIME_MODULES)
-        needs_torch = _nvidia_present()
+        # Máy trắng luôn cần torch + torchaudio; installer tự chọn CUDA/macOS/CPU.
+        needs_torch = True
     else:
         # Phát hiện torch bị corrupt (file mix version) — phải reinstall khi dừng backend.
         if _torch_broken():
@@ -344,14 +387,7 @@ def install_ai_runtime() -> dict[str, Any]:
         uv = shutil.which("uv")
         if not uv:
             raise RuntimeError("Bản ứng dụng thiếu uv để cài gói AI")
-        if not py.is_file():
-            subprocess.run(
-                [uv, "venv", "--python", f"{sys.version_info.major}.{sys.version_info.minor}", "--seed", str(venv)],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=900,
-            )
+        py = _ensure_frozen_runtime_venv(uv, venv)
         # opencv-python + headless cùng lúc → đụng cv2; chỉ giữ headless.
         subprocess.run(
             [uv, "pip", "uninstall", "--python", str(py), "-y", "opencv-python"],
@@ -360,9 +396,12 @@ def install_ai_runtime() -> dict[str, Any]:
             timeout=120,
         )
         base_cmd = [uv, "pip", "install", "--python", str(py), "--upgrade", *_AI_RUNTIME_PACKAGES]
-        if _nvidia_present():
+        ort_accel = _runtime_ort_accel()
+        if ort_accel == "cuda":
             base_cmd.append(_ORT_GPU_PKG)
             base_cmd += ["--extra-index-url", _ORT_GPU_CUDA12_INDEX]
+        elif ort_accel == "directml":
+            base_cmd.append(_ORT_DIRECTML_PKG)
         vieneu_cmd = [
             uv, "pip", "install", "--python", str(py), "--upgrade", "--no-deps", _VIENEU_PACKAGE
         ]
@@ -460,14 +499,21 @@ def install_ai_runtime() -> dict[str, Any]:
             proc = _pip_stream(base_cmd)
             if proc.returncode:
                 raise RuntimeError((proc.stderr or proc.stdout)[-3000:])
-            if getattr(sys, "frozen", False) and _nvidia_present():
+            if getattr(sys, "frozen", False) and ort_accel in ("cuda", "directml"):
                 _pip_stream([uv, "pip", "uninstall", "--python", str(py), "-y", "onnxruntime"])
+                provider_pkg = _ORT_GPU_PKG if ort_accel == "cuda" else _ORT_DIRECTML_PKG
+                provider_cmd = [uv, "pip", "install", "--python", str(py), "--force-reinstall", provider_pkg]
+                if ort_accel == "cuda":
+                    provider_cmd += ["--index-url", _ORT_GPU_CUDA12_INDEX]
+                proc_provider = _pip_stream(provider_cmd)
+                if proc_provider.returncode:
+                    raise RuntimeError((proc_provider.stderr or proc_provider.stdout)[-3000:])
             # transformers cài riêng --no-deps — tránh conflict tokenizers (không có version nào
             # hỗ trợ tokenizers>=0.23.1; --no-deps bỏ qua dep resolution hoàn toàn).
             if "transformers" in missing:
-                proc2 = _pip_stream([
-                    sys.executable, "-m", "pip", "install", "--no-deps", "transformers>=4.46.0"
-                ])
+                proc2 = _pip_stream(
+                    _runtime_pip_cmd("--no-deps", "transformers>=4.46.0")
+                )
                 if proc2.returncode:
                     raise RuntimeError((proc2.stderr or proc2.stdout)[-3000:])
     if "vieneu" in missing or not _mod_ok("vieneu")[0]:
@@ -523,14 +569,7 @@ def install_ocr_cuda() -> dict[str, Any]:
         uv = shutil.which("uv")
         if not uv:
             raise RuntimeError("Bản ứng dụng thiếu uv để cài OCR GPU")
-        if not py.is_file():
-            subprocess.run(
-                [uv, "venv", "--python", "3.12", "--seed", str(venv)],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=900,
-            )
+        py = _ensure_frozen_runtime_venv(uv, venv)
         proc = subprocess.run(
             [
                 uv,

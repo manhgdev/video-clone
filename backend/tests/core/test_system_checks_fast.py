@@ -48,3 +48,36 @@ def test_system_checks_deep_runs_heavy_probes(monkeypatch) -> None:
 
     assert result["fast"] is False
     assert called["demucs"] is True
+
+
+def test_clean_frozen_machine_marks_ai_groups_missing(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "pipeline.core.media.detect_device",
+        lambda: {
+            "osLabel": "Windows",
+            "arch": "x64",
+            "gpuKind": "cpu",
+            "accel": "cpu",
+            "install": {},
+        },
+    )
+    monkeypatch.setattr(sc, "_which", lambda _name: None)
+    monkeypatch.setattr(sc.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sc, "_runtime_venv_fast", lambda: (False, "chưa cài"))
+    monkeypatch.setattr(sc, "_demucs_venv_fast", lambda: (False, "chưa cài"))
+    monkeypatch.setattr(sc, "_ocr_venv_fast", lambda: (True, "not relevant"))
+    sc._invalidate_checks_cache()
+
+    result = sc.system_checks(fast=True)
+    by_id = {item["id"]: item for item in result["items"]}
+
+    assert by_id["ai_runtime"]["ok"] is False
+    assert by_id["ai_runtime_ocr"]["ok"] is False
+    assert by_id["ai_runtime_vieneu"]["ok"] is False
+    assert "python" not in by_id
+
+    # Desktop setup must never expose Python even if a launcher is misdetected as non-frozen.
+    monkeypatch.setattr(sc.sys, "frozen", False, raising=False)
+    sc._invalidate_checks_cache()
+    result = sc.system_checks(fast=True)
+    assert "python" not in {item["id"] for item in result["items"]}

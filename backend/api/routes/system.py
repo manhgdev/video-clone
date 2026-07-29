@@ -83,6 +83,29 @@ _install_state: dict[str, Any] = {
     "log": "",
 }
 _install_lock = threading.Lock()
+_checks_warm_lock = threading.Lock()
+_checks_warming = False
+
+
+def _start_checks_warm() -> None:
+    """Populate the first-run cache once; polling requests must not spawn a thread each."""
+    global _checks_warming
+    with _checks_warm_lock:
+        if _checks_warming:
+            return
+        _checks_warming = True
+
+    def work() -> None:
+        global _checks_warming
+        try:
+            from pipeline.core.system_check import system_checks
+
+            system_checks(fast=True)
+        finally:
+            with _checks_warm_lock:
+                _checks_warming = False
+
+    threading.Thread(target=work, name="warm-checks", daemon=True).start()
 
 
 def _append_install_log(text: str) -> None:
@@ -148,15 +171,7 @@ def _start_install_job(kind: str, fn, *, needs_restart: bool = True) -> dict[str
             with _install_lock:
                 _install_state["running"] = False
 
-        def _warm_checks() -> None:
-            """Pre-warm _CHECKS_CACHE ngay khi server ready — request đầu tiên trả cache thay vì block."""
-            try:
-                from pipeline.core.system_check import system_checks
-                system_checks(fast=True)
-            except Exception:
-                pass
-
-        threading.Thread(target=_warm_checks, name="warm-checks", daemon=True).start()
+        _start_checks_warm()
 
     threading.Thread(target=work, name=f"install-{kind}", daemon=True).start()
     return {"ok": True, "running": True, "kind": kind, "message": f"Đang cài {kind}…"}
@@ -227,19 +242,21 @@ def api_system_checks(refresh: bool = False, deep: bool = False):
     from pipeline.core import system_check as _sc
 
     try:
+        checks_module = _sc.checks
         with _install_lock:
             installing = _install_state.get("running", False)
 
         # Cache có rồi — trả ngay, không tính toán gì thêm.
         if not refresh and not installing:
-            with _sc._checks_lock:
-                cached = _sc._CHECKS_CACHE
+            with checks_module._checks_lock:
+                cached = checks_module._CHECKS_CACHE
             if cached is not None:
                 return cached[2]
 
         # Cache rỗng HOẶC install đang chạy — trả loading ngay,
         # background thread (warm-checks) sẽ điền cache.
-        if _sc._CHECKS_CACHE is None:
+        if checks_module._CHECKS_CACHE is None:
+            _start_checks_warm()
             return {"items": [], "loading": True, "device": {}}
 
         return _sc.system_checks(refresh=refresh and not installing, fast=True)
@@ -353,23 +370,175 @@ def api_system_logs_clear():
     return clear_log()
 
 
+def _windows_native_dialog(script: str, extra_env: dict[str, str] | None = None) -> str:
+    env = os.environ.copy()
+    env.update(extra_env or {})
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Sta", "-Command", script],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        env=env, timeout=300,
+        creationflags=int(getattr(subprocess, "CREATE_NO_WINDOW", 0)),
+    )
+    if result.returncode:
+        raise RuntimeError(result.stderr.strip() or f"PowerShell kết thúc với mã {result.returncode}")
+    return result.stdout.strip()
+
+
+def _pick_folder(title: str) -> str:
+    if os.name == "nt":
+        return _windows_native_dialog(
+            """
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+Add-Type -AssemblyName System.Windows.Forms
+$owner = New-Object System.Windows.Forms.Form
+$owner.TopMost = $true
+$owner.ShowInTaskbar = $false
+$owner.Width = 1
+$owner.Height = 1
+$owner.Show()
+$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+$dialog.Description = $env:VIDEOCLONE_DIALOG_TITLE
+$dialog.ShowNewFolderButton = $true
+if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) {
+    [Console]::Write($dialog.SelectedPath)
+}
+$owner.Close()
+""",
+            {"VIDEOCLONE_DIALOG_TITLE": title},
+        )
+    import tkinter as tk
+    from tkinter import filedialog
+    root = tk.Tk()
+    try:
+        root.withdraw()
+        root.attributes("-topmost", True)
+        return filedialog.askdirectory(title=title)
+    finally:
+        root.destroy()
+
+
+def _pick_file(title: str, file_filter: str) -> str:
+    if os.name == "nt":
+        return _windows_native_dialog(
+            """
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+Add-Type -AssemblyName System.Windows.Forms
+$owner = New-Object System.Windows.Forms.Form
+$owner.TopMost = $true
+$owner.ShowInTaskbar = $false
+$owner.Width = 1
+$owner.Height = 1
+$owner.Show()
+$dialog = New-Object System.Windows.Forms.OpenFileDialog
+$dialog.Title = $env:VIDEOCLONE_DIALOG_TITLE
+$dialog.Filter = $env:VIDEOCLONE_FILE_FILTER
+$dialog.Multiselect = $false
+if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) {
+    [Console]::Write($dialog.FileName)
+}
+$owner.Close()
+""",
+            {
+                "VIDEOCLONE_DIALOG_TITLE": title,
+                "VIDEOCLONE_FILE_FILTER": file_filter,
+            },
+        )
+    import tkinter as tk
+    from tkinter import filedialog
+    root = tk.Tk()
+    try:
+        root.withdraw()
+        root.attributes("-topmost", True)
+        return filedialog.askopenfilename(title=title)
+    finally:
+        root.destroy()
+
+
+@router.post("/api/system/pick-srt-image-file")
+def api_pick_srt_image_file(kind: str):
+    choices = {
+        "audio": ("Chọn file audio", "Audio|*.mp3;*.wav;*.m4a;*.aac;*.flac;*.ogg|Tất cả tệp|*.*"),
+        "timeline": ("Chọn file timeline", "Timeline TXT|*.txt|Tất cả tệp|*.*"),
+        "srt": ("Chọn file phụ đề", "Phụ đề SRT|*.srt|Tất cả tệp|*.*"),
+        "watermark": ("Chọn ảnh logo", "Ảnh|*.png;*.jpg;*.jpeg;*.jfif;*.webp;*.bmp|Tất cả tệp|*.*"),
+    }
+    if kind not in choices:
+        raise HTTPException(400, "Loại file không hợp lệ")
+    try:
+        selected = _pick_file(*choices[kind])
+        return {"ok": bool(selected), "path": str(Path(selected).resolve()) if selected else ""}
+    except Exception as exc:
+        raise HTTPException(500, f"Không mở được hộp thoại chọn file: {exc}") from exc
+
+
 @router.post("/api/system/pick-folder")
 def api_pick_folder():
     """Mở native folder picker dialog, trả về path user chọn."""
-    import platform
-
-    system = platform.system()
     try:
-        # tkinter: có sẵn trong Python standard lib
-        import tkinter as tk
-        from tkinter import filedialog
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes("-topmost", True)
-        folder = filedialog.askdirectory(title="Chọn thư mục xuất")
-        root.destroy()
-        if not folder:
-            return {"ok": False, "path": ""}
-        return {"ok": True, "path": str(Path(folder).resolve())}
+        folder = _pick_folder("Chọn thư mục xuất")
+        return {"ok": bool(folder), "path": str(Path(folder).resolve()) if folder else ""}
     except Exception as e:
         raise HTTPException(500, f"Không mở được folder dialog: {e}") from e
+
+
+@router.post("/api/system/pick-save-video")
+def api_pick_save_video(filename: str = "ghep-anh-video-srt.mp4"):
+    """Mở native Save As dialog và trả về đường dẫn MP4 đầy đủ."""
+    try:
+        initial = f"{Path(filename).stem or 'ghep-anh-video-srt'}.mp4"
+        if os.name == "nt":
+            path = _windows_native_dialog(
+                """
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+Add-Type -AssemblyName System.Windows.Forms
+$owner = New-Object System.Windows.Forms.Form
+$owner.TopMost = $true
+$owner.ShowInTaskbar = $false
+$owner.Width = 1
+$owner.Height = 1
+$owner.Show()
+$dialog = New-Object System.Windows.Forms.SaveFileDialog
+$dialog.Title = 'Chọn nơi lưu video'
+$dialog.Filter = 'Video MP4 (*.mp4)|*.mp4|Tất cả tệp (*.*)|*.*'
+$dialog.DefaultExt = 'mp4'
+$dialog.AddExtension = $true
+$dialog.FileName = $env:VIDEOCLONE_SAVE_NAME
+if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) {
+    [Console]::Write($dialog.FileName)
+}
+$owner.Close()
+""",
+                {"VIDEOCLONE_SAVE_NAME": initial},
+            )
+        else:
+            import tkinter as tk
+            from tkinter import filedialog
+            root = tk.Tk()
+            try:
+                root.withdraw()
+                root.attributes("-topmost", True)
+                path = filedialog.asksaveasfilename(
+                    title="Chọn nơi lưu video", defaultextension=".mp4",
+                    initialfile=initial,
+                    filetypes=[("Video MP4", "*.mp4"), ("Tất cả tệp", "*.*")],
+                )
+            finally:
+                root.destroy()
+        if not path:
+            return {"ok": False, "path": ""}
+        selected = Path(path).resolve()
+        if selected.suffix.lower() != ".mp4":
+            selected = selected.with_suffix(".mp4")
+        return {"ok": True, "path": str(selected)}
+    except Exception as e:
+        raise HTTPException(500, f"Không mở được hộp thoại lưu video: {e}") from e
+
+
+@router.post("/api/system/pick-media-folder")
+def api_pick_media_folder():
+    """Chọn thư mục chứa ảnh/video đầu vào."""
+    try:
+        folder = _pick_folder("Chọn thư mục ảnh / video")
+        return {"ok": bool(folder), "path": str(Path(folder).resolve()) if folder else ""}
+    except Exception as e:
+        raise HTTPException(500, f"Không mở được hộp thoại chọn thư mục media: {e}") from e

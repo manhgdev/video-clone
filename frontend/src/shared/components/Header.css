@@ -52,7 +52,7 @@
   justify-content: center;
   gap: 0;
   min-width: 0;
-  overflow-x: auto;
+  overflow: visible;
 }
 
 .nav button {
@@ -87,6 +87,37 @@
 
 .nav button.active:hover {
   color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
+}
+
+.nav-tools {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+}
+
+.nav-tools-menu {
+  position: absolute;
+  z-index: 120;
+  top: calc(100% - 1px);
+  left: 0;
+  min-width: 190px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 0 0 10px 10px;
+  background: var(--surface);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.18);
+}
+
+.nav .nav-tools-menu button {
+  width: 100%;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 7px;
+  justify-content: flex-start;
+}
+
+.nav .nav-tools-menu button.active {
   background: color-mix(in srgb, var(--primary) 12%, transparent);
 }
 

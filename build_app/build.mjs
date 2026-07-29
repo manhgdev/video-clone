@@ -60,10 +60,16 @@ function formatSemver({ major, minor, patch }) {
 }
 
 function bumpPatch(version) {
+  // VideoClone uses decimal rollover per component (0..9), not unbounded SemVer minors:
+  // 2.9.8 -> 2.9.9 -> 3.0.0 -> 3.0.1.
   const s = parseSemver(version)
   if (s.patch >= 9) {
     s.patch = 0
     s.minor += 1
+    if (s.minor >= 10) {
+      s.minor = 0
+      s.major += 1
+    }
   } else {
     s.patch += 1
   }
@@ -74,6 +80,7 @@ for (const [input, expected] of [
   ['2.0.8', '2.0.9'],
   ['2.0.9', '2.1.0'],
   ['2.1.9', '2.2.0'],
+  ['2.9.9', '3.0.0'],
 ]) {
   const got = bumpPatch(input)
   if (got !== expected) {

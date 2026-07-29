@@ -25,15 +25,17 @@ from .logo import detect_logo_bbox_inprocess as _bundled_logo_detector  # noqa: 
 _LOCATE_TIMEOUT_SECONDS = 120
 
 
-def _python_can_ocr(exe: str) -> tuple[bool, bool]:
-    """(chay duoc OCR, co CUDA) — probe that trong tien trinh rieng."""
+def _python_can_ocr(exe: str) -> tuple[bool, str]:
+    """(OCR usable, accelerator) — probe providers in a clean process."""
     try:
         proc = subprocess.run(
             [
                 exe,
                 "-c",
                 "import cv2, rapidocr_onnxruntime, onnxruntime as ort;"
-                "print('CUDAExecutionProvider' in ort.get_available_providers())",
+                "p=ort.get_available_providers();"
+                "print('CUDA' if 'CUDAExecutionProvider' in p else "
+                "('DirectML' if 'DmlExecutionProvider' in p else 'CPU'))",
             ],
             capture_output=True,
             text=True,
@@ -45,10 +47,11 @@ def _python_can_ocr(exe: str) -> tuple[bool, bool]:
             ),
         )
     except (OSError, subprocess.SubprocessError):
-        return False, False
+        return False, "CPU"
     if proc.returncode != 0:
-        return False, False
-    return True, "True" in (proc.stdout or "")
+        return False, "CPU"
+    mode = (proc.stdout or "").strip().splitlines()
+    return True, mode[-1] if mode else "CPU"
 
 
 @lru_cache(maxsize=1)
@@ -70,16 +73,16 @@ def _dev_worker_python() -> str:
 
     usable: list[str] = []
     for exe in candidates:
-        ok, cuda = _python_can_ocr(exe)
-        if ok and cuda:
+        ok, mode = _python_can_ocr(exe)
+        if ok and mode != "CPU":
             if exe != sys.executable:
-                _log_worker_python(exe, "GPU")
+                _log_worker_python(exe, mode)
             return exe
         if ok:
             usable.append(exe)
     if usable:
         # Khong co CUDA o dau — chay CPU nhung phai bao ro, dung im lang.
-        _log_worker_python(usable[0], "CPU (khong thay CUDAExecutionProvider)")
+        _log_worker_python(usable[0], "CPU (khong thay GPU provider)")
         return usable[0]
     return sys.executable
 

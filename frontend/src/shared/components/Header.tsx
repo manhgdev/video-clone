@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from 'react'
 import type { HardwareInfo } from '@/features/project/project.types'
 import {
   IconBook,
@@ -11,7 +12,7 @@ import {
 } from '@/shared/components/Icons'
 import './Header.css'
 
-export type AppMode = 'clone' | 'tts' | 'download' | 'film' | 'batch' | 'renders' | 'cleaner'
+export type AppMode = 'clone' | 'tts' | 'download' | 'film' | 'batch' | 'renders' | 'cleaner' | 'srt-image'
 
 function IconSun({ size = 16 }: { size?: number }) {
   return (
@@ -30,20 +31,20 @@ function IconMoon({ size = 16 }: { size?: number }) {
 }
 
 const NAV: {
-  id: AppMode | 'config' | 'help'
+  id: AppMode | 'tools' | 'config' | 'help'
   label: string
   Icon: typeof IconCam
   mode?: AppMode
-  action?: 'config'
+  action?: 'config' | 'tools'
 }[] = [
   { id: 'clone', label: 'Clone Video', Icon: IconCam, mode: 'clone' },
   { id: 'renders', label: 'Đã render', Icon: IconVideo, mode: 'renders' },
-  { id: 'cleaner', label: 'Làm sạch video', Icon: IconWand, mode: 'cleaner' },
   // ponytail: Film/Batch chỉ ẩn khỏi nav; giữ page để bật lại khi hai luồng hoàn thiện.
   // { id: 'film', label: 'Clone Phim', Icon: IconFilm, mode: 'film' },
   // { id: 'batch', label: 'Clone Hàng loạt', Icon: IconBatch, mode: 'batch' },
   { id: 'download', label: 'Download Video', Icon: IconDownload, mode: 'download' },
   { id: 'tts', label: 'Text to Speech', Icon: IconMic, mode: 'tts' },
+  { id: 'tools', label: 'Tools', Icon: IconWand, action: 'tools' },
   { id: 'config', label: 'Cấu hình', Icon: IconGear, action: 'config' },
   { id: 'help', label: 'Hướng dẫn', Icon: IconBook },
 ]
@@ -82,6 +83,24 @@ export default function Header({
 }: Props) {
   const display = SHORT[hardware.accel] ?? hardware.accel.toUpperCase()
   const showTtsMenu = mode === 'tts' && typeof onMenuClick === 'function'
+  const [toolsOpen, setToolsOpen] = useState(false)
+  const toolsRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!toolsOpen) return
+    const close = (event: MouseEvent) => {
+      if (!toolsRef.current?.contains(event.target as Node)) setToolsOpen(false)
+    }
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setToolsOpen(false)
+    }
+    document.addEventListener('mousedown', close)
+    document.addEventListener('keydown', escape)
+    return () => {
+      document.removeEventListener('mousedown', close)
+      document.removeEventListener('keydown', escape)
+    }
+  }, [toolsOpen])
 
   return (
     <header className={`header${showTtsMenu ? ' header--tts' : ''}`}>
@@ -102,12 +121,56 @@ export default function Header({
           <IconLogo />
         </span>
         <div className="brand-text">
-          <strong>VideoClone</strong>
-          <span>Studio Dịch Thuật & Lồng Tiếng AI</span>
+          <strong>ZM TOOL</strong>
+          <span>Studio Dịch Thuật & Ghép & Lồng Tiếng AI</span>
         </div>
       </div>
       <nav className="nav" aria-label="Chính">
         {NAV.map((item) => {
+          if (item.action === 'tools') {
+            return (
+              <div key={item.id} className="nav-tools" ref={toolsRef}>
+                <button
+                  type="button"
+                  className={mode === 'cleaner' || mode === 'srt-image' ? 'active' : undefined}
+                  aria-haspopup="menu"
+                  aria-expanded={toolsOpen}
+                  onClick={() => setToolsOpen((open) => !open)}
+                >
+                  <item.Icon size={16} />
+                  <span>{item.label}</span>
+                </button>
+                {toolsOpen ? (
+                  <div className="nav-tools-menu" role="menu">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className={mode === 'cleaner' ? 'active' : undefined}
+                      onClick={() => {
+                        setToolsOpen(false)
+                        onModeChange?.('cleaner')
+                      }}
+                    >
+                      <IconWand size={16} />
+                      <span>Làm sạch video</span>
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className={mode === 'srt-image' ? 'active' : undefined}
+                      onClick={() => {
+                        setToolsOpen(false)
+                        onModeChange?.('srt-image')
+                      }}
+                    >
+                      <IconVideo size={16} />
+                      <span>Ghép ảnh/video SRT</span>
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            )
+          }
           const active =
             item.mode != null
               ? mode === item.mode

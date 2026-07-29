@@ -129,6 +129,7 @@ export default function ConfigModal({
   const [logErr, setLogErr] = useState('')
   const [logCopied, setLogCopied] = useState(false)
   const autoSetupLock = useRef(false)
+  const restartRequested = useRef(false)
 
   const loadLogs = useCallback(() => {
     setLogLoading(true)
@@ -149,11 +150,15 @@ export default function ConfigModal({
   const loadChecks = useCallback((refresh = false, deep = false) => {
     setChecksLoading(true)
     setChecksErr('')
-    void api
-      .systemChecks(refresh, deep)
-      .then((c) => {
-        setChecks(c)
-      })
+    void (async () => {
+      for (let attempt = 0; attempt < 60; attempt += 1) {
+        const result = await api.systemChecks(refresh && attempt === 0, deep)
+        if (!result.loading) return result
+        await new Promise((resolve) => window.setTimeout(resolve, 500))
+      }
+      throw new Error('Ứng dụng chuẩn bị quá lâu. Vui lòng mở lại APP.')
+    })()
+      .then(setChecks)
       .catch((e: Error) => {
         setChecksErr(e.message || 'Không kiểm tra được hệ thống')
         setChecks(null)
@@ -273,11 +278,15 @@ export default function ConfigModal({
   }, [loadChecks])
 
   const restartApp = useCallback(async () => {
+    if (restartRequested.current) return
+    restartRequested.current = true
+    setPendingRestart(false)
     setRestarting(true)
     setChecksErr('')
     try {
       await api.restartApp()
     } catch (e) {
+      restartRequested.current = false
       setChecksErr(e instanceof Error ? e.message : 'Không khởi động lại được app')
       autoSetupLock.current = false
     } finally {
@@ -293,6 +302,10 @@ export default function ConfigModal({
     if (!shouldAuto) return
 
     const run = async () => {
+      if (forceSetup && checks.ok) {
+        onSetupReady?.()
+        return
+      }
       const next = nextAutoInstall(checks)
       if (next) {
         autoSetupLock.current = true
@@ -314,6 +327,11 @@ export default function ConfigModal({
     installAction,
     onSetupReady,
   ])
+
+  useEffect(() => {
+    if (!forceSetup || !pendingRestart || installing || restarting) return
+    void restartApp()
+  }, [forceSetup, pendingRestart, installing, restarting, restartApp])
 
   function tryClose() {
     if (!canClose) return
@@ -497,7 +515,7 @@ export default function ConfigModal({
                 </strong>
                 {checks ? (
                   <span className="cfg-setup-meta">
-                    {checks.platform} · Python {checks.python}
+                    {checks.platform}
                     {checks.device?.accel
                       ? ` · ${String(checks.device.accel).toUpperCase()}`
                       : ''}
@@ -778,7 +796,7 @@ export default function ConfigModal({
                   Đóng
                 </button>
               ) : (
-                <span className="cfg-foot-note">Cài đủ mục bắt buộc để tiếp tục</span>
+                <span className="cfg-foot-note">Ứng dụng đang tự chuẩn bị các thành phần cần thiết</span>
               )}
               {pendingRestart ? (
                 <button
@@ -799,7 +817,7 @@ export default function ConfigModal({
                   else loadChecks(true, false)
                 }}
               >
-                {checks?.ok ? 'Bắt đầu' : checksLoading ? 'Đang tải…' : 'Tải lại'}
+                {checks?.ok ? 'Bắt đầu' : checksLoading ? 'Đang chuẩn bị…' : 'Thử lại'}
               </button>
             </>
           ) : section === 'logs' ? (

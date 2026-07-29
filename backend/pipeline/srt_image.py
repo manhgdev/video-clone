@@ -1,0 +1,510 @@
+"""Render images and video clips to a prompt timeline with optional narration."""
+from __future__ import annotations
+
+import re
+import json
+import os
+import signal
+import subprocess
+import sys
+import threading
+import time
+import uuid
+from pathlib import Path
+from typing import Any
+
+from pipeline.core.config import DATA
+from pipeline.core.jobs import kill_process_tree
+from pipeline.core.media import nvenc_available
+
+ROOT = DATA / "srt_image"
+ROOT.mkdir(parents=True, exist_ok=True)
+_LOCK = threading.Lock()
+_JOBS: dict[str, dict[str, Any]] = {}
+_PROCS: dict[str, subprocess.Popen] = {}
+_TIME = re.compile(r"(\d+):(\d+):(\d+)[,.](\d+)")
+_SRT_RANGE = re.compile(
+    r"(?m)^(\s*)(\d+:\d+:\d+[,.]\d+)(\s*-->\s*)(\d+:\d+:\d+[,.]\d+)(.*)$"
+)
+_TIMELINE_RANGE = re.compile(r"\[\s*([0-9:.,]+)\s*[-–—]\s*([0-9:.,]+)\s*\]")
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
+
+
+def _seconds(value: str) -> float:
+    match = _TIME.fullmatch(value.strip())
+    if not match:
+        raise ValueError(f"Mốc SRT không hợp lệ: {value}")
+    h, m, s, ms = match.groups()
+    return int(h) * 3600 + int(m) * 60 + int(s) + int(ms.ljust(3, "0")[:3]) / 1000
+
+
+def parse_srt_times(path: Path) -> list[tuple[float, float]]:
+    text = path.read_text(encoding="utf-8-sig", errors="replace")
+    times: list[tuple[float, float]] = []
+    for line in text.splitlines():
+        if "-->" not in line:
+            continue
+        left, right = line.split("-->", 1)
+        start, end = _seconds(left), _seconds(right.split()[0])
+        if end > start:
+            times.append((start, end))
+    if not times:
+        raise ValueError("File SRT không có mốc thời gian hợp lệ")
+    return times
+
+
+def _format_srt_time(seconds: float) -> str:
+    milliseconds = round(max(0, seconds) * 1000)
+    hours, remainder = divmod(milliseconds, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    secs, millis = divmod(remainder, 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
+
+def shift_srt(path: Path, output: Path, offset: float) -> Path:
+    text = path.read_text(encoding="utf-8-sig", errors="replace")
+
+    def replace(match: re.Match[str]) -> str:
+        start = _format_srt_time(_seconds(match.group(2)) + offset)
+        end = _format_srt_time(_seconds(match.group(4)) + offset)
+        return f"{match.group(1)}{start}{match.group(3)}{end}{match.group(5)}"
+
+    shifted, count = _SRT_RANGE.subn(replace, text)
+    if not count:
+        raise ValueError("File SRT không có mốc thời gian hợp lệ")
+    blocks = re.split(r"(\r?\n[ \t]*\r?\n)", shifted)
+    for index in range(0, len(blocks), 2):
+        lines = blocks[index].splitlines()
+        timeline_index = next((i for i, line in enumerate(lines) if "-->" in line), -1)
+        if timeline_index >= 0 and timeline_index + 1 < len(lines):
+            # SRT thường ngắt câu theo độ rộng giả định; để libass tự wrap theo video thật.
+            text_line = " ".join(line.strip() for line in lines[timeline_index + 1:] if line.strip())
+            blocks[index] = "\n".join([*lines[:timeline_index + 1], text_line])
+    output.write_text("".join(blocks), encoding="utf-8")
+    return output
+
+
+def _timeline_seconds(value: str) -> float:
+    normalized = value.strip().replace(",", ".")
+    dot_parts = normalized.split(".")
+    if ":" not in normalized and len(dot_parts) == 4:
+        hours, minutes, seconds, centiseconds = dot_parts
+        return int(hours) * 3600 + int(minutes) * 60 + int(seconds) + int(centiseconds) / 100
+    parts = normalized.split(":")
+    if len(parts) == 2:
+        parts.insert(0, "0")
+    if len(parts) != 3:
+        raise ValueError(f"Mốc timeline không hợp lệ: {value}")
+    hours, minutes, seconds = parts
+    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+
+def parse_timeline_times(path: Path) -> list[tuple[float, float]]:
+    text = path.read_text(encoding="utf-8-sig", errors="replace")
+    times: list[tuple[float, float]] = []
+    for left, right in _TIMELINE_RANGE.findall(text):
+        start, end = _timeline_seconds(left), _timeline_seconds(right)
+        if end > start:
+            times.append((start, end))
+    if not times:
+        raise ValueError("File tạo ảnh không có timeline hợp lệ")
+    return times
+
+
+def image_resolution(path: Path) -> tuple[int, int]:
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=width,height", "-of", "json", str(path)],
+        capture_output=True, text=True, timeout=15, check=True,
+    )
+    stream = json.loads(result.stdout)["streams"][0]
+    width, height = int(stream["width"]), int(stream["height"])
+    return width - width % 2, height - height % 2
+
+
+def is_video(path: Path) -> bool:
+    return path.suffix.lower() in VIDEO_EXTENSIONS
+
+
+def _encoder_args(use_gpu: bool, crf: int) -> list[str]:
+    if use_gpu:
+        return ["-c:v", "h264_nvenc", "-preset", "p5", "-cq", str(crf), "-b:v", "0"]
+    return ["-c:v", "libx264", "-preset", "medium", "-crf", str(crf)]
+
+
+def _run_stage(job_id: str, cmd: list[str]) -> None:
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+        encoding="utf-8", errors="replace",
+        creationflags=int(getattr(subprocess, "CREATE_NO_WINDOW", 0)) if sys.platform == "win32" else 0,
+    )
+    with _LOCK:
+        _PROCS[job_id] = proc
+    _, stderr = proc.communicate()
+    with _LOCK:
+        _PROCS.pop(job_id, None)
+    if (get_job(job_id) or {}).get("status") == "cancelled":
+        raise InterruptedError
+    if proc.returncode:
+        detail = "\n".join(stderr.splitlines()[-8:])
+        _log(job_id, f"FFmpeg lỗi:\n{detail}")
+        raise RuntimeError(f"FFmpeg kết thúc với mã {proc.returncode}: {detail}")
+
+
+def _prepare_video_segments(
+    job_id: str, media: list[Path], durations: list[float], work: Path,
+    width: int, height: int, fps: int, crf: int, use_gpu: bool,
+) -> list[Path]:
+    segments: list[Path] = []
+    vf = (
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,fps={fps},format=yuv420p"
+    )
+    for index, (source, duration) in enumerate(zip(media, durations)):
+        _log(job_id, f"Chuẩn bị clip {index + 1}/{len(durations)}: {source.name} ({duration:.2f}s)")
+        output = work / f"segment_{index:05d}.mp4"
+        cmd = ["ffmpeg", "-y"]
+        cmd += ["-stream_loop", "-1"] if is_video(source) else ["-loop", "1"]
+        cmd += ["-i", str(source), "-t", f"{duration:.3f}", "-vf", vf, "-an"]
+        cmd += _encoder_args(use_gpu, crf)
+        cmd += ["-movflags", "+faststart", str(output)]
+        _run_stage(job_id, cmd)
+        segments.append(output)
+        _update(job_id, status="processing", progress=round((index + 1) / len(durations) * 35, 1))
+    return segments
+
+
+def create_job(
+    name: str, work: Path, images: list[Path], audio: Path | None,
+    timeline: Path, srt: Path, options: dict, watermark: Path | None = None,
+    output_target: Path | None = None,
+) -> dict:
+    job_id = uuid.uuid4().hex[:10]
+    output = output_target or ROOT / f"{Path(name).stem or 'ghep-anh-srt'}_{job_id}.mp4"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    job = {
+        "id": job_id, "name": name, "status": "queued", "progress": 0,
+        "error": "", "outputSize": 0, "output": str(output), "work": str(work),
+        "logs": [f"[{time.strftime('%H:%M:%S')}] Đã tạo job: {name}"],
+        "images": [str(p) for p in images], "audio": str(audio) if audio else "",
+        "timeline": str(timeline), "srt": str(srt), "watermark": str(watermark) if watermark else "",
+        "options": options,
+    }
+    with _LOCK:
+        _JOBS[job_id] = job
+    return dict(job)
+
+
+def list_jobs() -> list[dict]:
+    with _LOCK:
+        return [dict(job) for job in _JOBS.values()]
+
+
+def get_job(job_id: str) -> dict | None:
+    with _LOCK:
+        job = _JOBS.get(job_id)
+        return dict(job) if job else None
+
+
+def _update(job_id: str, **values: Any) -> None:
+    with _LOCK:
+        if job_id in _JOBS:
+            _JOBS[job_id].update(values)
+
+
+def _log(job_id: str, message: str) -> None:
+    with _LOCK:
+        job = _JOBS.get(job_id)
+        if not job:
+            return
+        logs = job.setdefault("logs", [])
+        logs.append(f"[{time.strftime('%H:%M:%S')}] {message}")
+        del logs[:-200]
+
+
+def output_path(job_id: str) -> Path | None:
+    job = get_job(job_id)
+    path = Path(job["output"]) if job else None
+    return path if job and job["status"] == "done" and path and path.is_file() else None
+
+
+def cancel(job_id: str) -> bool:
+    with _LOCK:
+        if job_id not in _JOBS:
+            return False
+        _JOBS[job_id]["status"] = "cancelled"
+        proc = _PROCS.get(job_id)
+    if proc:
+        kill_process_tree(proc.pid)
+    return True
+
+
+def pause(job_id: str, paused: bool) -> bool:
+    with _LOCK:
+        proc = _PROCS.get(job_id)
+        job = _JOBS.get(job_id)
+    if not proc or not job or proc.poll() is not None:
+        return False
+    if sys.platform == "win32":
+        import ctypes
+        access = 0x0800
+        handle = ctypes.windll.kernel32.OpenProcess(access, False, proc.pid)
+        if not handle:
+            return False
+        try:
+            fn = ctypes.windll.ntdll.NtSuspendProcess if paused else ctypes.windll.ntdll.NtResumeProcess
+            if fn(handle) != 0:
+                return False
+        finally:
+            ctypes.windll.kernel32.CloseHandle(handle)
+    else:
+        os.kill(proc.pid, signal.SIGSTOP if paused else signal.SIGCONT)
+    _update(job_id, status="paused" if paused else "processing")
+    return True
+
+
+def _ffmpeg_subtitle(path: Path, font_size: int = 8, margin_bottom: int = 18,
+                     background: bool = True) -> str:
+    value = path.resolve().as_posix().replace(":", r"\:").replace("'", r"\'")
+    style = (
+        f"FontSize={font_size},MarginV={margin_bottom},MarginL=20,MarginR=20,"
+        "Alignment=2,WrapStyle=0,Shadow=0"
+    )
+    # libass dùng OutlineColour cho hộp BorderStyle=3; BackColour chỉ dùng cho shadow.
+    style += (
+        ",BorderStyle=3,Outline=4,OutlineColour=&H60000000,BackColour=&H60000000"
+        if background else ",BorderStyle=1,Outline=1"
+    )
+    return f"subtitles=filename='{value}':force_style='{style}'"
+
+
+def _logo_position(x_percent: float = 88, y_percent: float = 88, moving: bool = False) -> tuple[str, str]:
+    if moving:
+        return "(W-w)*(0.5+0.45*sin(t*0.37))", "(H-h)*(0.5+0.45*cos(t*0.29))"
+    x = max(0, min(100, float(x_percent))) / 100
+    y = max(0, min(100, float(y_percent))) / 100
+    return f"min(W-w,max(0,W*{x:.4f}))", f"min(H-h,max(0,H*{y:.4f}))"
+
+
+def _text_logo_position(x_percent: float = 88, y_percent: float = 88,
+                        moving: bool = False, cycle: float = 6,
+                        safe_margin: float = 4) -> tuple[str, str]:
+    if moving:
+        margin = max(0, min(20, float(safe_margin))) / 100
+        step = f"floor(t/{max(0.5, cycle):.3f})"
+        x = f"W*{margin:.4f}+max(0,W-tw-W*{margin * 2:.4f})*abs(sin({step}*12.9898+1.37))"
+        # Phụ đề nằm dưới: logo ngẫu nhiên chỉ dùng 75% chiều cao phía trên.
+        y = f"H*{margin:.4f}+max(0,H*0.75-th-H*{margin * 2:.4f})*abs(sin({step}*78.233+2.71))"
+        return x, y
+    x = max(0, min(100, float(x_percent))) / 100
+    y = max(0, min(100, float(y_percent))) / 100
+    return f"min(W-tw,max(0,W*{x:.4f}))", f"min(H-th,max(0,H*{y:.4f}))"
+
+
+def _text_logo_filter(logo: dict, height: int) -> str:
+    raw = str(logo.get("text") if logo.get("source") == "text" else logo.get("icon", "★"))
+    text = raw.replace("\\", r"\\").replace(":", r"\:").replace("'", r"\'").replace("%", r"\%")
+    opacity = max(5, min(100, float(logo.get("opacity", 85)))) / 100
+    font_size = max(6, min(160, int(logo.get("fontSize") or 42)))
+    color = str(logo.get("color") or "#ffffff")
+    if not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+        color = "#ffffff"
+    visible = max(0.5, float(logo.get("visibleSec") or 4))
+    hidden = max(0, float(logo.get("hiddenSec") or 2))
+    fade = min(max(0, float(logo.get("fadeSec") or 0.5)), visible / 2)
+    cycle = visible + hidden
+    moving = logo.get("motion") == "random"
+    x, y = _text_logo_position(
+        logo.get("x", 88), logo.get("y", 88), moving, cycle, logo.get("safeMargin", 4),
+    )
+    enable = ""
+    if logo.get("scope") == "range":
+        start = max(0, float(logo.get("start", 0)))
+        end = max(start, float(logo.get("end", start)))
+        enable = f":enable='between(t,{start:.3f},{end:.3f})'"
+    font_option = ""
+    if sys.platform == "win32":
+        font = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts" / "arialbd.ttf"
+        if not font.is_file():
+            font = font.with_name("arial.ttf")
+        if font.is_file():
+            escaped_font = font.as_posix().replace(":", r"\:").replace("'", r"\'")
+            font_option = f"fontfile='{escaped_font}':"
+    alpha = f"{opacity:.3f}"
+    if moving:
+        local = f"mod(t,{cycle:.3f})"
+        if fade > 0:
+            alpha = (
+                f"if(lt({local},{visible:.3f}),{opacity:.3f}*"
+                f"min(1,min({local}/{fade:.3f},({visible:.3f}-{local})/{fade:.3f})),0)"
+            )
+        else:
+            alpha = f"if(lt({local},{visible:.3f}),{opacity:.3f},0)"
+    return (
+        f"drawtext={font_option}text='{text}':fontsize={font_size}:"
+        f"fontcolor={color}:shadowcolor=black@0.85:shadowx=2:shadowy=2:"
+        f"alpha='{alpha}':x='{x}':y='{y}'{enable}"
+    )
+
+
+def run(job_id: str) -> None:
+    job = get_job(job_id)
+    if not job:
+        return
+    try:
+        _log(job_id, "Đang đọc timeline và kiểm tra media…")
+        media = [Path(p) for p in job["images"]]
+        cues = parse_timeline_times(Path(job["timeline"]))
+        if len(media) < len(cues):
+            raise ValueError(f"Thiếu ảnh/video: cần ít nhất {len(cues)} file, hiện có {len(media)}")
+        durations = [
+            max(0.04, (cues[i + 1][0] if i + 1 < len(cues) else end) - start)
+            for i, (start, end) in enumerate(cues)
+        ]
+        opts = job["options"]
+        resolution = str(opts.get("resolution", "auto"))
+        width, height = image_resolution(media[0]) if resolution == "auto" else (
+            int(value) for value in resolution.split("x", 1)
+        )
+        fps = max(1, min(60, int(opts.get("fps", 30))))
+        crf = max(14, min(32, int(opts.get("crf", 20))))
+        use_gpu = opts.get("encoder", "auto") != "cpu" and nvenc_available()
+        _log(
+            job_id,
+            f"Đầu vào: {len(media)} media · {len(cues)} cảnh · {width}x{height} · {fps} FPS",
+        )
+        _log(job_id, f"Encoder: {'GPU NVIDIA NVENC' if use_gpu else 'CPU libx264'} · CRF {crf}")
+        work = Path(job["work"])
+        sources = (
+            _prepare_video_segments(
+                job_id, media, durations, work, width, height, fps, crf, use_gpu,
+            )
+            if any(is_video(path) for path in media[:len(durations)]) else media
+        )
+        concat = work / "media.ffconcat"
+        lines = ["ffconcat version 1.0"]
+        for source, duration in zip(sources, durations):
+            escaped = source.resolve().as_posix().replace("'", r"'\''")
+            lines.append(f"file '{escaped}'")
+            if sources is media:
+                lines.append(f"duration {duration:.3f}")
+        if sources is media:
+            lines.append(f"file '{media[len(durations) - 1].resolve().as_posix()}'")
+        concat.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        speed = max(25, min(400, float(opts.get("speed", 100)))) / 100
+        volume = max(0, min(300, float(opts.get("volume", 100)))) / 100
+        preview = max(0, min(120, float(opts.get("previewSeconds", 0))))
+        subtitle_size = max(6, min(120, int(opts.get("subtitleSize", 8))))
+        subtitle_margin = max(0, min(1000, int(opts.get("subtitleMargin", 18))))
+        subtitle_offset = max(-3600, min(3600, float(opts.get("subtitleOffset", 0))))
+        subtitle_background = bool(int(opts.get("subtitleBackground", 1)))
+        base_vf = (
+            f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,fps={fps}"
+        )
+        cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat)]
+        audio_index = None
+        if job["audio"]:
+            audio_index = 1
+            cmd += ["-i", job["audio"]]
+        logo = opts.get("logo") if isinstance(opts.get("logo"), dict) else {}
+        watermark_index = None
+        if logo.get("enabled") and logo.get("source") == "image" and job.get("watermark"):
+            watermark_index = 2 if audio_index is not None else 1
+            cmd += ["-loop", "1", "-i", job["watermark"]]
+        speed_filter = f",setpts=PTS/{speed:.6f}" if abs(speed - 1) > 0.001 else ""
+        subtitle_path = shift_srt(
+            Path(job["srt"]), work / "subtitles-prepared.srt", subtitle_offset,
+        )
+        subtitle_filter = _ffmpeg_subtitle(
+            subtitle_path, subtitle_size, subtitle_margin, subtitle_background,
+        )
+        _log(
+            job_id,
+            f"Phụ đề: cỡ {subtitle_size} · lề dưới {subtitle_margin} · "
+            f"lệch {subtitle_offset:g}s · nền {'bật' if subtitle_background else 'tắt'}",
+        )
+        if watermark_index is not None:
+            opacity = max(5, min(100, float(logo.get("opacity", 85)))) / 100
+            scale = max(2, min(30, float(logo.get("size", 8)))) / 100
+            x, y = _logo_position(logo.get("x", 88), logo.get("y", 88), logo.get("motion") == "random")
+            enable = ""
+            if logo.get("scope") == "range":
+                start = max(0, float(logo.get("start", 0)))
+                end = max(start, float(logo.get("end", start)))
+                enable = f":enable='between(t,{start:.3f},{end:.3f})'"
+            graph = (
+                f"[0:v]{base_vf}{speed_filter}[base];"
+                f"[{watermark_index}:v]scale=-1:{max(12, round(height * scale))},format=rgba,"
+                f"colorchannelmixer=aa={opacity:.3f}[wm];"
+                f"[base][wm]overlay=x='{x}':y='{y}':shortest=1{enable},"
+                f"{subtitle_filter},format=yuv420p[vout]"
+            )
+            cmd += ["-filter_complex", graph, "-map", "[vout]"]
+        else:
+            logo_filter = (
+                f",{_text_logo_filter(logo, height)}"
+                if logo.get("enabled") and logo.get("source") in {"text", "icon"} else ""
+            )
+            cmd += ["-vf", f"{base_vf},{subtitle_filter}{logo_filter}{speed_filter},format=yuv420p"]
+        cmd += _encoder_args(use_gpu, crf)
+        if audio_index is not None:
+            if watermark_index is None:
+                cmd += ["-map", "0:v:0"]
+            cmd += ["-map", f"{audio_index}:a:0", "-af", f"volume={volume:.3f},atempo={speed:.6f}",
+                    "-c:a", "aac", "-b:a", "192k", "-shortest"]
+        if preview:
+            cmd += ["-t", str(preview / speed)]
+        if opts.get("removeMetadata"):
+            cmd += ["-map_metadata", "-1", "-metadata", "encoder="]
+        cmd += ["-movflags", "+faststart", job["output"]]
+        _update(job_id, status="processing", progress=1)
+        _log(job_id, f"Bắt đầu render: {Path(job['output']).name}")
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+            encoding="utf-8", errors="replace",
+            creationflags=int(getattr(subprocess, "CREATE_NO_WINDOW", 0)) if sys.platform == "win32" else 0,
+        )
+        with _LOCK:
+            _PROCS[job_id] = proc
+        total = max(end for _, end in cues)
+        assert proc.stderr
+        stderr_tail: list[str] = []
+        last_logged_percent = -10
+        for line in proc.stderr:
+            clean = line.strip()
+            if clean:
+                stderr_tail.append(clean)
+                del stderr_tail[:-30]
+            match = re.search(r"time=(\d+):(\d+):([\d.]+)", line)
+            if match:
+                current = int(match[1]) * 3600 + int(match[2]) * 60 + float(match[3])
+                base = 35 if sources is not media else 1
+                progress = min(99, round(base + current / total * (99 - base), 1))
+                _update(job_id, progress=progress)
+                bucket = int(progress // 10) * 10
+                if bucket > last_logged_percent:
+                    last_logged_percent = bucket
+                    _log(job_id, f"Đang render: {progress:.1f}% · {current:.1f}/{total:.1f}s")
+        code = proc.wait()
+        with _LOCK:
+            _PROCS.pop(job_id, None)
+        if get_job(job_id).get("status") == "cancelled":
+            return
+        if code or not Path(job["output"]).is_file():
+            detail = "\n".join(stderr_tail[-12:])
+            raise RuntimeError(f"FFmpeg kết thúc với mã {code}\n{detail}")
+        path = Path(job["output"])
+        _update(job_id, status="done", progress=100, outputSize=path.stat().st_size)
+        _log(job_id, f"Hoàn thành: {path} ({path.stat().st_size / 1_048_576:.1f} MB)")
+    except Exception as exc:
+        with _LOCK:
+            _PROCS.pop(job_id, None)
+        if (get_job(job_id) or {}).get("status") != "cancelled":
+            _update(job_id, status="error", error=str(exc))
+            _log(job_id, f"LỖI: {exc}")
+
+
+def start(job_id: str) -> None:
+    threading.Thread(target=run, args=(job_id,), name=f"srt-image-{job_id}", daemon=True).start()

@@ -120,8 +120,9 @@ function hasCmd(cmd, args = ['--version']) {
 }
 
 /** Chỉ kill PID đang LISTEN cổng — không quét lan. */
-function freePorts(ports) {
-  if (!isWin) return
+function freePorts(ports, failedPids = new Set()) {
+  if (!isWin) return true
+  let success = true
   for (const port of ports) {
     const out = spawnSync('cmd', ['/c', `netstat -ano | findstr :${port}`], {
       encoding: 'utf8',
@@ -135,10 +136,30 @@ function freePorts(ports) {
     }
     for (const pid of pids) {
       // Không /T — tránh giết nhầm parent shell / terminal VS Code
-      spawnSync('taskkill', ['/pid', pid, '/F'], { stdio: 'ignore' })
-      console.log(`Đã giải phóng cổng ${port} (pid ${pid})`)
+      const stopped = spawnSync('taskkill', ['/pid', pid, '/F'], {
+        encoding: 'utf8',
+        timeout: 8_000,
+      })
+      // Windows đôi khi xóa process cha nhưng worker Python vẫn giữ socket kế thừa;
+      // netstat lúc đó tiếp tục trả PID cha đã chết.
+      const orphanStopped = stopped.status === 0 ? null : spawnSync('powershell.exe', [
+        '-NoProfile',
+        '-Command',
+        `$children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = ${pid}" -ErrorAction SilentlyContinue); if ($children.Count) { $children | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; exit 0 }; exit 1`,
+      ], { encoding: 'utf8', timeout: 8_000 })
+      if (stopped.status === 0 || orphanStopped?.status === 0) {
+        console.log(`Đã giải phóng cổng ${port} (pid ${pid})`)
+      } else {
+        success = false
+        if (!failedPids.has(pid)) {
+          failedPids.add(pid)
+          const detail = String(stopped.stderr || stopped.stdout || '').trim()
+          console.error(`Không thể dừng tiến trình giữ cổng ${port} (pid ${pid})${detail ? `: ${detail}` : '.'}`)
+        }
+      }
     }
   }
+  return success
 }
 
 function portsFree(ports) {
@@ -151,8 +172,10 @@ function portsFree(ports) {
 
 async function freePortsAndWait(ports) {
   if (!isWin) return true
+  const failedPids = new Set()
   for (let attempt = 0; attempt < 25; attempt += 1) {
-    freePorts(ports)
+    if (portsFree(ports)) return true
+    freePorts(ports, failedPids)
     if (portsFree(ports)) return true
     await new Promise((resolve) => setTimeout(resolve, 120))
   }
@@ -265,7 +288,11 @@ if (!py) {
     console.error('[dev] unhandledRejection:', err)
   })
 
-  await freePortsAndWait(PORTS)
+  if (!await freePortsAndWait(PORTS)) {
+    console.error('Không thể khởi động: cổng 5173 hoặc 8787 vẫn đang bị tiến trình khác sử dụng.')
+    releaseDevLock()
+    process.exit(1)
+  }
 
   console.log(`API  → http://127.0.0.1:8787  (${py} uvicorn)`)
   console.log('Web  → http://127.0.0.1:5173  (Vite)')

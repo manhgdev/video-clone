@@ -16,6 +16,34 @@ from typing import Any
 from .jobs import run_cmd
 
 
+def _gpu_kind_from_name(name: str) -> str:
+    value = name.casefold()
+    if any(token in value for token in ("nvidia", "geforce", "quadro", "tesla", "titan")):
+        return "nvidia"
+    if any(token in value for token in ("amd", "radeon", "firepro")):
+        return "amd"
+    if any(token in value for token in ("intel", "iris", "arc", "uhd graphics")):
+        return "intel"
+    return "other"
+
+
+def _windows_video_controllers() -> list[dict[str, Any]]:
+    """Use CIM on current Windows; WMIC disappeared from many clean Windows 11 installs."""
+    script = (
+        "Get-CimInstance Win32_VideoController | "
+        "Select-Object Name,AdapterRAM,DriverVersion | ConvertTo-Json -Compress"
+    )
+    try:
+        raw = subprocess.check_output(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+            text=True, stderr=subprocess.DEVNULL, timeout=8,
+        ).strip()
+        data = json.loads(raw) if raw else []
+        return data if isinstance(data, list) else [data]
+    except (FileNotFoundError, subprocess.SubprocessError, OSError, json.JSONDecodeError):
+        return []
+
+
 def _atomic_replace(src: Path, dst: Path, *, attempts: int = 30) -> None:
     """Replace dst with src; retry when Windows locks final.mp4 (preview/player/AV)."""
     src_p, dst_p = Path(src), Path(dst)
@@ -201,32 +229,29 @@ def detect_device() -> dict[str, Any]:
         except (FileNotFoundError, subprocess.SubprocessError, OSError):
             pass
 
-        # Fallback: non-NVIDIA GPU → wmic (Windows) / lspci (Linux)
+        # Fallback: NVIDIA without nvidia-smi, AMD and Intel via native OS inventory.
         if gpu_kind == "none":
             if system == "Windows":
-                try:
-                    out = subprocess.check_output(
-                        ["wmic", "path", "win32_VideoController",
-                         "get", "Name,AdapterRAM", "/format:csv"],
-                        text=True, stderr=subprocess.DEVNULL, timeout=4,
-                    ).strip()
-                    for row in out.splitlines():
-                        cols = [c.strip() for c in row.split(",")]
-                        # csv: Node,AdapterRAM,Name
-                        if len(cols) < 3 or not cols[-1] or cols[-1].lower() == "name":
-                            continue
-                        gpu_name = cols[-1]
-                        gpu_kind = "other"
-                        accel = "directml"
-                        try:
-                            ram = int(cols[1])
-                            if ram > 0:
-                                vram_mb = ram // (1024 * 1024)
-                        except (ValueError, IndexError):
-                            pass
-                        break
-                except (FileNotFoundError, subprocess.SubprocessError, OSError):
-                    pass
+                controllers = [
+                    item for item in _windows_video_controllers()
+                    if item.get("Name") and "microsoft basic" not in str(item["Name"]).casefold()
+                ]
+                # Prefer a discrete GPU over the integrated adapter on hybrid laptops.
+                controllers.sort(
+                    key=lambda item: (
+                        _gpu_kind_from_name(str(item["Name"])) in ("nvidia", "amd"),
+                        int(item.get("AdapterRAM") or 0),
+                    ),
+                    reverse=True,
+                )
+                if controllers:
+                    selected = controllers[0]
+                    gpu_name = str(selected["Name"])
+                    gpu_kind = _gpu_kind_from_name(gpu_name)
+                    accel = "directml"
+                    driver = str(selected.get("DriverVersion") or "")
+                    ram = int(selected.get("AdapterRAM") or 0)
+                    vram_mb = ram // (1024 * 1024) if ram > 0 else None
             elif system == "Linux":
                 try:
                     out = subprocess.check_output(
@@ -237,7 +262,8 @@ def detect_device() -> dict[str, Any]:
                             parts = line.split('"')
                             gpu_name = (f"{parts[3]} {parts[5]}".strip()
                                         if len(parts) >= 6 else line.split()[-1])
-                            gpu_kind = "other"
+                            gpu_kind = _gpu_kind_from_name(gpu_name)
+                            accel = "rocm" if gpu_kind == "amd" else "cpu"
                             break
                 except (FileNotFoundError, subprocess.SubprocessError, OSError):
                     pass
@@ -256,13 +282,17 @@ def detect_device() -> dict[str, Any]:
         ocr_label = ""
         install_summary = f"{os_label} Apple Silicon ({gpu_name}) → Demucs-MLX (Metal)"
         install_hint = "Mac Apple Silicon — OCR chạy CPU/ANE; tách lời dùng demucs-mlx (Metal)."
-    elif gpu_kind == "other":
+    elif gpu_kind in ("amd", "intel", "other"):
         demucs_label = "Cài Demucs (CPU)"
         demucs_backend = "cpu"
-        ocr_action = ""
-        ocr_label = ""
-        install_summary = f"{os_label} + {gpu_name} — CUDA chưa hỗ trợ loại GPU này"
-        install_hint = f"GPU: {gpu_name}. Chạy CPU mode; CUDA chỉ hỗ trợ NVIDIA."
+        ocr_action = "ai_runtime" if accel == "directml" else ""
+        ocr_label = "Cài OCR DirectML" if accel == "directml" else ""
+        install_summary = f"{os_label} + {gpu_name} → {accel.upper() if accel != 'cpu' else 'CPU'}"
+        install_hint = (
+            f"GPU: {gpu_name}. OCR dùng DirectML; các tác vụ không hỗ trợ sẽ tự dùng CPU."
+            if accel == "directml"
+            else f"GPU: {gpu_name}. Tác vụ PyTorch dùng ROCm khi tương thích, còn lại tự dùng CPU."
+        )
     else:
         demucs_label = "Cài Demucs (CPU)"
         demucs_backend = "cpu"

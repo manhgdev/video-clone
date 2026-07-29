@@ -115,6 +115,16 @@ npm run build:app
 
 Output: `build_app/release/VideoClone_v<version>/` — **chạy cả thư mục**, không copy riêng `.exe`.
 
+### Quy tắc tăng version
+
+VideoClone dùng ba số `major.minor.patch`, mỗi số chạy từ `0` đến `9`:
+
+- Build thường tăng patch: `3.0.0 → 3.0.1`.
+- Patch `9` cuộn sang minor: `3.0.9 → 3.1.0`.
+- Minor `9` và patch `9` cuộn sang major: `2.9.9 → 3.0.0`.
+- `npm run build:app` lấy version hiện tại từ `package.json`, ghi cùng version vào tiêu đề APP, `build_app/VERSION`, tên thư mục và ZIP; chỉ sau khi build thành công mới ghi version kế tiếp vào `package.json`.
+- Script build có self-check bắt buộc cho các mốc `2.0.9 → 2.1.0` và `2.9.9 → 3.0.0`; sai quy tắc thì build dừng.
+
 ```powershell
 $env:ONEFILE='1'; npm run build:app   # optional one-file
 $env:CLEAN='1'; npm run build:app     # xóa cache PyInstaller

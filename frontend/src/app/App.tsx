@@ -22,6 +22,7 @@ import FilmPage from '@/pages/FilmPage'
 import BatchPage from '@/pages/BatchPage'
 import RendersPage from '@/pages/RendersPage'
 import VideoCleanerPage from '@/pages/VideoCleanerPage'
+import SrtImagePage from '@/pages/SrtImagePage'
 import { ExportSuccessModal } from '@/features/editor/ExportSuccessModal'
 import { api } from '@/features/project/project.api'
 import { expandSegmentsForList } from '@/features/project/expandCompound'
@@ -817,6 +818,8 @@ export default function App() {
         <BatchPage />
       ) : appMode === 'cleaner' ? (
         <VideoCleanerPage />
+      ) : appMode === 'srt-image' ? (
+        <SrtImagePage />
       ) : appMode === 'renders' ? (
         <RendersPage onEdit={editRenderedProject} />
       ) : editorOpen ? (

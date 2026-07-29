@@ -177,6 +177,14 @@ def _runtime_torch_accel() -> str:
         return "cuda"
     if _apple_silicon_runtime():
         return "mac"
+    if sys.platform.startswith("linux"):
+        try:
+            from ..media import detect_device
+
+            if detect_device().get("accel") == "rocm":
+                return "rocm"
+        except Exception:
+            pass
     return "cpu"
 
 
@@ -486,8 +494,11 @@ _demucs_cache_lock = threading.Lock()
 
 
 def _demucs_check(*, refresh: bool = False) -> tuple[bool, str]:
-    global _demucs_cache
+    global _demucs_cache, _DEMUCS_PY_CACHE
     with _demucs_cache_lock:
+        if refresh:
+            # The venv may have been created by the installer after a cached miss.
+            _DEMUCS_PY_CACHE = None
         now = time.monotonic()
         if not refresh and _demucs_cache and now - _demucs_cache[0] < _DEMUCS_CACHE_TTL:
             return _demucs_cache[1]
