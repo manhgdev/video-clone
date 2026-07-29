@@ -412,8 +412,14 @@ export default function SrtImagePage() {
               </label>
               <label><span className="siv-setting-title">Zoom <button type="button" className="siv-info" onClick={() => setHelpKey('zoom')}>i</button></span>
                 <select value={zoom} onChange={(e) => setZoom(e.target.value)}>
-                  <option value="off">Tắt</option><option value="light">Nhẹ</option>
-                  <option value="medium">Vừa</option><option value="strong">Mạnh</option>
+                    <option value="off">Tắt</option>
+                    <option value="random">Ngẫu nhiên</option>
+                    <option value="zoomIn">Zoom in</option>
+                    <option value="zoomOut">Zoom out</option>
+                    <option value="left">Trái → phải</option>
+                    <option value="right">Phải → trái</option>
+                    <option value="up">Dưới → trên</option>
+                    <option value="down">Trên → dưới</option>
                 </select>
               </label>
               <label><span className="siv-setting-title">Speed (%) <button type="button" className="siv-info" onClick={() => setHelpKey('speed')}>i</button></span>

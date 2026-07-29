@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 import json
 import os
+import random
 import signal
 import subprocess
 import sys
@@ -153,14 +154,21 @@ def _run_stage(job_id: str, cmd: list[str]) -> None:
 
 def _prepare_video_segments(
     job_id: str, media: list[Path], durations: list[float], work: Path,
-    width: int, height: int, fps: int, crf: int, use_gpu: bool,
+    width: int, height: int, fps: int, crf: int, use_gpu: bool, zoom: str = "off",
 ) -> list[Path]:
     segments: list[Path] = []
-    vf = (
+    base_vf = (
         f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,fps={fps},format=yuv420p"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,fps={fps}"
     )
+    last_variant = -1
     for index, (source, duration) in enumerate(zip(media, durations)):
+        variant = random.randrange(16)
+        if variant == last_variant:
+            variant = (variant + random.randrange(1, 16)) % 16
+        last_variant = variant
+        motion = _motion_filter(zoom, width, height, fps, variant, duration)
+        vf = f"{base_vf}{',' + motion if motion else ''},format=yuv420p"
         _log(job_id, f"Chuẩn bị clip {index + 1}/{len(durations)}: {source.name} ({duration:.2f}s)")
         output = work / f"segment_{index:05d}.mp4"
         cmd = ["ffmpeg", "-y"]
@@ -347,6 +355,69 @@ def _text_logo_filter(logo: dict, height: int) -> str:
     )
 
 
+def _motion_filter(
+    mode: str, width: int, height: int, fps: int = 30,
+    variant: int = 0, duration: float = 8,
+) -> str:
+    """Ken Burns motion with frame-evaluated expressions for smooth movement."""
+    mode = str(mode or "off")
+    if mode == "off":
+        return ""
+    size = f"{width}x{height}"
+    if mode == "zoomIn":
+        return (
+            "scale=iw*4:ih*4,"
+            "zoompan=z='min(1.06,1+on*0.00020)':"
+            "x='iw/2-iw/zoom/2':y='ih/2-ih/zoom/2':"
+            f"d=1:s={size}:fps={fps}"
+        )
+    if mode == "zoomOut":
+        return (
+            "scale=iw*4:ih*4,"
+            "zoompan=z='max(1,1.06-on*0.00020)':"
+            "x='iw/2-iw/zoom/2':y='ih/2-ih/zoom/2':"
+            f"d=1:s={size}:fps={fps}"
+        )
+    axis = {
+        "left": ("(iw-iw/zoom)*min(1,on/240)", "(ih-ih/zoom)/2"),
+        "right": ("(iw-iw/zoom)*(1-min(1,on/240))", "(ih-ih/zoom)/2"),
+        "up": ("(iw-iw/zoom)/2", "(ih-ih/zoom)*(1-min(1,on/240))"),
+        "down": ("(iw-iw/zoom)/2", "(ih-ih/zoom)*min(1,on/240)"),
+    }.get(mode)
+    if axis:
+        return (
+            "scale=iw*4:ih*4,"
+            f"zoompan=z='min(1.06,1+on*0.00020)':x='{axis[0]}':y='{axis[1]}':"
+            f"d=1:s={size}:fps={fps}"
+        )
+    # random: one continuous Ken Burns camera move per scene.
+    frames = max(2, round(duration * fps) - 1)
+    progress = f"min(1,on/{frames})"
+    travel = f"(0.5-0.5*cos(PI*{progress}))"
+    directions = (
+        (f"(iw-iw/zoom)*{travel}", "(ih-ih/zoom)/2"),
+        (f"(iw-iw/zoom)*(1-{travel})", "(ih-ih/zoom)/2"),
+        ("(iw-iw/zoom)/2", f"(ih-ih/zoom)*{travel}"),
+        ("(iw-iw/zoom)/2", f"(ih-ih/zoom)*(1-{travel})"),
+        (f"(iw-iw/zoom)*{travel}", f"(ih-ih/zoom)*{travel}"),
+        (f"(iw-iw/zoom)*(1-{travel})", f"(ih-ih/zoom)*{travel}"),
+        (f"(iw-iw/zoom)*{travel}", f"(ih-ih/zoom)*(1-{travel})"),
+        (f"(iw-iw/zoom)*(1-{travel})", f"(ih-ih/zoom)*(1-{travel})"),
+    )
+    x, y = directions[variant % len(directions)]
+    zoom_curve = (
+        f"1.12-0.12*{travel}"
+        if variant % 2 == 0
+        else f"1+0.09*{travel}"
+    )
+    return (
+        "scale=iw*4:ih*4,"
+        f"zoompan=z='{zoom_curve}':"
+        f"x='{x}':y='{y}':"
+        f"d=1:s={size}:fps={fps}"
+    )
+
+
 def run(job_id: str) -> None:
     job = get_job(job_id)
     if not job:
@@ -375,11 +446,12 @@ def run(job_id: str) -> None:
         )
         _log(job_id, f"Encoder: {'GPU NVIDIA NVENC' if use_gpu else 'CPU libx264'} · CRF {crf}")
         work = Path(job["work"])
+        zoom_mode = str(opts.get("zoom", "off"))
         sources = (
             _prepare_video_segments(
-                job_id, media, durations, work, width, height, fps, crf, use_gpu,
+                job_id, media, durations, work, width, height, fps, crf, use_gpu, zoom_mode,
             )
-            if any(is_video(path) for path in media[:len(durations)]) else media
+            if zoom_mode != "off" or any(is_video(path) for path in media[:len(durations)]) else media
         )
         concat = work / "media.ffconcat"
         lines = ["ffconcat version 1.0"]
@@ -399,9 +471,13 @@ def run(job_id: str) -> None:
         subtitle_margin = max(0, min(1000, int(opts.get("subtitleMargin", 18))))
         subtitle_offset = max(-3600, min(3600, float(opts.get("subtitleOffset", 0))))
         subtitle_background = bool(int(opts.get("subtitleBackground", 1)))
+        zoom_filter = ""
+        if str(opts.get("zoom", "off")) != "off":
+            _log(job_id, f"Zoom: {opts.get('zoom')} · chuyển động nội suy theo thời gian")
         base_vf = (
             f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
             f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,fps={fps}"
+            + (f",{zoom_filter}" if zoom_filter else "")
         )
         cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat)]
         audio_index = None

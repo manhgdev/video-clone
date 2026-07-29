@@ -148,9 +148,8 @@ def open_folder(job_id: str = "", selected_output: str = ""):
     folder = output.parent if output else ROOT
     folder.mkdir(parents=True, exist_ok=True)
     if os.name == "nt":
-        # /select mở cửa sổ Explorer mới và chọn đúng video, thay vì tái dùng cửa sổ ẩn phía sau APP.
-        argument = f'/select,"{output}"' if output and output.exists() else f'/n,"{folder}"'
-        subprocess.Popen(["explorer.exe", argument])
+        # Mở đúng thư mục xuất; không dùng /select vì Windows có thể giữ Explorer ẩn phía sau app.
+        subprocess.Popen(["explorer.exe", str(folder)])
     else:
         subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(folder)])
     return {"ok": True}
