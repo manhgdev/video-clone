@@ -75,7 +75,9 @@ export default function SrtImagePage() {
   const [logoText, setLogoText] = useState(String(
     !cached.logoText || cached.logoText === 'VideoClone' ? 'ZMTOOL' : cached.logoText,
   ))
-  const [logoFontSize, setLogoFontSize] = useState(Number(cached.logoFontSize ?? 42))
+  const [logoFontSize, setLogoFontSize] = useState(Number(
+    cached.logoFontSize == null || cached.logoFontSize === 42 ? 10 : cached.logoFontSize,
+  ))
   const [logoColor, setLogoColor] = useState(String(cached.logoColor ?? '#ffffff'))
   const [logoIcon, setLogoIcon] = useState(String(cached.logoIcon ?? '★'))
   const [logoSize, setLogoSize] = useState(Number(cached.logoSize ?? 8))
@@ -182,7 +184,10 @@ export default function SrtImagePage() {
   }
 
   async function openFolder() {
-    const query = job?.id ? `?job_id=${encodeURIComponent(job.id)}` : ''
+    const params = new URLSearchParams()
+    if (outputPath) params.set('selected_output', outputPath)
+    else if (job?.id) params.set('job_id', job.id)
+    const query = params.size ? `?${params}` : ''
     const response = await fetch(`/api/srt-image/open-folder${query}`, { method: 'POST' })
     if (!response.ok) setJob(job ? { ...job, error: await response.text() } : job)
   }

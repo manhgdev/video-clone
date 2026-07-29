@@ -305,7 +305,7 @@ def _text_logo_filter(logo: dict, height: int) -> str:
     raw = str(logo.get("text") if logo.get("source") == "text" else logo.get("icon", "★"))
     text = raw.replace("\\", r"\\").replace(":", r"\:").replace("'", r"\'").replace("%", r"\%")
     opacity = max(5, min(100, float(logo.get("opacity", 85)))) / 100
-    font_size = max(6, min(160, int(logo.get("fontSize") or 42)))
+    font_size = max(6, min(160, int(logo.get("fontSize") or 10)))
     color = str(logo.get("color") or "#ffffff")
     if not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
         color = "#ffffff"

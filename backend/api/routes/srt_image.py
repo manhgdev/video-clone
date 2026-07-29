@@ -138,9 +138,13 @@ def set_paused(job_id: str, paused: bool = True):
 
 
 @router.post("/api/srt-image/open-folder")
-def open_folder(job_id: str = ""):
+def open_folder(job_id: str = "", selected_output: str = ""):
     job = get_job(job_id) if job_id else None
-    output = Path(job["output"]) if job else None
+    output = (
+        Path(selected_output).expanduser().resolve()
+        if selected_output.strip()
+        else Path(job["output"]) if job else None
+    )
     folder = output.parent if output else ROOT
     folder.mkdir(parents=True, exist_ok=True)
     if os.name == "nt":
