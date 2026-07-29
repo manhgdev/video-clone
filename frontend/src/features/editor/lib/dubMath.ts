@@ -54,7 +54,7 @@ export function fileBakedSpeed(
   if (typeof bakedSpeed === 'number' && bakedSpeed > 0.2 && (hasBakedSpeed || Math.abs(bakedSpeed - 1) > 0.02)) {
     return Math.max(0.5, Math.min(2, bakedSpeed))
   }
-  if (bakedPreferVideo) return 0.8
+  if (bakedPreferVideo) return 0.7
   return 1
 }
 

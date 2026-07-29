@@ -85,7 +85,7 @@ export function useDubAudioSync(deps: DubAudioSyncDeps) {
       typeof bakedSpeed === 'number' && bakedSpeed > 0.2
         ? bakedSpeed
         : bakedPreferVideo
-          ? 0.8
+          ? 0.7
           : 1
 
     if (playStem && bg) {

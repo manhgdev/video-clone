@@ -264,6 +264,33 @@ def api_system_checks(refresh: bool = False, deep: bool = False):
         raise HTTPException(500, f"system checks failed: {e}") from e
 
 
+@router.post("/api/system/ollama/signin")
+def api_ollama_signin():
+    """Mở luồng đăng nhập chính chủ; VideoClone không đọc hay giữ token Ollama."""
+    import subprocess
+
+    from pipeline.core.system_check.checks import _ollama_executable
+
+    exe = _ollama_executable()
+    if not exe:
+        raise HTTPException(404, "Chưa tìm thấy Ollama trên máy")
+    try:
+        subprocess.Popen(
+            [exe, "signin"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=(
+                int(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
+                if sys.platform == "win32"
+                else 0
+            ),
+        )
+    except OSError as e:
+        raise HTTPException(500, f"Không mở được Ollama Sign in: {e}") from e
+    return {"ok": True, "message": "Đã mở Ollama Sign in"}
+
+
 @router.get("/api/system/install/status")
 def api_install_status():
     with _install_lock:

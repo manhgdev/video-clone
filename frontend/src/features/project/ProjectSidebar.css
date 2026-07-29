@@ -185,6 +185,25 @@
   border-color: var(--primary);
 }
 
+.field-inline {
+  display: flex;
+  gap: 6px;
+}
+
+.field-inline input {
+  min-width: 0;
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 9px 10px;
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.field-inline button {
+  white-space: nowrap;
+}
+
 .number-setting {
   display: flex;
   align-items: center;

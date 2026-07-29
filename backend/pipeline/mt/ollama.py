@@ -15,8 +15,8 @@ from pipeline.core.resources import progress_msg
 
 from .text import *  # noqa: F403
 
-def _ollama_model(models: list[str], *, prefer_fast: bool = True) -> str:
-    """prefer_fast: ưu tiên 3–14B (dịch phụ đề). 32B quá chậm; 1B dễ hỏng."""
+def _ollama_model(models: list[str], *, tier: str = "balanced") -> str:
+    """Chọn model đã cài theo mức UI; không tự pull hoặc đoán model không tồn tại."""
     import re
 
     def size_b(name: str) -> float:
@@ -27,20 +27,15 @@ def _ollama_model(models: list[str], *, prefer_fast: bool = True) -> str:
         n = name.lower()
         fam = 0 if "qwen" in n else 1 if "mistral" in n else 2 if "llama" in n else 9
         sb = size_b(n)
-        if prefer_fast:
-            # 3–14B sweet spot; 1.5–3; 14–20; rồi 32B+ / tiny
-            if 3.0 <= sb <= 14.0:
-                tier = 0
-            elif 1.5 <= sb < 3.0:
-                tier = 1
-            elif 14.0 < sb <= 20.0:
-                tier = 2
-            elif sb > 20.0:
-                tier = 3
-            else:
-                tier = 4  # ≤1.5B
-            return (tier, fam, sb)
-        return (fam, 0.0, -sb)
+        wanted = (tier or "balanced").lower()
+        if wanted == "fast":
+            band = 0 if 1.5 <= sb <= 4.0 else 1 if sb < 8 else 2
+            return (band, fam, sb)
+        if wanted == "quality":
+            band = 0 if 14 <= sb <= 32 else 1 if 7 <= sb < 14 else 2
+            return (band, fam, -sb)
+        band = 0 if 7 <= sb <= 14 else 1 if 3 <= sb < 7 else 2
+        return (band, fam, abs(sb - 8))
 
     return sorted(models, key=score)[0]
 
@@ -53,6 +48,10 @@ def translate_ollama(
     source_lang: str = "auto",
     batch_size: int = 12,
     workers: int = 2,
+    mode: str = "cloud",
+    model: str = "minimax-m3:cloud",
+    local_tier: str = "balanced",
+    durations: list[float] | None = None,
 ) -> list[str]:
     """Dịch batch Ollama — nhiều batch song song theo `workers`."""
     names = {
@@ -70,12 +69,25 @@ def translate_ollama(
         return out
     try:
         with httpx.Client(timeout=300.0, trust_env=False) as client:
-            tags = client.get("http://127.0.0.1:11434/api/tags")
-            tags.raise_for_status()
-            models = [m["name"] for m in tags.json().get("models", [])]
-            if not models:
-                raise RuntimeError("Ollama không có model. Chạy: ollama pull qwen2.5")
-            model = _ollama_model(models, prefer_fast=True)
+            cloud = str(mode or "cloud").lower() == "cloud"
+            if cloud:
+                model = (model or "minimax-m3:cloud").strip()
+                if not model.endswith(":cloud"):
+                    model += ":cloud"
+                probe = client.post(
+                    "http://127.0.0.1:11434/api/show", json={"model": model}
+                )
+                probe.raise_for_status()
+            else:
+                tags = client.get("http://127.0.0.1:11434/api/tags")
+                tags.raise_for_status()
+                models = [m["name"] for m in tags.json().get("models", [])]
+                if not models:
+                    raise RuntimeError(
+                        "Ollama đã cài nhưng chưa có model local. Hãy chọn model Cloud hoặc tải model local."
+                    )
+                requested = (model or "").strip()
+                model = requested if requested in models else _ollama_model(models, tier=local_tier)
             # 32B + nhiều request song song → thrash GPU, chậm hơn tuần tự
             size_m = __import__("re").search(r"(\d+(?:\.\d+)?)[bB]", model.lower())
             size_b = float(size_m.group(1)) if size_m else 7.0
@@ -99,7 +111,11 @@ def translate_ollama(
                     project_id,
                     step="translate",
                     progress=55,
-                    message=progress_msg("Dịch Ollama", workers=w, extra=f"{model} · batch {bs}"),
+                    message=progress_msg(
+                        f"Dịch Ollama {'Cloud' if cloud else 'Local'}",
+                        workers=w,
+                        extra=f"{model} · batch {bs}",
+                    ),
                     running=True,
                 )
 
@@ -107,7 +123,13 @@ def translate_ollama(
                 # ctx nhỏ + predict gọn = nhanh hơn nhiều với phụ đề
                 return {
                     "temperature": 0.0,
-                    "num_predict": min(512, 28 * n_lines + 32),
+                    # ponytail: Cloud models may spend part of this budget internally even
+                    # with think=false; leave enough room to finish every numbered line.
+                    "num_predict": (
+                        min(4096, 768 + 256 * n_lines)
+                        if cloud
+                        else min(512, 28 * n_lines + 32)
+                    ),
                     "num_ctx": min(2048, 128 + 64 * n_lines),
                 }
 
@@ -130,10 +152,11 @@ def translate_ollama(
                             "model": model,
                             "prompt": one_prompt,
                             "stream": False,
+                            "think": False,
                             "keep_alive": "30m",
                             "options": {
                                 "temperature": 0.0,
-                                "num_predict": 64,
+                                "num_predict": 1024 if cloud else 64,
                                 "num_ctx": 512,
                             },
                         },
@@ -151,6 +174,16 @@ def translate_ollama(
                 chunk = texts[start : start + bs]
                 n = len(chunk)
                 numbered = "\n".join(f"{j + 1}. {t}" for j, t in enumerate(chunk))
+                before = texts[max(0, start - 4) : start]
+                after = texts[start + n : start + n + 4]
+                context = "\n".join(
+                    [*(f"Trước: {t}" for t in before), *(f"Sau: {t}" for t in after)]
+                )
+                timing = "\n".join(
+                    f"{j + 1}: {max(0.2, float((durations or [])[start + j])):.2f}s"
+                    for j in range(n)
+                    if durations and start + j < len(durations)
+                )
                 if same_lang:
                     if target_lang == "zh":
                         prompt = (
@@ -175,9 +208,15 @@ def translate_ollama(
                     )
                     prompt = (
                         f"Translate these {n} video subtitles from {src_name} into {lang_name}. "
-                        "Be faithful. Do not invent content. "
+                        "Write natural spoken language, not a literal translation. Keep names, numbers and meaning. "
+                        "Infer dialogue turns from adjacent lines and vocatives: if one speaker says Mom/Dad, "
+                        "the reply is from that mother/father unless the text proves otherwise. Keep pronouns "
+                        "and forms of address consistent across the whole batch. "
+                        "Preserve every clause and key fact. Only shorten wording when the full natural translation "
+                        "clearly cannot fit its duration; never drop a reason, negation, name or number. "
                         f"Return exactly {n} numbered lines only, format: 1. translation\\n2. ...\n\n"
-                        f"{numbered}"
+                        f"Surrounding context (reference only, do not output):\n{context or '(none)'}\n\n"
+                        f"Target durations:\n{timing or '(not provided)'}\n\nSubtitles:\n{numbered}"
                     )
                 with httpx.Client(timeout=300.0, trust_env=False) as c:
                     r = c.post(
@@ -186,6 +225,7 @@ def translate_ollama(
                             "model": model,
                             "prompt": prompt,
                             "stream": False,
+                            "think": False,
                             "keep_alive": "30m",
                             "options": _gen_opts(n),
                         },
@@ -203,12 +243,17 @@ def translate_ollama(
                     for text, line in zip(chunk, parsed):
                         if same_lang and line and _same_lang_too_rewritten(text, line):
                             line = text
-                        line = _clean_burn_text(line, target_lang=target_lang) or (
-                            text
-                            if same_lang
-                            else _clean_burn_text(text, target_lang=target_lang) or text
-                        )
-                        cleaned.append(line or text)
+                        line = _clean_burn_text(line, target_lang=target_lang)
+                        if not line and not same_lang:
+                            line = _clean_burn_text(_one_line(text), target_lang=target_lang)
+                        if not line:
+                            if same_lang:
+                                line = text
+                            else:
+                                raise RuntimeError(
+                                    f"Ollama không trả bản dịch {lang_name} hợp lệ cho: {text[:80]!r}"
+                                )
+                        cleaned.append(line)
                     return start, cleaned
 
             with ThreadPoolExecutor(max_workers=w, thread_name_prefix="ollama") as pool:
@@ -227,12 +272,24 @@ def translate_ollama(
                             project_id,
                             step="translate",
                             progress=pct,
-                            message=progress_msg(f"Dịch {model}", cur, total, workers=w),
+                        message=progress_msg(
+                            f"Dịch Ollama {'Cloud' if cloud else 'Local'}",
+                            cur,
+                            total,
+                            workers=w,
+                            extra=model,
+                        ),
                             running=True,
                         )
     except (httpx.HTTPError, RuntimeError) as e:
+        detail = str(e)
+        if str(mode or "cloud").lower() == "cloud":
+            detail = (
+                f"{detail}. Nếu Cloud chưa xác thực, mở Ollama và chọn Sign in; "
+                "nếu đã đăng nhập hãy kiểm tra hạn mức Cloud."
+            )
         raise RuntimeError(
-            f"Ollama lỗi ({e}). Chạy `ollama serve` rồi `ollama pull qwen2.5`."
+            f"Ollama lỗi ({detail})"
         ) from e
     return out
 

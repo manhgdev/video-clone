@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -129,6 +130,22 @@ def run_dub(project_id: str, *, finalize: bool = True, nested: bool = False) -> 
                 seg.pop("audioDuration", None)
                 continue
             text = seg.get("translation") or seg.get("source") or "."
+            # Non-verbal laughter is already present in the original audio. Cloud
+            # CapCut intermittently reports TTSInvalidText for these tiny slots, so
+            # do not let a sound effect abort the whole dubbing job.
+            if re.fullmatch(r"(?i)\s*(?:ha[\s.!?,-]*){2,}\s*", str(text)):
+                seg.pop("audioFile", None)
+                seg.pop("audioUrl", None)
+                seg.pop("audioDuration", None)
+                continue
+            # Never send untranslated CJK text to a Vietnamese CapCut voice. A
+            # stale editor save can restore a source line after translation; that
+            # must skip one cue, not abort the entire dubbing job.
+            if lang == "vi" and re.search(r"[\u3400-\u9fff\uf900-\ufaff]", str(text)):
+                seg.pop("audioFile", None)
+                seg.pop("audioUrl", None)
+                seg.pop("audioDuration", None)
+                continue
             voice = inherit_voice(seg.get("voice"), default_voice)
             seg["voice"] = voice
             tts_speed, tts_volume = _segment_playback(seg)
@@ -219,10 +236,12 @@ def run_dub(project_id: str, *, finalize: bool = True, nested: bool = False) -> 
                     check_cancel(project_id)
                     last = exc
                     wav.unlink(missing_ok=True)
+                    if "TTSInvalidText" in str(exc):
+                        break
                     if attempt < 2:
                         time.sleep(1.5 * (attempt + 1))
             assert last is not None
-            raise RuntimeError(f"TTS thất bại sau 3 lần: {last}") from last
+            raise RuntimeError(f"TTS thất bại sau {attempt + 1} lần: {last}") from last
 
         pending = list(jobs.values())
         if not pending:

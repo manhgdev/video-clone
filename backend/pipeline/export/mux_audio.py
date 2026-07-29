@@ -32,8 +32,8 @@ from pipeline.core.media import ffprobe_duration
 from pipeline.core.project import ensure_layout, load_meta, set_status
 
 # preferVideo: chậm cố định 0.80× (setpts 1/0.8)
-PREFER_VIDEO_SPEED = 0.80
-PREFER_VIDEO_FACTOR = 1.0 / PREFER_VIDEO_SPEED  # 1.25
+PREFER_VIDEO_SPEED = 0.70
+PREFER_VIDEO_FACTOR = 1.0 / PREFER_VIDEO_SPEED
 
 
 def _bg_duck_expr(

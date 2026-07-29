@@ -96,6 +96,22 @@ def _install_from_plan(plan: dict[str, Any], item_id: str) -> tuple[str, str, st
     return value, label, hint
 
 
+def _ollama_executable() -> str | None:
+    """PATH của process có thể cũ nếu Ollama được cài sau khi VideoClone mở."""
+    found = _which("ollama")
+    if found:
+        return found
+    if sys.platform == "win32":
+        for path in (
+            Path.home() / "AppData/Local/Programs/Ollama/ollama.exe",
+            Path.home() / "AppData/Local/Ollama/ollama.exe",
+            Path("C:/Program Files/Ollama/ollama.exe"),
+        ):
+            if path.is_file():
+                return str(path)
+    return None
+
+
 def system_checks(*, refresh: bool = False, fast: bool = True) -> dict[str, Any]:
     """Danh sách dependency + ready/missing cho first-run UI."""
     global _CHECKS_CACHE
@@ -130,13 +146,13 @@ def _system_checks_uncached(*, fast: bool = True) -> dict[str, Any]:
     # submit thừa cũng nhanh từ lần 2 trở đi.
     ff = _which("ffmpeg")
     fp = _which("ffprobe")
-    ol = _which("ollama")
+    ol = _ollama_executable()
     node = _which("node")
     with ThreadPoolExecutor(max_workers=6) as _pool:
         _fut_device = _pool.submit(detect_device)
         _fut_ff = _pool.submit(_run_ver, ["ffmpeg", "-version"]) if ff else None
         _fut_fp = _pool.submit(_run_ver, ["ffprobe", "-version"]) if fp else None
-        _fut_ol = _pool.submit(_run_ver, ["ollama", "--version"]) if ol else None
+        _fut_ol = _pool.submit(_run_ver, [ol, "--version"]) if ol else None
         _fut_nd = _pool.submit(_run_ver, ["node", "-v"]) if node else None
         device = _fut_device.result()
         ff_ver = _fut_ff.result() if _fut_ff else "không có trên PATH"
@@ -387,23 +403,18 @@ def _system_checks_uncached(*, fast: bool = True) -> dict[str, Any]:
     # Ollama
     ol_ok = False
     ol_detail = ol_ver
-    if ol:
-        if fast:
-            ol_ok = True
-        else:
-            try:
-                import httpx
+    try:
+        import httpx
 
-                r = httpx.get("http://127.0.0.1:11434/api/tags", timeout=0.6)
-                ol_ok = r.status_code < 500
-                if ol_ok:
-                    n = len((r.json() or {}).get("models") or [])
-                    ol_detail = f"{ol_ver} · server OK · {n} model"
-                else:
-                    ol_detail = f"{ol_ver} · server HTTP {r.status_code}"
-            except Exception:
-                ol_ok = True
-                ol_detail = f"{ol_ver} · binary OK (chưa ping được server)"
+        r = httpx.get("http://127.0.0.1:11434/api/tags", timeout=0.8)
+        ol_ok = r.status_code < 500
+        if ol_ok:
+            n = len((r.json() or {}).get("models") or [])
+            ol_detail = f"{ol_ver} · server OK · {n} model local · Cloud kiểm tra khi dịch"
+    except Exception:
+        if ol:
+            ol_ok = True
+            ol_detail = f"{ol_ver} · đã cài (server chưa chạy)"
     ol_inst, ol_lab, ol_hint = _install_from_plan(plan, "ollama")
     items.append(
         _item(

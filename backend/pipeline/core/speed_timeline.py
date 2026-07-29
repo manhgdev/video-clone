@@ -16,13 +16,13 @@ def meta_baked_speed(meta: dict) -> float:
     """Tốc độ đã bake vào workVideo.
 
     - bakedSpeed có key (kể cả 1.0 sau «Áp dụng 1×») → dùng giá trị đó
-    - chỉ bakedPreferVideo (legacy) → 0.80
+    - chỉ bakedPreferVideo (legacy) → 0.70
     - không key → 1.0 (timeline 1×; soft preferVideo chỉ ở FE playbackRate)
     """
     if meta.get("bakedSpeed") is not None:
         return clamp_playback_speed(float(meta["bakedSpeed"]))
     if meta.get("bakedPreferVideo"):
-        return 0.80
+        return 0.70
     return 1.0
 
 
@@ -32,8 +32,8 @@ def meta_has_user_bake(meta: dict) -> bool:
 
 
 def initial_rate_from_match_duration(match_duration: str | None) -> float:
-    """preferVideo → 0.80; còn lại → 1.00. Không bake file."""
-    return 0.80 if str(match_duration or "").strip() == "preferVideo" else 1.0
+    """preferVideo → 0.70; còn lại → 1.00. Không bake file."""
+    return 0.70 if str(match_duration or "").strip() == "preferVideo" else 1.0
 
 
 def ensure_project_initial_playback_rate(

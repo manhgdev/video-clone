@@ -358,7 +358,9 @@ export default function Sidebar({
                 : settings.translator === 'tiktok'
                   ? 'TikTok translate free — không key.'
                   : settings.translator === 'ollama'
-                    ? 'Cấu hình model trên máy'
+                    ? settings.ollamaMode === 'cloud'
+                      ? 'Cloud'
+                      : 'Dùng model đã tải trên máy'
                     : 'Cấu hình API key tại Cấu hình'
           }
         >
@@ -372,15 +374,54 @@ export default function Sidebar({
             <option value="google">Google Translate</option>
             <option value="mymemory">MyMemory</option>
             <option value="tiktok">TikTok Translate</option>
-            <option value="ollama">Ollama (local)</option>
+            <option value="ollama">Ollama</option>
             <option value="openai">OpenAI</option>
             <option value="gemini">Gemini</option>
             <option value="deepseek">DeepSeek</option>
             <option value="openrouter">OpenRouter</option>
             <option value="grok">Grok (xAI)</option>
+            <option value="nvidia">NVIDIA NIM</option>
           </select>
         </Field>
       </div>
+
+      {settings.translator === 'ollama' && (
+        <div className="field-row">
+          <Field label="Ollama">
+            <select
+              value={settings.ollamaMode}
+              disabled={busy}
+              onChange={(e) => set('ollamaMode', e.target.value as ProjectSettings['ollamaMode'])}
+            >
+              <option value="cloud">Cloud Free</option>
+              <option value="local">Local</option>
+            </select>
+          </Field>
+          {settings.ollamaMode === 'cloud' ? (
+            <Field label="Model Cloud">
+              <div className="field-inline">
+                <input
+                  value={settings.ollamaModel}
+                  disabled={busy}
+                  onChange={(e) => set('ollamaModel', e.target.value || 'minimax-m3:cloud')}
+                />
+              </div>
+            </Field>
+          ) : (
+            <Field label="Mức model local">
+              <select
+                value={settings.ollamaLocalTier}
+                disabled={busy}
+                onChange={(e) => set('ollamaLocalTier', e.target.value as ProjectSettings['ollamaLocalTier'])}
+              >
+                <option value="fast">Nhanh</option>
+                <option value="balanced">Cân bằng</option>
+                <option value="quality">Chất lượng</option>
+              </select>
+            </Field>
+          )}
+        </div>
+      )}
 
       <div className="field-row">
         <Field label="Ngôn ngữ gốc" icon={<IconGlobe size={14} />}>
@@ -423,7 +464,7 @@ export default function Sidebar({
             disabled={busy}
             title={
               settings.matchDuration === 'preferVideo'
-                ? 'Chậm video 0.80× nếu TTS dài hơn'
+                ? 'Phân tích video ở 0.70×, vào editor trở về 1×'
                 : settings.matchDuration === 'none'
                   ? 'Giữ TTS nguyên tốc độ'
                   : settings.matchDuration === 'stretch'
@@ -434,7 +475,7 @@ export default function Sidebar({
               set('matchDuration', e.target.value as ProjectSettings['matchDuration'])
             }
           >
-            <option value="preferVideo">Ưu tiên chậm video 0.80× (trước ASR)</option>
+            <option value="preferVideo">Ưu tiên phân tích 0.70× (editor 1×)</option>
             <option value="none">Giữ nguyên TTS</option>
             <option value="natural">Tự nhiên, rút gọn nhẹ</option>
             <option value="stretch">Kéo giãn khớp đoạn</option>

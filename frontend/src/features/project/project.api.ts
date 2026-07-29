@@ -91,6 +91,13 @@ export const api = {
       40_000,
     ),
 
+  ollamaSignin: () =>
+    fetchJson<{ ok: boolean; message: string }>(
+      `${base}/system/ollama/signin`,
+      { method: 'POST' },
+      15_000,
+    ),
+
   getSetupGate: () =>
     fetchJson<{ passed: boolean }>(`${base}/system/setup-gate`, undefined, 5_000),
 

@@ -157,30 +157,30 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
         # «Ưu tiên chậm 0.8»: làm chậm clip TRƯỚC rồi ASR/dịch/OCR trên chính
         # file đó (cửa sổ đo rộng 1.25×); PHÂN TÍCH XONG tự nâng timeline về
         # 1.00× (khối cuối) — editor/xuất luôn ở tốc độ thật.
-        auto_baked_08 = False
+        auto_baked_prefer = False
         if (
             str(settings.get("matchDuration") or "") == "preferVideo"
             and meta.get("bakedSpeed") is None
         ):
-            auto_baked_08 = True
+            auto_baked_prefer = True
             from pipeline.core.media import ensure_playback_speed, speed_cache_tag
 
             set_status(
                 project_id,
                 step="asr",
                 progress=4,
-                message="Làm chậm video 0.80× (ưu tiên chậm) trước khi dịch…",
+                message="Làm chậm video 0.70× (ưu tiên chậm) trước khi dịch…",
                 running=True,
             )
-            s080 = speed_cache_tag(0.8)
+            s070 = speed_cache_tag(0.7)
             dest = ensure_layout(project_id) / "cache" / (
-                f"preview_{preview_sec}_{s080}.mp4"
+                f"preview_{preview_sec}_{s070}.mp4"
                 if preview_sec > 0
-                else f"source_{s080}.mp4"
+                else f"source_{s070}.mp4"
             )
-            video = ensure_playback_speed(video, dest, 0.8, project_id=project_id)
+            video = ensure_playback_speed(video, dest, 0.7, project_id=project_id)
             meta["bakedPreferVideo"] = True
-            meta["bakedSpeed"] = 0.8
+            meta["bakedSpeed"] = 0.7
             meta["workDuration"] = float(ffprobe_duration(video) or 0)
             meta["workVideo"] = str(video.resolve())
             meta["timelineClock"] = "display"
@@ -402,6 +402,17 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                         source_lang=source,
                         translator=str(settings.get("translator") or "google"),
                         workers=w,
+                        ollama_mode=str(settings.get("ollamaMode") or "cloud"),
+                        ollama_model=str(settings.get("ollamaModel") or "minimax-m3:cloud"),
+                        ollama_local_tier=str(settings.get("ollamaLocalTier") or "balanced"),
+                        durations=[
+                            max(
+                                0.2,
+                                float(segments[i].get("end") or 0)
+                                - float(segments[i].get("start") or 0),
+                            )
+                            for i in need_idx
+                        ],
                     )
                 # Ghi kết quả dịch vào segments (bug cũ: nằm nhầm trong else → luôn trống)
                 for i, tr in zip(need_idx, translations):
@@ -582,7 +593,7 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
         # Phân tích 0.8 xong → nâng timeline + work file về 1.00× (yêu cầu:
         # đầu vào 0.8 chỉ để đo; vào editor là tốc độ thật, khỏi nâng tay).
         # Cache dịch (run_caches) giữ clock 0.8 khớp asrKey s080 cho lần chạy sau.
-        if auto_baked_08:
+        if auto_baked_prefer:
             from pipeline.core.media import (
                 preview_1x_path,
                 remap_timeline_for_speed_change,
@@ -595,7 +606,7 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                 message="Phân tích xong — nâng timeline về 1.00×…",
                 running=True,
             )
-            remap_timeline_for_speed_change(meta, 0.8, 1.0)
+            remap_timeline_for_speed_change(meta, 0.7, 1.0)
             segments = meta.get("segments") or segments
             base_1x = preview_1x_path(project_id, meta)
             meta["bakedSpeed"] = 1.0
@@ -604,7 +615,7 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
             meta["workVideo"] = str(base_1x.resolve())
             meta["timelineClock"] = "display"
             # Dấu vết flow «ưu tiên 0.8»: dub sẽ mặc định giọng 1.20× (khe đã co)
-            meta["analyzedAtSpeed"] = 0.8
+            meta["analyzedAtSpeed"] = 0.7
         save_meta(project_id, meta)
         hint = f"Preview {preview_sec}s — " if preview_sec > 0 else ""
         no_tr = str(settings.get("targetLang") or "") in ("none", "off", "source", "")

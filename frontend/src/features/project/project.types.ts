@@ -94,7 +94,7 @@ export type ProjectSettings = {
   engine: 'whisper' | 'paddleocr'
   sourceLang: string
   targetLang: string
-  /** google | mymemory | tiktok | ollama | openai | gemini | deepseek | openrouter | grok */
+  /** google | mymemory | tiktok | ollama | openai | gemini | deepseek | openrouter | grok | nvidia */
   translator:
     | 'google'
     | 'mymemory'
@@ -105,6 +105,11 @@ export type ProjectSettings = {
     | 'deepseek'
     | 'openrouter'
     | 'grok'
+    | 'nvidia'
+  /** Ollama local dùng model đã tải; cloud dùng hạn mức tài khoản Ollama. */
+  ollamaMode: 'local' | 'cloud'
+  ollamaModel: string
+  ollamaLocalTier: 'fast' | 'balanced' | 'quality'
   matchDuration: 'natural' | 'stretch' | 'none' | 'preferVideo'
   defaultVoice: string
   /** true khi bấm Lồng tiếng — server xóa cache TTS và gen lại */
@@ -200,7 +205,7 @@ export type ProjectSettings = {
   >
 }
 
-export type CloudProviderId = 'openai' | 'gemini' | 'deepseek' | 'openrouter' | 'grok'
+export type CloudProviderId = 'openai' | 'gemini' | 'deepseek' | 'openrouter' | 'grok' | 'nvidia'
 
 export type CloudProviderConfig = {
   apiKey: string

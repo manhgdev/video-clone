@@ -17,6 +17,9 @@ class Settings(BaseModel):
     sourceLang: str = "auto"
     targetLang: str = "vi"
     translator: str = "google"
+    ollamaMode: str = "cloud"
+    ollamaModel: str = "minimax-m3:cloud"
+    ollamaLocalTier: str = "balanced"
     matchDuration: str = "preferVideo"
     defaultVoice: str = "cc:BV075_streaming:7102355803792740865"
     stableCaptionLocate: bool = False
@@ -172,6 +175,9 @@ class RetranslateIn(BaseModel):
     sourceLang: str | None = None
     targetLang: str | None = None
     translator: str | None = None
+    ollamaMode: str | None = None
+    ollamaModel: str | None = None
+    ollamaLocalTier: str | None = None
 
 
 class StudioSynthIn(BaseModel):

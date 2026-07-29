@@ -343,10 +343,24 @@ def _post_json(path: str, body: dict[str, Any], device: dict[str, Any], *, babi:
     return data
 
 
+def _normalize_tts_text(text: str) -> str:
+    """Normalize text forms that CapCut rejects as TTSInvalidText."""
+    value = " ".join((text or "").split()).strip()
+    laugh = re.fullmatch(r"(?i)(ha){2,}[.!?…]*", value)
+    if laugh:
+        count = len(laugh.group(0).rstrip(".!?…")) // 2
+        return "Ha."
+    spaced_laugh = re.fullmatch(r"(?i)ha(?:[\s-]+ha){1,}[.!?…]*", value)
+    if spaced_laugh:
+        parts = re.findall(r"(?i)ha", spaced_laugh.group(0))
+        return "Ha."
+    return value or "."
+
+
 def tts_create(text: str, voice: str, resource_id: str, rate: str = "1.0", device: dict[str, Any] | None = None) -> tuple[str, str]:
     device = device or load_device()
     _throttle_create()
-    babi, body = tts_new_body([text or "."], voice, resource_id, rate, device)
+    babi, body = tts_new_body([_normalize_tts_text(text)], voice, resource_id, rate, device)
     data = _post_json("/lv/v1/common_task/new", body, device, babi=babi, appid=True)
     tasks = ((data.get("data") or {}).get("tasks")) or []
     if not tasks:
@@ -411,7 +425,8 @@ def synthesize_mp3(text: str, voice: str, resource_id: str, out_mp3: Path, *, ra
                 status = str(task.get("status") or "").lower()
                 url = _find_audio_url(task) or _find_audio_url(last)
                 if status in ("failed", "fail", "error", "cancelled"):
-                    raise RuntimeError(f"CapCut TTS thất bại: {task}")
+                    sent_text = _normalize_tts_text(text)
+                    raise RuntimeError(f"CapCut TTS thất bại (text={sent_text!r}): {task}")
                 if url and status not in ("queueing", "processing", "running", "pending", "created"):
                     break
                 if url and status in ("success", "succeed", "done", "finished", "complete", "completed", ""):
@@ -433,6 +448,15 @@ def synthesize_mp3(text: str, voice: str, resource_id: str, out_mp3: Path, *, ra
             return out_mp3
         except RuntimeError as e:
             last_err = e
+            # CapCut can reject a laugh intermittently; retry once with a minimal
+            # valid utterance instead of failing the whole dubbing job.
+            if (
+                "TTSInvalidText" in str(e)
+                and attempt < 2
+                and re.fullmatch(r"(?i)ha(?:[\s-]+ha)*[.!?…]*", " ".join((text or "").split()))
+            ):
+                text = "Ha."
+                continue
             if not _is_shark(e) or attempt >= 2:
                 raise
             # ponytail: shark block — random device_id (upstream tip), chờ rồi thử lại

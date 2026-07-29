@@ -47,6 +47,7 @@ def fit_tts_audio_to_slots(
 
     ordered = sorted(segments, key=lambda s: float(s.get("start") or 0))
     by_wav: dict[str, float] = {}
+    by_wav_manual: dict[str, float] = {}
     for i, seg in enumerate(ordered):
         name = str(seg.get("audioFile") or "")
         ad = float(seg.get("audioDuration") or 0)
@@ -66,13 +67,8 @@ def fit_tts_audio_to_slots(
             continue  # câu cuối: không ai bị đè
         slot = max(0.15, next_start - start - 0.03) * manual
         by_wav[name] = min(by_wav.get(name, 1e9), slot)
+        by_wav_manual[name] = max(by_wav_manual.get(name, 1.0), manual)
 
-    # Trần nén: tổng giọng (nén × nâng-bake sau này) ≤ ~2×
-    try:
-        bk = max(0.5, min(2.0, float(bake or 1.0)))
-    except (TypeError, ValueError):
-        bk = 1.0
-    max_compress = max(1.2, 2.0 * min(1.0, bk))
     n = 0
     for name, slot in by_wav.items():
         wav = root / "tts" / name
@@ -81,7 +77,10 @@ def fit_tts_audio_to_slots(
         dur = float(ffprobe_duration(wav) or 0.0)
         if dur <= 0.05 or dur <= slot * 1.04:
             continue
-        target = max(slot, dur / max_compress)  # quá trần thì chấp nhận tràn nhẹ
+        # Tổng tốc độ tự động + tốc độ user không vượt 1.25×; câu còn dài sẽ
+        # được giữ nguyên phần dư thay vì đọc gấp khó nghe.
+        max_compress = max(1.0, 1.25 / by_wav_manual.get(name, 1.0))
+        target = max(slot, dur / max_compress)
         try:
             new_dur = float(fit_duration(wav, target, "stretch", force_refit=True))
         except Exception:

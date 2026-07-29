@@ -54,6 +54,9 @@ export const defaultSettings: ProjectSettings = {
   sourceLang: 'auto',
   targetLang: 'vi',
   translator: 'google',
+  ollamaMode: 'cloud',
+  ollamaModel: 'minimax-m3:cloud',
+  ollamaLocalTier: 'balanced',
   matchDuration: ENGINE_DEFAULTS.whisper.matchDuration,
   defaultVoice: 'cc:BV075_streaming:7102355803792740865',
   stableCaptionLocate: false,
@@ -177,8 +180,16 @@ export function loadSettings(): ProjectSettings {
       'deepseek',
       'openrouter',
       'grok',
+      'nvidia',
     ] as const
     if (!okTr.includes(s.translator as (typeof okTr)[number])) s.translator = 'google'
+    if (s.ollamaMode !== 'local' && s.ollamaMode !== 'cloud') s.ollamaMode = 'cloud'
+    if (typeof s.ollamaModel !== 'string' || !s.ollamaModel.trim()) {
+      s.ollamaModel = 'minimax-m3:cloud'
+    }
+    if (!['fast', 'balanced', 'quality'].includes(s.ollamaLocalTier)) {
+      s.ollamaLocalTier = 'balanced'
+    }
     const okMask = ['blur', 'solid', 'mosaic'] as const
     if (!okMask.includes(s.coverMaskStyle as (typeof okMask)[number])) s.coverMaskStyle = 'blur'
     if (typeof s.coverMaskOpacity !== 'number' || Number.isNaN(s.coverMaskOpacity)) {

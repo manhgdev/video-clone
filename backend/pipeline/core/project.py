@@ -201,9 +201,18 @@ def asr_cache_key(settings: dict[str, Any], source_fp: str, speed: float = 1.0) 
 
 
 def trans_cache_key(settings: dict[str, Any]) -> str:
-    # g4: free fallback Google→TikTok→MyMemory
+    # g5: Ollama mode/model/tier là một phần nội dung đầu ra, không dùng lẫn cache.
     eng = str(settings.get("translator") or "google")
-    return f"{eng}|{settings.get('targetLang', 'vi')}|g4"
+    ollama = ""
+    if eng == "ollama":
+        ollama = "|".join(
+            (
+                str(settings.get("ollamaMode") or "cloud"),
+                str(settings.get("ollamaModel") or "minimax-m3:cloud"),
+                str(settings.get("ollamaLocalTier") or "balanced"),
+            )
+        )
+    return f"{eng}|{settings.get('targetLang', 'vi')}|{ollama}|g5"
 
 
 def _read_meta_file(path: Path) -> dict[str, Any]:

@@ -153,6 +153,14 @@ def api_retranslate(project_id: str, seg_id: str, body: RetranslateIn):
             source_lang=src_lang,
             translator=str(eng),
             workers=1,
+            ollama_mode=str(body.ollamaMode or settings.get("ollamaMode") or "cloud"),
+            ollama_model=str(
+                body.ollamaModel or settings.get("ollamaModel") or "minimax-m3:cloud"
+            ),
+            ollama_local_tier=str(
+                body.ollamaLocalTier or settings.get("ollamaLocalTier") or "balanced"
+            ),
+            durations=[max(0.2, float(seg.get("end") or 0) - float(seg.get("start") or 0))],
         )
     except Exception as e:
         raise HTTPException(500, str(e)) from e

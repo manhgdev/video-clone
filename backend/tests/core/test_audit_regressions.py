@@ -103,5 +103,5 @@ def test_fit_tts_audio_compresses_to_slot(tmp_path):
     ]
     n = fit_tts_audio_to_slots(segs, tmp_path, match="preferVideo")
     assert n == 1
-    # khe = 2.5 - 0.03 = 2.47; wav 4s nén còn ~2.47s (≤2×)
-    assert 2.0 < segs[0]["audioDuration"] < 2.9
+    # Tổng tăng tốc tự động bị chặn 1.25×: wav 4s không được ép ngắn quá ~3.2s.
+    assert 3.1 < segs[0]["audioDuration"] < 3.4

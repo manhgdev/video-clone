@@ -42,6 +42,12 @@ PROVIDERS: dict[str, dict[str, str]] = {
         "model": "grok-3-mini",
         "label": "Grok",
     },
+    "nvidia": {
+        "env": "NVIDIA_API_KEY",
+        "base": "https://integrate.api.nvidia.com/v1",
+        "model": "nvidia/riva-translate-4b-instruct-v2",
+        "label": "NVIDIA NIM",
+    },
 }
 
 
@@ -81,10 +87,13 @@ def load_app_config() -> dict[str, Any]:
         block = saved.get(pid) if isinstance(saved.get(pid), dict) else {}
         env_key = (os.environ.get(meta["env"]) or "").strip()
         file_key = str(block.get("apiKey") or "").strip()
+        saved_model = str(block.get("model") or "").strip()
+        if pid == "nvidia" and saved_model == "meta/llama-3.1-8b-instruct":
+            saved_model = meta["model"]
         cloud[pid] = {
             "apiKey": file_key or env_key,
             "baseUrl": str(block.get("baseUrl") or meta["base"]).strip() or meta["base"],
-            "model": str(block.get("model") or meta["model"]).strip() or meta["model"],
+            "model": saved_model or meta["model"],
         }
 
     tts = _default_tts()

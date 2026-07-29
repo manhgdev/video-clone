@@ -25,7 +25,7 @@ from .eleven import (
 from . import capcut as capcut_client
 from .schemas import PREFIX_CAPCUT, PREFIX_ELEVEN, PREFIX_VIENEU, VIENEU_TTS_VER
 
-CC_TTS_VER = "cc3-slot"
+CC_TTS_VER = "cc4-normalize"
 _VOICES_JSON = Path(__file__).resolve().parent / "voices_capcut.json"
 _cc_voices_cache: list[dict[str, Any]] | None = None
 

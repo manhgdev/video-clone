@@ -11,6 +11,7 @@ const PROVIDERS: CloudProviderId[] = [
   'deepseek',
   'openrouter',
   'grok',
+  'nvidia',
 ]
 
 type InstallKind = 'ai_runtime' | 'ai_runtime_ocr' | 'ai_runtime_vieneu' | 'ocr_cuda' | 'demucs_cuda'
@@ -93,6 +94,13 @@ function emptyCloud(): CloudDraft {
       model: 'grok-3-mini',
       apiKeySet: false,
       label: 'Grok',
+    },
+    nvidia: {
+      apiKey: '',
+      baseUrl: 'https://integrate.api.nvidia.com/v1',
+      model: 'nvidia/riva-translate-4b-instruct-v2',
+      apiKeySet: false,
+      label: 'NVIDIA NIM',
     },
   }
 }

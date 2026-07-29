@@ -25,8 +25,12 @@ def translate_segments(
     source_lang: str = "auto",
     translator: str = "google",
     workers: int = 2,
+    ollama_mode: str = "cloud",
+    ollama_model: str = "minimax-m3:cloud",
+    ollama_local_tier: str = "balanced",
+    durations: list[float] | None = None,
 ) -> list[str]:
-    """google | mymemory | tiktok | ollama | openai | gemini | deepseek | openrouter | grok.
+    """google | mymemory | tiktok | ollama | openai | gemini | deepseek | openrouter | grok | nvidia.
 
     Free MT fallback cứng: Google → TikTok → MyMemory (bỏ engine đã thử).
     """
@@ -139,7 +143,7 @@ def translate_segments(
         return list(texts)
 
     # Cloud LLM — lỗi → free chain Google→TikTok→MyMemory
-    if eng in ("openai", "gemini", "deepseek", "openrouter", "grok"):
+    if eng in ("openai", "gemini", "deepseek", "openrouter", "grok", "nvidia"):
         try:
             raw = translate_cloud(
                 texts,
@@ -158,12 +162,16 @@ def translate_segments(
             if not need:
                 return out
             # vá free chain cho chỗ hỏng
+            if eng == "nvidia":
+                raise RuntimeError("NVIDIA Riva không trả bản dịch hợp lệ; không tự chuyển sang Google.")
             free = _free_chain("google")
             for i in need:
                 if i < len(free):
                     out[i] = free[i]
             return out
         except (httpx.HTTPError, RuntimeError, ValueError, TypeError, IndexError) as e:
+            if eng == "nvidia":
+                raise RuntimeError(f"NVIDIA NIM lỗi: {e}") from e
             if project_id:
                 set_status(
                     project_id,
@@ -175,36 +183,20 @@ def translate_segments(
             eng = "google"
 
     if eng in ("ollama", "local", "llm"):
-        try:
-            raw = translate_ollama(
-                texts,
-                target_lang,
-                project_id=project_id,
-                source_lang=source_lang,
-                workers=w,
-            )
-            out = _clean_all(raw)
-            need = [
-                i
-                for i, (s, t) in enumerate(zip(texts, out))
-                if _needs_google_fallback(s, t, target_lang=target_lang)
-            ]
-            if need:
-                free = _free_chain("google")
-                for i in need:
-                    if i < len(free):
-                        out[i] = free[i]
-            return out
-        except (httpx.HTTPError, RuntimeError, ValueError, TypeError, IndexError) as e:
-            if project_id:
-                set_status(
-                    project_id,
-                    step="translate",
-                    progress=58,
-                    message=f"Ollama lỗi — free MT… ({e})",
-                    running=True,
-                )
-            eng = "google"
+        # Ollama là lựa chọn chủ động: lỗi phải nổi lên UI, tuyệt đối không âm thầm
+        # thay toàn bộ bản dịch bằng Google.
+        raw = translate_ollama(
+            texts,
+            target_lang,
+            project_id=project_id,
+            source_lang=source_lang,
+            workers=w,
+            mode=ollama_mode,
+            model=ollama_model,
+            local_tier=ollama_local_tier,
+            durations=durations,
+        )
+        return _clean_all(raw)
 
     # Free: google | tiktok | mymemory (+ fallback chain)
     if eng not in ("google", "tiktok", "mymemory"):
