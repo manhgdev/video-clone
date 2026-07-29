@@ -258,7 +258,7 @@
     "ref_file": "quoc_bao_triet_ly.wav",
     "ref_text": "",
     "hidden": false,
-    "favorite": false
+    "favorite": true
   },
   {
     "tags": [
@@ -274,6 +274,6 @@
     "ref_file": "tao_thao.wav",
     "ref_text": "",
     "hidden": false,
-    "favorite": false
+    "favorite": true
   }
 ]
