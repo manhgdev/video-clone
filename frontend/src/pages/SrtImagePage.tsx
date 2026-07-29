@@ -264,6 +264,11 @@ export default function SrtImagePage() {
   const logText = visibleLogs.length
     ? visibleLogs.join('\n')
     : `[${new Date().toLocaleTimeString('vi-VN')}] ${job?.error || statusText}`
+  const logRef = useRef<HTMLPreElement>(null)
+  useEffect(() => {
+    const node = logRef.current
+    if (node) node.scrollTop = node.scrollHeight
+  }, [logText])
 
   function openSettings() {
     if (tab === 'settings') return
@@ -483,7 +488,7 @@ export default function SrtImagePage() {
                   <button type="button" onClick={() => setLogStart(job?.logs?.length || 0)}>Xóa</button>
                 </div>
               </header>
-              <pre>{logText}</pre>
+              <pre ref={logRef}>{logText}</pre>
             </div>
             <footer className="siv-actions">
               <button className="primary" disabled={busy || !mediaFolder || !timelinePath || !srtPath} onClick={() => start(false)}>
