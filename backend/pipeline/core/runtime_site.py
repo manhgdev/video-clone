@@ -215,6 +215,14 @@ def preload_cv2() -> None:
             append_log("[cv2] preload ok", also_print=False)
         except Exception:
             pass
+    except (ModuleNotFoundError, ImportError) as e:
+        # Bình thường ở lần mở đầu tiên trước khi APP cài gói AI; không ghi traceback giả như crash.
+        try:
+            from pipeline.core.app_log import append_log
+
+            append_log(f"[cv2] chưa sẵn sàng, chờ cài gói AI: {e}", also_print=False)
+        except Exception:
+            pass
     except Exception as e:
         try:
             from pipeline.core.app_log import append_exception

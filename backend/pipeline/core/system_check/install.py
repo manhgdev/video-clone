@@ -21,6 +21,7 @@ from .probe import (
     _ocr_cuda_check_fresh,
     _ocr_venv_fast,
     _runtime_torch_accel,
+    _runtime_mod_ok,
     _runtime_venv_fast,
     _torch_broken,
     _torch_cuda_ready,
@@ -352,7 +353,8 @@ def install_ai_runtime() -> dict[str, Any]:
     """Cài nhóm ASR/OCR nặng vào venv riêng của bản desktop."""
     if getattr(sys, "frozen", False):
         ok, detail = _runtime_venv_fast()
-        if ok:
+        cv2_ok = ok and _runtime_mod_ok("cv2")[0]
+        if ok and cv2_ok:
             return {
                 "ok": True,
                 "message": "Gói AI đã sẵn sàng",
@@ -389,8 +391,9 @@ def install_ai_runtime() -> dict[str, Any]:
             raise RuntimeError("Bản ứng dụng thiếu uv để cài gói AI")
         py = _ensure_frozen_runtime_venv(uv, venv)
         # opencv-python + headless cùng lúc → đụng cv2; chỉ giữ headless.
+        opencv_remove = ["opencv-python"] + ([] if cv2_ok else ["opencv-python-headless"])
         subprocess.run(
-            [uv, "pip", "uninstall", "--python", str(py), "-y", "opencv-python"],
+            [uv, "pip", "uninstall", "--python", str(py), "-y", *opencv_remove],
             capture_output=True,
             text=True,
             timeout=120,

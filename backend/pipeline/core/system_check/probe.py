@@ -37,7 +37,9 @@ def _mod_ok(name: str, *, dist_map: dict[str, list[str]] | None = None) -> tuple
             return _runtime_mod_ok(name)
         if importlib.util.find_spec(name) is None:
             return False, "chưa cài"
-        __import__(name)
+        module = __import__(name)
+        if name == "cv2" and not getattr(module, "VideoCapture", None):
+            return False, "cv2 thiếu VideoCapture"
         # Import OK = package usable. Metadata có thể hỏng (~orch dist-info) — đừng coi là thiếu.
         try:
             dists = (dist_map or _pkg_distributions()).get(name) or []
@@ -67,7 +69,9 @@ def _runtime_modules_batch_ok(names: list[str]) -> dict[str, tuple[bool, str]]:
         "out = {}\n"
         "for n in names:\n"
         "  try:\n"
-        "    __import__(n)\n"
+        "    m = __import__(n)\n"
+        "    if n == 'cv2' and not getattr(m, 'VideoCapture', None):\n"
+        "      raise ImportError('cv2 thiếu VideoCapture')\n"
         "    out[n] = [True, 'ok']\n"
         "  except Exception as e:\n"
         "    out[n] = [False, str(e)[:80]]\n"

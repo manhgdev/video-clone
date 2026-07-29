@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 
 from pipeline.core import runtime_site as rs
+from pipeline.core.system_check import probe
 
 
 def test_cv2_not_in_runtime_meta_roots() -> None:
@@ -56,3 +57,13 @@ def test_preload_cv2_puts_runtime_first(monkeypatch, tmp_path: Path) -> None:
     rs.preload_cv2()
     assert sys.path[0] == str(site)
     assert calls and calls[0] == str(site)
+
+
+def test_probe_rejects_hollow_cv2(monkeypatch) -> None:
+    class _Hollow:
+        pass
+
+    monkeypatch.setattr(probe.sys, "frozen", False, raising=False)
+    monkeypatch.setattr(probe.importlib.util, "find_spec", lambda _name: object())
+    monkeypatch.setattr("builtins.__import__", lambda name, *args, **kwargs: _Hollow() if name == "cv2" else __import__(name, *args, **kwargs))
+    assert probe._mod_ok("cv2") == (False, "cv2 thiếu VideoCapture")
