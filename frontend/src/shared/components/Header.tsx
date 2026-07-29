@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import type { HardwareInfo } from '@/features/project/project.types'
+import type { LicenseStatus } from '@/features/license/license.api'
 import {
   IconBook,
   IconCam,
+  IconClock,
   IconDownload,
   IconGear,
   IconLogo,
@@ -12,7 +14,7 @@ import {
 } from '@/shared/components/Icons'
 import './Header.css'
 
-export type AppMode = 'clone' | 'tts' | 'download' | 'film' | 'batch' | 'renders' | 'cleaner' | 'srt-image'
+export type AppMode = 'clone' | 'tts' | 'download' | 'film' | 'batch' | 'renders' | 'cleaner' | 'srt-image' | 'srt-export' | 'license'
 
 function IconSun({ size = 16 }: { size?: number }) {
   return (
@@ -46,6 +48,7 @@ const NAV: {
   { id: 'tts', label: 'Text to Speech', Icon: IconMic, mode: 'tts' },
   { id: 'tools', label: 'Tools', Icon: IconWand, action: 'tools' },
   { id: 'config', label: 'Cấu hình', Icon: IconGear, action: 'config' },
+  { id: 'license', label: 'Kích hoạt', Icon: IconClock, mode: 'license' },
   { id: 'help', label: 'Hướng dẫn', Icon: IconBook },
 ]
 
@@ -69,6 +72,7 @@ type Props = {
   /** TTS mobile: ☰ thay logo — mở sidebar trái */
   onMenuClick?: () => void
   menuOpen?: boolean
+  licenseStatus?: LicenseStatus
 }
 
 export default function Header({
@@ -80,6 +84,7 @@ export default function Header({
   onOpenConfig,
   onMenuClick,
   menuOpen = false,
+  licenseStatus,
 }: Props) {
   const display = SHORT[hardware.accel] ?? hardware.accel.toUpperCase()
   const showTtsMenu = mode === 'tts' && typeof onMenuClick === 'function'
@@ -132,7 +137,7 @@ export default function Header({
               <div key={item.id} className="nav-tools" ref={toolsRef}>
                 <button
                   type="button"
-                  className={mode === 'cleaner' || mode === 'srt-image' ? 'active' : undefined}
+                  className={mode === 'cleaner' || mode === 'srt-image' || mode === 'srt-export' ? 'active' : undefined}
                   aria-haspopup="menu"
                   aria-expanded={toolsOpen}
                   onClick={() => setToolsOpen((open) => !open)}
@@ -166,6 +171,18 @@ export default function Header({
                       <IconVideo size={16} />
                       <span>Ghép ảnh/video SRT</span>
                     </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className={mode === 'srt-export' ? 'active' : undefined}
+                      onClick={() => {
+                        setToolsOpen(false)
+                        onModeChange?.('srt-export')
+                      }}
+                    >
+                      <IconBook size={16} />
+                      <span>Xuất Phụ Đề</span>
+                    </button>
                   </div>
                 ) : null}
               </div>
@@ -197,6 +214,14 @@ export default function Header({
         })}
       </nav>
       <div className="hw" title={hardware.label}>
+        {licenseStatus && (
+          <span
+            className={`license-expiry${licenseStatus.remainingDay !== -1 && licenseStatus.remainingDay <= 7 ? ' is-warning' : ''}`}
+            title={licenseStatus.expiresAt ? `Hết hạn: ${new Date(licenseStatus.expiresAt).toLocaleString('vi-VN')}` : undefined}
+          >
+            {licenseStatus.remainingDay === -1 ? 'Không giới hạn' : `Còn ${licenseStatus.remainingDay} ngày`}
+          </span>
+        )}
         <span className="dot" />
         {display}
         <button

@@ -6,7 +6,9 @@ import time
 import threading
 from contextlib import asynccontextmanager
 
+import anyio
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -145,6 +147,21 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def require_license(request, call_next):
+        path = request.url.path
+        setup_paths = ("/api/license", "/api/system", "/api/config", "/api/hardware")
+        if path == "/api/health" or path.startswith(setup_paths):
+            return await call_next(request)
+        from pipeline.core.license import license_cached_valid
+
+        if not await anyio.to_thread.run_sync(license_cached_valid):
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "Cần kích hoạt key ZM Tool để sử dụng ứng dụng"},
+            )
+        return await call_next(request)
 
     @app.get("/api/health")
     def api_health() -> dict[str, object]:

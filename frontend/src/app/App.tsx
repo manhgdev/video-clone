@@ -23,6 +23,9 @@ import BatchPage from '@/pages/BatchPage'
 import RendersPage from '@/pages/RendersPage'
 import VideoCleanerPage from '@/pages/VideoCleanerPage'
 import SrtImagePage from '@/pages/SrtImagePage'
+import SrtExportPage from '@/pages/SrtExportPage'
+import LicensePage from '@/features/license/LicensePage'
+import { licenseApi, type LicenseStatus } from '@/features/license/license.api'
 import { ExportSuccessModal } from '@/features/editor/ExportSuccessModal'
 import { api } from '@/features/project/project.api'
 import { expandSegmentsForList } from '@/features/project/expandCompound'
@@ -62,6 +65,16 @@ function fmtDuration(sec: number) {
   return `${m}:${String(s).padStart(2, '0')}`
 }
 
+const EMPTY_LICENSE: LicenseStatus = {
+  valid: false,
+  configured: false,
+  keyMasked: '',
+  remainingDay: 0,
+  expiresAt: null,
+  activationLimit: 0,
+  message: 'Đang kiểm tra bản quyền…',
+}
+
 export default function App() {
   const [dark, setDark] = useState(loadTheme)
   const [appMode, setAppMode] = useState<AppMode>(loadAppMode)
@@ -79,6 +92,7 @@ export default function App() {
   /** Backend checks done once — không chặn UI sau khi đã qua cổng thiết lập. */
   const [setupChecked, setSetupChecked] = useState(false)
   const [setupMissingRequired, setSetupMissingRequired] = useState(false)
+  const [licenseStatus, setLicenseStatus] = useState<LicenseStatus | null>(null)
   const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth)
   const sidebarWidthRef = useRef(sidebarWidth)
   const sidebarDrag = useRef<{ startX: number; startW: number } | null>(null)
@@ -223,6 +237,25 @@ export default function App() {
       .then((c) => setIsDesktopApp(Boolean(c.desktop)))
       .catch(() => setIsDesktopApp(false))
   }, [])
+
+  useEffect(() => {
+    if (!setupGatePassed) return
+    let cancelled = false
+    const refresh = () => licenseApi.status()
+      .then((next) => { if (!cancelled) setLicenseStatus(next) })
+      .catch((error) => {
+        if (!cancelled) setLicenseStatus({
+          ...EMPTY_LICENSE,
+          message: error instanceof Error ? error.message : 'Không thể kiểm tra key',
+        })
+      })
+    void refresh()
+    const timer = window.setInterval(refresh, 10 * 60 * 1000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [setupGatePassed])
 
   useEffect(() => {
     api.hardware().then(setHw).catch(() => setHw({ label: 'Local', accel: 'cpu' }))
@@ -716,6 +749,7 @@ export default function App() {
   // Chỉ sau Bắt đầu / đã lưu cổng — tránh Header+Modal+workspace cùng chiếm CSS grid → trắng.
   const firstRunBlocked = !setupGatePassed
   const appUsable = setupGatePassed
+  const licenseBlocked = appUsable && !licenseStatus?.valid
   const configModalOpen = configOpen || firstRunBlocked
 
   return (
@@ -729,11 +763,12 @@ export default function App() {
             : 'Đang kết nối backend…'}
         </p>
       ) : null}
-      {appUsable && !(editorOpen && appMode === 'clone') && (
+      {appUsable && !licenseBlocked && !(editorOpen && appMode === 'clone') && (
       <Header
         hardware={hw}
         dark={dark}
         mode={appMode}
+        licenseStatus={licenseStatus || undefined}
         menuOpen={ttsSideOpen}
         onMenuClick={
           appMode === 'tts' ? () => setTtsSideOpen((o) => !o) : undefined
@@ -768,8 +803,15 @@ export default function App() {
           void api.voices(l).then(setVoices).catch(() => {})
         }}
       />
+      {licenseBlocked && (
+        <LicensePage
+          status={licenseStatus || EMPTY_LICENSE}
+          gate
+          onStatusChange={setLicenseStatus}
+        />
+      )}
       <Suspense fallback={<div className="page-loading" role="status">Đang tải…</div>}>
-      {appUsable ? (
+      {appUsable && !licenseBlocked ? (
       appMode === 'tts' ? (
         <TtsPage
           voices={voices}
@@ -780,6 +822,8 @@ export default function App() {
             void api.voices(l).then(setVoices).catch(() => {})
           }}
         />
+      ) : appMode === 'license' ? (
+        <LicensePage status={licenseStatus || EMPTY_LICENSE} onStatusChange={setLicenseStatus} />
       ) : appMode === 'download' ? (
         <DownloadPage
           onUseInClone={(pid, meta) => {
@@ -820,6 +864,8 @@ export default function App() {
         <VideoCleanerPage />
       ) : appMode === 'srt-image' ? (
         <SrtImagePage />
+      ) : appMode === 'srt-export' ? (
+        <SrtExportPage />
       ) : appMode === 'renders' ? (
         <RendersPage onEdit={editRenderedProject} />
       ) : editorOpen ? (

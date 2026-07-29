@@ -140,6 +140,15 @@
   box-shadow: 0 0 0 3px rgba(26, 155, 92, 0.18);
 }
 
+.license-expiry {
+  color: var(--ok);
+  font-variant-numeric: tabular-nums;
+}
+
+.license-expiry.is-warning {
+  color: var(--warning, #d97706);
+}
+
 .theme-toggle {
   display: inline-flex;
   align-items: center;

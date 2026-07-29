@@ -456,7 +456,6 @@ export default function Sidebar({
           </select>
         </Field>
       </div>
-
       <div className="field-row">
         <Field label="Khớp thời lượng" icon={<IconClock size={14} />}>
           <select

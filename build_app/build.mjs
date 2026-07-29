@@ -30,6 +30,25 @@ function run(command, args, extraEnv = {}) {
   if (result.status !== 0) process.exit(result.status ?? 1)
 }
 
+function cleanFrontendDist() {
+  const dist = path.join(root, 'frontend', 'dist')
+  if (!existsSync(dist)) return
+  try {
+    // Windows Defender/WebView can hold generated assets briefly after APP closes.
+    rmSync(dist, { recursive: true, force: true, maxRetries: 12, retryDelay: 250 })
+  } catch (error) {
+    const stale = path.join(root, 'frontend', `.dist-stale-${process.pid}-${Date.now()}`)
+    try {
+      renameSync(dist, stale)
+      console.warn(`frontend/dist đang bị Windows giữ khóa — đã chuyển bản cũ sang ${path.basename(stale)}.`)
+    } catch {
+      console.error('Không thể dọn frontend/dist. Hãy đóng cửa sổ VideoClone/Preview rồi chạy build lại.')
+      console.error(error instanceof Error ? error.message : error)
+      process.exit(1)
+    }
+  }
+}
+
 function pyOk(code) {
   const r = spawnSync(python, ['-c', code], { encoding: 'utf8', shell: false })
   return r.status === 0
@@ -106,6 +125,7 @@ if (
   console.log('Thiếu dependency frontend — đang cài đặt...')
   run(npmCommand, npmArgs('install', '--no-package-lock'))
 }
+cleanFrontendDist()
 run(npmCommand, npmArgs('run', 'build'))
 
 // Pre-build validation

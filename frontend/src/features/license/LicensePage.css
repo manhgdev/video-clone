@@ -1,0 +1,45 @@
+.license-page {
+  min-height: 0;
+  flex: 1;
+  display: grid;
+  place-items: center;
+  padding: 32px 20px;
+  background: var(--background);
+}
+
+.license-page.license-gate {
+  min-height: 100vh;
+}
+
+.license-card {
+  width: min(560px, 100%);
+  padding: 28px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.12);
+}
+
+.license-brand { display: flex; flex-direction: column; gap: 4px; margin-bottom: 22px; }
+.license-brand strong { font-size: 1.35rem; color: var(--ink); }
+.license-brand span { color: var(--muted-foreground); font-size: 0.88rem; }
+.license-state { display: flex; flex-direction: column; gap: 4px; padding: 14px 16px; border-radius: 10px; }
+.license-state.is-valid { color: var(--ok); background: color-mix(in srgb, var(--ok) 10%, var(--surface)); }
+.license-state.is-invalid { color: var(--danger); background: color-mix(in srgb, var(--danger) 9%, var(--surface)); }
+.license-state span { font-size: 0.84rem; }
+.license-details { display: grid; gap: 0; margin: 18px 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.license-details div { display: flex; justify-content: space-between; gap: 18px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+.license-details div:last-child { border-bottom: 0; }
+.license-details dt { color: var(--muted-foreground); }
+.license-details dd { margin: 0; color: var(--ink); font-weight: 650; text-align: right; }
+.license-input-label { display: block; margin: 18px 0 7px; color: var(--ink); font-size: 0.86rem; font-weight: 650; }
+.license-form { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+.license-form input { min-width: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--background); color: var(--ink); }
+.license-form button { padding: 10px 18px; border: 0; border-radius: 8px; background: var(--primary); color: var(--primary-foreground); font-weight: 700; }
+.license-form button:disabled { opacity: 0.55; cursor: not-allowed; }
+.license-error { margin: 12px 0 0; color: var(--danger); font-size: 0.84rem; }
+
+@media (max-width: 520px) {
+  .license-card { padding: 20px; }
+  .license-form { grid-template-columns: 1fr; }
+}

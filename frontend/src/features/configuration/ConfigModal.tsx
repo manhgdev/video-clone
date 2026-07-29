@@ -390,9 +390,7 @@ export default function ConfigModal({
 
       // Chỉ gửi TTS khi user gõ key mới / thay — ô trống = giữ nguyên server
       const typed = elSlots.map((s) => s.trim()).filter(Boolean)
-      if (typed.length > 0) {
-        body.tts = { elevenlabs: { apiKeys: typed.join(',') } }
-      }
+      if (typed.length > 0) body.tts = { elevenlabs: { apiKeys: typed.join(',') } }
 
       const cfg = await api.saveConfig(body)
       const next = emptyCloud()
