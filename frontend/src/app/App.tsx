@@ -25,7 +25,7 @@ import VideoCleanerPage from '@/pages/VideoCleanerPage'
 import SrtImagePage from '@/pages/SrtImagePage'
 import SrtExportPage from '@/pages/SrtExportPage'
 import LicensePage from '@/features/license/LicensePage'
-import { licenseApi, type LicenseStatus } from '@/features/license/license.api'
+import { licenseApi, readCachedStatus, type LicenseStatus } from '@/features/license/license.api'
 import { ExportSuccessModal } from '@/features/editor/ExportSuccessModal'
 import { api } from '@/features/project/project.api'
 import { expandSegmentsForList } from '@/features/project/expandCompound'
@@ -92,7 +92,8 @@ export default function App() {
   /** Backend checks done once — không chặn UI sau khi đã qua cổng thiết lập. */
   const [setupChecked, setSetupChecked] = useState(false)
   const [setupMissingRequired, setSetupMissingRequired] = useState(false)
-  const [licenseStatus, setLicenseStatus] = useState<LicenseStatus | null>(null)
+  // ponytail: init từ sessionStorage cache → không flash LicensePage mỗi lần mở app
+  const [licenseStatus, setLicenseStatus] = useState<LicenseStatus | null>(readCachedStatus)
   const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth)
   const sidebarWidthRef = useRef(sidebarWidth)
   const sidebarDrag = useRef<{ startX: number; startW: number } | null>(null)
@@ -749,7 +750,8 @@ export default function App() {
   // Chỉ sau Bắt đầu / đã lưu cổng — tránh Header+Modal+workspace cùng chiếm CSS grid → trắng.
   const firstRunBlocked = !setupGatePassed
   const appUsable = setupGatePassed
-  const licenseBlocked = appUsable && !licenseStatus?.valid
+  // ponytail: null = đang loading → không block; chỉ block khi đã load xong và invalid
+  const licenseBlocked = appUsable && licenseStatus != null && !licenseStatus.valid
   const configModalOpen = configOpen || firstRunBlocked
 
   return (

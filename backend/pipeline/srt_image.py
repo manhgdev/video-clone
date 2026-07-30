@@ -78,7 +78,8 @@ def shift_srt(path: Path, output: Path, offset: float) -> Path:
         lines = blocks[index].splitlines()
         timeline_index = next((i for i, line in enumerate(lines) if "-->" in line), -1)
         if timeline_index >= 0 and timeline_index + 1 < len(lines):
-            # SRT thường ngắt câu theo độ rộng giả định; để libass tự wrap theo video thật.
+            # ponytail: join bằng khoảng trắng để tận dụng hết chiều ngang màn hình.
+            # Nếu để \N sẽ bị xuống dòng quá sớm theo file SRT gốc.
             text_line = " ".join(line.strip() for line in lines[timeline_index + 1:] if line.strip())
             blocks[index] = "\n".join([*lines[:timeline_index + 1], text_line])
     output.write_text("".join(blocks), encoding="utf-8")
@@ -184,7 +185,7 @@ def _prepare_video_segments(
 
 def create_job(
     name: str, work: Path, images: list[Path], audio: Path | None,
-    timeline: Path, srt: Path, options: dict, watermark: Path | None = None,
+    timeline: Path, srt: Path | None, options: dict, watermark: Path | None = None,
     output_target: Path | None = None,
 ) -> dict:
     job_id = uuid.uuid4().hex[:10]
@@ -195,7 +196,7 @@ def create_job(
         "error": "", "outputSize": 0, "output": str(output), "work": str(work),
         "logs": [f"[{time.strftime('%H:%M:%S')}] Đã tạo job: {name}"],
         "images": [str(p) for p in images], "audio": str(audio) if audio else "",
-        "timeline": str(timeline), "srt": str(srt), "watermark": str(watermark) if watermark else "",
+        "timeline": str(timeline), "srt": str(srt) if srt else "", "watermark": str(watermark) if watermark else "",
         "options": options,
     }
     with _LOCK:
@@ -271,18 +272,44 @@ def pause(job_id: str, paused: bool) -> bool:
     return True
 
 
-def _ffmpeg_subtitle(path: Path, font_size: int = 8, margin_bottom: int = 18,
-                     background: bool = True) -> str:
+def _ffmpeg_subtitle(path: Path, font_name: str = "Arial", font_size: int = 8, margin_bottom: int = 18,
+                     bg_style: str = "solid", text_color: str = "#ffffff", bg_color: str = "#000000",
+                     opacity: int = 55) -> str:
     value = path.resolve().as_posix().replace(":", r"\:").replace("'", r"\'")
+    _FONT_MAP = {
+        "system": "Arial", "segoe": "Arial", "arial": "Arial", "bold": "Impact",
+        "helvetica": "Arial", "verdana": "Verdana", "tahoma": "Tahoma",
+        "trebuchet": "Trebuchet MS", "rounded": "Arial", "impact": "Impact",
+        "georgia": "Georgia", "times": "Times New Roman", "palatino": "Palatino Linotype",
+        "garamond": "Garamond", "courier": "Courier New", "mono": "Consolas",
+        "comic": "Comic Sans MS",
+    }
+    real_font = _FONT_MAP.get(font_name.lower(), "Arial")
+    tc = text_color.lstrip("#")
+    if len(tc) != 6: tc = "ffffff"
+    tr, tg, tb = int(tc[0:2], 16), int(tc[2:4], 16), int(tc[4:6], 16)
+    ass_primary = f"&H00{tb:02X}{tg:02X}{tr:02X}"
+
     style = (
-        f"FontSize={font_size},MarginV={margin_bottom},MarginL=20,MarginR=20,"
-        "Alignment=2,WrapStyle=0,Shadow=0"
+        f"FontName={real_font},FontSize={font_size},MarginV={margin_bottom},MarginL=20,MarginR=20,"
+        f"PrimaryColour={ass_primary},"
+        "Alignment=2,WrapStyle=0"
     )
-    # libass dùng OutlineColour cho hộp BorderStyle=3; BackColour chỉ dùng cho shadow.
-    style += (
-        ",BorderStyle=3,Outline=4,OutlineColour=&H60000000,BackColour=&H60000000"
-        if background else ",BorderStyle=1,Outline=1"
-    )
+    if bg_style in ("solid", "box"):
+        bc = bg_color.lstrip("#")
+        if len(bc) != 6: bc = "000000"
+        br, bg, bb = int(bc[0:2], 16), int(bc[2:4], 16), int(bc[4:6], 16)
+        a = 255 - max(0, min(255, int(255 * opacity / 100)))
+        ass_bg = f"&H{a:02X}{bb:02X}{bg:02X}{br:02X}"
+        shadow_a = min(255, a + 40)
+        ass_shadow = f"&H{shadow_a:02X}{bb:02X}{bg:02X}{br:02X}"
+        outline = 2 if bg_style == "box" else 1.2
+        shadow = f",Shadow=1,ShadowColour={ass_shadow}" if bg_style == "box" else ",Shadow=0"
+        style += f",BorderStyle=3,Outline={outline}{shadow}"
+        style += f",OutlineColour={ass_bg},BackColour={ass_bg}"
+    else:
+        # none — outline only (black)
+        style += ",BorderStyle=1,Outline=1,Shadow=0,OutlineColour=&H00000000"
     return f"subtitles=filename='{value}':force_style='{style}'"
 
 
@@ -300,9 +327,9 @@ def _text_logo_position(x_percent: float = 88, y_percent: float = 88,
     if moving:
         margin = max(0, min(20, float(safe_margin))) / 100
         step = f"floor(t/{max(0.5, cycle):.3f})"
-        x = f"W*{margin:.4f}+max(0,W-tw-W*{margin * 2:.4f})*abs(sin({step}*12.9898+1.37))"
+        x = f"W*{margin:.4f}+max(0,W-tw-W*{margin * 2:.4f})*mod(abs(sin({step}*12.9898+1.37)*43758.5453),1)"
         # Phụ đề nằm dưới: logo ngẫu nhiên chỉ dùng 75% chiều cao phía trên.
-        y = f"H*{margin:.4f}+max(0,H*0.75-th-H*{margin * 2:.4f})*abs(sin({step}*78.233+2.71))"
+        y = f"H*{margin:.4f}+max(0,H*0.75-th-H*{margin * 2:.4f})*mod(abs(sin({step}*78.233+2.71)*43758.5453),1)"
         return x, y
     x = max(0, min(100, float(x_percent))) / 100
     y = max(0, min(100, float(y_percent))) / 100
@@ -467,10 +494,21 @@ def run(job_id: str) -> None:
         speed = max(25, min(400, float(opts.get("speed", 100)))) / 100
         volume = max(0, min(300, float(opts.get("volume", 100)))) / 100
         preview = max(0, min(120, float(opts.get("previewSeconds", 0))))
+        subtitle_font = str(opts.get("subtitleFontFamily", "system"))
         subtitle_size = max(6, min(120, int(opts.get("subtitleSize", 8))))
         subtitle_margin = max(0, min(1000, int(opts.get("subtitleMargin", 18))))
         subtitle_offset = max(-3600, min(3600, float(opts.get("subtitleOffset", 0))))
-        subtitle_background = bool(int(opts.get("subtitleBackground", 1)))
+        _raw_bg = opts.get("subtitleBackground", "solid")
+        # ponytail: backward compat — old payloads sent 0/1; new sends none/solid/box
+        if _raw_bg in (0, "0", False):
+            subtitle_background = "none"
+        elif _raw_bg in (1, "1", True):
+            subtitle_background = "solid"
+        else:
+            subtitle_background = str(opts.get("subtitleBackground", "solid"))
+        subtitle_color = str(opts.get("subtitleColor", "#ffffff"))
+        subtitle_bg_color = str(opts.get("subtitleBgColor", "#000000"))
+        subtitle_opacity = max(0, min(100, int(opts.get("subtitleOpacity", 55))))
         zoom_filter = ""
         if str(opts.get("zoom", "off")) != "off":
             _log(job_id, f"Zoom: {opts.get('zoom')} · chuyển động nội suy theo thời gian")
@@ -490,17 +528,20 @@ def run(job_id: str) -> None:
             watermark_index = 2 if audio_index is not None else 1
             cmd += ["-loop", "1", "-i", job["watermark"]]
         speed_filter = f",setpts=PTS/{speed:.6f}" if abs(speed - 1) > 0.001 else ""
-        subtitle_path = shift_srt(
-            Path(job["srt"]), work / "subtitles-prepared.srt", subtitle_offset,
-        )
-        subtitle_filter = _ffmpeg_subtitle(
-            subtitle_path, subtitle_size, subtitle_margin, subtitle_background,
-        )
-        _log(
-            job_id,
-            f"Phụ đề: cỡ {subtitle_size} · lề dưới {subtitle_margin} · "
-            f"lệch {subtitle_offset:g}s · nền {'bật' if subtitle_background else 'tắt'}",
-        )
+        subtitle_filter = ""
+        if job["srt"]:
+            shifted_srt = shift_srt(
+                Path(job["srt"]), work / "subtitles-prepared.srt", subtitle_offset,
+            )
+            subtitle_filter = "," + _ffmpeg_subtitle(
+                shifted_srt, subtitle_font, subtitle_size, subtitle_margin, subtitle_background,
+                subtitle_color, subtitle_bg_color, subtitle_opacity,
+            )
+            _log(
+                job_id,
+                f"Phụ đề: cỡ {subtitle_size} · lề dưới {subtitle_margin} · "
+                f"lệch {subtitle_offset:g}s · nền {subtitle_background}",
+            )
         if watermark_index is not None:
             opacity = max(5, min(100, float(logo.get("opacity", 85)))) / 100
             scale = max(2, min(30, float(logo.get("size", 8)))) / 100
@@ -514,7 +555,7 @@ def run(job_id: str) -> None:
                 f"[0:v]{base_vf}{speed_filter}[base];"
                 f"[{watermark_index}:v]scale=-1:{max(12, round(height * scale))},format=rgba,"
                 f"colorchannelmixer=aa={opacity:.3f}[wm];"
-                f"[base][wm]overlay=x='{x}':y='{y}':shortest=1{enable},"
+                f"[base][wm]overlay=x='{x}':y='{y}':shortest=1{enable}"
                 f"{subtitle_filter},format=yuv420p[vout]"
             )
             cmd += ["-filter_complex", graph, "-map", "[vout]"]
@@ -523,7 +564,7 @@ def run(job_id: str) -> None:
                 f",{_text_logo_filter(logo, height)}"
                 if logo.get("enabled") and logo.get("source") in {"text", "icon"} else ""
             )
-            cmd += ["-vf", f"{base_vf},{subtitle_filter}{logo_filter}{speed_filter},format=yuv420p"]
+            cmd += ["-vf", f"{base_vf}{subtitle_filter}{logo_filter}{speed_filter},format=yuv420p"]
         cmd += _encoder_args(use_gpu, crf)
         if audio_index is not None:
             if watermark_index is None:

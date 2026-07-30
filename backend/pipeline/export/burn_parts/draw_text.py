@@ -155,9 +155,10 @@ def _caption_overlay(layout: dict[str, Any]) -> tuple[Any, int, int] | None:
         shadow_layer = Image.new("RGBA", overlay.size, (0, 0, 0, 0))
         shadow_draw = ImageDraw.Draw(shadow_layer)
         # CSS drop-shadow: 0 2px 4px (relative to 48px base font in preview)
+        # ponytail: CSS blur-radius 4px ≈ Gaussian sigma 2; old 3.0 was too heavy vs preview
         scale_f = max(0.5, fs / 48.0)
         dy_off = int(round(2 * scale_f))
-        blur_rad = max(1.0, 3.0 * scale_f)
+        blur_rad = max(1.0, 2.0 * scale_f)
 
         ty_s = ty
         for i, line in enumerate(lines):

@@ -14,7 +14,7 @@ const STATUS_CACHE_KEY = 'videoclone.license.status.v1'
 const STATUS_CACHE_MS = 5 * 60 * 1000
 let statusInFlight: Promise<LicenseStatus> | null = null
 
-function readCachedStatus(): LicenseStatus | null {
+export function readCachedStatus(): LicenseStatus | null {
   try {
     const cached = JSON.parse(sessionStorage.getItem(STATUS_CACHE_KEY) || 'null')
     return cached && Date.now() - Number(cached.at || 0) < STATUS_CACHE_MS

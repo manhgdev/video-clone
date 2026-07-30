@@ -91,7 +91,7 @@ async def create(
         return None
 
     timeline_file = copy_input(timeline_path, timeline, "timeline", {".txt"}, True)
-    srt_file = copy_input(srt_path, srt, "subtitles", {".srt"}, True)
+    srt_file = copy_input(srt_path, srt, "subtitles", {".srt"})
     audio_file = copy_input(
         audio_path, audio, "audio", {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"},
     )

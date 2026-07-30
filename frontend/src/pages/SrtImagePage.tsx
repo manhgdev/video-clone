@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import './SrtImagePage.css'
+import { CAPTION_FONT_PRESETS } from '../features/editor/lib/previewStyles'
 
 type Job = {
   id: string
@@ -17,10 +18,12 @@ const HELP = {
   timeline: ['File timeline', 'Quyết định file ảnh/clip nào xuất hiện và xuất hiện trong bao lâu. Mỗi dòng timecode tương ứng một file theo thứ tự tên.', 'Dùng file TXT prompt ảnh/video, ví dụ: 001_[00.00.00.00-00.00.08.00] …'],
   output: ['File xuất', 'Chọn thư mục và tên video MP4 sẽ được lưu sau khi render. Nếu không chọn, APP lưu trong thư mục xuất mặc định.', 'Bấm Chọn để mở hộp thoại Windows. Ví dụ: D:\\Video\\lich-su-loai-nguoi.mp4.'],
   subtitles: ['File phụ đề', 'Chèn chữ phụ đề trực tiếp vào hình ảnh video.', 'Dùng file .SRT có timecode hợp lệ. Đây là file bắt buộc ở chế độ Ghép ảnh/video SRT.'],
+  subtitleFontFamily: ['Phông chữ', 'Kiểu chữ (font) dùng cho phụ đề.', 'Nên chọn các font không chân (sans-serif) nét rõ như Noto Sans, Inter, Roboto để dễ đọc trên mọi thiết bị.'],
   subtitleSize: ['Cỡ chữ', 'Điều chỉnh kích thước chữ phụ đề khi chèn vào video.', 'Giá trị mặc định là 8. Tăng nếu chữ quá nhỏ, giảm nếu chữ chiếm nhiều khung hình.'],
   subtitleOffset: ['Lệch phụ đề', 'Dịch toàn bộ phụ đề sớm hoặc muộn hơn so với audio.', 'Số dương làm phụ đề xuất hiện muộn hơn; số âm làm phụ đề xuất hiện sớm hơn. Đơn vị là giây.'],
   subtitleMargin: ['Lề dưới', 'Điều chỉnh khoảng cách từ phụ đề đến mép dưới video.', 'Giá trị càng lớn thì phụ đề càng được đẩy lên cao. Mặc định là 18.'],
-  subtitleBackground: ['Nền chữ', 'Bật nền đen mờ phía sau chữ để phụ đề dễ đọc trên cảnh sáng.', 'Chọn 1 để bật nền chữ, chọn 0 để chỉ hiển thị chữ và viền.'],
+  subtitleBackground: ['Nền chữ', 'Kiểu nền phía sau chữ phụ đề, giống tùy chọn nền bản dịch bên Clone Video.', 'Tắt: chỉ viền · Đặc: nền đen mờ · Hộp: nền bo góc viền trắng.'],
+  subtitleColor: ['Màu chữ', 'Màu sắc chính của chữ phụ đề.', 'Thường nên để màu trắng (#FFFFFF) hoặc vàng nhạt để tương phản tốt với các nền tối.'],
   effect: ['Hiệu ứng', 'Chọn cách chuyển từ cảnh hiện tại sang cảnh kế tiếp. Tắt sẽ giữ chuyển cảnh trực tiếp và render nhanh nhất.', 'Mặc định nên để Tắt. Chỉ bật khi muốn video có chuyển cảnh mềm hơn.'],
   transition: ['Thời lượng hiệu ứng', 'Số giây dành cho một lần chuyển cảnh. Giá trị lớn làm hai cảnh hòa vào nhau lâu hơn.', 'Khoảng 0,2–0,5 giây thường tự nhiên; mặc định 0,28 giây.'],
   resolution: ['Độ phân giải', 'Kích thước khung hình video xuất. Auto lấy theo file media đầu tiên.', 'Dùng Auto để giữ khung gốc; chọn 1920×1080 cho video ngang hoặc 1080×1920 cho video dọc.'],
@@ -54,8 +57,12 @@ export default function SrtImagePage() {
   const [srtPath, setSrtPath] = useState(String(cached.srtPath ?? ''))
   const [subtitleSize, setSubtitleSize] = useState(Number(cached.subtitleSize ?? 8))
   const [subtitleOffset, setSubtitleOffset] = useState(Number(cached.subtitleOffset ?? 0))
+  const [subtitleFontFamily, setSubtitleFontFamily] = useState(String(cached.subtitleFontFamily ?? 'system'))
   const [subtitleMargin, setSubtitleMargin] = useState(Number(cached.subtitleMargin ?? 18))
-  const [subtitleBackground, setSubtitleBackground] = useState(Number(cached.subtitleBackground ?? 1))
+  const [subtitleBackground, setSubtitleBackground] = useState(String(cached.subtitleBackground ?? 'solid'))
+  const [subtitleColor, setSubtitleColor] = useState(String(cached.subtitleColor ?? '#ffffff'))
+  const [subtitleBgColor, setSubtitleBgColor] = useState(String(cached.subtitleBgColor ?? '#000000'))
+  const [subtitleOpacity, setSubtitleOpacity] = useState(Number(cached.subtitleOpacity ?? 55))
   const [resolution, setResolution] = useState(String(cached.resolution ?? 'auto'))
   const [fps, setFps] = useState(Number(cached.fps ?? 30))
   const [crf, setCrf] = useState(Number(cached.crf ?? 20))
@@ -119,8 +126,8 @@ export default function SrtImagePage() {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify({
       mediaFolder, audioPath, timelinePath, srtPath, watermarkPath, outputName, outputPath,
       resolution, fps, crf, effect, transitionDuration, zoom, speed, volume,
-      previewSeconds, encoder, removeMetadata, subtitleSize, subtitleOffset,
-      subtitleMargin, subtitleBackground, logoEnabled, logoSource, logoText,
+      previewSeconds, encoder, removeMetadata, subtitleSize, subtitleOffset, subtitleFontFamily,
+      subtitleMargin, subtitleBackground, subtitleColor, subtitleBgColor, subtitleOpacity, logoEnabled, logoSource, logoText,
       logoIcon, logoSize, logoFontSize, logoColor, logoOpacity, logoX, logoY,
       logoMotion, logoScope, logoStart, logoEnd, logoVisibleSec, logoHiddenSec,
       logoFadeSec, logoSafeMargin,
@@ -128,29 +135,29 @@ export default function SrtImagePage() {
   }, [
     mediaFolder, audioPath, timelinePath, srtPath, watermarkPath, outputName, outputPath,
     resolution, fps, crf, effect, transitionDuration, zoom, speed, volume,
-    previewSeconds, encoder, removeMetadata, subtitleSize, subtitleOffset,
-    subtitleMargin, subtitleBackground, logoEnabled, logoSource, logoText,
+    previewSeconds, encoder, removeMetadata, subtitleSize, subtitleOffset, subtitleFontFamily,
+    subtitleMargin, subtitleBackground, subtitleColor, subtitleBgColor, subtitleOpacity, logoEnabled, logoSource, logoText,
     logoIcon, logoSize, logoFontSize, logoColor, logoOpacity, logoX, logoY,
     logoMotion, logoScope, logoStart, logoEnd, logoVisibleSec, logoHiddenSec,
     logoFadeSec, logoSafeMargin,
   ])
 
   async function start(preview = false) {
-    if (!mediaFolder || !timelinePath || !srtPath) return
+    if (!mediaFolder || !timelinePath) return
     setSending(true)
     try {
       const form = new FormData()
       form.append('media_folder', mediaFolder)
       form.append('timeline_path', timelinePath)
-      form.append('srt_path', srtPath)
+      if (srtPath) form.append('srt_path', srtPath)
       if (audioPath) form.append('audio_path', audioPath)
       if (watermarkPath) form.append('watermark_path', watermarkPath)
       form.append('output_name', preview ? `${outputName.replace(/\.mp4$/i, '')}-preview.mp4` : outputName)
       if (outputPath && !preview) form.append('output_path', outputPath)
       form.append('options', JSON.stringify({
         resolution, fps, crf, effect, transitionDuration, zoom, speed, volume,
-        encoder, removeMetadata, subtitleSize, subtitleOffset, subtitleMargin,
-        subtitleBackground, previewSeconds: preview ? previewSeconds : 0,
+        encoder, removeMetadata, subtitleSize, subtitleOffset, subtitleFontFamily, subtitleMargin,
+        subtitleBackground, subtitleColor, subtitleBgColor, subtitleOpacity, previewSeconds: preview ? previewSeconds : 0,
         logo: {
           enabled: logoEnabled, source: logoSource, text: logoText, icon: logoIcon,
           size: logoSize, fontSize: logoFontSize, color: logoColor, opacity: logoOpacity,
@@ -368,6 +375,16 @@ export default function SrtImagePage() {
               {srtPath && (
                 <div className="siv-subtitle-options">
                   <label>
+                    <span className="siv-subtitle-title">Phông chữ <button type="button" className="siv-info" onClick={() => setHelpKey('subtitleFontFamily')}>i</button></span>
+                    <select value={subtitleFontFamily} onChange={(e) => setSubtitleFontFamily(e.target.value)}>
+                      {CAPTION_FONT_PRESETS.map((font) => <option key={font.id} value={font.id} style={{ fontFamily: font.css }}>{font.label}</option>)}
+                    </select>
+                  </label>
+                  <label>
+                    <span className="siv-subtitle-title">Màu chữ <button type="button" className="siv-info" onClick={() => setHelpKey('subtitleColor')}>i</button></span>
+                    <input type="color" className="siv-text-color" value={subtitleColor} title="Màu chữ" onChange={e => setSubtitleColor(e.target.value)} />
+                  </label>
+                  <label>
                     <span className="siv-subtitle-title">Cỡ chữ <button type="button" className="siv-info" onClick={() => setHelpKey('subtitleSize')}>i</button></span>
                     <input type="number" min="6" max="120" value={subtitleSize} onChange={(e) => setSubtitleSize(Number(e.target.value))} />
                   </label>
@@ -379,12 +396,21 @@ export default function SrtImagePage() {
                     <span className="siv-subtitle-title">Lề dưới <button type="button" className="siv-info" onClick={() => setHelpKey('subtitleMargin')}>i</button></span>
                     <input type="number" min="0" max="1000" value={subtitleMargin} onChange={(e) => setSubtitleMargin(Number(e.target.value))} />
                   </label>
-                  <label>
+                  <label className="siv-bg-label">
                     <span className="siv-subtitle-title">Nền chữ <button type="button" className="siv-info" onClick={() => setHelpKey('subtitleBackground')}>i</button></span>
-                    <select value={subtitleBackground} onChange={(e) => setSubtitleBackground(Number(e.target.value))}>
-                      <option value="1">1 — Bật</option>
-                      <option value="0">0 — Tắt</option>
-                    </select>
+                    <span className="siv-bg-row">
+                      <div className="siv-bg-tabs">
+                        {(['solid', 'box', 'none'] as const).map(id => (
+                          <button key={id} type="button" className={`siv-bg-tab${subtitleBackground === id ? ' on' : ''}`}
+                            onClick={() => setSubtitleBackground(id)}>{id === 'solid' ? 'Đặc' : id === 'box' ? 'Hộp' : 'Tắt'}</button>
+                        ))}
+                      </div>
+                      {subtitleBackground !== 'none' && <>
+                        <input type="color" className="siv-bg-color" value={subtitleBgColor} title="Màu nền" onChange={e => setSubtitleBgColor(e.target.value)} />
+                        <input type="range" min={0} max={100} className="siv-bg-slider" value={subtitleOpacity} onChange={e => setSubtitleOpacity(Number(e.target.value))} />
+                        <span className="siv-bg-pct">{subtitleOpacity}%</span>
+                      </>}
+                    </span>
                   </label>
                 </div>
               )}
@@ -491,10 +517,10 @@ export default function SrtImagePage() {
               <pre ref={logRef}>{logText}</pre>
             </div>
             <footer className="siv-actions">
-              <button className="primary" disabled={busy || !mediaFolder || !timelinePath || !srtPath} onClick={() => start(false)}>
+              <button className="primary" disabled={busy || !mediaFolder || !timelinePath} onClick={() => start(false)}>
                 {sending ? 'ĐANG TẢI…' : 'RENDER'}
               </button>
-              <button disabled={busy || !mediaFolder || !timelinePath || !srtPath} onClick={() => start(true)}>Preview</button>
+              <button disabled={busy || !mediaFolder || !timelinePath} onClick={() => start(true)}>Preview</button>
               <button disabled={!job || !['processing', 'paused'].includes(job.status)} onClick={togglePause}>
                 {job?.status === 'paused' ? 'Tiếp tục' : 'Tạm dừng'}
               </button>

@@ -151,6 +151,10 @@ def create_app() -> FastAPI:
     @app.middleware("http")
     async def require_license(request, call_next):
         path = request.url.path
+        # ponytail: chỉ gate /api/* — static files (/, .js, .css) phải qua để FE tải
+        # và tự hiện LicensePage. Không gate → webview chỉ thấy 403 JSON.
+        if not path.startswith("/api/"):
+            return await call_next(request)
         setup_paths = ("/api/license", "/api/system", "/api/config", "/api/hardware")
         if path == "/api/health" or path.startswith(setup_paths):
             return await call_next(request)
