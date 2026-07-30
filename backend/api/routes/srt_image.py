@@ -26,6 +26,48 @@ def _natural_name(path: Path):
     return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", path.name)]
 
 
+def _media_size(folder: str) -> dict | None:
+    """Trả về {w, h} của file media đầu tiên trong folder."""
+    p = Path(folder)
+    if not p.is_dir():
+        return None
+    files = sorted(
+        (f for f in p.iterdir() if f.suffix.lower() in MEDIA_SUFFIXES),
+        key=_natural_name,
+    )
+    if not files:
+        return None
+    first = files[0]
+    if first.suffix.lower() in {".jpg", ".jpeg", ".jfif", ".png", ".webp", ".bmp"}:
+        try:
+            from PIL import Image
+            with Image.open(first) as im:
+                return {"w": im.width, "h": im.height}
+        except Exception:
+            pass
+    # Video: dùng ffprobe
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height", "-of", "json", str(first)],
+            capture_output=True, text=True, timeout=10,
+        )
+        data = json.loads(r.stdout)
+        s = data["streams"][0]
+        return {"w": s["width"], "h": s["height"]}
+    except Exception:
+        return None
+
+
+@router.get("/api/srt-image/media-size")
+def media_size(folder: str = ""):
+    """Kích thước file đầu tiên trong media folder — để preview đúng tỉ lệ."""
+    result = _media_size(folder)
+    if result is None:
+        raise HTTPException(404, "Không tìm thấy file media")
+    return result
+
+
 @router.get("/api/srt-image/jobs")
 def jobs():
     return list_jobs()

@@ -140,7 +140,7 @@ export function captionChromeStyle(
   const style: React.CSSProperties = {
     color,
     fontFamily: captionFontCss(family),
-    // Soft shadow CapCut — khớp class drop-shadow-[0_2px_4px_rgba(0,0,0,0.9)]
+    fontWeight: 700, // Tất cả @font-face đều khai báo weight:700 (Bold TTF) — cần match
     textShadow:
       settings.captionStroke === false
         ? 'none'

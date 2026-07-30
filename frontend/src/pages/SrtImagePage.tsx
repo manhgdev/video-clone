@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import './SrtImagePage.css'
-import { CAPTION_FONT_PRESETS } from '../features/editor/lib/previewStyles'
+import { CAPTION_FONT_PRESETS, captionChromeStyle, captionFontCss } from '../features/editor/lib/previewStyles'
 
 type Job = {
   id: string
@@ -199,12 +199,6 @@ export default function SrtImagePage() {
     if (!response.ok) setJob(job ? { ...job, error: await response.text() } : job)
   }
 
-  async function openVideo() {
-    if (!job?.id) return
-    const response = await fetch(`/api/srt-image/jobs/${job.id}/open`, { method: 'POST' })
-    if (!response.ok) setJob({ ...job, error: await response.text() })
-  }
-
   async function chooseMediaFolder() {
     try {
       const response = await fetch('/api/system/pick-media-folder', { method: 'POST' })
@@ -333,7 +327,9 @@ export default function SrtImagePage() {
         </div>
       </header>
 
-      <section className="siv-workspace">
+      <div className="siv-layout">
+        <div className="siv-main-pane">
+          <section className="siv-workspace">
         <nav className="siv-tabs" aria-label="Thiết lập Ghép ảnh SRT">
           <button className={tab === 'project' ? 'active' : ''} onClick={() => setTab('project')}>Dự án</button>
           <button className={tab === 'settings' ? 'active' : ''} onClick={openSettings}>Cài đặt</button>
@@ -343,31 +339,31 @@ export default function SrtImagePage() {
           {tab === 'project' ? (
             <div className="siv-form">
               <div className="siv-row">
-                <label>Thư mục media <button type="button" className="siv-info" onClick={() => setHelpKey('media')}>i</button></label>
+                <label>Thư mục media <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('media') }}>i</span></label>
                 <div className="siv-input"><span>{mediaFolder || 'Chưa chọn thư mục ảnh/video'}</span></div>
                 <button onClick={chooseMediaFolder}>Chọn</button>
                 <button onClick={() => setMediaFolder('')} disabled={!mediaFolder}>Xóa</button>
               </div>
               <div className="siv-row">
-                <label>File audio <button type="button" className="siv-info" onClick={() => setHelpKey('audio')}>i</button></label>
+                <label>File audio <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('audio') }}>i</span></label>
                 <div className="siv-input"><span title={audioPath}>{audioPath || 'Không dùng audio'}</span></div>
                 <button onClick={() => chooseInputFile('audio')}>Chọn</button>
                 <button onClick={() => setAudioPath('')} disabled={!audioPath}>Xóa</button>
               </div>
               <div className="siv-row">
-                <label>File timeline <button type="button" className="siv-info" onClick={() => setHelpKey('timeline')}>i</button></label>
+                <label>File timeline <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('timeline') }}>i</span></label>
                 <div className="siv-input"><span title={timelinePath}>{timelinePath || 'Chưa chọn file timeline (.txt)'}</span></div>
                 <button onClick={() => chooseInputFile('timeline')}>Chọn</button>
                 <button onClick={() => setTimelinePath('')} disabled={!timelinePath}>Xóa</button>
               </div>
               <div className="siv-row">
-                <label>File xuất <button type="button" className="siv-info" onClick={() => setHelpKey('output')}>i</button></label>
+                <label>File xuất <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('output') }}>i</span></label>
                 <div className="siv-input siv-output-path"><span title={outputDirectory}>{outputDirectory}</span><input value={outputName.replace(/\.mp4$/i, '')} onChange={(e) => renameOutput(e.target.value)} /><b>.mp4</b></div>
                 <button onClick={chooseOutput}>Chọn</button>
                 <button onClick={() => { setOutputPath(''); setOutputName('output.mp4') }}>Xóa</button>
               </div>
               <div className="siv-row">
-                <label>File phụ đề <button type="button" className="siv-info" onClick={() => setHelpKey('subtitles')}>i</button></label>
+                <label>File phụ đề <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('subtitles') }}>i</span></label>
                 <div className="siv-input"><span title={srtPath}>{srtPath || 'Chưa chọn phụ đề SRT'}</span></div>
                 <button onClick={() => chooseInputFile('srt')}>Chọn</button>
                 <button onClick={() => setSrtPath('')} disabled={!srtPath}>Xóa</button>
@@ -375,29 +371,29 @@ export default function SrtImagePage() {
               {srtPath && (
                 <div className="siv-subtitle-options">
                   <label>
-                    <span className="siv-subtitle-title">Phông chữ <button type="button" className="siv-info" onClick={() => setHelpKey('subtitleFontFamily')}>i</button></span>
+                    <span className="siv-subtitle-title">Phông chữ <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('subtitleFontFamily') }}>i</span></span>
                     <select value={subtitleFontFamily} onChange={(e) => setSubtitleFontFamily(e.target.value)}>
                       {CAPTION_FONT_PRESETS.map((font) => <option key={font.id} value={font.id} style={{ fontFamily: font.css }}>{font.label}</option>)}
                     </select>
                   </label>
                   <label>
-                    <span className="siv-subtitle-title">Màu chữ <button type="button" className="siv-info" onClick={() => setHelpKey('subtitleColor')}>i</button></span>
+                    <span className="siv-subtitle-title">Màu chữ <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('subtitleColor') }}>i</span></span>
                     <input type="color" className="siv-text-color" value={subtitleColor} title="Màu chữ" onChange={e => setSubtitleColor(e.target.value)} />
                   </label>
                   <label>
-                    <span className="siv-subtitle-title">Cỡ chữ <button type="button" className="siv-info" onClick={() => setHelpKey('subtitleSize')}>i</button></span>
+                    <span className="siv-subtitle-title">Cỡ chữ <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('subtitleSize') }}>i</span></span>
                     <input type="number" min="6" max="120" value={subtitleSize} onChange={(e) => setSubtitleSize(Number(e.target.value))} />
                   </label>
                   <label>
-                    <span className="siv-subtitle-title">Lệch (s) <button type="button" className="siv-info" onClick={() => setHelpKey('subtitleOffset')}>i</button></span>
+                    <span className="siv-subtitle-title">Lệch (s) <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('subtitleOffset') }}>i</span></span>
                     <input type="number" min="-3600" max="3600" step=".1" value={subtitleOffset} onChange={(e) => setSubtitleOffset(Number(e.target.value))} />
                   </label>
                   <label>
-                    <span className="siv-subtitle-title">Lề dưới <button type="button" className="siv-info" onClick={() => setHelpKey('subtitleMargin')}>i</button></span>
+                    <span className="siv-subtitle-title">Lề dưới <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('subtitleMargin') }}>i</span></span>
                     <input type="number" min="0" max="1000" value={subtitleMargin} onChange={(e) => setSubtitleMargin(Number(e.target.value))} />
                   </label>
                   <label className="siv-bg-label">
-                    <span className="siv-subtitle-title">Nền chữ <button type="button" className="siv-info" onClick={() => setHelpKey('subtitleBackground')}>i</button></span>
+                    <span className="siv-subtitle-title">Nền chữ <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('subtitleBackground') }}>i</span></span>
                     <span className="siv-bg-row">
                       <div className="siv-bg-tabs">
                         {(['solid', 'box', 'none'] as const).map(id => (
@@ -418,16 +414,16 @@ export default function SrtImagePage() {
             </div>
           ) : (
             <div className="siv-settings">
-              <label><span className="siv-setting-title">Hiệu ứng <button type="button" className="siv-info" onClick={() => setHelpKey('effect')}>i</button></span>
+              <label><span className="siv-setting-title">Hiệu ứng <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('effect') }}>i</span></span>
                 <select value={effect} onChange={(e) => setEffect(e.target.value)}>
                   <option value="random">Ngẫu nhiên</option><option value="fade">Fade</option>
                   <option value="dissolve">Dissolve</option><option value="none">Tắt</option>
                 </select>
               </label>
-              <label><span className="siv-setting-title">Thời lượng (s) <button type="button" className="siv-info" onClick={() => setHelpKey('transition')}>i</button></span>
+              <label><span className="siv-setting-title">Thời lượng (s) <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('transition') }}>i</span></span>
                 <input type="number" min=".1" max="2" step=".01" value={transitionDuration} onChange={(e) => setTransitionDuration(Number(e.target.value))} />
               </label>
-              <label><span className="siv-setting-title">Độ phân giải <button type="button" className="siv-info" onClick={() => setHelpKey('resolution')}>i</button></span>
+              <label><span className="siv-setting-title">Độ phân giải <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('resolution') }}>i</span></span>
                 <select value={resolution} onChange={(e) => setResolution(e.target.value)}>
                   <option value="auto">Auto (theo ảnh)</option>
                   <option value="1920x1080">1920 × 1080 (16:9)</option>
@@ -436,12 +432,12 @@ export default function SrtImagePage() {
                   <option value="1280x720">1280 × 720</option>
                 </select>
               </label>
-              <label><span className="siv-setting-title">FPS <button type="button" className="siv-info" onClick={() => setHelpKey('fps')}>i</button></span>
+              <label><span className="siv-setting-title">FPS <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('fps') }}>i</span></span>
                 <select value={fps} onChange={(e) => setFps(Number(e.target.value))}>
                   <option>24</option><option>25</option><option>30</option><option>60</option>
                 </select>
               </label>
-              <label><span className="siv-setting-title">Zoom <button type="button" className="siv-info" onClick={() => setHelpKey('zoom')}>i</button></span>
+              <label><span className="siv-setting-title">Zoom <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('zoom') }}>i</span></span>
                 <select value={zoom} onChange={(e) => setZoom(e.target.value)}>
                     <option value="off">Tắt</option>
                     <option value="random">Ngẫu nhiên</option>
@@ -453,26 +449,26 @@ export default function SrtImagePage() {
                     <option value="down">Trên → dưới</option>
                 </select>
               </label>
-              <label><span className="siv-setting-title">Speed (%) <button type="button" className="siv-info" onClick={() => setHelpKey('speed')}>i</button></span>
+              <label><span className="siv-setting-title">Speed (%) <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('speed') }}>i</span></span>
                 <input type="number" min="25" max="400" value={speed} onChange={(e) => setSpeed(Number(e.target.value))} />
               </label>
-              <label><span className="siv-setting-title">Chất lượng <button type="button" className="siv-info" onClick={() => setHelpKey('quality')}>i</button></span>
+              <label><span className="siv-setting-title">Chất lượng <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('quality') }}>i</span></span>
                 <select value={crf} onChange={(e) => setCrf(Number(e.target.value))}>
                   <option value="18">Cao</option><option value="20">Cân bằng</option><option value="24">Nhanh</option>
                 </select>
               </label>
-              <label><span className="siv-setting-title">Âm lượng (%) <button type="button" className="siv-info" onClick={() => setHelpKey('volume')}>i</button></span>
+              <label><span className="siv-setting-title">Âm lượng (%) <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('volume') }}>i</span></span>
                 <input type="number" min="0" max="300" value={volume} onChange={(e) => setVolume(Number(e.target.value))} />
               </label>
-              <label><span className="siv-setting-title">Encoder <button type="button" className="siv-info" onClick={() => setHelpKey('encoder')}>i</button></span>
+              <label><span className="siv-setting-title">Encoder <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('encoder') }}>i</span></span>
                 <select value={encoder} onChange={(e) => setEncoder(e.target.value)}>
                   <option value="auto">Tự động</option><option value="gpu">GPU</option><option value="cpu">CPU</option>
                 </select>
               </label>
-              <label><span className="siv-setting-title">Preview (s) <button type="button" className="siv-info" onClick={() => setHelpKey('preview')}>i</button></span>
+              <label><span className="siv-setting-title">Preview (s) <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('preview') }}>i</span></span>
                 <input type="number" min="1" max="120" value={previewSeconds} onChange={(e) => setPreviewSeconds(Number(e.target.value))} />
               </label>
-              <label><span className="siv-setting-title">Xóa metadata <button type="button" className="siv-info" onClick={() => setHelpKey('metadata')}>i</button></span>
+              <label><span className="siv-setting-title">Xóa metadata <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('metadata') }}>i</span></span>
                 <select value={removeMetadata ? 'on' : 'off'} onChange={(e) => setRemoveMetadata(e.target.value === 'on')}>
                   <option value="off">Tắt</option><option value="on">Bật</option>
                 </select>
@@ -525,7 +521,6 @@ export default function SrtImagePage() {
                 {job?.status === 'paused' ? 'Tiếp tục' : 'Tạm dừng'}
               </button>
               <button disabled={!busy} onClick={cancel}>Hủy</button>
-              <button disabled={job?.status !== 'done'} onClick={openVideo}>Mở video</button>
               <button onClick={openFolder}>Thư mục</button>
               <span>{statusText}</span>
             </footer>
@@ -536,7 +531,47 @@ export default function SrtImagePage() {
             <button onClick={cancelSettings}>Hủy</button>
           </footer>
         )}
-      </section>
+          </section>
+        </div>
+        
+        <div className="siv-preview-pane">
+          <div className="siv-preview-header">
+            <span>{job?.status === 'done' ? 'Video Output' : 'Preview trực tiếp'}</span>
+            {job?.status === 'done' && job.name && (
+              <span style={{ color: 'var(--muted-foreground)', fontSize: '0.75rem' }}>{job.name}</span>
+            )}
+          </div>
+          {job?.status === 'done' && job.id ? (
+            <SubtitleLivePreview
+              fontFamily={subtitleFontFamily}
+              textColor={subtitleColor}
+              bgStyle={subtitleBackground}
+              bgColor={subtitleBgColor}
+              bgOpacity={subtitleOpacity}
+              fontSize={subtitleSize}
+              marginBottom={subtitleMargin}
+              resolution={resolution}
+              onResolutionChange={setResolution}
+              mediaFolder={mediaFolder}
+              videoSrc={`/api/srt-image/jobs/${job.id}/file`}
+            />
+          ) : (
+            <SubtitleLivePreview
+              fontFamily={subtitleFontFamily}
+              textColor={subtitleColor}
+              bgStyle={subtitleBackground}
+              bgColor={subtitleBgColor}
+              bgOpacity={subtitleOpacity}
+              fontSize={subtitleSize}
+              marginBottom={subtitleMargin}
+              resolution={resolution}
+              onResolutionChange={setResolution}
+              mediaFolder={mediaFolder}
+            />
+          )}
+        </div>
+      </div>
+
       {helpKey && (
         <div className="siv-help-backdrop" role="presentation" onMouseDown={() => setHelpKey(null)}>
           <section className="siv-help-dialog" role="dialog" aria-modal="true" aria-labelledby="siv-help-title" onMouseDown={(event) => event.stopPropagation()}>
@@ -545,14 +580,325 @@ export default function SrtImagePage() {
                 <small>Hướng dẫn sử dụng</small>
                 <h2 id="siv-help-title">{HELP[helpKey][0]}</h2>
               </div>
-              <button type="button" aria-label="Đóng hướng dẫn" onClick={() => setHelpKey(null)}>×</button>
+              <button type="button" aria-label="Đóng hướng dẫn" onClick={(e) => { e.stopPropagation(); setHelpKey(null) }}>×</button>
             </header>
             <p>{HELP[helpKey][1]}</p>
             <div><strong>File hoặc thiết lập cần dùng</strong><p>{HELP[helpKey][2]}</p></div>
-            <button type="button" className="siv-help-close" onClick={() => setHelpKey(null)}>Đã hiểu</button>
+            <button type="button" className="siv-help-close" onClick={(e) => { e.stopPropagation(); setHelpKey(null) }}>Đã hiểu</button>
           </section>
         </div>
       )}
     </main>
   )
+}
+
+// ─── Live Preview ────────────────────────────────────────────────────────────
+type PreviewProps = {
+  fontFamily: string
+  textColor: string
+  bgStyle: string
+  bgColor: string
+  bgOpacity: number
+  fontSize: number
+  marginBottom: number
+  resolution: string
+  onResolutionChange: (r: string) => void
+  mediaFolder: string
+  videoSrc?: string
+}
+
+const SAMPLE_LINES = ['Đây là dòng phụ đề mẫu,', 'hiển thị trực tiếp theo cài đặt.']
+
+// Platform → resolution mapping (exact specs)
+const PLATFORM_OPTIONS = [
+  { id: 'auto',      label: 'Theo media', res: 'auto',      w: 16, h: 9,
+    icon: <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><rect x="2" y="4" width="20" height="14" rx="2" fill="none" stroke="currentColor" strokeWidth="2"/><path d="M8 10l4 3 4-3" stroke="currentColor" strokeWidth="1.5" fill="none"/></svg> },
+  { id: 'tiktok',    label: 'TikTok',     res: '1080x1920', w: 9,  h: 16,
+    icon: <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><path d="M19.59 6.69a4.83 4.83 0 01-3.77-4.25V2h-3.45v13.67a2.89 2.89 0 01-2.88 2.5 2.89 2.89 0 01-2.89-2.89 2.89 2.89 0 012.89-2.89c.28 0 .54.04.79.1V9.01a6.29 6.29 0 00-.79-.05 6.34 6.34 0 00-6.34 6.34 6.34 6.34 0 006.34 6.34 6.34 6.34 0 006.33-6.34V8.82a8.18 8.18 0 004.79 1.53V6.88a4.85 4.85 0 01-1.02-.19z"/></svg> },
+  { id: 'yt-shorts', label: 'Shorts',      res: '1080x1920', w: 9,  h: 16,
+    icon: <svg viewBox="0 0 24 24" fill="#FF0000" width="16" height="16"><path d="M10 15l5.19-3L10 9v6m11.56-7.83c.13.47.22 1.1.28 1.9.07.8.1 1.49.1 2.09L22 12c0 2.19-.16 3.8-.44 4.83-.25.9-.83 1.48-1.73 1.73-.47.13-1.33.22-2.65.28-1.3.07-2.49.1-3.59.1L12 19c-4.19 0-6.8-.16-7.83-.44-.9-.25-1.48-.83-1.73-1.73-.13-.47-.22-1.1-.28-1.9-.07-.8-.1-1.49-.1-2.09L2 12c0-2.19.16-3.8.44-4.83.25-.9.83-1.48 1.73-1.73.47-.13 1.33-.22 2.65-.28 1.3-.07 2.49-.1 3.59-.1L12 5c4.19 0 6.8.16 7.83.44.9.25 1.48.83 1.73 1.73z"/></svg> },
+  { id: 'youtube',   label: 'YouTube',     res: '1920x1080', w: 16, h: 9,
+    icon: <svg viewBox="0 0 24 24" fill="#FF0000" width="16" height="16"><path d="M10 15l5.19-3L10 9v6m11.56-7.83c.13.47.22 1.1.28 1.9.07.8.1 1.49.1 2.09L22 12c0 2.19-.16 3.8-.44 4.83-.25.9-.83 1.48-1.73 1.73-.47.13-1.33.22-2.65.28-1.3.07-2.49.1-3.59.1L12 19c-4.19 0-6.8-.16-7.83-.44-.9-.25-1.48-.83-1.73-1.73-.13-.47-.22-1.1-.28-1.9-.07-.8-.1-1.49-.1-2.09L2 12c0-2.19.16-3.8.44-4.83.25-.9.83-1.48 1.73-1.73.47-.13 1.33-.22 2.65-.28 1.3-.07 2.49-.1 3.59-.1L12 5c4.19 0 6.8.16 7.83.44.9.25 1.48.83 1.73 1.73z"/></svg> },
+  { id: 'facebook',  label: 'Facebook',    res: '1080x1920', w: 9,  h: 16,
+    icon: <svg viewBox="0 0 24 24" fill="#1877F2" width="16" height="16"><path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/></svg> },
+]
+
+function SubtitleLivePreview({ fontFamily, textColor, bgStyle, bgColor, bgOpacity, fontSize, marginBottom, resolution, onResolutionChange, mediaFolder, videoSrc }: PreviewProps) {
+  // Fetch kích thước thực tế của media khi resolution=auto
+  const [mediaAp, setMediaAp] = useState<{ w: number; h: number } | null>(null)
+  useEffect(() => {
+    if (resolution !== 'auto' || !mediaFolder) { setMediaAp(null); return }
+    fetch(`/api/srt-image/media-size?folder=${encodeURIComponent(mediaFolder)}`)
+      .then(r => r.ok ? r.json() : null)
+      .then(d => setMediaAp(d))
+      .catch(() => setMediaAp(null))
+  }, [resolution, mediaFolder])
+
+  // Derive aspect ratio from resolution setting — this is the single source of truth
+  const resMap: Record<string, { w: number; h: number }> = {
+    'auto':      { w: 16, h: 9 }, // fallback nếu chưa chọn thư mục
+    '1920x1080': { w: 16, h: 9 },
+    '1280x720':  { w: 16, h: 9 },
+    '1080x1920': { w: 9,  h: 16 },
+    '1080x1080': { w: 1,  h: 1 },
+  }
+  // Ưu tiên kích thước thực tế từ media khi đang ở chế độ auto
+  const ap = (resolution === 'auto' && mediaAp) ? mediaAp : (resMap[resolution] ?? { w: 16, h: 9 })
+  // active = platform khớp resolution, fallback 'auto'
+  const activePlatform = PLATFORM_OPTIONS.find(p => p.res === resolution)?.id ?? 'auto'
+  const frameRef = useRef<HTMLDivElement>(null)
+  const videoRef  = useRef<HTMLVideoElement>(null)
+  const [frameH, setFrameH] = useState(300)
+
+  // Autoplay sau khi src được set: dùng native addEventListener (không qua React synthetic)
+  // để tránh bi mất event nếu canplay fire trước React attach xong.
+  useEffect(() => {
+    const el = videoRef.current
+    if (!el || !videoSrc) return
+    const tryPlay = () => { el.muted = true; el.play().catch(() => {}) }
+    if (el.readyState >= 3) { tryPlay(); return } // đã sẵn sàng ngay
+    el.addEventListener('canplay', tryPlay, { once: true })
+    return () => el.removeEventListener('canplay', tryPlay)
+  }, [videoSrc])
+
+  // Đo chiều cao frame thực tế để tính scale đúng với ASS (PlayResY=288)
+  useEffect(() => {
+    if (!frameRef.current) return
+    const ro = new ResizeObserver(e => setFrameH(e[0].contentRect.height))
+    ro.observe(frameRef.current)
+    return () => ro.disconnect()
+  }, [])
+
+  const fakeSettings = {
+    captionTextColor: textColor,
+    captionBgStyle: bgStyle as 'none' | 'solid' | 'box' | 'blur',
+    captionBgColor: bgColor,
+    captionBgOpacity: bgOpacity,
+    subtitleFontFamily: fontFamily,
+    captionStroke: true,
+  // ponytail: cast minimal fake settings; chỉ dùng các field mà captionChromeStyle đọc
+  } as Parameters<typeof captionChromeStyle>[0]
+
+  const captionStyle = captionChromeStyle(fakeSettings)
+  const fontCss = captionFontCss(fontFamily)
+
+  // Scale khớp ASS: FontSize/MarginV đều dùng PlayResY=288 làm reference
+  // MarginV đo từ đáy frame — chrome UI chỉ là overlay visual, không ảnh hưởng vị trí ASS
+  const scale = frameH / 288
+  const scaledFontSize = Math.round(fontSize * scale)
+
+  const scaledMarginBottom = Math.round(marginBottom * scale)
+
+  return (
+    <div className="siv-live-preview-wrap">
+      <div className="siv-live-aspect-toggle">
+        {PLATFORM_OPTIONS.map(p => (
+          <button
+            key={p.id}
+            type="button"
+            className={p.id === activePlatform ? 'active' : ''}
+            onClick={() => onResolutionChange(p.res)}
+            title={`${p.label} · ${p.res}`}
+          >
+            {p.icon}
+            <span>{p.label}</span>
+          </button>
+        ))}
+      </div>
+      <div className="siv-live-preview-stage">
+        <div
+          ref={frameRef}
+          className="siv-live-preview-frame"
+          style={{
+            aspectRatio: `${ap.w}/${ap.h}`,
+            ...(ap.h > ap.w
+              ? { height: '100%', width: 'auto' }
+              : { width: '100%' }),
+          }}
+        >
+          {videoSrc ? (
+            /* Video output: hiện video thật trong cùng khung, controls bên dưới */
+            <video
+              src={videoSrc}
+              controls
+              preload="metadata"
+              style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain', background: '#000' }}
+            />
+          ) : (
+            <>
+              {/* Nền giả: gradient tối như cảnh video */}
+              <div className="siv-live-preview-bg" />
+              {/* Platform UI chrome overlay */}
+              <PlatformChrome platform={activePlatform} />
+              {/* Phụ đề mẫu */}
+              <div
+                className="siv-live-caption-wrap"
+                style={{ paddingBottom: `${scaledMarginBottom}px` }}
+              >
+                {SAMPLE_LINES.map((line, i) => (
+                  <div
+                    key={i}
+                    className="siv-live-caption-line"
+                    style={{
+                      ...captionStyle,
+                      fontFamily: fontCss,
+                      fontSize: `${scaledFontSize}px`,
+                      lineHeight: 1.4,
+                    }}
+                  >
+                    {line}
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── Platform Chrome Overlay (accurate per-platform layouts) ─────────────────
+// ponytail: shared icon helpers avoid repetition across 4 platform branches
+const IcoHeart   = () => <svg viewBox="0 0 24 24" width="22" height="22" fill="white"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
+const IcoComment = () => <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="white" strokeWidth="2" strokeLinejoin="round"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+const IcoShare   = () => <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round"><path d="M4 12v8a2 2 0 002 2h12a2 2 0 002-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>
+const IcoBookmark= () => <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg>
+const IcoThumbUp = () => <svg viewBox="0 0 24 24" width="22" height="22" fill="white"><path d="M2 20h2c.55 0 1-.45 1-1v-9H2v10zm19.83-7.12c.11-.25.17-.52.17-.88v-2c0-1.1-.9-2-2-2h-6.31l.95-4.57.03-.32c0-.41-.17-.79-.44-1.06L13.17 1 6.59 7.59C6.22 7.95 6 8.45 6 9v10c0 1.1.9 2 2 2h9c.83 0 1.54-.5 1.84-1.22l3.02-7.05-.03.15z"/></svg>
+const IcoThumbDn = () => <svg viewBox="0 0 24 24" width="22" height="22" fill="white"><path d="M22 4h-2c-.55 0-1 .45-1 1v9h2V4zM2.17 11.12c-.11.25-.17.52-.17.88v2c0 1.1.9 2 2 2h6.31l-.95 4.57c0 .41.17.79.44 1.06L10.83 23l6.59-6.59c.36-.36.58-.86.58-1.41V5c0-1.1-.9-2-2-2H7c-.83 0-1.54.5-1.84 1.22L2.17 11.12z"/></svg>
+const IcoMore3Vert=()=> <svg viewBox="0 0 24 24" width="20" height="20" fill="white"><circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="19" r="1.8"/></svg>
+const IcoMore3Horiz=()=><svg viewBox="0 0 24 24" width="20" height="20" fill="white"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>
+const IcoMusic   = () => <svg viewBox="0 0 24 24" width="10" height="10" fill="white"><path d="M9 18V5l12-2v13M6 21a3 3 0 100-6 3 3 0 000 6zM18 19a3 3 0 100-6 3 3 0 000 6z"/></svg>
+const IcoAvatar  = ({ s = 22 }: { s?: number }) => (
+  <svg viewBox="0 0 24 24" width={s} height={s}>
+    <circle cx="12" cy="12" r="11" fill="rgba(255,255,255,0.18)" stroke="white" strokeWidth="1.2"/>
+    <circle cx="12" cy="9" r="4" fill="rgba(255,255,255,0.55)"/>
+    <path d="M4 22c0-4.4 3.6-8 8-8s8 3.6 8 8" fill="rgba(255,255,255,0.55)"/>
+  </svg>
+)
+const Bar = () => <div className="plat-statusbar"><span>9:41</span><span>▐▐ ◈</span></div>
+const Act = ({ ico, lbl }: { ico: React.ReactNode; lbl?: string }) => (
+  <div className="plat-action">{ico}{lbl && <small>{lbl}</small>}</div>
+)
+
+function PlatformChrome({ platform }: { platform: string }) {
+  if (platform === 'tiktok') return (
+    <div className="plat-chrome plat-tiktok">
+      <Bar/>
+      {/* Right sidebar — Avatar · Like · Comment · Bookmark · Share · Disc */}
+      <div className="plat-right">
+        <div className="plat-action" style={{marginBottom:4}}>
+          <div className="plat-tt-avatar"><IcoAvatar s={28}/><div className="plat-tt-plus">+</div></div>
+        </div>
+        <Act ico={<IcoHeart/>}    lbl="2.8M"/>
+        <Act ico={<IcoComment/>}  lbl="48K"/>
+        <Act ico={<IcoBookmark/>} lbl="12K"/>
+        <Act ico={<IcoShare/>}    lbl="Share"/>
+        <div className="plat-action" style={{marginTop:4}}>
+          <div className="plat-tt-disc"><div className="plat-tt-disc-inner"/></div>
+        </div>
+      </div>
+      {/* Bottom: @user · desc · music */}
+      <div className="plat-bottom">
+        <div className="plat-bottom-left">
+          <div className="plat-username">@your_username</div>
+          <div className="plat-desc">Mô tả video của bạn #hashtag</div>
+          <div className="plat-music-row"><IcoMusic/><span>Tên bài hát · Nghệ sĩ</span></div>
+        </div>
+        {/* TikTok logo bottom-right */}
+        <svg viewBox="0 0 24 24" fill="white" width="20" height="20" style={{flexShrink:0,alignSelf:'flex-end',marginBottom:2,opacity:.9}}><path d="M19.59 6.69a4.83 4.83 0 01-3.77-4.25V2h-3.45v13.67a2.89 2.89 0 01-2.88 2.5 2.89 2.89 0 01-2.89-2.89 2.89 2.89 0 012.89-2.89c.28 0 .54.04.79.1V9.01a6.29 6.29 0 00-.79-.05 6.34 6.34 0 00-6.34 6.34 6.34 6.34 0 006.34 6.34 6.34 6.34 0 006.33-6.34V8.82a8.18 8.18 0 004.79 1.53V6.88a4.85 4.85 0 01-1.02-.19z"/></svg>
+      </div>
+    </div>
+  )
+
+  if (platform === 'yt-shorts') return (
+    <div className="plat-chrome plat-ytshorts">
+      <Bar/>
+      {/* Top nav: back · Shorts · search · more */}
+      <div className="plat-yt-topnav">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round"><path d="M19 12H5M12 5l-7 7 7 7"/></svg>
+        <span style={{fontWeight:700,fontSize:'0.62rem',flex:1,textAlign:'center'}}>Shorts</span>
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+        <IcoMore3Vert/>
+      </div>
+      {/* Right sidebar: Like · Dislike · Comment · Share · More */}
+      <div className="plat-right" style={{bottom:85}}>
+        <Act ico={<IcoThumbUp/>} lbl="2.8M"/>
+        <Act ico={<IcoThumbDn/>} lbl="Dislike"/>
+        <Act ico={<IcoComment/>} lbl="48K"/>
+        <Act ico={<IcoShare/>}   lbl="Share"/>
+        <Act ico={<IcoMore3Vert/>}/>
+      </div>
+      {/* Bottom: avatar · channel · subscribe · title */}
+      <div className="plat-bottom">
+        <div className="plat-bottom-left">
+          <div style={{display:'flex',alignItems:'center',gap:5,marginBottom:3}}>
+            <IcoAvatar s={20}/>
+            <div className="plat-username">@channel_name</div>
+            <div style={{fontSize:'0.48rem',border:'1px solid white',borderRadius:3,padding:'1px 4px',whiteSpace:'nowrap'}}>Đăng ký</div>
+          </div>
+          <div className="plat-desc">Tiêu đề Short · Xem thêm</div>
+        </div>
+      </div>
+      {/* Seek bar at very bottom */}
+      <div className="plat-yt-seek"><div className="plat-yt-seek-fill"/></div>
+    </div>
+  )
+
+  if (platform === 'youtube') return (
+    <div className="plat-chrome plat-youtube">
+      <Bar/>
+      {/* YouTube header bar */}
+      <div className="plat-yt-header">
+        <svg viewBox="0 0 24 24" fill="#FF0000" width="17" height="17"><path d="M10 15l5.19-3L10 9v6m11.56-7.83c.13.47.22 1.1.28 1.9.07.8.1 1.49.1 2.09L22 12c0 2.19-.16 3.8-.44 4.83-.25.9-.83 1.48-1.73 1.73-.47.13-1.33.22-2.65.28-1.3.07-2.49.1-3.59.1L12 19c-4.19 0-6.8-.16-7.83-.44-.9-.25-1.48-.83-1.73-1.73-.13-.47-.22-1.1-.28-1.9-.07-.8-.1-1.49-.1-2.09L2 12c0-2.19.16-3.8.44-4.83.25-.9.83-1.48 1.73-1.73.47-.13 1.33-.22 2.65-.28 1.3-.07 2.49-.1 3.59-.1L12 5c4.19 0 6.8.16 7.83.44.9.25 1.48.83 1.73 1.73z"/></svg>
+        <span style={{color:'white',fontSize:'0.6rem',fontWeight:700}}>YouTube</span>
+        <div style={{marginLeft:'auto',display:'flex',gap:8,alignItems:'center'}}>
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="white" strokeWidth="2"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9M13.73 21a2 2 0 01-3.46 0"/></svg>
+          <IcoAvatar s={16}/>
+        </div>
+      </div>
+      {/* Progress + controls at bottom */}
+      <div style={{position:'absolute',bottom:0,left:0,right:0}}>
+        <div style={{height:'2px',background:'rgba(255,255,255,0.25)',position:'relative',margin:'0 8px'}}>
+          <div style={{position:'absolute',left:0,top:0,bottom:0,width:'38%',background:'#FF0000'}}/>
+          <div style={{position:'absolute',left:'38%',top:'-3px',width:'7px',height:'7px',background:'#FF0000',borderRadius:'50%',marginLeft:'-3px'}}/>
+        </div>
+        <div style={{display:'flex',alignItems:'center',padding:'3px 8px 5px',gap:7,fontSize:'0.5rem',color:'rgba(255,255,255,0.85)'}}>
+          <svg viewBox="0 0 24 24" width="12" height="12" fill="white"><polygon points="5,3 19,12 5,21"/></svg>
+          <span>1:06 / 2:32</span>
+          <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="white" strokeWidth="2"><polygon points="11,5 6,9 2,9 2,15 6,15 11,19"/><path d="M19.07 4.93a10 10 0 010 14.14M15.54 8.46a5 5 0 010 7.07"/></svg>
+          <div style={{flex:1}}/>
+          <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="white" strokeWidth="2"><path d="M8 3H5a2 2 0 00-2 2v3m18 0V5a2 2 0 00-2-2h-3m0 18h3a2 2 0 002-2v-3M3 16v3a2 2 0 002 2h3"/></svg>
+        </div>
+      </div>
+    </div>
+  )
+
+  if (platform === 'facebook') return (
+    <div className="plat-chrome plat-facebook">
+      <Bar/>
+      {/* Right sidebar: Like · Comment · Share · More */}
+      <div className="plat-right">
+        <Act ico={<IcoHeart/>}      lbl="2.8M"/>
+        <Act ico={<IcoComment/>}    lbl="48K"/>
+        <Act ico={<IcoShare/>}      lbl="Share"/>
+        <Act ico={<IcoMore3Horiz/>}/>
+      </div>
+      {/* Bottom: avatar · name · follow · desc · music */}
+      <div className="plat-bottom">
+        <div className="plat-bottom-left">
+          <div style={{display:'flex',alignItems:'center',gap:5,marginBottom:3}}>
+            <IcoAvatar s={22}/>
+            <div className="plat-username">Your Name</div>
+            <div style={{fontSize:'0.48rem',border:'1px solid white',borderRadius:3,padding:'1px 5px',whiteSpace:'nowrap'}}>+ Theo dõi</div>
+          </div>
+          <div className="plat-desc">Mô tả video của bạn #hashtag</div>
+          <div className="plat-music-row"><IcoMusic/><span>Tên bài hát · Nghệ sĩ</span></div>
+        </div>
+      </div>
+    </div>
+  )
+
+  return null
 }

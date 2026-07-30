@@ -272,45 +272,128 @@ def pause(job_id: str, paused: bool) -> bool:
     return True
 
 
-def _ffmpeg_subtitle(path: Path, font_name: str = "Arial", font_size: int = 8, margin_bottom: int = 18,
+def _srt_ts_to_ass(ts: str) -> str:
+    """'01:23:45,678' hoặc '01:23:45.678' → '1:23:45.67' (ASS centiseconds)"""
+    ts = ts.replace(".", ",")
+    h, m, s_ms = ts.split(":")
+    s, ms = s_ms.split(",")
+    return f"{int(h)}:{m}:{s}.{ms[:2]}"
+
+
+def _ffmpeg_subtitle(path: Path, font_name: str = "system", font_size: int = 8, margin_bottom: int = 18,
                      bg_style: str = "solid", text_color: str = "#ffffff", bg_color: str = "#000000",
                      opacity: int = 55) -> str:
-    value = path.resolve().as_posix().replace(":", r"\:").replace("'", r"\'")
-    _FONT_MAP = {
-        "system": "Arial", "segoe": "Arial", "arial": "Arial", "bold": "Impact",
-        "helvetica": "Arial", "verdana": "Verdana", "tahoma": "Tahoma",
-        "trebuchet": "Trebuchet MS", "rounded": "Arial", "impact": "Impact",
-        "georgia": "Georgia", "times": "Times New Roman", "palatino": "Palatino Linotype",
-        "garamond": "Garamond", "courier": "Courier New", "mono": "Consolas",
-        "comic": "Comic Sans MS",
+    """Generate ASS từ SRT với inline \\blur tags — Gaussian blur = CSS textShadow.
+    force_style trên SRT không hỗ trợ inline tags; cần ASS file thực.
+    Font: fontsdir (đã xác nhận hoạt động với DirectWrite).
+    """
+    # ponytail: Bold flag phải khớp nameID=2 (subfamily) trong TTF.
+    # libass dùng flag này để tìm variant — sai flag → pick sai file hoặc fallback.
+    # sub=Bold → Bold=1; sub=Regular → Bold=0
+    _FONT_INFO: dict[str, tuple[str, str, int]] = {
+        "system":   ("NotoSans-Bold.ttf",        "Noto Sans",         1),  # sub=Bold
+        "segoe":    ("Inter-Bold.ttf",           "Inter",             0),  # sub=Regular
+        "arial":    ("Arimo-Bold.ttf",           "Arimo",             0),  # sub=Regular
+        "bold":     ("ArchivoBlack-Regular.ttf", "Archivo SemiBold",  0),  # sub=Regular
+        "helvetica":("Roboto-Bold.ttf",          "Roboto",            0),  # sub=Regular
+        "verdana":  ("OpenSans-Bold.ttf",        "Open Sans",         0),  # sub=Regular
+        "tahoma":   ("Carlito-Bold.ttf",         "Carlito",           1),  # sub=Bold
+        "trebuchet":("FiraSans-Bold.ttf",        "Fira Sans",         1),  # sub=Bold
+        "rounded":  ("Nunito-Bold.ttf",          "Nunito ExtraLight", 0),  # sub=Regular
+        "impact":   ("Anton-Regular.ttf",        "Anton",             0),  # sub=Regular
+        "georgia":  ("Merriweather-Bold.ttf",    "Merriweather Light",0),  # sub=Regular
+        "times":    ("Tinos-Bold.ttf",           "Tinos",             1),  # sub=Bold
+        "palatino": ("Literata-Bold.ttf",        "Literata",          0),  # sub=Regular
+        "garamond": ("EBGaramond-Bold.ttf",      "EB Garamond",       0),  # sub=Regular
+        "courier":  ("CourierPrime-Bold.ttf",    "Cousine",           1),  # sub=Bold
+        "mono":     ("NotoSansMono-Bold.ttf",    "Noto Sans Mono",    0),  # sub=Regular
+        "comic":    ("ComicNeue-Bold.ttf",       "Patrick Hand",      0),  # sub=Regular
+        "cjk":      ("NotoSansSC-Bold.ttf",      "Noto Sans SC Thin", 0),  # sub=Regular
+        "meiryo":   ("NotoSansJP-Bold.ttf",      "Noto Sans JP Thin", 0),  # sub=Regular
+        "malgun":   ("NotoSansKR-Bold.ttf",      "Noto Sans KR Thin", 0),  # sub=Regular
     }
-    real_font = _FONT_MAP.get(font_name.lower(), "Arial")
+    _ttf, real_font, bold_flag = _FONT_INFO.get(font_name.lower(), _FONT_INFO["system"])
+    fonts_dir = (Path(__file__).parent.parent.parent / "frontend" / "public" / "fonts").resolve()
+
+    # ── Màu chữ (ASS BBGGRR little-endian) ───────────────────────────────────
     tc = text_color.lstrip("#")
     if len(tc) != 6: tc = "ffffff"
     tr, tg, tb = int(tc[0:2], 16), int(tc[2:4], 16), int(tc[4:6], 16)
     ass_primary = f"&H00{tb:02X}{tg:02X}{tr:02X}"
 
-    style = (
-        f"FontName={real_font},FontSize={font_size},MarginV={margin_bottom},MarginL=20,MarginR=20,"
-        f"PrimaryColour={ass_primary},"
-        "Alignment=2,WrapStyle=0"
-    )
+    # ── ASS Style + inline override tags theo bg_style ────────────────────────
+    # CSS textShadow '0 2px 4px rgba(0,0,0,0.9)' = subtle dark glow phía sau chữ
+    # ASS tương đương: Shadow=1 với ShadowColour tối — chữ vẫn sắc nét như CSS
+    # KHÔNG dùng \blur — nó blur toàn bộ glyph (cả fill), làm chữ mờ hơn preview
     if bg_style in ("solid", "box"):
         bc = bg_color.lstrip("#")
         if len(bc) != 6: bc = "000000"
-        br, bg, bb = int(bc[0:2], 16), int(bc[2:4], 16), int(bc[4:6], 16)
+        br, bg_r, bb = int(bc[0:2], 16), int(bc[2:4], 16), int(bc[4:6], 16)
         a = 255 - max(0, min(255, int(255 * opacity / 100)))
-        ass_bg = f"&H{a:02X}{bb:02X}{bg:02X}{br:02X}"
-        shadow_a = min(255, a + 40)
-        ass_shadow = f"&H{shadow_a:02X}{bb:02X}{bg:02X}{br:02X}"
-        outline = 2 if bg_style == "box" else 1.2
-        shadow = f",Shadow=1,ShadowColour={ass_shadow}" if bg_style == "box" else ",Shadow=0"
-        style += f",BorderStyle=3,Outline={outline}{shadow}"
-        style += f",OutlineColour={ass_bg},BackColour={ass_bg}"
+        ass_bg = f"&H{a:02X}{bb:02X}{bg_r:02X}{br:02X}"
+        pad = 2 if bg_style == "box" else 1.2
+        # BorderStyle=3: nền box; Shadow=1 + dark colour = subtle drop shadow
+        style_line = (
+            f"Style: Default,{real_font},{font_size},"
+            f"{ass_primary},&H00FFFFFF,{ass_bg},{ass_bg},"
+            f"{bold_flag},0,0,0,100,100,0,0,3,{pad},1,2,20,20,{margin_bottom},0"
+        )
     else:
-        # none — outline only (black)
-        style += ",BorderStyle=1,Outline=1,Shadow=0,OutlineColour=&H00000000"
-    return f"subtitles=filename='{value}':force_style='{style}'"
+        # none: outline mỏng tối + shadow nhẹ = CSS textShadow
+        style_line = (
+            f"Style: Default,{real_font},{font_size},"
+            f"{ass_primary},&H00FFFFFF,&H1A000000,&H1A000000,"
+            f"{bold_flag},0,0,0,100,100,0,0,1,1,1,2,20,20,{margin_bottom},0"
+        )
+    # Không inline override — style definition đã đủ
+    inline_tag = ""
+
+    # ── ASS header ────────────────────────────────────────────────────────────
+    header = (
+        "[Script Info]\r\n"
+        "ScriptType: v4.00+\r\n"
+        "PlayResX: 384\r\n"
+        "PlayResY: 288\r\n"
+        "WrapStyle: 0\r\n\r\n"
+        "[V4+ Styles]\r\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
+        "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, "
+        "Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\r\n"
+        f"{style_line}\r\n\r\n"
+        "[Events]\r\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\r\n"
+    )
+
+    # ── Parse SRT → ASS Dialogue events ───────────────────────────────────────
+    srt_text = path.read_text(encoding="utf-8-sig", errors="replace")
+    events: list[str] = []
+    for block in re.split(r"\n\s*\n", srt_text.strip()):
+        lines = block.strip().splitlines()
+        for i, line in enumerate(lines):
+            m = re.match(
+                r"(\d{1,2}:\d{2}:\d{2}[,\.]\d{3})\s*-->\s*(\d{1,2}:\d{2}:\d{2}[,\.]\d{3})",
+                line.strip(),
+            )
+            if m:
+                start = _srt_ts_to_ass(m.group(1))
+                end   = _srt_ts_to_ass(m.group(2))
+                text  = r"\N".join(l.strip() for l in lines[i + 1:] if l.strip())
+                text  = re.sub(r"<[^>]+>", "", text)  # strip HTML tags
+                events.append(f"Dialogue: 0,{start},{end},Default,,0,0,0,,{inline_tag}{text}")
+                break
+
+    ass_path = path.with_suffix(".sub.ass")
+    ass_path.write_bytes((header + "\r\n".join(events) + "\r\n").encode("utf-8-sig"))
+
+    # ── FFmpeg filter ─────────────────────────────────────────────────────────
+    ass_ff   = ass_path.resolve().as_posix().replace(":", r"\:").replace("'", r"\'")
+    fonts_ff = str(fonts_dir).replace("\\", "/").replace(":", r"\:")
+    return f"subtitles=filename='{ass_ff}':fontsdir='{fonts_ff}'"
+
+
+
+
+
 
 
 def _logo_position(x_percent: float = 88, y_percent: float = 88, moving: bool = False) -> tuple[str, str]:
