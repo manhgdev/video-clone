@@ -156,9 +156,11 @@ def _run_stage(job_id: str, cmd: list[str]) -> None:
 def _prepare_video_segments(
     job_id: str, media: list[Path], durations: list[float], work: Path,
     width: int, height: int, fps: int, crf: int, use_gpu: bool, zoom: str = "off",
+    delogo_prefix: str = "",
 ) -> list[Path]:
     segments: list[Path] = []
     base_vf = (
+        f"{delogo_prefix}"
         f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
         f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,fps={fps}"
     )
@@ -557,9 +559,21 @@ def run(job_id: str) -> None:
         _log(job_id, f"Encoder: {'GPU NVIDIA NVENC' if use_gpu else 'CPU libx264'} · CRF {crf}")
         work = Path(job["work"])
         zoom_mode = str(opts.get("zoom", "off"))
+        # ponytail: delogo — xóa watermark AI trước scale/zoom, tính trên frame gốc
+        delogo_prefix = ""
+        dl = opts.get("delogo") if isinstance(opts.get("delogo"), dict) else {}
+        if dl.get("enabled"):
+            src_w, src_h = image_resolution(media[0])
+            dx = max(0, round(float(dl.get("x", 82)) / 100 * src_w))
+            dy = max(0, round(float(dl.get("y", 94)) / 100 * src_h))
+            dw = max(10, round(float(dl.get("w", 16)) / 100 * src_w))
+            dh = max(10, round(float(dl.get("h", 4)) / 100 * src_h))
+            delogo_prefix = f"delogo=x={dx}:y={dy}:w={dw}:h={dh},"
+            _log(job_id, f"Delogo: {dw}×{dh} tại ({dx},{dy}) trên {src_w}×{src_h}")
         sources = (
             _prepare_video_segments(
                 job_id, media, durations, work, width, height, fps, crf, use_gpu, zoom_mode,
+                delogo_prefix,
             )
             if zoom_mode != "off" or any(is_video(path) for path in media[:len(durations)]) else media
         )
@@ -595,20 +609,10 @@ def run(job_id: str) -> None:
         zoom_filter = ""
         if str(opts.get("zoom", "off")) != "off":
             _log(job_id, f"Zoom: {opts.get('zoom')} · chuyển động nội suy theo thời gian")
-        # ponytail: delogo — xóa watermark AI (Veo 3, Grok) trước khi scale
-        delogo_prefix = ""
-        dl = opts.get("delogo") if isinstance(opts.get("delogo"), dict) else {}
-        if dl.get("enabled"):
-            src_w, src_h = image_resolution(media[0])
-            # Frontend gửi % (0–100) → chuyển sang pixel trên frame gốc
-            dx = max(0, round(float(dl.get("x", 82)) / 100 * src_w))
-            dy = max(0, round(float(dl.get("y", 94)) / 100 * src_h))
-            dw = max(10, round(float(dl.get("w", 16)) / 100 * src_w))
-            dh = max(10, round(float(dl.get("h", 4)) / 100 * src_h))
-            delogo_prefix = f"delogo=x={dx}:y={dy}:w={dw}:h={dh},"
-            _log(job_id, f"Delogo: {dw}×{dh} tại ({dx},{dy}) trên {src_w}×{src_h}")
+        # ponytail: khi có segments (zoom on), delogo đã chạy trong segment → không cần lại
+        seg_delogo = delogo_prefix if sources is media else ""
         base_vf = (
-            f"{delogo_prefix}"
+            f"{seg_delogo}"
             f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
             f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,fps={fps}"
             + (f",{zoom_filter}" if zoom_filter else "")
