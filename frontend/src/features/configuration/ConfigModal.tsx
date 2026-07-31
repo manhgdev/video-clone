@@ -191,7 +191,7 @@ export default function ConfigModal({
           const c = cfg.cloud?.[id]
           if (!c) continue
           next[id] = {
-            apiKey: '',
+            apiKey: c.apiKey || '',
             baseUrl: c.baseUrl || next[id].baseUrl,
             model: c.model || next[id].model,
             apiKeySet: !!c.apiKeySet,
@@ -398,7 +398,7 @@ export default function ConfigModal({
         const c = cfg.cloud?.[id]
         if (!c) continue
         next[id] = {
-          apiKey: '',
+          apiKey: c.apiKey || '',
           baseUrl: c.baseUrl || next[id].baseUrl,
           model: c.model || next[id].model,
           apiKeySet: !!c.apiKeySet,
