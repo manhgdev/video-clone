@@ -233,7 +233,8 @@ def open_video(job_id: str):
         raise HTTPException(404, "Video chưa hoàn thành")
     try:
         if os.name == "nt":
-            os.startfile(path)  # type: ignore[attr-defined]
+            # ponytail: 'start' đưa cửa sổ player lên foreground, os.startfile() thì không
+            subprocess.Popen(["cmd", "/c", "start", "", str(path)], creationflags=0x00000008)
         else:
             subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(path)])
     except OSError as exc:

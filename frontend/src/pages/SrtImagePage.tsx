@@ -35,6 +35,8 @@ const HELP = {
   encoder: ['Encoder', 'Chọn phần cứng dùng để mã hóa video. Tự động ưu tiên GPU khi máy hỗ trợ và chuyển sang CPU khi cần.', 'Nên để Tự động. Chọn CPU khi driver GPU gặp lỗi; chọn GPU để tăng tốc trên máy tương thích.'],
   preview: ['Preview', 'Giới hạn số giây render khi bấm Preview để kiểm tra nhanh trước khi xuất toàn bộ video.', '15 giây thường đủ để kiểm tra tỷ lệ, phụ đề, logo và âm lượng.'],
   metadata: ['Xóa metadata', 'Loại bỏ thông tin phụ như tên encoder và metadata khỏi file MP4 đầu ra.', 'Không ảnh hưởng hình hoặc tiếng. Bật nếu muốn file xuất sạch thông tin kỹ thuật.'],
+  delogo: ['Xóa logo gốc', 'Xóa watermark AI (Veo 3, Grok…) bằng bộ lọc delogo của FFmpeg trên frame gốc trước khi scale.', 'Vùng xóa mặc định ở góc dưới phải. Tắt Tự định vị để kéo tay chọn vùng trên Preview.'],
+  delogoAuto: ['Tự định vị', 'Tự động đặt vùng xóa logo ở góc dưới phải — vị trí mặc định của Veo 3, Grok.', 'Tắt để kéo chuột vẽ vùng xóa tùy ý trên Preview trực tiếp.'],
 } as const
 
 type HelpKey = keyof typeof HELP
@@ -482,12 +484,12 @@ export default function SrtImagePage() {
                     <option value="off">Tắt</option><option value="on">Bật</option>
                   </select>
                 </label>
-                <label><span className="siv-setting-title">Xóa logo gốc</span>
+                <label><span className="siv-setting-title">Xóa logo gốc <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('delogo') }}>i</span></span>
                   <select value={delogoEnabled ? 'on' : 'off'} onChange={(e) => setDelogoEnabled(e.target.value === 'on')}>
                     <option value="off">Tắt</option><option value="on">Bật</option>
                   </select>
                 </label>
-                {delogoEnabled && <label><span className="siv-setting-title">Tự định vị</span>
+                {delogoEnabled && <label><span className="siv-setting-title">Tự định vị <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('delogoAuto') }}>i</span></span>
                   <select value={delogoAuto ? 'on' : 'off'} onChange={(e) => setDelogoAuto(e.target.value === 'on')}>
                     <option value="on">Bật</option><option value="off">Tắt (kéo tay)</option>
                   </select>
@@ -757,7 +759,7 @@ function SubtitleLivePreview({ fontFamily, textColor, bgStyle, bgColor, bgOpacit
               src={videoSrc}
               controls
               preload="metadata"
-              style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain', background: '#000' }}
+              style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain', background: '#000', zIndex: 30 }}
             />
           ) : (
             <>
