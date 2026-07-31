@@ -595,7 +595,20 @@ def run(job_id: str) -> None:
         zoom_filter = ""
         if str(opts.get("zoom", "off")) != "off":
             _log(job_id, f"Zoom: {opts.get('zoom')} · chuyển động nội suy theo thời gian")
+        # ponytail: delogo — xóa watermark AI (Veo 3, Grok) trước khi scale
+        delogo_prefix = ""
+        dl = opts.get("delogo") if isinstance(opts.get("delogo"), dict) else {}
+        if dl.get("enabled"):
+            src_w, src_h = image_resolution(media[0])
+            # Frontend gửi % (0–100) → chuyển sang pixel trên frame gốc
+            dx = max(0, round(float(dl.get("x", 82)) / 100 * src_w))
+            dy = max(0, round(float(dl.get("y", 94)) / 100 * src_h))
+            dw = max(10, round(float(dl.get("w", 16)) / 100 * src_w))
+            dh = max(10, round(float(dl.get("h", 4)) / 100 * src_h))
+            delogo_prefix = f"delogo=x={dx}:y={dy}:w={dw}:h={dh},"
+            _log(job_id, f"Delogo: {dw}×{dh} tại ({dx},{dy}) trên {src_w}×{src_h}")
         base_vf = (
+            f"{delogo_prefix}"
             f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
             f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,fps={fps}"
             + (f",{zoom_filter}" if zoom_filter else "")

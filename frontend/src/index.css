@@ -1,26 +1,26 @@
 @import "tailwindcss";
 
-/* Bundled OFL fonts: preview metrics and Pillow export use the same files. */
-@font-face { font-family: "VC Noto Sans"; src: url("/fonts/NotoSans-Bold.ttf") format("truetype"); font-style: normal; font-weight: 700; font-display: block; }
-@font-face { font-family: "VC Inter"; src: url("/fonts/Inter-Bold.ttf") format("truetype"); font-style: normal; font-weight: 700; font-display: block; }
-@font-face { font-family: "VC Arimo"; src: url("/fonts/Arimo-Bold.ttf") format("truetype"); font-style: normal; font-weight: 700; font-display: block; }
-@font-face { font-family: "VC Archivo Black"; src: url("/fonts/ArchivoBlack-Regular.ttf") format("truetype"); font-style: normal; font-weight: 700; font-display: block; }
-@font-face { font-family: "VC Roboto"; src: url("/fonts/Roboto-Bold.ttf") format("truetype"); font-style: normal; font-weight: 700; font-display: block; }
-@font-face { font-family: "VC Open Sans"; src: url("/fonts/OpenSans-Bold.ttf") format("truetype"); font-style: normal; font-weight: 700; font-display: block; }
-@font-face { font-family: "VC Carlito"; src: url("/fonts/Carlito-Bold.ttf") format("truetype"); font-style: normal; font-weight: 700; font-display: block; }
-@font-face { font-family: "VC Fira Sans"; src: url("/fonts/FiraSans-Bold.ttf") format("truetype"); font-style: normal; font-weight: 700; font-display: block; }
-@font-face { font-family: "VC Nunito"; src: url("/fonts/Nunito-Bold.ttf") format("truetype"); font-style: normal; font-weight: 700; font-display: block; }
-@font-face { font-family: "VC Anton"; src: url("/fonts/Anton-Regular.ttf") format("truetype"); font-style: normal; font-weight: 700; font-display: block; }
-@font-face { font-family: "VC Merriweather"; src: url("/fonts/Merriweather-Bold.ttf") format("truetype"); font-style: normal; font-weight: 700; font-display: block; }
-@font-face { font-family: "VC Tinos"; src: url("/fonts/Tinos-Bold.ttf") format("truetype"); font-style: normal; font-weight: 700; font-display: block; }
-@font-face { font-family: "VC Literata"; src: url("/fonts/Literata-Bold.ttf") format("truetype"); font-style: normal; font-weight: 700; font-display: block; }
-@font-face { font-family: "VC EB Garamond"; src: url("/fonts/EBGaramond-Bold.ttf") format("truetype"); font-style: normal; font-weight: 700; font-display: block; }
-@font-face { font-family: "VC Cousine"; src: url("/fonts/CourierPrime-Bold.ttf") format("truetype"); font-style: normal; font-weight: 700; font-display: block; }
-@font-face { font-family: "VC Noto Sans Mono"; src: url("/fonts/NotoSansMono-Bold.ttf") format("truetype"); font-style: normal; font-weight: 700; font-display: block; }
-@font-face { font-family: "VC Patrick Hand"; src: url("/fonts/ComicNeue-Bold.ttf") format("truetype"); font-style: normal; font-weight: 700; font-display: block; }
-@font-face { font-family: "VC Noto Sans SC"; src: url("/fonts/NotoSansSC-Bold.ttf") format("truetype"); font-style: normal; font-weight: 700; font-display: block; }
-@font-face { font-family: "VC Noto Sans JP"; src: url("/fonts/NotoSansJP-Bold.ttf") format("truetype"); font-style: normal; font-weight: 700; font-display: block; }
-@font-face { font-family: "VC Noto Sans KR"; src: url("/fonts/NotoSansKR-Bold.ttf") format("truetype"); font-style: normal; font-weight: 700; font-display: block; }
+/* Bundled OFL fonts: mỗi family chỉ 1 file Bold — khai báo weight:normal để browser không synthetic bold thêm */
+@font-face { font-family: "VC Noto Sans"; src: url("/fonts/NotoSans-Bold.ttf") format("truetype"); font-style: normal; font-weight: normal; font-display: block; }
+@font-face { font-family: "VC Inter"; src: url("/fonts/Inter-Bold.ttf") format("truetype"); font-style: normal; font-weight: normal; font-display: block; }
+@font-face { font-family: "VC Arimo"; src: url("/fonts/Arimo-Bold.ttf") format("truetype"); font-style: normal; font-weight: normal; font-display: block; }
+@font-face { font-family: "VC Archivo Black"; src: url("/fonts/ArchivoBlack-Regular.ttf") format("truetype"); font-style: normal; font-weight: normal; font-display: block; }
+@font-face { font-family: "VC Roboto"; src: url("/fonts/Roboto-Bold.ttf") format("truetype"); font-style: normal; font-weight: normal; font-display: block; }
+@font-face { font-family: "VC Open Sans"; src: url("/fonts/OpenSans-Bold.ttf") format("truetype"); font-style: normal; font-weight: normal; font-display: block; }
+@font-face { font-family: "VC Carlito"; src: url("/fonts/Carlito-Bold.ttf") format("truetype"); font-style: normal; font-weight: normal; font-display: block; }
+@font-face { font-family: "VC Fira Sans"; src: url("/fonts/FiraSans-Bold.ttf") format("truetype"); font-style: normal; font-weight: normal; font-display: block; }
+@font-face { font-family: "VC Nunito"; src: url("/fonts/Nunito-Bold.ttf") format("truetype"); font-style: normal; font-weight: normal; font-display: block; }
+@font-face { font-family: "VC Anton"; src: url("/fonts/Anton-Regular.ttf") format("truetype"); font-style: normal; font-weight: normal; font-display: block; }
+@font-face { font-family: "VC Merriweather"; src: url("/fonts/Merriweather-Bold.ttf") format("truetype"); font-style: normal; font-weight: normal; font-display: block; }
+@font-face { font-family: "VC Tinos"; src: url("/fonts/Tinos-Bold.ttf") format("truetype"); font-style: normal; font-weight: normal; font-display: block; }
+@font-face { font-family: "VC Literata"; src: url("/fonts/Literata-Bold.ttf") format("truetype"); font-style: normal; font-weight: normal; font-display: block; }
+@font-face { font-family: "VC EB Garamond"; src: url("/fonts/EBGaramond-Bold.ttf") format("truetype"); font-style: normal; font-weight: normal; font-display: block; }
+@font-face { font-family: "VC Cousine"; src: url("/fonts/CourierPrime-Bold.ttf") format("truetype"); font-style: normal; font-weight: normal; font-display: block; }
+@font-face { font-family: "VC Noto Sans Mono"; src: url("/fonts/NotoSansMono-Bold.ttf") format("truetype"); font-style: normal; font-weight: normal; font-display: block; }
+@font-face { font-family: "VC Patrick Hand"; src: url("/fonts/ComicNeue-Bold.ttf") format("truetype"); font-style: normal; font-weight: normal; font-display: block; }
+@font-face { font-family: "VC Noto Sans SC"; src: url("/fonts/NotoSansSC-Bold.ttf") format("truetype"); font-style: normal; font-weight: normal; font-display: block; }
+@font-face { font-family: "VC Noto Sans JP"; src: url("/fonts/NotoSansJP-Bold.ttf") format("truetype"); font-style: normal; font-weight: normal; font-display: block; }
+@font-face { font-family: "VC Noto Sans KR"; src: url("/fonts/NotoSansKR-Bold.ttf") format("truetype"); font-style: normal; font-weight: normal; font-display: block; }
 
 /* Logo editor follows the panel width, not the browser viewport. */
 .logo-editor-panel {

@@ -68,6 +68,35 @@ def media_size(folder: str = ""):
     return result
 
 
+@router.get("/api/srt-image/media-thumb")
+def media_thumb(folder: str = ""):
+    """Trả ảnh đầu tiên trong folder — dùng cho preview delogo."""
+    p = Path(folder)
+    if not p.is_dir():
+        raise HTTPException(404, "Folder không tồn tại")
+    files = sorted(
+        (f for f in p.iterdir() if f.suffix.lower() in MEDIA_SUFFIXES),
+        key=_natural_name,
+    )
+    if not files:
+        raise HTTPException(404, "Không có media")
+    first = files[0]
+    img_exts = {".jpg", ".jpeg", ".jfif", ".png", ".webp", ".bmp"}
+    if first.suffix.lower() in img_exts:
+        mt = "image/jpeg" if first.suffix.lower() in {".jpg", ".jpeg", ".jfif"} else f"image/{first.suffix.lower().strip('.')}"
+        return FileResponse(first, media_type=mt)
+    # Video: trích frame đầu
+    import tempfile
+    tmp = Path(tempfile.mktemp(suffix=".jpg"))
+    subprocess.run(
+        ["ffmpeg", "-y", "-i", str(first), "-frames:v", "1", "-q:v", "3", str(tmp)],
+        capture_output=True, timeout=15,
+    )
+    if tmp.exists():
+        return FileResponse(tmp, media_type="image/jpeg")
+    raise HTTPException(500, "Không trích được frame")
+
+
 @router.get("/api/srt-image/jobs")
 def jobs():
     return list_jobs()

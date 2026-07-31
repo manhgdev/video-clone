@@ -140,32 +140,33 @@ export function captionChromeStyle(
   const style: React.CSSProperties = {
     color,
     fontFamily: captionFontCss(family),
-    fontWeight: 700, // Tất cả @font-face đều khai báo weight:700 (Bold TTF) — cần match
-    textShadow:
-      settings.captionStroke === false
-        ? 'none'
-        : '0 2px 4px rgba(0,0,0,0.9)',
   }
   if (bg === 'solid' || bg === 'box' || bg === 'blur') {
     const bgColor = settings.captionBgColor || '#000000'
     const op = Math.max(0, Math.min(100, settings.captionBgOpacity ?? 55)) / 100
     const [r, g, b] = parseHexColor(bgColor)
     if (bg === 'solid') {
-      style.backgroundColor = `rgba(${r},${g},${b},${Math.max(0.2, op)})`
-      style.borderRadius = 4
-      style.padding = '0.12em 0.28em'
+      style.backgroundColor = `rgba(${r},${g},${b},${op})`
+      style.padding = '0.1em 0.22em'
+      // ASS BorderStyle=3: shadow trên hộp nền, không trên chữ
     } else if (bg === 'box') {
-      style.backgroundColor = `rgba(${r},${g},${b},${Math.max(0.35, op)})`
-      style.borderRadius = 6
-      style.padding = '0.18em 0.4em'
-      style.border = '1px solid rgba(255,255,255,0.12)'
+      style.backgroundColor = `rgba(${r},${g},${b},${op})`
+      style.padding = '0.15em 0.35em'
+      // ASS BorderStyle=3: shadow trên hộp nền, không trên chữ
     } else {
+      // blur: chỉ preview, ASS không hỗ trợ backdrop blur
       style.backgroundColor = `rgba(${r},${g},${b},${Math.max(0.15, op * 0.55)})`
       style.backdropFilter = 'blur(10px) saturate(0.9)'
       style.WebkitBackdropFilter = 'blur(10px) saturate(0.9)'
       style.borderRadius = 6
       style.padding = '0.14em 0.32em'
     }
+  } else {
+    // none: ASS Outline=1 (viền mỏng tối) + Shadow=1 (1px cứng)
+    // CSS tương đương: multi-shadow không blur mô phỏng outline + 1px offset
+    style.textShadow = settings.captionStroke === false
+      ? 'none'
+      : '-1px 0 0 rgba(0,0,0,0.9), 1px 0 0 rgba(0,0,0,0.9), 0 -1px 0 rgba(0,0,0,0.9), 0 1px 0 rgba(0,0,0,0.9), 1px 1px 0 rgba(0,0,0,0.9)'
   }
   // Không WebkitTextStroke — làm chữ «cứng» xấu hơn bản drop-shadow
   void customColor
