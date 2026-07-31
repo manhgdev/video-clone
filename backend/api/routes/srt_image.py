@@ -69,8 +69,8 @@ def media_size(folder: str = ""):
 
 
 @router.get("/api/srt-image/media-thumb")
-def media_thumb(folder: str = ""):
-    """Trả ảnh đầu tiên trong folder — dùng cho preview delogo."""
+def media_thumb(folder: str = "", index: int = 0):
+    """Trả ảnh thứ index trong folder — dùng cho preview delogo."""
     p = Path(folder)
     if not p.is_dir():
         raise HTTPException(404, "Folder không tồn tại")
@@ -80,20 +80,22 @@ def media_thumb(folder: str = ""):
     )
     if not files:
         raise HTTPException(404, "Không có media")
-    first = files[0]
+    idx = max(0, min(index, len(files) - 1))
+    target = files[idx]
     img_exts = {".jpg", ".jpeg", ".jfif", ".png", ".webp", ".bmp"}
-    if first.suffix.lower() in img_exts:
-        mt = "image/jpeg" if first.suffix.lower() in {".jpg", ".jpeg", ".jfif"} else f"image/{first.suffix.lower().strip('.')}"
-        return FileResponse(first, media_type=mt)
+    headers = {"X-Total": str(len(files)), "X-Index": str(idx), "X-Name": target.name}
+    if target.suffix.lower() in img_exts:
+        mt = "image/jpeg" if target.suffix.lower() in {".jpg", ".jpeg", ".jfif"} else f"image/{target.suffix.lower().strip('.')}"
+        return FileResponse(target, media_type=mt, headers=headers)
     # Video: trích frame đầu
     import tempfile
     tmp = Path(tempfile.mktemp(suffix=".jpg"))
     subprocess.run(
-        ["ffmpeg", "-y", "-i", str(first), "-frames:v", "1", "-q:v", "3", str(tmp)],
+        ["ffmpeg", "-y", "-i", str(target), "-frames:v", "1", "-q:v", "3", str(tmp)],
         capture_output=True, timeout=15,
     )
     if tmp.exists():
-        return FileResponse(tmp, media_type="image/jpeg")
+        return FileResponse(tmp, media_type="image/jpeg", headers=headers)
     raise HTTPException(500, "Không trích được frame")
 
 

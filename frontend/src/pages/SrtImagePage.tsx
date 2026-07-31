@@ -688,10 +688,10 @@ function SubtitleLivePreview({ fontFamily, textColor, bgStyle, bgColor, bgOpacit
   }
   // Ưu tiên kích thước thực tế từ media khi đang ở chế độ auto
   const ap = (resolution === 'auto' && mediaAp) ? mediaAp : (resMap[resolution] ?? { w: 16, h: 9 })
-  // active = platform khớp resolution, fallback 'auto'
   const activePlatform = PLATFORM_OPTIONS.find(p => p.res === resolution)?.id ?? 'auto'
   const frameRef = useRef<HTMLDivElement>(null)
   const [frameH, setFrameH] = useState(300)
+  const [thumbIdx, setThumbIdx] = useState(0)
 
   // Đo chiều cao frame thực tế để tính scale đúng với ASS (PlayResY=288)
   useEffect(() => {
@@ -765,12 +765,28 @@ function SubtitleLivePreview({ fontFamily, textColor, bgStyle, bgColor, bgOpacit
             <>
               {/* Nền: ảnh thật khi delogo bật, gradient khi không */}
               {delogoEnabled && mediaFolder ? (
-                <img
-                  src={`/api/srt-image/media-thumb?folder=${encodeURIComponent(mediaFolder)}`}
-                  alt=""
-                  style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', opacity: 0.85 }}
-                  onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }}
-                />
+                <>
+                  <img
+                    src={`/api/srt-image/media-thumb?folder=${encodeURIComponent(mediaFolder)}&index=${thumbIdx}`}
+                    alt=""
+                    style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', opacity: 0.85 }}
+                    onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }}
+                  />
+                  <div style={{
+                    position: 'absolute', top: 6, right: 6, zIndex: 22,
+                    display: 'flex', gap: 3, alignItems: 'center',
+                  }}>
+                    <button onClick={() => setThumbIdx(i => Math.max(0, i - 1))} style={{
+                      width: 22, height: 22, border: 'none', borderRadius: 4,
+                      background: 'rgba(0,0,0,0.55)', color: '#fff', fontSize: 13, cursor: 'pointer', lineHeight: 1,
+                    }}>◀</button>
+                    <span style={{ fontSize: 10, color: '#fff', textShadow: '0 1px 3px #000', fontWeight: 600 }}>{thumbIdx + 1}</span>
+                    <button onClick={() => setThumbIdx(i => i + 1)} style={{
+                      width: 22, height: 22, border: 'none', borderRadius: 4,
+                      background: 'rgba(0,0,0,0.55)', color: '#fff', fontSize: 13, cursor: 'pointer', lineHeight: 1,
+                    }}>▶</button>
+                  </div>
+                </>
               ) : (
                 <div className="siv-live-preview-bg" />
               )}

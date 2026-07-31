@@ -153,17 +153,46 @@ def _run_stage(job_id: str, cmd: list[str]) -> None:
         raise RuntimeError(f"FFmpeg kết thúc với mã {proc.returncode}: {detail}")
 
 
+def _has_logo_region(source: Path, x: int, y: int, w: int, h: int) -> bool:
+    """Kiểm tra vùng (x,y,w,h) có đủ phức tạp (variance) để là logo không.
+    ponytail: heuristic đơn giản — vùng trơn = không logo → skip delogo."""
+    try:
+        from PIL import Image
+        import numpy as np
+        img_exts = {".jpg", ".jpeg", ".jfif", ".png", ".webp", ".bmp"}
+        if source.suffix.lower() not in img_exts:
+            return True  # video → assume có logo, safe hơn
+        with Image.open(source) as im:
+            iw, ih = im.size
+            cx, cy = min(x, iw - 1), min(y, ih - 1)
+            cw, ch = min(w, iw - cx), min(h, ih - cy)
+            if cw < 4 or ch < 4:
+                return False
+            crop = im.crop((cx, cy, cx + cw, cy + ch)).convert("L")
+            arr = np.array(crop, dtype=float)
+            return float(arr.std()) > 8  # std > 8 → có nội dung (logo/text)
+    except Exception:
+        return True  # lỗi → safe: áp delogo
+
+
 def _prepare_video_segments(
     job_id: str, media: list[Path], durations: list[float], work: Path,
     width: int, height: int, fps: int, crf: int, use_gpu: bool, zoom: str = "off",
     delogo_prefix: str = "",
 ) -> list[Path]:
     segments: list[Path] = []
-    base_vf = (
-        f"{delogo_prefix}"
+    # Parse delogo params 1 lần để check per-file
+    dl_params: tuple[int, int, int, int] | None = None
+    if delogo_prefix:
+        import re as _re
+        m = _re.search(r"x=(\d+):y=(\d+):w=(\d+):h=(\d+)", delogo_prefix)
+        if m:
+            dl_params = (int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4)))
+    base_vf_no_dl = (
         f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
         f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,fps={fps}"
     )
+    base_vf_dl = f"{delogo_prefix}{base_vf_no_dl}"
     last_variant = -1
     for index, (source, duration) in enumerate(zip(media, durations)):
         variant = random.randrange(16)
@@ -171,7 +200,12 @@ def _prepare_video_segments(
             variant = (variant + random.randrange(1, 16)) % 16
         last_variant = variant
         motion = _motion_filter(zoom, width, height, fps, variant, duration)
-        vf = f"{base_vf}{',' + motion if motion else ''},format=yuv420p"
+        # ponytail: chỉ delogo file thật sự có logo trong vùng đó
+        use_dl = delogo_prefix and (not dl_params or _has_logo_region(source, *dl_params))
+        chosen_vf = base_vf_dl if use_dl else base_vf_no_dl
+        vf = f"{chosen_vf}{',' + motion if motion else ''},format=yuv420p"
+        if use_dl:
+            _log(job_id, f"Clip {index + 1}: delogo ✓ · {source.name}")
         _log(job_id, f"Chuẩn bị clip {index + 1}/{len(durations)}: {source.name} ({duration:.2f}s)")
         output = work / f"segment_{index:05d}.mp4"
         cmd = ["ffmpeg", "-y"]
@@ -570,12 +604,18 @@ def run(job_id: str) -> None:
             dh = max(10, round(float(dl.get("h", 4)) / 100 * src_h))
             delogo_prefix = f"delogo=x={dx}:y={dy}:w={dw}:h={dh},"
             _log(job_id, f"Delogo: {dw}×{dh} tại ({dx},{dy}) trên {src_w}×{src_h}")
+        # ponytail: delogo bật → force segments để check logo per-file
+        need_segments = (
+            zoom_mode != "off"
+            or bool(delogo_prefix)
+            or any(is_video(path) for path in media[:len(durations)])
+        )
         sources = (
             _prepare_video_segments(
                 job_id, media, durations, work, width, height, fps, crf, use_gpu, zoom_mode,
                 delogo_prefix,
             )
-            if zoom_mode != "off" or any(is_video(path) for path in media[:len(durations)]) else media
+            if need_segments else media
         )
         concat = work / "media.ffconcat"
         lines = ["ffconcat version 1.0"]
