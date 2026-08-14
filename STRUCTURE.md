@@ -117,6 +117,12 @@ tests/
    ├─ video/                  Fixture video nhỏ
    └─ conftest.py             Thêm `backend/` vào Python path khi pytest
 
+tests/fixtures/
+├─ fonts/                     Video fixture kiểm tra font
+├─ frames/                    Ảnh frame dọc/ngang dùng cho OCR và export
+├─ subtitles/                 File SRT mẫu
+└─ state/                     JSON state/DB mẫu
+
 tests/manual/
 └─ font/                      Script chẩn đoán font/layout thủ công + ảnh mẫu
 ```
