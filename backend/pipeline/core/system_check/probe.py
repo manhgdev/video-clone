@@ -137,6 +137,8 @@ _AI_RUNTIME_MODULES = (
     "torchaudio",
     "transformers",
     "vieneu",
+    "soundfile",
+    "cffi",
 )
 
 

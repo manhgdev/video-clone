@@ -129,6 +129,14 @@ _idle: dict[str, list["_Worker"]] = {}
 _all_workers: list["_Worker"] = []
 
 
+def _sanitize_no_proxy(env: dict[str, str]) -> None:
+    broken = {"::1", "::1/128", "[::1]", "[::1]/128"}
+    for name in ("NO_PROXY", "no_proxy"):
+        raw = env.get(name)
+        if raw:
+            env[name] = ",".join(part for part in raw.split(",") if part.strip() not in broken)
+
+
 class _Worker:
     def __init__(self, py: Path, backend: str, device: str) -> None:
         self.backend = backend
@@ -136,6 +144,7 @@ class _Worker:
         self.key = f"{backend}|{device}"
         self._lock = threading.Lock()
         env = os.environ.copy()
+        _sanitize_no_proxy(env)
         env["PYTHONIOENCODING"] = "utf-8"
         env["TQDM_DISABLE"] = "1"
         env["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"

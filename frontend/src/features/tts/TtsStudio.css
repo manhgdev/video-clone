@@ -83,6 +83,10 @@ html.dark .tts-studio {
   display: none;
 }
 
+.tts-mobile-mode-tabs {
+  display: none;
+}
+
 .tts-side-brand {
   display: flex;
   align-items: center;
@@ -209,6 +213,7 @@ html.dark .tts-studio {
   box-shadow: 0 1px 2px rgb(15 23 42 / 4%);
   min-width: 0;
   overflow: hidden;
+  container-type: inline-size;
 }
 
 .tts-engine-card .top {
@@ -271,8 +276,15 @@ html.dark .tts-studio {
   color: var(--tts-ink);
   line-height: 1.35;
   min-width: 0;
-  overflow-wrap: anywhere;
-  word-break: break-word;
+  overflow-wrap: break-word;
+  word-break: normal;
+}
+
+@container (max-width: 180px) {
+  .tts-engine-card .meta-row {
+    grid-template-columns: 1fr;
+    gap: 1px;
+  }
 }
 
 .tts-engine-card .meta strong.ok {
@@ -2013,6 +2025,25 @@ html.dark .tts-wave-box {
   }
 }
 
+/* Màn hình vừa: Clone có tab riêng, dành trọn hàng đầu cho ba ô tạo giọng. */
+@media (max-width: 1500px) {
+  .tts-dash-item[data-dash-id="clone"] {
+    display: none;
+  }
+}
+
+@media (min-width: 901px) and (max-width: 1500px) {
+  .tts-dash-item[data-dash-id="input"] {
+    grid-column: 1 / span 8 !important;
+  }
+  .tts-dash-item[data-dash-id="voice"] {
+    grid-column: 9 / span 8 !important;
+  }
+  .tts-dash-item[data-dash-id="advanced"] {
+    grid-column: 17 / span 8 !important;
+  }
+}
+
 .tts-page-panel {
   max-width: 1100px;
   width: 100%;
@@ -2114,6 +2145,35 @@ html.dark .tts-wave-box {
     margin: 0;
     background: rgba(15, 23, 42, 0.42);
     cursor: pointer;
+  }
+
+  .tts-mobile-mode-tabs {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 4px;
+    margin-bottom: 12px;
+    padding: 4px;
+    border: 1px solid var(--tts-line);
+    border-radius: 10px;
+    background: var(--tts-card);
+  }
+  .tts-mobile-mode-tabs button {
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--tts-muted);
+    font: inherit;
+    font-size: 0.82rem;
+    font-weight: 650;
+  }
+  .tts-mobile-mode-tabs button.active {
+    background: var(--tts-blue-soft);
+    color: var(--tts-blue);
   }
 
   .tts-dash {

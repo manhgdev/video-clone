@@ -13,6 +13,12 @@ from pipeline.core import system_check
 from pipeline.core.media import _gpu_kind_from_name
 
 
+def test_ai_runtime_includes_soundfile_native_dependency() -> None:
+    assert "cffi" in system_check._AI_RUNTIME_PACKAGES
+    assert {"cffi", "pycparser"}.issubset(system_check._PKG_WHISPER)
+    assert {"soundfile", "cffi"}.issubset(system_check._AI_RUNTIME_MODULES)
+
+
 def test_frozen_runtime_provisions_managed_python(monkeypatch, tmp_path):
     calls = []
     py = tmp_path / ".venv-runtime" / "Scripts" / "python.exe"

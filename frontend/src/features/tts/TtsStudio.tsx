@@ -452,6 +452,12 @@ export default function TtsStudio({
 
   const vieneu = status.vieneu
 
+  useEffect(() => {
+    if (vieneu?.loadState !== 'loading') return
+    const timer = window.setInterval(() => void loadStatus(), 2000)
+    return () => window.clearInterval(timer)
+  }, [vieneu?.loadState, loadStatus])
+
   function go(id: string) {
     // input/srt gộp vào dashboard Tổng quan (không còn tab sidebar riêng)
     if (id === 'input' || id === 'srt' || id === 'make') {
@@ -1180,6 +1186,29 @@ export default function TtsStudio({
             <button type="button"><IconKb size={14} /> Phím tắt</button>
           </div>
         </div>
+
+        {(isFullDash || section === 'clone') && (
+          <div className="tts-mobile-mode-tabs" role="tablist" aria-label="Chế độ tạo giọng">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={isFullDash}
+              className={isFullDash ? 'active' : undefined}
+              onClick={() => go('overview')}
+            >
+              <IconMic size={16} /> Tạo giọng nói
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={section === 'clone'}
+              className={section === 'clone' ? 'active' : undefined}
+              onClick={() => go('clone')}
+            >
+              <IconClone /> Clone giọng nói
+            </button>
+          </div>
+        )}
 
         {error && <div className="tts-error">{error}</div>}
 

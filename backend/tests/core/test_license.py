@@ -1,3 +1,4 @@
+from pipeline.core import license
 from pipeline.core.license import status_from_payload
 
 
@@ -18,3 +19,22 @@ def test_zm_tool_license_requires_exact_app_and_time() -> None:
 
     payload["apps"][0].update(path="zm_tool", remaining_day=0)
     assert status_from_payload(payload, "ABCDEF123456")["valid"] is False
+
+
+def test_license_request_ignores_broken_environment_proxy(monkeypatch) -> None:
+    seen = {}
+
+    class Response:
+        def raise_for_status(self): pass
+        def json(self): return {"status": True, "apps": []}
+
+    class Client:
+        def __init__(self, **kwargs): seen.update(kwargs)
+        def __enter__(self): return self
+        def __exit__(self, *_args): pass
+        def post(self, *_args, **_kwargs): return Response()
+
+    monkeypatch.setattr(license.httpx, "Client", Client)
+
+    assert license._request("checkkey", "test")["status"] is True
+    assert seen["trust_env"] is False

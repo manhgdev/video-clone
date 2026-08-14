@@ -32,6 +32,15 @@ _clone_lock = threading.Lock()
 _clone_cache: dict[str, tuple[int, int]] = {}
 
 
+def _sanitize_no_proxy(env: Any = os.environ) -> None:
+    """Drop bare IPv6 loopback entries that current httpx parses as port ``:1``."""
+    broken = {"::1", "::1/128", "[::1]", "[::1]/128"}
+    for name in ("NO_PROXY", "no_proxy"):
+        raw = env.get(name)
+        if raw:
+            env[name] = ",".join(part for part in raw.split(",") if part.strip() not in broken)
+
+
 def _prepare_cuda_weight_load(backend: str, device: str) -> bool:
     """Initialize CUDA; stage safetensors through CPU if pinned memory is unavailable.
 
@@ -271,6 +280,7 @@ def get_client() -> Any:
             pass
         _load_state = "loading"
         try:
+            _sanitize_no_proxy()
             from pipeline.core.system_check import ensure_runtime_torch, ensure_runtime_transformers
             from pipeline.core.runtime_site import bootstrap_ai_runtime, install_runtime_meta_path
 

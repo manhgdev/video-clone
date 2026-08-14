@@ -112,6 +112,7 @@ _AI_RUNTIME_PACKAGES = (
     "pyyaml",
     "sea-g2p",
     "soundfile",
+    "cffi",
     "soxr",
     "httpx",
     "tokenizers",
@@ -119,7 +120,7 @@ _AI_RUNTIME_PACKAGES = (
 )
 
 # 3 nhóm riêng — mỗi nhóm cài 1 pip call với --no-deps, có header log riêng.
-_PKG_WHISPER = ("faster-whisper>=1.1.0", "soundfile", "soxr", "tokenizers")
+_PKG_WHISPER = ("faster-whisper>=1.1.0", "soundfile", "cffi", "pycparser", "soxr", "tokenizers")
 _PKG_OCR     = ("rapidocr-onnxruntime>=1.3.20", "pillow", "opencv-python-headless<5.0")
 _PKG_VIENEU  = (
     "huggingface-hub>=0.34", "httpx", "pyyaml",
@@ -154,6 +155,8 @@ _MODULE_TO_PACKAGE: dict[str, str] = {
     "torchaudio": "torchaudio",
     "transformers": "transformers>=4.46.0",
     "vieneu": "vieneu>=3.2.0",
+    "soundfile": "soundfile",
+    "cffi": "cffi",
 }
 
 
@@ -419,6 +422,8 @@ def install_ai_runtime() -> dict[str, Any]:
         _PKG_MOD: dict[str, str] = {
             "faster-whisper": "faster_whisper",
             "soundfile": "soundfile",
+            "cffi": "cffi",
+            "pycparser": "pycparser",
             "soxr": "soxr",
             "tokenizers": "tokenizers",
             "rapidocr-onnxruntime": "rapidocr_onnxruntime",

@@ -1,6 +1,7 @@
 /** TTS Studio UI preferences — localStorage, not project/backend settings. */
 
 export const TTS_SETTINGS_KEY = 'video-clone:tts-settings:v1'
+export const DEFAULT_CAPCUT_VOICE = 'cc:BV074_streaming:7102355709945188865'
 
 export type TtsEngine = 'zmai' | 'vieneu' | 'clone' | 'capcut' | 'eleven' | 'system'
 export type TtsOutputFormat = 'wav48' | 'wav16' | 'mp3'
@@ -26,8 +27,8 @@ export type TtsSettings = {
 
 export const defaultTtsSettings: TtsSettings = {
   lang: 'auto',
-  engine: 'zmai',
-  voice: '',
+  engine: 'capcut',
+  voice: DEFAULT_CAPCUT_VOICE,
   style: 'tu_nhien',
   speed: 1,
   volume: 1,
@@ -131,7 +132,9 @@ export function persistTtsSettings(s: TtsSettings): void {
 /** ponytail: self-check — serialize/validate falls back safely */
 export function __checkTtsSettings(): void {
   const base = parseTtsSettings(null)
-  if (base.engine !== 'zmai' || base.speed !== 1) throw new Error('defaults mismatch')
+  if (base.engine !== 'capcut' || base.voice !== DEFAULT_CAPCUT_VOICE || base.speed !== 1) {
+    throw new Error('defaults mismatch')
+  }
 
   const ok = parseTtsSettings({
     lang: 'vi',
@@ -168,14 +171,14 @@ export function __checkTtsSettings(): void {
     outputFormat: 'flac',
     voice: 'x'.repeat(300),
   })
-  if (bad.engine !== 'zmai') throw new Error('bad engine must fallback')
+  if (bad.engine !== 'capcut') throw new Error('bad engine must fallback')
   if (bad.speed !== 2) throw new Error('out-of-range speed must clamp')
   if (bad.pitch !== 0) throw new Error('bad pitch must fallback')
   if (bad.gapMs !== 50) throw new Error('out-of-range gapMs must clamp')
   if (bad.lang !== 'auto') throw new Error('bad lang must fallback')
   if (bad.style !== 'tu_nhien') throw new Error('bad style must fallback')
   if (bad.outputFormat !== 'wav48') throw new Error('bad output must fallback')
-  if (bad.voice !== '') throw new Error('oversized voice must fallback')
+  if (bad.voice !== DEFAULT_CAPCUT_VOICE) throw new Error('oversized voice must fallback')
 
   const partial = parseTtsSettings({ engine: 'capcut', speed: 1.5 })
   if (partial.engine !== 'capcut' || partial.speed !== 1.5) throw new Error('partial merge failed')
@@ -184,5 +187,7 @@ export function __checkTtsSettings(): void {
   }
 
   const junk = parseTtsSettings('{not json')
-  if (junk.engine !== 'zmai') throw new Error('corrupt JSON must fallback')
+  if (junk.engine !== 'capcut' || junk.voice !== DEFAULT_CAPCUT_VOICE) {
+    throw new Error('corrupt JSON must fallback')
+  }
 }

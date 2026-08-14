@@ -206,26 +206,27 @@
   display: none;
 }
 
-@media (max-width: 900px) {
-  .nav button span { display: none; }
-  .nav button { padding: 0 10px; }
+@media (max-width: 1500px) {
+  .brand-text span { display: none; }
   .nav > .nav-download { display: none; }
   .nav .nav-tools-menu .nav-download-menu { display: inline-flex; }
-  .nav .nav-tools-menu .nav-download-menu span { display: inline; }
   .nav-tools > button.compact-active {
     color: var(--primary);
     font-weight: 650;
     border-bottom-color: var(--primary);
   }
+}
+
+@media (max-width: 900px) {
+  .nav button span { display: none; }
+  .nav button { padding: 0 10px; }
+  .nav .nav-tools-menu .nav-download-menu span { display: inline; }
 
   /* TTS hẹp: ☰ thay logo — sidebar drawer, không nửa trên */
   .header--tts .header-menu-btn {
     display: inline-flex;
   }
   .header--tts .header-logo-wrap {
-    display: none;
-  }
-  .header--tts .brand-text span {
     display: none;
   }
 }

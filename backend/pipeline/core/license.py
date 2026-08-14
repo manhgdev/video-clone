@@ -48,9 +48,10 @@ def _request(action: str, key: str) -> dict[str, Any]:
         "Origin": "https://zm.io.vn",
         "Referer": "https://zm.io.vn/",
     }
-    response = httpx.post(
-        f"{API_BASE}/{action}", json={"key": key}, headers=headers, timeout=30.0
-    )
+    # httpx có thể parse NO_PROXY chứa IPv6 trần ``::1`` thành port ``:1``.
+    # License API là HTTPS cố định nên kết nối trực tiếp, không phụ thuộc proxy máy.
+    with httpx.Client(trust_env=False, timeout=30.0) as client:
+        response = client.post(f"{API_BASE}/{action}", json={"key": key}, headers=headers)
     response.raise_for_status()
     payload = response.json()
     if payload.get("error"):
