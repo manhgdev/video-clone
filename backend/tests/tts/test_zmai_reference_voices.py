@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from pipeline.tts.engines import vieneu
+from pipeline.tts import voice_store
 
 
 class _FakeClient:
@@ -15,6 +16,22 @@ class _FakeClient:
     def encode_reference(self, path: Path, denoise: bool = False):
         self.calls += 1
         return f"embedding-{self.calls}", f"codes-{self.calls}"
+
+
+def test_reference_voice_list_excludes_missing_audio(tmp_path, monkeypatch) -> None:
+    existing = tmp_path / "ready.wav"
+    existing.write_bytes(b"wav")
+    monkeypatch.setattr(voice_store, "REFERENCE_ROOT", tmp_path)
+    monkeypatch.setattr(
+        voice_store,
+        "_read_reference_raw",
+        lambda: [
+            {"id": "ready", "engine": "vieneu", "type": "zmAI", "ref_file": "ready.wav"},
+            {"id": "missing", "engine": "vieneu", "type": "zmAI", "ref_file": "missing.wav"},
+        ],
+    )
+
+    assert [item["id"] for item in voice_store.load_reference_voices()] == ["ready"]
 
 
 def test_reference_encode_cache_refreshes_when_wav_changes(tmp_path, monkeypatch) -> None:

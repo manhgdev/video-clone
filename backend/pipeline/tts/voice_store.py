@@ -249,13 +249,14 @@ def save_reference_voices(items: list[dict[str, Any]]) -> None:
 
 
 def load_reference_voices() -> list[dict[str, Any]]:
-    """zmAI voices backed by distinct reference WAV files (hidden excluded)."""
+    """Only expose visible zmAI voices that have a usable reference file."""
     return [
         item
         for item in _read_reference_raw()
         if item.get("engine") == "vieneu"
         and item.get("type") == "zmAI"
         and not item.get("hidden")
+        and reference_path(item).is_file()
     ]
 
 

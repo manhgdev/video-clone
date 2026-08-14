@@ -188,6 +188,7 @@ export default function TtsStudio({
   const [inputMode, setInputMode] = useState<'text' | 'srt'>('text')
   const [previewBusy, setPreviewBusy] = useState(false)
   const [previewingVoiceId, setPreviewingVoiceId] = useState<string | null>(null)
+  const [previewGeneratingVoiceId, setPreviewGeneratingVoiceId] = useState<string | null>(null)
   const [selectedVoiceIds, setSelectedVoiceIds] = useState<Set<string>>(() => new Set())
   const [bulkMoveOpen, setBulkMoveOpen] = useState(false)
   const [voiceQuery, setVoiceQuery] = useState('')
@@ -821,19 +822,10 @@ export default function TtsStudio({
     }
   }
 
-  function toggleVoicePreview(v: Voice) {
-    const current = voicePreviewRef.current
-    if (current && previewingVoiceId === v.id && !current.paused) {
-      current.pause()
-      setPreviewingVoiceId(null)
-      return
-    }
-    current?.pause()
-    audioRef.current?.pause()
-    if (!v.previewUrl) return
-    const player = new Audio(`${v.previewUrl}${v.previewUrl.includes('?') ? '&' : '?'}t=${Date.now()}`)
+  function playVoicePreview(voiceId: string, url: string) {
+    const player = new Audio(`${url}${url.includes('?') ? '&' : '?'}t=${Date.now()}`)
     voicePreviewRef.current = player
-    setPreviewingVoiceId(v.id)
+    setPreviewingVoiceId(voiceId)
     const clear = () => {
       if (voicePreviewRef.current === player) {
         voicePreviewRef.current = null
@@ -849,6 +841,44 @@ export default function TtsStudio({
       clear()
       setError('Trình duyệt không cho phát audio mẫu')
     })
+  }
+
+  async function toggleVoicePreview(v: Voice) {
+    const current = voicePreviewRef.current
+    if (current && previewingVoiceId === v.id && !current.paused) {
+      current.pause()
+      setPreviewingVoiceId(null)
+      return
+    }
+    current?.pause()
+    audioRef.current?.pause()
+    if (v.previewUrl) {
+      playVoicePreview(v.id, v.previewUrl)
+      return
+    }
+    setPreviewGeneratingVoiceId(v.id)
+    setError('')
+    try {
+      const sampleLang = v.language || lang
+      const res = await api.ttsStudioSynth({
+        jobId: crypto.randomUUID().replaceAll('-', '').slice(0, 12),
+        text: previewSampleFor(sampleLang).slice(0, 200),
+        voice: v.id,
+        lang: sampleLang,
+        speed,
+        volume,
+        pitch,
+        style,
+        matchDuration: 'none',
+        autoSplit: false,
+        title: `Nghe thử · ${voiceDisplayName(v.id, voices, v.name)}`.slice(0, 80),
+      })
+      playVoicePreview(v.id, res.audioUrl)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Không tạo được audio nghe thử')
+    } finally {
+      setPreviewGeneratingVoiceId(null)
+    }
   }
 
   /** Danh sách giọng theo engine; zmAI + clone có sửa / xóa / chuyển bucket. */
@@ -919,17 +949,20 @@ export default function TtsStudio({
               >
                 <IconHeart size={14} filled={isVoiceFavorite(v)} />
               </button>
-              {v.previewUrl && (
-                <button
-                  type="button"
-                  className="tts-btn-sm tts-btn-icon"
-                  title={previewingVoiceId === v.id ? 'Dừng audio mẫu' : 'Phát audio mẫu gốc'}
-                  aria-label={previewingVoiceId === v.id ? 'Dừng' : 'Phát audio mẫu'}
-                  onClick={() => toggleVoicePreview(v)}
-                >
-                  {previewingVoiceId === v.id ? <IconPause size={13} /> : <IconPlay size={13} />}
-                </button>
-              )}
+              <button
+                type="button"
+                className="tts-btn-sm tts-btn-icon"
+                title={previewingVoiceId === v.id
+                  ? 'Dừng audio mẫu'
+                  : v.previewUrl ? 'Phát audio mẫu gốc' : 'Tạo và phát câu nghe thử'}
+                aria-label={previewingVoiceId === v.id ? 'Dừng' : 'Phát audio mẫu'}
+                disabled={busy || previewGeneratingVoiceId !== null}
+                onClick={() => void toggleVoicePreview(v)}
+              >
+                {previewGeneratingVoiceId === v.id
+                  ? <span aria-hidden>…</span>
+                  : previewingVoiceId === v.id ? <IconPause size={13} /> : <IconPlay size={13} />}
+              </button>
               {canManage && (
                 <>
                   <select
