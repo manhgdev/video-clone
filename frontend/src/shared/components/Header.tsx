@@ -137,7 +137,9 @@ export default function Header({
               <div key={item.id} className="nav-tools" ref={toolsRef}>
                 <button
                   type="button"
-                  className={mode === 'cleaner' || mode === 'srt-image' || mode === 'srt-export' ? 'active' : undefined}
+                  className={mode === 'cleaner' || mode === 'srt-image' || mode === 'srt-export'
+                    ? 'active'
+                    : mode === 'download' ? 'compact-active' : undefined}
                   aria-haspopup="menu"
                   aria-expanded={toolsOpen}
                   onClick={() => setToolsOpen((open) => !open)}
@@ -147,6 +149,18 @@ export default function Header({
                 </button>
                 {toolsOpen ? (
                   <div className="nav-tools-menu" role="menu">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className={`nav-download-menu${mode === 'download' ? ' active' : ''}`}
+                      onClick={() => {
+                        setToolsOpen(false)
+                        onModeChange?.('download')
+                      }}
+                    >
+                      <IconDownload size={16} />
+                      <span>Download Video</span>
+                    </button>
                     <button
                       type="button"
                       role="menuitem"
@@ -198,7 +212,7 @@ export default function Header({
             <button
               key={item.id}
               type="button"
-              className={active ? 'active' : undefined}
+              className={`${active ? 'active ' : ''}${item.id === 'download' ? 'nav-download' : ''}`.trim() || undefined}
               onClick={() => {
                 if (item.action === 'config') {
                   onOpenConfig?.()

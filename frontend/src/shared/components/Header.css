@@ -121,6 +121,10 @@
   background: color-mix(in srgb, var(--primary) 12%, transparent);
 }
 
+.nav .nav-tools-menu .nav-download-menu {
+  display: none;
+}
+
 .hw {
   display: flex;
   align-items: center;
@@ -205,6 +209,14 @@
 @media (max-width: 900px) {
   .nav button span { display: none; }
   .nav button { padding: 0 10px; }
+  .nav > .nav-download { display: none; }
+  .nav .nav-tools-menu .nav-download-menu { display: inline-flex; }
+  .nav .nav-tools-menu .nav-download-menu span { display: inline; }
+  .nav-tools > button.compact-active {
+    color: var(--primary);
+    font-weight: 650;
+    border-bottom-color: var(--primary);
+  }
 
   /* TTS hẹp: ☰ thay logo — sidebar drawer, không nửa trên */
   .header--tts .header-menu-btn {
