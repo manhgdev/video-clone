@@ -6,6 +6,8 @@ import shutil
 import subprocess
 import sys
 import threading
+import tempfile
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -662,3 +664,54 @@ def install_demucs_cuda() -> dict[str, Any]:
     label = "Apple GPU" if _apple_silicon() else ("NVIDIA GPU" if _which("nvidia-smi") else "CPU")
     _invalidate_checks_cache()
     return {"ok": True, "message": f"Đã cài Demucs ({label})", "detail": detail}
+
+
+def install_nvm() -> dict[str, Any]:
+    """Install NVM and the current Node.js LTS without opening a browser."""
+    if shutil.which("node"):
+        return {"ok": True, "message": "Node.js đã sẵn sàng", "detail": "node trên PATH"}
+    if sys.platform == "win32":
+        winget = shutil.which("winget")
+        if not winget:
+            raise RuntimeError("Windows thiếu winget để tự cài NVM for Windows")
+        proc = _pip_stream([
+            winget, "install", "--id", "CoreyButler.NVMforWindows", "-e", "--silent",
+            "--accept-package-agreements", "--accept-source-agreements",
+        ], timeout=900)
+        if proc.returncode:
+            raise RuntimeError((proc.stdout or proc.stderr)[-2000:])
+        candidates = [Path(value) / suffix for value, suffix in (
+            (os.environ.get("NVM_HOME"), "nvm.exe"),
+            (os.environ.get("APPDATA"), "nvm/nvm.exe"),
+            (os.environ.get("ProgramFiles", r"C:\Program Files"), "nvm/nvm.exe"),
+        ) if value]
+        nvm = next((str(path) for path in candidates if path.is_file()), None) or shutil.which("nvm")
+        if not nvm:
+            raise RuntimeError("NVM đã cài nhưng chưa tìm thấy nvm.exe; khởi động lại app")
+        for args in (("install", "lts"), ("use", "lts")):
+            result = _pip_stream([nvm, *args], timeout=1200)
+            if result.returncode:
+                raise RuntimeError((result.stdout or result.stderr)[-2000:])
+        return {"ok": True, "message": "Đã cài NVM + Node.js LTS", "detail": "NVM for Windows"}
+
+    # Official nvm installer also wires the user's shell profile.
+    url = "https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.6/install.sh"
+    try:
+        script = urllib.request.urlopen(url, timeout=30).read()
+    except Exception as exc:
+        raise RuntimeError(f"Không tải được NVM installer: {exc}") from exc
+    with tempfile.NamedTemporaryFile(suffix=".sh") as tmp:
+        tmp.write(script)
+        tmp.flush()
+        installed = _pip_stream(["bash", tmp.name], timeout=900)
+    if installed.returncode:
+        raise RuntimeError((installed.stdout or installed.stderr)[-2000:])
+    nvm_dir = Path(os.environ.get("NVM_DIR") or Path.home() / ".nvm")
+    nvm_sh = nvm_dir / "nvm.sh"
+    if not nvm_sh.is_file():
+        raise RuntimeError(f"NVM installer hoàn tất nhưng thiếu {nvm_sh}")
+    command = f'. "{nvm_sh}" && nvm install --lts && nvm alias default "lts/*"'
+    node = _pip_stream(["bash", "-lc", command], timeout=1800)
+    if node.returncode:
+        raise RuntimeError((node.stdout or node.stderr)[-2000:])
+    return {"ok": True, "message": "Đã cài NVM + Node.js LTS", "detail": str(nvm_dir)}

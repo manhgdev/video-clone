@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import platform
+import os
 import sys
 import threading
 import time
@@ -113,6 +114,26 @@ def _ollama_executable() -> str | None:
     return None
 
 
+def _node_executable() -> str | None:
+    """Tìm Node do NVM cài dù process hiện tại chưa nhận PATH mới."""
+    found = _which("node")
+    if found:
+        return found
+    if sys.platform == "win32":
+        candidates = [
+            os.environ.get("NVM_SYMLINK"),
+            str(Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "nodejs"),
+        ]
+        for directory in filter(None, candidates):
+            path = Path(directory) / "node.exe"
+            if path.is_file():
+                return str(path)
+        return None
+    nvm_dir = Path(os.environ.get("NVM_DIR") or Path.home() / ".nvm")
+    nodes = list(nvm_dir.glob("versions/node/*/bin/node"))
+    return str(max(nodes, key=lambda path: path.stat().st_mtime)) if nodes else None
+
+
 def system_checks(*, refresh: bool = False, fast: bool = True) -> dict[str, Any]:
     """Danh sách dependency + ready/missing cho first-run UI."""
     global _CHECKS_CACHE
@@ -148,13 +169,13 @@ def _system_checks_uncached(*, fast: bool = True) -> dict[str, Any]:
     ff = _which("ffmpeg")
     fp = _which("ffprobe")
     ol = _ollama_executable()
-    node = _which("node")
+    node = _node_executable()
     with ThreadPoolExecutor(max_workers=6) as _pool:
         _fut_device = _pool.submit(detect_device)
         _fut_ff = _pool.submit(_run_ver, ["ffmpeg", "-version"]) if ff else None
         _fut_fp = _pool.submit(_run_ver, ["ffprobe", "-version"]) if fp else None
         _fut_ol = _pool.submit(_run_ver, [ol, "--version"]) if ol else None
-        _fut_nd = _pool.submit(_run_ver, ["node", "-v"]) if node else None
+        _fut_nd = _pool.submit(_run_ver, [node, "-v"]) if node else None
         device = _fut_device.result()
         ff_ver = _fut_ff.result() if _fut_ff else "không có trên PATH"
         fp_ver = _fut_fp.result() if _fut_fp else "không có trên PATH"

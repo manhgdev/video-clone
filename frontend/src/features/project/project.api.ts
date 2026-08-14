@@ -121,6 +121,8 @@ export const api = {
 
   installDemucsCuda: (onLog?: (log: string) => void) => pollInstall(`${base}/system/install/demucs_cuda`, onLog),
 
+  installNvm: (onLog?: (log: string) => void) => pollInstall(`${base}/system/install/nvm`, onLog),
+
   restartApp: () =>
     fetchJson<{ ok: boolean; message: string }>(
       `${base}/system/restart`,

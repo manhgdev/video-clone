@@ -357,6 +357,13 @@ def api_install_demucs_cuda():
     return _start_install_job("demucs_cuda", install_demucs_cuda, needs_restart=False)
 
 
+@router.post("/api/system/install/nvm")
+def api_install_nvm():
+    from pipeline.core.system_check import install_nvm
+
+    return _start_install_job("nvm", install_nvm, needs_restart=False)
+
+
 @router.get("/api/system/setup-gate")
 def api_get_setup_gate():
     """Cổng first-run — lưu file dưới VIDEO_CLONE_HOME (không phụ thuộc port/localStorage)."""

@@ -540,10 +540,10 @@ def detect_device() -> dict[str, Any]:
             "hint": "Dịch local (tuỳ chọn).",
         },
         "node": {
-            "kind": "url",
-            "value": node_link,
+            "kind": "action",
+            "value": "nvm",
             "label": node_label,
-            "hint": "Dùng NVM để cài và chuyển phiên bản Node.js; chỉ cần khi dev UI.",
+            "hint": f"Nhấn Cài để tự cài NVM + Node.js LTS. Tài liệu: {node_link}",
         },
         "data": {
             "kind": "none",

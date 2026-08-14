@@ -14,7 +14,7 @@ const PROVIDERS: CloudProviderId[] = [
   'nvidia',
 ]
 
-type InstallKind = 'ai_runtime' | 'ai_runtime_ocr' | 'ai_runtime_vieneu' | 'ocr_cuda' | 'demucs_cuda'
+type InstallKind = 'ai_runtime' | 'ai_runtime_ocr' | 'ai_runtime_vieneu' | 'ocr_cuda' | 'demucs_cuda' | 'nvm'
 
 const INSTALL_LABELS: Record<InstallKind, string> = {
   ai_runtime: 'gói AI',
@@ -22,6 +22,7 @@ const INSTALL_LABELS: Record<InstallKind, string> = {
   ai_runtime_vieneu: 'gói AI',
   ocr_cuda: 'OCR CUDA',
   demucs_cuda: 'Demucs',
+  nvm: 'NVM + Node.js LTS',
 }
 
 const INSTALL_ORDER: InstallKind[] = ['ai_runtime', 'ai_runtime_ocr', 'ai_runtime_vieneu', 'ocr_cuda', 'demucs_cuda']
@@ -263,7 +264,9 @@ export default function ConfigModal({
         ? await api.installAiRuntime(onLog)
         : kind === 'ocr_cuda'
           ? await api.installOcrCuda(onLog)
-          : await api.installDemucsCuda(onLog)
+          : kind === 'demucs_cuda'
+            ? await api.installDemucsCuda(onLog)
+            : await api.installNvm(onLog)
       setMsg(result.detail || result.message)
       if (result.needsRestart) setPendingRestart(true)
       loadChecks(true, false)
@@ -275,7 +278,9 @@ export default function ConfigModal({
             ? 'Cài gói AI thất bại'
             : kind === 'ocr_cuda'
             ? 'Cài GPU OCR thất bại'
-            : 'Cài Demucs thất bại'
+            : kind === 'demucs_cuda'
+              ? 'Cài Demucs thất bại'
+              : 'Cài NVM + Node.js LTS thất bại'
       setChecksErr(message)
       setInstallPopupError(message)
       // ponytail: giữ lock=true khi fail — tránh auto-retry vô tận.
@@ -601,10 +606,10 @@ export default function ConfigModal({
                       {!it.ok ? <div className="cfg-check-hint">{it.hint}</div> : null}
                     </div>
                     {it.ok ? (
-                      ['ai_runtime', 'ai_runtime_ocr', 'ai_runtime_vieneu', 'ocr_cuda', 'demucs_cuda'].includes(it.install) ? (
+                      ['ai_runtime', 'ai_runtime_ocr', 'ai_runtime_vieneu', 'ocr_cuda', 'demucs_cuda', 'nvm'].includes(it.install) ? (
                         <span className="cfg-check-installed">Đã cài</span>
                       ) : null
-                    ) : ['ai_runtime', 'ai_runtime_ocr', 'ai_runtime_vieneu', 'ocr_cuda', 'demucs_cuda'].includes(it.install) ? (
+                    ) : ['ai_runtime', 'ai_runtime_ocr', 'ai_runtime_vieneu', 'ocr_cuda', 'demucs_cuda', 'nvm'].includes(it.install) ? (
                       <button
                         type="button"
                         className="cfg-check-install"
@@ -614,7 +619,7 @@ export default function ConfigModal({
                           // ai_runtime_ocr / ai_runtime_vieneu → cùng endpoint ai_runtime
                           const kind = it.install.startsWith('ai_runtime')
                             ? 'ai_runtime'
-                            : it.install as 'ocr_cuda' | 'demucs_cuda'
+                            : it.install as 'ocr_cuda' | 'demucs_cuda' | 'nvm'
                           void installAction(kind)
                         }}
                       >
@@ -859,7 +864,9 @@ export default function ConfigModal({
                 ? 'Đang cài gói AI'
                 : installing === 'ocr_cuda'
                   ? 'Đang cài GPU OCR'
-                  : 'Đang cài Demucs'
+                  : installing === 'demucs_cuda'
+                    ? 'Đang cài Demucs'
+                    : 'Đang cài NVM + Node.js LTS'
           }
           message={
             installing
