@@ -43,6 +43,30 @@ def _register():
     except Exception:
         pass
 
+def _prepare_cuda_weight_load(backend, device):
+    if backend != "pytorch" or not str(device).startswith("cuda"):
+        return
+    import torch
+    torch.cuda.init()
+    try:
+        torch.empty(1, dtype=torch.uint8, pin_memory=True)
+        return
+    except RuntimeError as e:
+        if "pin_memory allocator" not in str(e) and "pin memory" not in str(e):
+            raise
+    import safetensors.torch as safe_torch
+    original = safe_torch.load_model
+    if getattr(original, "_videoclone_cpu_stage", False):
+        return
+    def load_model_cpu_stage(model, filename, strict=True, device="cpu"):
+        target = str(device)
+        result = original(model, filename, strict=strict, device="cpu")
+        if target.startswith("cuda"):
+            model.to(target)
+        return result
+    load_model_cpu_stage._videoclone_cpu_stage = True
+    safe_torch.load_model = load_model_cpu_stage
+
 def main():
     backend = "onnx"
     device = "cpu"
@@ -65,6 +89,7 @@ def main():
             if op == "init":
                 backend = msg.get("backend") or "pytorch"
                 device = msg.get("device") or "cuda"
+                _prepare_cuda_weight_load(backend, device)
                 _register()
                 from vieneu import Vieneu
                 client = Vieneu(mode="v3turbo", backend=backend, device=device)

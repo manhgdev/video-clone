@@ -32,6 +32,41 @@ _clone_lock = threading.Lock()
 _clone_cache: dict[str, tuple[int, int]] = {}
 
 
+def _prepare_cuda_weight_load(backend: str, device: str) -> bool:
+    """Initialize CUDA; stage safetensors through CPU if pinned memory is unavailable.
+
+    Some Windows torch builds expose CUDA inference but do not register a pinned
+    host allocator early enough for safetensors' direct-to-CUDA loader.
+    """
+    if backend != "pytorch" or not str(device).startswith("cuda"):
+        return False
+    import torch
+
+    torch.cuda.init()
+    try:
+        torch.empty(1, dtype=torch.uint8, pin_memory=True)
+        return False
+    except RuntimeError as exc:
+        if "pin_memory allocator" not in str(exc) and "pin memory" not in str(exc):
+            raise
+    import safetensors.torch as safe_torch
+
+    if getattr(safe_torch.load_model, "_videoclone_cpu_stage", False):
+        return True
+    original = safe_torch.load_model
+
+    def load_model_cpu_stage(model, filename, strict=True, device="cpu"):
+        target = str(device)
+        result = original(model, filename, strict=strict, device="cpu")
+        if target.startswith("cuda"):
+            model.to(target)
+        return result
+
+    load_model_cpu_stage._videoclone_cpu_stage = True  # type: ignore[attr-defined]
+    safe_torch.load_model = load_model_cpu_stage
+    return True
+
+
 def _torch_cuda_ready() -> bool:
     try:
         from pipeline.core.accel import preferred_torch_device
@@ -255,6 +290,7 @@ def get_client() -> Any:
             from vieneu import Vieneu
 
             backend, device = _resolve_backend()
+            _prepare_cuda_weight_load(backend, device)
             kwargs: dict[str, Any] = {
                 "mode": "v3turbo",
                 "backend": backend,
