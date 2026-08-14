@@ -6,7 +6,7 @@ from pathlib import Path
 
 import sys
 
-from pipeline.core.media import ffprobe_duration, nvenc_available
+from pipeline.core.media import ffprobe_duration, h264_encoder_args, h264_hardware_encoder
 from pipeline.cleaner.cleaner_jobs import (
     update_job,
     register_proc,
@@ -49,10 +49,8 @@ def run_cleaner_job_sync(job_id: str) -> None:
             
             if vcodec == "copy":
                 cmd.extend(["-c:v", "copy"])
-            elif vcodec == "libx264" and nvenc_available():
-                # Mặc định libx264 → dùng GPU khi có (crf ↦ cq tương đương)
-                cmd.extend(["-c:v", "h264_nvenc", "-preset", "p5",
-                            "-rc", "vbr", "-cq", crf, "-b:v", "0"])
+            elif vcodec == "libx264" and h264_hardware_encoder():
+                cmd.extend(h264_encoder_args(quality=int(crf)))
             else:
                 cmd.extend(["-c:v", vcodec, "-preset", preset, "-crf", crf])
                 
@@ -65,9 +63,8 @@ def run_cleaner_job_sync(job_id: str) -> None:
                 cmd.extend(["-map_metadata", "-1"])
                 
         elif method == "optimize":
-            if nvenc_available():
-                cmd.extend(["-c:v", "h264_nvenc", "-preset", "p4",
-                            "-rc", "vbr", "-cq", "26", "-b:v", "0"])
+            if h264_hardware_encoder():
+                cmd.extend(h264_encoder_args(fast=True, quality=26))
             else:
                 cmd.extend(["-c:v", "libx264", "-preset", "faster", "-crf", "26"])
             cmd.extend(["-movflags", "+faststart", "-c:a", "aac"])

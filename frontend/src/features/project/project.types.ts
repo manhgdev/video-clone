@@ -253,6 +253,17 @@ export type DeviceInfo = {
   accel: 'cuda' | 'metal' | 'cpu' | string
   label: string
   hasGpu: boolean
+  gpuCount?: number
+  hybridGpu?: boolean
+  gpus?: Array<{
+    index: number
+    name: string
+    kind: string
+    vramMb?: number | null
+    driver?: string
+    accel: string
+    source?: string
+  }>
   install: {
     ocr: string
     ocrLabel?: string

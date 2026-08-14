@@ -44,6 +44,77 @@ def _windows_video_controllers() -> list[dict[str, Any]]:
         return []
 
 
+def _nvidia_gpus() -> list[dict[str, Any]]:
+    """All NVIDIA adapters visible to this process, including vGPU/passthrough."""
+    try:
+        out = subprocess.check_output(
+            [
+                "nvidia-smi",
+                "--query-gpu=index,name,memory.total,driver_version",
+                "--format=csv,noheader,nounits",
+            ],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+        ).strip()
+    except (FileNotFoundError, subprocess.SubprocessError, OSError):
+        return []
+    result: list[dict[str, Any]] = []
+    for line in out.splitlines():
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) < 2:
+            continue
+        try:
+            index = int(parts[0])
+        except ValueError:
+            index = len(result)
+        try:
+            memory = int(float(parts[2])) if len(parts) > 2 else None
+        except ValueError:
+            memory = None
+        result.append({
+            "index": index,
+            "name": parts[1],
+            "kind": "nvidia",
+            "vramMb": memory,
+            "driver": parts[3] if len(parts) > 3 else "",
+            "accel": "cuda",
+            "source": "nvidia-smi",
+        })
+    return result
+
+
+def _windows_gpu_inventory(nvidia: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge CUDA-visible NVIDIA GPUs with every Windows display adapter."""
+    result = list(nvidia)
+    known = {str(gpu.get("name") or "").casefold() for gpu in result}
+    for controller in _windows_video_controllers():
+        name = str(controller.get("Name") or "").strip()
+        if not name or "microsoft basic" in name.casefold():
+            continue
+        kind = _gpu_kind_from_name(name)
+        # Device Manager may repeat an adapter already reported by nvidia-smi.
+        if kind == "nvidia" and any(
+            name.casefold() in item or item in name.casefold() for item in known if item
+        ):
+            continue
+        try:
+            ram = int(controller.get("AdapterRAM") or 0)
+        except (TypeError, ValueError):
+            ram = 0
+        result.append({
+            "index": len(result),
+            "name": name,
+            "kind": kind,
+            "vramMb": ram // (1024 * 1024) if ram > 0 else None,
+            "driver": str(controller.get("DriverVersion") or ""),
+            "accel": "directml",
+            "source": "windows-cim",
+        })
+        known.add(name.casefold())
+    return result
+
+
 def _atomic_replace(src: Path, dst: Path, *, attempts: int = 30) -> None:
     """Replace dst with src; retry when Windows locks final.mp4 (preview/player/AV)."""
     src_p, dst_p = Path(src), Path(dst)
@@ -123,6 +194,44 @@ def nvenc_available() -> bool:
         return False
 
 
+@lru_cache(maxsize=None)
+def _h264_encoder_available(codec: str) -> bool:
+    """Probe a hardware encoder by actually encoding one frame."""
+    try:
+        return subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", "color=size=256x256:rate=1",
+                "-frames:v", "1", "-c:v", codec, "-f", "null", "-",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        ).returncode == 0
+    except (FileNotFoundError, subprocess.SubprocessError, OSError):
+        return False
+
+
+def h264_hardware_encoder() -> str | None:
+    """Best working Windows H.264 encoder: NVIDIA, AMD, or Intel."""
+    if nvenc_available():
+        return "h264_nvenc"
+    if sys.platform != "win32":
+        return None
+    try:
+        device = detect_device()
+        kinds = {str(gpu.get("kind") or "") for gpu in device.get("gpus", [])}
+        kinds.add(str(device.get("gpuKind") or ""))
+    except Exception:
+        kinds = set()
+    # Prefer a discrete AMD encoder; QSV remains available on hybrid laptops.
+    candidates = tuple(
+        codec for codec, kind in (("h264_amf", "amd"), ("h264_qsv", "intel"))
+        if kind in kinds
+    ) or ("h264_qsv", "h264_amf")
+    return next((codec for codec in candidates if _h264_encoder_available(codec)), None)
+
+
 def nvdec_available(path: Path) -> bool:
     """Probe CUDA/NVDEC against the actual input codec."""
     try:
@@ -142,23 +251,38 @@ def nvdec_available(path: Path) -> bool:
         return False
 
 
-def h264_encoder_args(*, fast: bool = False, throughput: bool = False) -> list[str]:
-    if nvenc_available():
+def h264_encoder_args(
+    *, fast: bool = False, throughput: bool = False, quality: int | None = None
+) -> list[str]:
+    q = max(0, min(51, int(quality))) if quality is not None else (28 if throughput else 18)
+    encoder = h264_hardware_encoder()
+    if encoder == "h264_nvenc":
         if throughput:
             # Bản trung gian (burn raw→mp4): ưu tiên fps nuôi NVENC, chất lượng để encode 1080 cuối.
             return [
                 "-c:v", "h264_nvenc", "-preset", "p1",
-                "-tune", "ll", "-rc", "vbr", "-cq", "28", "-b:v", "0",
+                "-tune", "ll", "-rc", "vbr", "-cq", str(q), "-b:v", "0",
                 "-pix_fmt", "yuv420p",
             ]
         return [
             "-c:v", "h264_nvenc", "-preset", "p3" if fast else "p5",
-            "-tune", "hq", "-rc", "vbr", "-cq", "18", "-b:v", "0",
+            "-tune", "hq", "-rc", "vbr", "-cq", str(q), "-b:v", "0",
             "-pix_fmt", "yuv420p",
+        ]
+    if encoder == "h264_qsv":
+        return [
+            "-c:v", "h264_qsv", "-preset", "veryfast" if throughput else "faster",
+            "-global_quality", str(q), "-pix_fmt", "nv12",
+        ]
+    if encoder == "h264_amf":
+        return [
+            "-c:v", "h264_amf", "-quality", "speed" if throughput or fast else "balanced",
+            "-rc", "cqp", "-qp_i", str(q),
+            "-qp_p", str(q), "-pix_fmt", "nv12",
         ]
     return [
         "-c:v", "libx264", "-preset", "ultrafast" if throughput else ("veryfast" if fast else "fast"),
-        "-crf", "26" if throughput else "18", "-pix_fmt", "yuv420p",
+        "-crf", str(q), "-pix_fmt", "yuv420p",
     ]
 
 def detect_device() -> dict[str, Any]:
@@ -186,6 +310,7 @@ def detect_device() -> dict[str, Any]:
     vram_mb: int | None = None
     driver = ""
     accel = "cpu"
+    gpus: list[dict[str, Any]] = []
 
     if apple_silicon:
         gpu_kind = "apple"
@@ -201,57 +326,43 @@ def detect_device() -> dict[str, Any]:
         except (FileNotFoundError, subprocess.SubprocessError, OSError):
             pass
         gpu_name = chip or f"Apple Silicon ({machine})"
+        gpus = [{
+            "index": 0, "name": gpu_name, "kind": "apple", "vramMb": None,
+            "driver": "", "accel": "metal", "source": "apple-silicon",
+        }]
     else:
-        try:
-            out = subprocess.check_output(
-                [
-                    "nvidia-smi",
-                    "--query-gpu=name,memory.total,driver_version",
-                    "--format=csv,noheader,nounits",
-                ],
-                text=True,
-                stderr=subprocess.DEVNULL,
-                timeout=3,
-            ).strip()
-            if out:
-                line = out.splitlines()[0]
-                parts = [p.strip() for p in line.split(",")]
-                gpu_kind = "nvidia"
-                accel = "cuda"
-                gpu_name = parts[0] if parts else "NVIDIA GPU"
-                if len(parts) > 1:
-                    try:
-                        vram_mb = int(float(parts[1]))
-                    except ValueError:
-                        vram_mb = None
-                if len(parts) > 2:
-                    driver = parts[2]
-        except (FileNotFoundError, subprocess.SubprocessError, OSError):
-            pass
+        nvidia_gpus = _nvidia_gpus()
+        if system == "Windows":
+            gpus = _windows_gpu_inventory(nvidia_gpus)
+        else:
+            gpus = nvidia_gpus
+        if nvidia_gpus:
+            selected = nvidia_gpus[0]
+            gpu_kind = "nvidia"
+            accel = "cuda"
+            gpu_name = str(selected["name"])
+            vram_mb = selected.get("vramMb")
+            driver = str(selected.get("driver") or "")
 
         # Fallback: NVIDIA without nvidia-smi, AMD and Intel via native OS inventory.
         if gpu_kind == "none":
             if system == "Windows":
-                controllers = [
-                    item for item in _windows_video_controllers()
-                    if item.get("Name") and "microsoft basic" not in str(item["Name"]).casefold()
-                ]
                 # Prefer a discrete GPU over the integrated adapter on hybrid laptops.
-                controllers.sort(
+                candidates = sorted(
+                    gpus,
                     key=lambda item: (
-                        _gpu_kind_from_name(str(item["Name"])) in ("nvidia", "amd"),
-                        int(item.get("AdapterRAM") or 0),
+                        item.get("kind") in ("nvidia", "amd"),
+                        int(item.get("vramMb") or 0),
                     ),
                     reverse=True,
                 )
-                if controllers:
-                    selected = controllers[0]
-                    gpu_name = str(selected["Name"])
-                    gpu_kind = _gpu_kind_from_name(gpu_name)
-                    accel = "directml"
-                    driver = str(selected.get("DriverVersion") or "")
-                    ram = int(selected.get("AdapterRAM") or 0)
-                    vram_mb = ram // (1024 * 1024) if ram > 0 else None
+                if candidates:
+                    selected = candidates[0]
+                    gpu_name = str(selected["name"])
+                    gpu_kind = str(selected.get("kind") or "other")
+                    accel = str(selected.get("accel") or "directml")
+                    driver = str(selected.get("driver") or "")
+                    vram_mb = selected.get("vramMb")
             elif system == "Linux":
                 try:
                     out = subprocess.check_output(
@@ -264,6 +375,11 @@ def detect_device() -> dict[str, Any]:
                                         if len(parts) >= 6 else line.split()[-1])
                             gpu_kind = _gpu_kind_from_name(gpu_name)
                             accel = "rocm" if gpu_kind == "amd" else "cpu"
+                            gpus = [{
+                                "index": 0, "name": gpu_name, "kind": gpu_kind,
+                                "vramMb": None, "driver": "", "accel": accel,
+                                "source": "lspci",
+                            }]
                             break
                 except (FileNotFoundError, subprocess.SubprocessError, OSError):
                     pass
@@ -390,11 +506,13 @@ def detect_device() -> dict[str, Any]:
             "value": ocr_action,
             "label": ocr_label or "OCR CUDA (không cần)",
             "hint": (
-                "ONNX Runtime CUDA — chỉ NVIDIA."
+                "ONNX Runtime CUDA — NVIDIA."
                 if gpu_kind == "nvidia"
-                else "Máy này không dùng OCR CUDA."
+                else "ONNX Runtime DirectML — AMD/Intel Windows."
+                if accel == "directml"
+                else "Máy này không có ONNX GPU provider được hỗ trợ."
             ),
-            "relevant": gpu_kind == "nvidia",
+            "relevant": gpu_kind == "nvidia" or accel == "directml",
         },
         "demucs": {
             "kind": "action",
@@ -456,7 +574,10 @@ def detect_device() -> dict[str, Any]:
         "driver": driver,
         "accel": accel,
         "label": label,
-        "hasGpu": gpu_kind in ("nvidia", "apple"),
+        "hasGpu": gpu_kind != "none",
+        "gpuCount": len(gpus),
+        "hybridGpu": len({str(g.get("kind")) for g in gpus}) > 1,
+        "gpus": gpus,
         "install": {
             "ocr": ocr_action,
             "ocrLabel": ocr_label,

@@ -45,6 +45,28 @@ def test_encode_export_1080_scales_non_target_video(monkeypatch, tmp_path: Path)
     assert dst.read_bytes() == b"y"
 
 
+def test_windows_amd_uses_amf_when_probe_succeeds(monkeypatch) -> None:
+    monkeypatch.setattr(media, "nvenc_available", lambda: False)
+    monkeypatch.setattr(media.sys, "platform", "win32")
+    monkeypatch.setattr(media, "detect_device", lambda: {"gpuKind": "amd"})
+    monkeypatch.setattr(media, "_h264_encoder_available", lambda codec: codec == "h264_amf")
+
+    args = media.h264_encoder_args()
+
+    assert args[args.index("-c:v") + 1] == "h264_amf"
+
+
+def test_windows_intel_uses_qsv_when_probe_succeeds(monkeypatch) -> None:
+    monkeypatch.setattr(media, "nvenc_available", lambda: False)
+    monkeypatch.setattr(media.sys, "platform", "win32")
+    monkeypatch.setattr(media, "detect_device", lambda: {"gpuKind": "intel"})
+    monkeypatch.setattr(media, "_h264_encoder_available", lambda codec: codec == "h264_qsv")
+
+    args = media.h264_encoder_args()
+
+    assert args[args.index("-c:v") + 1] == "h264_qsv"
+
+
 def test_atomic_replace_retries_permission_error(monkeypatch, tmp_path: Path) -> None:
     import os
 

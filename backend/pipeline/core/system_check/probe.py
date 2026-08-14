@@ -270,14 +270,16 @@ def _runtime_venv_fast() -> tuple[bool, str]:
     return True, "đã cài · .venv-runtime"
 
 
-def _ocr_venv_fast() -> tuple[bool, str]:
+def _ocr_venv_fast(accel: str = "cuda") -> tuple[bool, str]:
     py = _ocr_python()
     if not py.is_file():
         return False, "chưa cài"
     sp = _venv_site_packages(py.parent.parent)
-    if not _site_has_dist(sp, "onnxruntime"):
-        return False, "chưa cài onnxruntime-gpu"
-    return True, "đã cài · bấm Kiểm tra lại để xác minh CUDA"
+    package = "onnxruntime-directml" if accel == "directml" else "onnxruntime-gpu"
+    if not _site_has_dist(sp, package):
+        return False, f"chưa cài {package}"
+    provider = "DirectML" if accel == "directml" else "CUDA"
+    return True, f"đã cài · bấm Kiểm tra lại để xác minh {provider}"
 
 
 def _demucs_venv_fast() -> tuple[bool, str]:
@@ -345,6 +347,28 @@ def _ocr_cuda_check() -> tuple[bool, str]:
         return "CUDAExecutionProvider" in providers, detail
     except Exception as e:
         return False, str(e)[:160]
+
+
+def _ocr_directml_check() -> tuple[bool, str]:
+    """Verify the DirectML provider in the runtime that will execute OCR."""
+    py = _ocr_python() if getattr(sys, "frozen", False) else Path(sys.executable)
+    if getattr(sys, "frozen", False) and not py.is_file():
+        return False, "thiếu runtime OCR"
+    try:
+        proc = subprocess.run(
+            [
+                str(py), "-c",
+                "import onnxruntime as ort; print(','.join(ort.get_available_providers()))",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, str(exc)[:160]
+    detail = (proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else proc.stderr.strip())[:500]
+    return proc.returncode == 0 and "DmlExecutionProvider" in detail, detail or "no providers"
 
 
 def _ocr_cuda_check_fresh(python: str | Path = sys.executable) -> tuple[bool, str]:

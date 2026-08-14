@@ -16,7 +16,7 @@ from typing import Any
 
 from pipeline.core.config import DATA
 from pipeline.core.jobs import kill_process_tree
-from pipeline.core.media import nvenc_available
+from pipeline.core.media import h264_encoder_args, h264_hardware_encoder
 
 ROOT = DATA / "srt_image"
 ROOT.mkdir(parents=True, exist_ok=True)
@@ -130,7 +130,7 @@ def is_video(path: Path) -> bool:
 
 def _encoder_args(use_gpu: bool, crf: int) -> list[str]:
     if use_gpu:
-        return ["-c:v", "h264_nvenc", "-preset", "p5", "-cq", str(crf), "-b:v", "0"]
+        return h264_encoder_args(quality=crf)
     return ["-c:v", "libx264", "-preset", "medium", "-crf", str(crf)]
 
 
@@ -585,12 +585,13 @@ def run(job_id: str) -> None:
         )
         fps = max(1, min(60, int(opts.get("fps", 30))))
         crf = max(14, min(32, int(opts.get("crf", 20))))
-        use_gpu = opts.get("encoder", "auto") != "cpu" and nvenc_available()
+        gpu_encoder = h264_hardware_encoder() if opts.get("encoder", "auto") != "cpu" else None
+        use_gpu = gpu_encoder is not None
         _log(
             job_id,
             f"Đầu vào: {len(media)} media · {len(cues)} cảnh · {width}x{height} · {fps} FPS",
         )
-        _log(job_id, f"Encoder: {'GPU NVIDIA NVENC' if use_gpu else 'CPU libx264'} · CRF {crf}")
+        _log(job_id, f"Encoder: {gpu_encoder or 'CPU libx264'} · quality {crf}")
         work = Path(job["work"])
         zoom_mode = str(opts.get("zoom", "off"))
         # ponytail: delogo — xóa watermark AI trước scale/zoom, tính trên frame gốc

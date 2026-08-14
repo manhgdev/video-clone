@@ -102,7 +102,7 @@ def _pip_stream(cmd: list[str], *, timeout: float = 1800) -> subprocess.Complete
 
 _AI_RUNTIME_PACKAGES = (
     "faster-whisper>=1.1.0",
-    "rapidocr-onnxruntime>=1.2.0",
+    "rapidocr-onnxruntime>=1.3.20",
     "pillow",
     "opencv-python-headless",
     "huggingface-hub>=0.34",   # bỏ <1.0 — hub 1.x đang có, không cần downgrade
@@ -118,7 +118,7 @@ _AI_RUNTIME_PACKAGES = (
 
 # 3 nhóm riêng — mỗi nhóm cài 1 pip call với --no-deps, có header log riêng.
 _PKG_WHISPER = ("faster-whisper>=1.1.0", "soundfile", "soxr", "tokenizers")
-_PKG_OCR     = ("rapidocr-onnxruntime>=1.2.0", "pillow", "opencv-python-headless<5.0")
+_PKG_OCR     = ("rapidocr-onnxruntime>=1.3.20", "pillow", "opencv-python-headless<5.0")
 _PKG_VIENEU  = (
     "huggingface-hub>=0.34", "httpx", "pyyaml",
     "perth", "sea-g2p",
@@ -145,7 +145,7 @@ def _runtime_ort_accel() -> str:
 # cài đúng gói thiếu (không --upgrade cả lô). Frozen dùng base_cmd đủ bộ.
 _MODULE_TO_PACKAGE: dict[str, str] = {
     "faster_whisper": "faster-whisper>=1.1.0",
-    "rapidocr_onnxruntime": "rapidocr-onnxruntime>=1.2.0",
+    "rapidocr_onnxruntime": "rapidocr-onnxruntime>=1.3.20",
     "PIL": "pillow",
     "cv2": "opencv-python-headless",
     "torch": "torch",
@@ -459,13 +459,24 @@ def install_ai_runtime() -> dict[str, Any]:
 
         # Nhóm 2 — OCR
         _pip_group("OCR", *_PKG_OCR)
-        if _nvidia_present():
+        ort_accel = _runtime_ort_accel()
+        if ort_accel == "cuda":
             if _install_log_fn:
                 _install_log_fn("\n=== OCR GPU (onnxruntime-gpu) ===\n")
             _pip_stream([sys.executable, "-m", "pip", "uninstall", "-y", "onnxruntime"])
             proc_gpu = _pip_stream([sys.executable, "-m", "pip", "install", _ORT_GPU_PKG, "--index-url", _ORT_GPU_CUDA12_INDEX])
             if proc_gpu.returncode:
                 raise RuntimeError("[OCR GPU] " + (proc_gpu.stderr or proc_gpu.stdout)[-2000:])
+        elif ort_accel == "directml":
+            if _install_log_fn:
+                _install_log_fn("\n=== OCR GPU (DirectML) ===\n")
+            # Both wheels own the same `onnxruntime` module; keep exactly one provider wheel.
+            _pip_stream([sys.executable, "-m", "pip", "uninstall", "-y", "onnxruntime"])
+            proc_dml = _pip_stream([
+                sys.executable, "-m", "pip", "install", "--force-reinstall", _ORT_DIRECTML_PKG
+            ])
+            if proc_dml.returncode:
+                raise RuntimeError("[OCR DirectML] " + (proc_dml.stderr or proc_dml.stdout)[-2000:])
 
         # Nhóm 3 — zmAI + VieNeu
         _pip_group("zmAI + VieNeu", *_PKG_VIENEU)

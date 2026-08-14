@@ -6,7 +6,6 @@ Frozen desktop app probes torch inside .venv-runtime (PyInstaller cannot import 
 from __future__ import annotations
 
 import os
-import platform
 import shutil
 import subprocess
 import sys
@@ -42,10 +41,6 @@ def _nvidia_smi() -> bool:
         return r.returncode == 0 and bool((r.stdout or "").strip())
     except Exception:
         return False
-
-
-def _apple_silicon() -> bool:
-    return sys.platform == "darwin" and platform.machine().lower() in ("arm64", "aarch64")
 
 
 def _runtime_python() -> str | None:
@@ -91,7 +86,7 @@ def _probe_torch_device_in(python: str) -> TorchDevice:
 
 
 def preferred_torch_device(*, refresh: bool = False) -> TorchDevice:
-    """Best torch device for this machine right now — LUÔN dùng CUDA nếu máy có GPU NVIDIA."""
+    """Best *working* torch device for this machine right now."""
     with _lock:
         if not refresh and "torch_device" in _cache and _cache["torch_device"] in ("cuda", "mps"):
             return _cache["torch_device"]  # type: ignore[return-value]
@@ -108,12 +103,6 @@ def preferred_torch_device(*, refresh: bool = False) -> TorchDevice:
         py = _runtime_python()
         if py:
             device = _probe_torch_device_in(py)
-            if device == "cpu" and _nvidia_smi():
-                device = "cuda"
-        elif _nvidia_smi():
-            device = "cuda"
-        elif _apple_silicon():
-            device = "mps"
     else:
         try:
             try:
@@ -128,15 +117,10 @@ def preferred_torch_device(*, refresh: bool = False) -> TorchDevice:
                 device = "cuda"
             elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
                 device = "mps"
-            elif _nvidia_smi():
-                device = "cuda"
             else:
                 device = "cpu"
         except Exception:
-            if _nvidia_smi():
-                device = "cuda"
-            elif _apple_silicon():
-                device = "mps"
+            pass
 
     with _lock:
         _cache["torch_device"] = device

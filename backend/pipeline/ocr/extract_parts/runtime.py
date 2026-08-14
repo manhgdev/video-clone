@@ -62,7 +62,8 @@ def _ocr_semaphore() -> threading.Semaphore:
         from pipeline.core.resources import pack_gpu_workers
 
         # _rapidocr_gpu_kwargs định nghĩa bên dưới cùng file
-        if _rapidocr_gpu_kwargs().get("det_use_cuda"):
+        gpu_kwargs = _rapidocr_gpu_kwargs()
+        if gpu_kwargs.get("det_use_cuda") or gpu_kwargs.get("det_use_dml"):
             n = pack_gpu_workers(per_job_mb=450, reserve_mb=350, hard_max=20)
         else:
             n = _cpu_budget(0.92)
@@ -99,10 +100,12 @@ def engine_providers(engine: object) -> list[str]:
 
 
 def engine_device_label(engine: object) -> str:
-    """'GPU' khi session chay CUDA/TensorRT, nguoc lai 'CPU'."""
+    """Provider tang toc that cua session, nguoc lai CPU."""
     provs = engine_providers(engine)
     if any("CUDA" in p or "Tensorrt" in p or "TensorRT" in p for p in provs):
-        return "GPU"
+        return "CUDA"
+    if any("Dml" in p or "DirectML" in p for p in provs):
+        return "DirectML"
     return "CPU"
 
 
@@ -323,13 +326,16 @@ def _rapidocr_labels(*, use_cuda: bool | None = None) -> Any:
     _patch_rapidocr_onnxruntime_ep()
 
     _limit_onnx_threads()
-    gpu_kwargs = (
+    gpu_kwargs: dict[str, bool] = (
         _rapidocr_gpu_kwargs()
         if use_cuda is None
         else {
             "det_use_cuda": use_cuda,
             "cls_use_cuda": use_cuda,
             "rec_use_cuda": use_cuda,
+            "det_use_dml": False,
+            "cls_use_dml": False,
+            "rec_use_dml": False,
         }
     )
     return RapidOCR(
@@ -345,7 +351,9 @@ def _rapidocr_labels(*, use_cuda: bool | None = None) -> Any:
 
 @lru_cache(maxsize=1)
 def _rapidocr_gpu_kwargs() -> dict[str, bool]:
-    """Ưu tiên CUDA khi onnxruntime-gpu có CUDAExecutionProvider."""
+    """Chọn ONNX GPU provider thực sự khả dụng: CUDA, rồi DirectML."""
+    use_cuda = False
+    use_dml = False
     try:
         # prepare_cuda_dlls đã đăng ký cả onnxruntime/capi/ — gọi trước khi import ort
         prepare_cuda_dlls()
@@ -354,10 +362,13 @@ def _rapidocr_gpu_kwargs() -> dict[str, bool]:
 
         providers = list(ort.get_available_providers())
         use_cuda = "CUDAExecutionProvider" in providers
+        use_dml = not use_cuda and "DmlExecutionProvider" in providers
         try:
             from pipeline.core.app_log import append_log
 
-            append_log(f"[ocr-gpu] providers={providers} -> use_cuda={use_cuda}")
+            append_log(
+                f"[ocr-gpu] providers={providers} -> cuda={use_cuda} dml={use_dml}"
+            )
         except Exception:
             pass
     except (ImportError, OSError) as e:
@@ -372,6 +383,9 @@ def _rapidocr_gpu_kwargs() -> dict[str, bool]:
         "det_use_cuda": use_cuda,
         "cls_use_cuda": use_cuda,
         "rec_use_cuda": use_cuda,
+        "det_use_dml": use_dml,
+        "cls_use_dml": use_dml,
+        "rec_use_dml": use_dml,
     }
 
 

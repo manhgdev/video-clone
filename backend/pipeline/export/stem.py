@@ -25,6 +25,7 @@ _stem_running: set[str] = set()
 _STEM_STALE_SEC = 45 * 60  # progress «running» quá lâu → coi crash
 
 _TORCH_CUDA_INDEX = "https://download.pytorch.org/whl/cu124"
+_TORCH_ROCM_INDEX = "https://download.pytorch.org/whl/rocm6.2"
 _TORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
 _PCT_RE = re.compile(r"(\d{1,3})\s*%")
 _MLX_SEPARATE_PY = r"""
@@ -178,11 +179,19 @@ def _apple_silicon() -> bool:
 
 
 def _demucs_backend_wanted() -> str:
-    """cuda | mlx | cpu — backend tách lời tối ưu theo máy."""
+    """cuda | rocm | mlx | cpu — backend tách lời tối ưu theo máy."""
     if _nvidia_smi_ok():
         return "cuda"
     if _apple_silicon():
         return "mlx"  # demucs-mlx (Metal) — torch MPS thiếu op complex
+    if sys.platform.startswith("linux"):
+        try:
+            from pipeline.core.media import detect_device
+
+            if detect_device().get("accel") == "rocm":
+                return "rocm"
+        except Exception:
+            pass
     return "cpu"
 
 
@@ -248,10 +257,10 @@ def _demucs_jobs() -> int:
 
 
 def _pip_install_torch(py: Path, *, accel: str, project_id: str | None) -> None:
-    """accel: cuda | cpu | mac (PyPI macOS arm64 có Metal trong torch)."""
+    """accel: cuda | rocm | cpu | mac (PyPI macOS arm64 có Metal trong torch)."""
     pip = [str(py), "-m", "pip"]
-    if accel == "cuda":
-        label = "CUDA"
+    if accel in ("cuda", "rocm"):
+        label = "CUDA" if accel == "cuda" else "ROCm"
         set_stem_progress(project_id, 10, f"Cài PyTorch {label} (có thể vài phút)…")
         subprocess.run(
             pip + ["uninstall", "-y", "torch", "torchaudio", "torchvision"],
@@ -264,7 +273,7 @@ def _pip_install_torch(py: Path, *, accel: str, project_id: str | None) -> None:
             "torch",
             "torchaudio",
             "--index-url",
-            _TORCH_CUDA_INDEX,
+            _TORCH_CUDA_INDEX if accel == "cuda" else _TORCH_ROCM_INDEX,
         ]
     elif accel == "mac":
         label = "macOS (Metal)"
@@ -387,7 +396,7 @@ def _demucs_python(project_id: str | None = None, *, report: bool = True) -> str
             set_stem_progress(project_id, 8, "Nâng cấp Demucs → Apple Metal (MLX)…")
             _pip_install_demucs_mlx(exe, project_id)
             return
-        if wanted == "cuda":
+        if wanted in ("cuda", "rocm"):
             if _ready(exe) and _torch_device(exe) == "cuda":
                 return
             if report and project_id:
@@ -395,17 +404,20 @@ def _demucs_python(project_id: str | None = None, *, report: bool = True) -> str
                     project_id,
                     step="export",
                     progress=62,
-                    message="Đang cài PyTorch CUDA cho tách lời…",
+                    message=f"Đang cài PyTorch {wanted.upper()} cho tách lời…",
                     running=True,
                 )
-            set_stem_progress(project_id, 8, "Nâng cấp PyTorch → CUDA…")
+            set_stem_progress(project_id, 8, f"Nâng cấp PyTorch → {wanted.upper()}…")
             try:
-                _pip_install_torch(exe, accel="cuda", project_id=project_id)
+                _pip_install_torch(exe, accel=wanted, project_id=project_id)
             except RuntimeError:
-                set_stem_progress(project_id, 10, "CUDA fail — fallback CPU…")
+                set_stem_progress(project_id, 10, f"{wanted.upper()} fail — fallback CPU…")
                 _pip_install_torch(exe, accel="cpu", project_id=project_id)
             if _torch_device(exe) != "cuda":
-                set_stem_progress(project_id, 10, "Torch CUDA không nhận GPU — fallback CPU…")
+                set_stem_progress(
+                    project_id, 10,
+                    f"Torch {wanted.upper()} không nhận GPU — fallback CPU…",
+                )
                 _pip_install_torch(exe, accel="cpu", project_id=project_id)
             if not _has_pkg(exe, "import demucs, soundfile"):
                 _pip_install_demucs_torch(exe, project_id)
@@ -425,12 +437,12 @@ def _demucs_python(project_id: str | None = None, *, report: bool = True) -> str
         cand = _demucs_py_in(root)
         if not _ready(cand):
             continue
-        if wanted == "cuda" and _torch_device(cand) != "cuda":
+        if wanted in ("cuda", "rocm") and _torch_device(cand) != "cuda":
             try:
                 _ensure(cand)
             except Exception:
                 pass
-            if _ready(cand):
+            if _ready(cand) and _torch_device(cand) == "cuda":
                 return str(cand)
             continue
         return str(cand)
@@ -988,4 +1000,3 @@ def separate_no_vocals(
         if acquired:
             lock.release()
     return cache
-

@@ -18,6 +18,7 @@ from .probe import (
     _mod_ok_fast,
     _nvidia_present,
     _ocr_cuda_check_cached,
+    _ocr_directml_check,
     _ocr_venv_fast,
     _pkg_distributions,
     _run_ver,
@@ -212,9 +213,13 @@ def _system_checks_uncached(*, fast: bool = True) -> dict[str, Any]:
 
     dist = None if fast else _pkg_distributions()
     nvidia = device.get("gpuKind") == "nvidia"
+    directml = device.get("accel") == "directml"
     if fast:
         demucs_ok, demucs_detail = _demucs_venv_fast()
-        cuda_ok, cuda_detail = _ocr_venv_fast() if nvidia else (True, "")
+        cuda_ok, cuda_detail = (
+            _ocr_venv_fast("directml" if directml else "cuda")
+            if (nvidia or directml) else (True, "")
+        )
         torch_cuda_ok = True
         if getattr(sys, "frozen", False):
             runtime_ok, runtime_detail = _runtime_venv_fast()
@@ -233,9 +238,13 @@ def _system_checks_uncached(*, fast: bool = True) -> dict[str, Any]:
         with ThreadPoolExecutor(max_workers=3) as pool:
             fut_demucs = pool.submit(_demucs_check)
             fut_ocr = pool.submit(_ocr_cuda_check_cached) if nvidia else None
+            fut_dml = pool.submit(_ocr_directml_check) if directml else None
             fut_cuda = pool.submit(_torch_cuda_ready_cached) if _nvidia_present() else None
             demucs_ok, demucs_detail = fut_demucs.result()
-            cuda_ok, cuda_detail = fut_ocr.result() if fut_ocr else (True, "")
+            cuda_ok, cuda_detail = (
+                fut_ocr.result() if fut_ocr else
+                fut_dml.result() if fut_dml else (True, "")
+            )
             torch_cuda_ok = fut_cuda.result() if fut_cuda else True
 
         runtime_missing = [
@@ -331,15 +340,15 @@ def _system_checks_uncached(*, fast: bool = True) -> dict[str, Any]:
     items.append(
         _item(
             id="ocr_cuda",
-            name="GPU tăng tốc OCR / Whisper",
-            ok=cuda_ok if nvidia else True,
+            name="GPU tăng tốc OCR",
+            ok=cuda_ok if (nvidia or directml) else True,
             required=False,
             detail=(
                 cuda_detail
                 if nvidia
                 else (
-                    f"DirectML · {device.get('gpuName')}"
-                    if device.get("accel") == "directml"
+                    cuda_detail or f"DirectML · {device.get('gpuName')}"
+                    if directml
                     else (
                     "Apple Silicon — không dùng CUDA"
                     if device.get("gpuKind") == "apple"
