@@ -1,9 +1,12 @@
 """Compare FE-baked captionLayout vs BE rendered text.
 
-Run: python scratch/diag_font.py
+Run: PYTHONPATH=backend python tests/manual/font/diag_font.py
 """
-import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(REPO_ROOT / "backend"))
 
 from PIL import Image, ImageDraw, ImageFont
 from pipeline.export.fonts import _font_for_preset
@@ -43,7 +46,7 @@ tx = (800 - tw) // 2 - bb[0]
 # center vertically using CSS line-height method
 gy = int(round((120 - line_h) / 2.0 + (line_h - (ascent + descent)) / 2.0))
 draw.text((tx, gy), SAMPLE_TEXT, font=font, fill=(255, 255, 255, 255))
-img.save(os.path.join(os.path.dirname(__file__), "diag_font_pil.png"))
+img.save(Path(__file__).with_name("diag_font_pil.png"))
 print(f"Saved diag_font_pil.png")
 print()
 print("Compare this with browser rendering of the same text at 48px bold VC Noto Sans")

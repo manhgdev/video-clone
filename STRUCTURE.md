@@ -108,7 +108,17 @@ backend/
 │     ├─ system_check/        probe phần cứng + install gói AI + checks (facade __init__)
 │     ├─ runtime_site.py      frozen .venv-runtime
 │     └─ …
-└─ tests/
+└─ …
+
+tests/
+└─ backend/                   Mirror theo domain backend
+   ├─ api/  asr/  core/  download/  export/  mt/  ocr/  tts/
+   ├─ pipeline/               Test module pipeline cấp cao (SRT, subtitles, …)
+   ├─ video/                  Fixture video nhỏ
+   └─ conftest.py             Thêm `backend/` vào Python path khi pytest
+
+tests/manual/
+└─ font/                      Script chẩn đoán font/layout thủ công + ảnh mẫu
 ```
 
 ### Quy ước backend
