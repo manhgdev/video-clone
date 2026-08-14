@@ -145,6 +145,10 @@ ensurePip(['pyinstaller', 'uv', 'pywebview'])
 
 const iconIco = path.join(root, 'build_app', 'app.ico')
 const iconIcns = path.join(root, 'build_app', 'app.icns')
+if (isMac && !existsSync(iconIcns)) {
+  console.error(`Thiếu icon macOS bắt buộc: ${iconIcns}`)
+  process.exit(1)
+}
 
 const args = [
   '-m', 'PyInstaller',
