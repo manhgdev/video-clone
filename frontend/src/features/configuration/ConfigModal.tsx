@@ -651,7 +651,7 @@ export default function ConfigModal({
             <details className="cfg-hint-details">
               <summary>Ghi chú cài đặt theo thiết bị</summary>
               <p className="cfg-hint">
-                Link tải và lệnh pip/brew/apt đổi theo OS; NVIDIA → CUDA; Apple Silicon → Metal.
+                Backend tăng tốc và hướng dẫn cài được chọn theo thiết bị và runtime thực tế.
               </p>
             </details>
           </div>

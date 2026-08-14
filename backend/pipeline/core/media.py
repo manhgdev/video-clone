@@ -424,7 +424,8 @@ def detect_device() -> dict[str, Any]:
         ff_link = ""
         ff_label = "Cài ffmpeg (brew)"
         ollama_link = "https://ollama.com/download/mac"
-        node_link = "https://nodejs.org/en/download"
+        node_link = "https://github.com/nvm-sh/nvm#installing-and-updating"
+        node_label = "Cài Node.js qua NVM"
         tts_id, tts_name, tts_hint = "say", "macOS say", "TTS hệ thống macOS (có sẵn)."
         tts_install, tts_label = "", ""
     elif os_id == "windows":
@@ -433,7 +434,8 @@ def detect_device() -> dict[str, Any]:
         ff_link = "https://www.gyan.dev/ffmpeg/builds/"
         ff_label = "Tải ffmpeg (Windows)"
         ollama_link = "https://ollama.com/download/windows"
-        node_link = "https://nodejs.org/en/download"
+        node_link = "https://github.com/coreybutler/nvm-windows/releases"
+        node_label = "Cài Node.js qua NVM for Windows"
         tts_id, tts_name = "espeak", "espeak-ng"
         tts_hint = "TTS hệ thống Windows/Linux (tuỳ chọn)."
         tts_install = "https://github.com/espeak-ng/espeak-ng/releases"
@@ -444,7 +446,8 @@ def detect_device() -> dict[str, Any]:
         ff_link = ""
         ff_label = "Cài ffmpeg (apt)"
         ollama_link = "https://ollama.com/download/linux"
-        node_link = "https://nodejs.org/en/download"
+        node_link = "https://github.com/nvm-sh/nvm#installing-and-updating"
+        node_label = "Cài Node.js qua NVM"
         tts_id, tts_name = "espeak", "espeak-ng"
         tts_hint = "TTS hệ thống Linux: sudo apt install espeak-ng"
         tts_install = "sudo apt install espeak-ng"
@@ -539,8 +542,8 @@ def detect_device() -> dict[str, Any]:
         "node": {
             "kind": "url",
             "value": node_link,
-            "label": f"Tải Node.js ({os_label})",
-            "hint": "Chỉ cần khi dev UI (npm run dev).",
+            "label": node_label,
+            "hint": "Dùng NVM để cài và chuyển phiên bản Node.js; chỉ cần khi dev UI.",
         },
         "data": {
             "kind": "none",

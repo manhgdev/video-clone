@@ -68,7 +68,7 @@ Desktop **không** đóng gói sẵn torch/OCR nặng: lần đầu vào **Cấu
 
 ### Yêu cầu
 
-- Node.js 18+
+- Node.js 18+ qua [NVM](https://github.com/nvm-sh/nvm) (Windows: [NVM for Windows](https://github.com/coreybutler/nvm-windows))
 - Python 3.11+ (khuyến nghị 3.12)
 - FFmpeg + FFprobe trên `PATH`
 - Windows / macOS / Linux

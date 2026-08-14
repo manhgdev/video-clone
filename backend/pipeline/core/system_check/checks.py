@@ -337,30 +337,19 @@ def _system_checks_uncached(*, fast: bool = True) -> dict[str, Any]:
 
     # OCR GPU — CUDA trên NVIDIA, DirectML trên AMD/Intel Windows.
     ocr_inst, ocr_lab, ocr_hint = _install_from_plan(plan, "ocr_cuda")
-    items.append(
-        _item(
-            id="ocr_cuda",
-            name="GPU tăng tốc OCR",
-            ok=cuda_ok if (nvidia or directml) else True,
-            required=False,
-            detail=(
-                cuda_detail
-                if nvidia
-                else (
-                    cuda_detail or f"DirectML · {device.get('gpuName')}"
-                    if directml
-                    else (
-                    "Apple Silicon — không dùng CUDA"
-                    if device.get("gpuKind") == "apple"
-                    else "Không có NVIDIA — OCR chạy CPU"
-                    )
-                )
-            ),
-            hint=ocr_hint,
-            install=ocr_inst,
-            installLabel=ocr_lab,
+    if nvidia or directml:
+        items.append(
+            _item(
+                id="ocr_cuda",
+                name="GPU tăng tốc OCR",
+                ok=cuda_ok,
+                required=False,
+                detail=cuda_detail or f"DirectML · {device.get('gpuName')}",
+                hint=ocr_hint,
+                install=ocr_inst,
+                installLabel=ocr_lab,
+            )
         )
-    )
 
     # Demucs — đã probe ở trên
     dem_inst, dem_lab, dem_hint = _install_from_plan(plan, "demucs")
@@ -443,7 +432,7 @@ def _system_checks_uncached(*, fast: bool = True) -> dict[str, Any]:
     items.append(
         _item(
             id="node",
-            name="Node.js",
+            name="Node.js (NVM)",
             ok=bool(node),
             required=False,
             detail=node_ver,
