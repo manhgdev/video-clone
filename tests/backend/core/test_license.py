@@ -38,3 +38,15 @@ def test_license_request_ignores_broken_environment_proxy(monkeypatch) -> None:
 
     assert license._request("checkkey", "test")["status"] is True
     assert seen["trust_env"] is False
+
+
+def test_deactivate_removes_only_the_local_saved_key(tmp_path, monkeypatch) -> None:
+    key_file = tmp_path / "license.json"
+    key_file.write_text('{"key":"LOCAL-KEY"}', encoding="utf-8")
+    monkeypatch.setattr(license, "LICENSE_FILE", key_file)
+
+    result = license.deactivate_license()
+
+    assert not key_file.exists()
+    assert result["configured"] is False
+    assert result["valid"] is False

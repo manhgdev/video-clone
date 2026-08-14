@@ -47,6 +47,12 @@ export const ENGINE_DEFAULTS = {
     originalAudioMode: 'original' as const,
     originalAudioVolume: 100,
   },
+  subtitle: {
+    matchDuration: 'none' as const,
+    processOriginalAudio: false,
+    originalAudioMode: 'original' as const,
+    originalAudioVolume: 100,
+  },
 }
 
 export const defaultSettings: ProjectSettings = {
@@ -88,6 +94,7 @@ export const defaultSettings: ProjectSettings = {
   engineProfiles: {
     whisper: { ...ENGINE_DEFAULTS.whisper },
     paddleocr: { ...ENGINE_DEFAULTS.paddleocr },
+    subtitle: { ...ENGINE_DEFAULTS.subtitle },
   },
 }
 
@@ -132,7 +139,7 @@ export function applyEngineProfile(
 
 /** Ghi profile engine đang active (matchDuration / lọc âm) — không đụng engine kia. */
 export function snapshotEngineProfile(s: ProjectSettings): ProjectSettings {
-  const eng = s.engine === 'paddleocr' ? 'paddleocr' : 'whisper'
+  const eng = s.engine === 'paddleocr' || s.engine === 'subtitle' ? s.engine : 'whisper'
   return {
     ...s,
     engineProfiles: {
@@ -246,7 +253,7 @@ export function loadSettings(): ProjectSettings {
     if (!okMatch.includes(s.matchDuration as (typeof okMatch)[number])) {
       s.matchDuration = 'preferVideo'
     }
-    const eng = s.engine === 'paddleocr' ? 'paddleocr' : 'whisper'
+    const eng = s.engine === 'paddleocr' || s.engine === 'subtitle' ? s.engine : 'whisper'
     const profiles = {
       whisper: {
         ...ENGINE_DEFAULTS.whisper,
@@ -255,6 +262,10 @@ export function loadSettings(): ProjectSettings {
       paddleocr: {
         ...ENGINE_DEFAULTS.paddleocr,
         ...s.engineProfiles?.paddleocr,
+      },
+      subtitle: {
+        ...ENGINE_DEFAULTS.subtitle,
+        ...s.engineProfiles?.subtitle,
       },
     }
     if (!s.engineProfiles?.[eng]) {

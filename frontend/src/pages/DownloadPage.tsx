@@ -2,7 +2,7 @@ import DownloadStudio from '@/features/download/DownloadStudio'
 import './DownloadPage.css'
 
 type Props = {
-  onUseInClone?: (projectId: string, meta: { videoUrl: string; duration: number }) => void
+  onUseInClone?: (projectId: string, meta: { videoUrl: string; duration: number; segments?: unknown[]; settings?: Record<string, unknown> }) => void
 }
 
 export default function DownloadPage({ onUseInClone }: Props) {

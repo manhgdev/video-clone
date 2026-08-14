@@ -4,7 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from pipeline.core.license import activate_license, license_status
+from pipeline.core.license import activate_license, deactivate_license, license_status
 
 router = APIRouter(prefix="/api/license", tags=["license"])
 
@@ -26,3 +26,11 @@ def activate(body: ActivateIn) -> dict:
         raise HTTPException(400, str(exc)) from exc
     except Exception as exc:
         raise HTTPException(502, f"Máy chủ key không phản hồi: {exc}") from exc
+
+
+@router.post("/deactivate")
+def deactivate() -> dict:
+    try:
+        return deactivate_license()
+    except Exception as exc:
+        raise HTTPException(500, str(exc)) from exc

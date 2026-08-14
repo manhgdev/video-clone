@@ -366,6 +366,24 @@ export const api = {
       body: JSON.stringify(settings),
     }),
 
+  subtitles: (projectId: string) =>
+    fetchJson<{ items: { name: string; label: string }[]; active: string }>(
+      `${base}/projects/${projectId}/subtitles`, undefined, 10_000),
+
+  uploadSubtitle: (projectId: string, file: File) => {
+    const body = new FormData()
+    body.append('file', file)
+    return fetchJson<{ name: string; items: { name: string; label: string }[] }>(
+      `${base}/projects/${projectId}/subtitles`, { method: 'POST', body }, 30_000)
+  },
+
+  applySubtitle: (projectId: string, name: string) =>
+    fetchJson<{ segments: Segment[]; settings: ProjectSettings }>(
+      `${base}/projects/${projectId}/subtitles/${encodeURIComponent(name)}/apply`,
+      { method: 'POST' },
+      30_000,
+    ),
+
   status: (projectId: string) =>
     fetchJson<JobStatus>(`${base}/projects/${projectId}/status`, undefined, 6000),
 

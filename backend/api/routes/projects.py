@@ -68,8 +68,80 @@ from pipeline.export.mux import (
     separate_no_vocals,
 )
 from pipeline.tts import engines_status
+from pipeline.subtitles import subtitle_segments
 
 router = APIRouter()
+
+
+def _subtitle_file(project_id: str, name: str) -> Path:
+    safe = Path(name or "").name
+    if not safe or Path(safe).suffix.lower() != ".srt":
+        raise HTTPException(422, "Chỉ hỗ trợ file phụ đề .srt")
+    return ensure_layout(project_id) / "subtitles" / safe
+
+
+@router.get("/api/projects/{project_id}/subtitles")
+def api_subtitles(project_id: str):
+    meta = load_meta(project_id)
+    if not meta:
+        raise HTTPException(404)
+    folder = ensure_layout(project_id) / "subtitles"
+    saved = {str(x.get("name")): x for x in meta.get("subtitleSources") or [] if isinstance(x, dict)}
+    items = [
+        {
+            "name": p.name,
+            "label": str(saved.get(p.name, {}).get("label") or f"File đã nhập · {p.name}"),
+        }
+        for p in sorted(folder.glob("*.srt"))
+    ]
+    return {"items": items, "active": str((meta.get("settings") or {}).get("subtitleSource") or "")}
+
+
+@router.post("/api/projects/{project_id}/subtitles")
+async def api_upload_subtitle(project_id: str, file: UploadFile = File(...)):
+    meta = load_meta(project_id)
+    if not meta:
+        raise HTTPException(404)
+    target = _subtitle_file(project_id, file.filename or "")
+    target.parent.mkdir(exist_ok=True)
+    with target.open("wb") as out:
+        shutil.copyfileobj(file.file, out)
+    try:
+        cues = subtitle_segments(target)
+    except OSError as e:
+        target.unlink(missing_ok=True)
+        raise HTTPException(422, f"Không đọc được file phụ đề: {e}") from e
+    if not cues:
+        target.unlink(missing_ok=True)
+        raise HTTPException(422, "File SRT không có cue hợp lệ")
+    sources = [x for x in meta.get("subtitleSources") or [] if x.get("name") != target.name]
+    sources.append({"name": target.name, "label": f"File đã nhập · {target.name}", "origin": "manual"})
+    meta["subtitleSources"] = sources
+    save_meta(project_id, meta)
+    return {"name": target.name, "items": sources}
+
+
+@router.post("/api/projects/{project_id}/subtitles/{name}/apply")
+def api_apply_subtitle(project_id: str, name: str):
+    """Apply a selected SRT immediately, so the editor never shows the old file's cues."""
+    meta = load_meta(project_id)
+    if not meta:
+        raise HTTPException(404)
+    source = _subtitle_file(project_id, name)
+    if not source.is_file():
+        raise HTTPException(404, "Không tìm thấy file phụ đề")
+    segments = subtitle_segments(source)
+    if not segments:
+        raise HTTPException(422, "File SRT không có cue hợp lệ")
+    settings = dict(meta.get("settings") or {})
+    settings.update({"engine": "subtitle", "subtitleSource": source.name, "matchDuration": "none"})
+    meta["segments"] = segments
+    meta["settings"] = settings
+    meta["cache"] = {}
+    meta["translationCaches"] = {}
+    set_status(project_id, step="asr", progress=100, message=f"Đã nạp {len(segments)} câu từ phụ đề SRT", running=False, error=None)
+    save_meta(project_id, meta)
+    return {"segments": segments, "settings": settings}
 
 # Aliases matching original routes_all names
 _spawn = spawn

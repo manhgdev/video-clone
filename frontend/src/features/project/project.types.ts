@@ -90,8 +90,9 @@ export type TextOverlay = {
 }
 
 export type ProjectSettings = {
-  /** whisper = giọng nói; paddleocr = chữ trên khung */
-  engine: 'whisper' | 'paddleocr'
+  /** whisper = giọng nói; paddleocr = chữ trên khung; subtitle = file SRT */
+  engine: 'whisper' | 'paddleocr' | 'subtitle'
+  subtitleSource?: string
   sourceLang: string
   targetLang: string
   /** google | mymemory | tiktok | ollama | openai | gemini | deepseek | openrouter | grok | nvidia */
@@ -194,7 +195,7 @@ export type ProjectSettings = {
    */
   engineProfiles?: Partial<
     Record<
-      'whisper' | 'paddleocr',
+      'whisper' | 'paddleocr' | 'subtitle',
       {
         matchDuration?: ProjectSettings['matchDuration']
         processOriginalAudio?: boolean

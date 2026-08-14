@@ -60,7 +60,10 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
     # settings.previewSec ở đây = cửa sổ LẦN CHẠY (api_run đã tách khỏi ô UI)
     preview_sec = max(0, int(settings.get("previewSec") or 0))
     tag = preview_tag(preview_sec)
-    run_settings = {**settings, "previewSec": preview_sec}
+    # v2: vertical speech/SRT cues are split into readable 9:16 display
+    # units before translating.  Keep old cache rows from restoring long
+    # sentence-sized cues after this behavior changes.
+    run_settings = {**settings, "previewSec": preview_sec, "portraitCueLayout": 2}
     a_key = asr_cache_key(run_settings, source_fp)
     t_key = trans_cache_key(run_settings)
     run_caches = meta.get("translationCaches")
@@ -159,6 +162,8 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
         # 1.00× (khối cuối) — editor/xuất luôn ở tốc độ thật.
         auto_baked_prefer = False
         if (
+            str(settings.get("engine") or "") != "subtitle"
+            and
             str(settings.get("matchDuration") or "") == "preferVideo"
             and meta.get("bakedSpeed") is None
         ):
@@ -205,11 +210,25 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                 running=True,
             )
         else:
-            wav = cache_audio(project_id, audio_cache_tag(preview_sec, match_mode, speed=work_speed))
             engine = settings.get("engine", "whisper")
-            use_ocr = engine in ("paddleocr", "screen")
+            if engine == "subtitle":
+                source_name = Path(str(settings.get("subtitleSource") or "")).name
+                source_file = ensure_layout(project_id) / "subtitles" / source_name
+                if not source_name or not source_file.is_file():
+                    raise RuntimeError("Chọn file phụ đề SRT trong Clone Video trước khi chạy.")
+                from pipeline.subtitles import subtitle_segments
+
+                set_status(project_id, step="asr", progress=35, message="Đọc phụ đề SRT…", running=True)
+                segments = subtitle_segments(source_file, preview_sec=preview_sec)
+                use_ocr = False
+            else:
+                wav = cache_audio(project_id, audio_cache_tag(preview_sec, match_mode, speed=work_speed))
+                use_ocr = engine in ("paddleocr", "screen")
+                segments = []
             if not use_ocr:
-                if wav.exists() and wav.stat().st_mtime >= video.stat().st_mtime:
+                if engine == "subtitle":
+                    pass
+                elif wav.exists() and wav.stat().st_mtime >= video.stat().st_mtime:
                     set_status(
                         project_id, step="asr", progress=8, message="Cache audio…", running=True
                     )
@@ -219,9 +238,10 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                     )
                     extract_audio(video, wav, project_id=project_id)
 
-            segments = []
             frames_ok = any(cache_frames(project_id, tag).glob("*.jpg"))
-            if use_ocr:
+            if engine == "subtitle":
+                pass
+            elif use_ocr:
                 ocr_req = int(settings.get("workers") or 0)
                 analysis_region = settings.get("analysisRegion")
                 stable = bool(settings.get("stableCaptionLocate", False))
@@ -270,6 +290,19 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
 
             if not segments:
                 raise RuntimeError("Không nhận được đoạn thoại nào từ video.")
+
+            # Whisper/SRT timestamps describe speech, not the small batches of
+            # text visible on a vertical video.  Split only true portrait input
+            # here; 16:9 keeps sentence-sized cues.  OCR below still finds the
+            # actual on-screen position for every resulting cue.
+            try:
+                input_w, input_h = video_size(video)
+            except Exception:
+                input_w, input_h = 0, 0
+            if input_h > input_w > 0 and engine in ("whisper", "subtitle"):
+                from pipeline.subtitles import split_portrait_caption_segments
+
+                segments = split_portrait_caption_segments(segments)
 
             # Normalize a tiny, whitelisted set of Chinese ASR homophones before
             # translation; this keeps the correction shared by Whisper and OCR.
@@ -431,12 +464,14 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                 seg["voice"] = inherit_voice(seg.get("voice"), voice)
             cache["transKey"] = t_key
 
-        # Whisper: speech timing ≠ vị trí chữ — OCR gắn bbox/layout (mid/đáy)
-        # Cần khi burnSubs (kéo mid/dọc đúng chỗ) — không chỉ khi coverHardsubs.
+        # Whisper/SRT provide text timing, not its on-screen position. OCR only
+        # locates the hard-sub area; it does not replace the SRT's text.
         engine = settings.get("engine", "whisper")
         if (
             engine not in ("paddleocr", "screen")
-            and bool(settings.get("burnSubs", True))
+            # Bbox is also needed when only covering existing hard-subs;
+            # editor's “Không chèn chữ” disables burnSubs but not coverHardsubs.
+            and (bool(settings.get("burnSubs", True)) or bool(settings.get("coverHardsubs", True)))
             and segments
         ):
             # Định vị: ưu tiên GPU (RapidOCR) khi có CUDA — không kẹp kind=cpu → 2 luồng
@@ -493,6 +528,10 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                     running=True,
                 )
             if cv2_ok:
+                srt_locator = engine == "subtitle"
+                if srt_locator:
+                    for seg in segments:
+                        seg["_locatorProbeEarly"] = True
                 try:
                     n_box = attach_speech_hardsub_boxes(
                         video,
@@ -524,6 +563,10 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                         message=f"Bỏ định vị OCR ({type(ocr_e).__name__}) — vẫn giữ bản dịch",
                         running=True,
                     )
+                finally:
+                    if srt_locator:
+                        for seg in segments:
+                            seg.pop("_locatorProbeEarly", None)
             if locate_ok:
                 meta["bboxLocateVersion"] = locate_layout_version
             if n_box:
@@ -623,6 +666,8 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
             next_msg = f"{hint}Xong {len(segments)} đoạn — không dịch, không chèn caption"
         elif engine in ("paddleocr", "screen"):
             next_msg = f"{hint}Xong {len(segments)} đoạn — bấm Xuất bản để che chữ cũ + đè bản dịch"
+        elif engine == "subtitle":
+            next_msg = f"{hint}Dùng phụ đề SRT: {len(segments)} đoạn — tiếp theo: Lồng tiếng → Xuất bản"
         else:
             next_msg = f"{hint}Xong {len(segments)} đoạn — tiếp theo: Lồng tiếng → Xuất bản"
         set_status(

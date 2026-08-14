@@ -201,7 +201,7 @@ function EmptyArt() {
 }
 
 type Props = {
-  onUseInClone?: (projectId: string, meta: { videoUrl: string; duration: number }) => void
+  onUseInClone?: (projectId: string, meta: { videoUrl: string; duration: number; segments?: unknown[]; settings?: Record<string, unknown> }) => void
 }
 
 export default function DownloadStudio({ onUseInClone }: Props = {}) {
@@ -331,29 +331,18 @@ export default function DownloadStudio({ onUseInClone }: Props = {}) {
   }
 
   async function onPickFolder() {
-    // Chromium: File System Access API (chỉ lấy tên folder → ghép path local nếu user đã có base)
-    const w = window as Window & {
-      showDirectoryPicker?: () => Promise<{ name: string }>
-    }
-    if (typeof w.showDirectoryPicker === 'function') {
-      try {
-        const dir = await w.showDirectoryPicker()
-        const name = dir?.name
-        if (name) {
-          // Browser không cho full OS path — gợi ý user dán path đầy đủ
-          const hint = savePath.trim()
-            ? savePath.replace(/[/\\][^/\\]+[/\\]?$/, '') + '\\' + name
-            : name
-          setSavePath(hint)
-          setPathMsg('Đã chọn tên folder — kiểm tra path rồi bấm Lưu (browser không lộ full path).')
-          return
-        }
-      } catch {
-        /* user cancel */
+    try {
+      const picked = await downloadApi.pickFolder()
+      if (picked.path) {
+        setSavePath(picked.path)
+        await applySavePath(picked.path)
         return
       }
+      return // user cancelled the native picker
+    } catch {
+      // Browser/remote backend fallback below.
     }
-    // fallback: mở explorer tại thư mục hiện tại + prompt path
+    // Fallback only when a native desktop picker is unavailable.
     try {
       await downloadApi.revealRoot()
     } catch {
@@ -446,6 +435,8 @@ export default function DownloadStudio({ onUseInClone }: Props = {}) {
       onUseInClone(res.projectId, {
         videoUrl: res.videoUrl,
         duration: res.duration || 0,
+        segments: res.segments,
+        settings: res.settings,
       })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Không mở được trong Clone Video')

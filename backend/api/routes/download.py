@@ -34,6 +34,7 @@ from pipeline.download.ytdlp_jobs import (
     set_download_root,
     start_jobs,
 )
+from pipeline.subtitles import subtitle_segments
 
 router = APIRouter()
 
@@ -53,6 +54,20 @@ class DownloadStartIn(BaseModel):
 
 class DownloadRootIn(BaseModel):
     path: str = Field(..., min_length=1)
+
+
+def _copy_job_subtitles(root: Path, job_dir: Path) -> list[dict[str, str]]:
+    """Copy SRT sidecars from a completed download into a Clone Video project."""
+    if not job_dir.is_dir():
+        return []
+    subtitle_dir = root / "subtitles"
+    subtitle_dir.mkdir(parents=True, exist_ok=True)
+    copied: list[dict[str, str]] = []
+    for source in sorted(job_dir.glob("*.srt")):
+        target = subtitle_dir / source.name
+        shutil.copy2(source, target)
+        copied.append({"name": source.name, "label": f"Từ Download · {source.name}", "origin": "download"})
+    return copied
 
 
 @router.get("/api/download/root")
@@ -187,12 +202,28 @@ def api_download_to_project(job_id: str):
     existing = find_project_by_fp(fp)
     if existing:
         meta = load_meta(existing)
-        ensure_layout(existing)
+        root = ensure_layout(existing)
+        job = get_job(job_id) or {}
+        downloaded_sources = _copy_job_subtitles(root, path.parent)
+        if downloaded_sources:
+            old_sources = [
+                source for source in meta.get("subtitleSources") or []
+                if isinstance(source, dict) and source.get("origin") != "download"
+            ]
+            selected = downloaded_sources[0]["name"]
+            settings = dict(meta.get("settings") or {})
+            settings.update({"engine": "subtitle", "subtitleSource": selected, "matchDuration": "none"})
+            meta.update({
+                "subtitleSources": downloaded_sources + old_sources,
+                "segments": subtitle_segments(root / "subtitles" / selected),
+                "settings": settings,
+            })
+            save_meta(existing, meta)
         set_status(
             existing,
             step=meta.get("status", {}).get("step") or "video",
             progress=100,
-            message="Video đã có sẵn (cache)",
+            message="Video + phụ đề đã sẵn sàng (cache)" if downloaded_sources else "Video đã có sẵn (cache)",
             running=False,
             error=None,
         )
@@ -204,6 +235,7 @@ def api_download_to_project(job_id: str):
             "segments": meta.get("segments") or [],
             "settings": meta.get("settings") or {},
             "fromDownload": job_id,
+            "subtitleSources": meta.get("subtitleSources") or [],
         }
 
     project_id = uuid.uuid4().hex[:12]
@@ -211,21 +243,32 @@ def api_download_to_project(job_id: str):
     dest = root / f"source{ext if ext else '.mp4'}"
     shutil.copy2(path, dest)
     duration = ffprobe_duration(dest)
+    job = get_job(job_id) or {}
+    subtitle_dir = root / "subtitles"
+    subtitle_sources = _copy_job_subtitles(root, path.parent)
+    subtitle_source = subtitle_sources[0]["name"] if subtitle_sources else ""
+    init_settings = Settings().model_dump()
+    if subtitle_source:
+        init_settings.update({"engine": "subtitle", "subtitleSource": subtitle_source, "matchDuration": "none"})
+        initial_segments = subtitle_segments(subtitle_dir / subtitle_source)
+    else:
+        initial_segments = []
     save_meta(
         project_id,
         {
             "videoPath": str(dest),
             "duration": duration,
             "sourceFp": fp,
-            "segments": [],
+            "segments": initial_segments,
             "cache": {},
-            "settings": Settings().model_dump(),
+            "settings": init_settings,
+            "subtitleSources": subtitle_sources,
             "sourceDownloadJob": job_id,
-            "sourceUrl": (get_job(job_id) or {}).get("url"),
+            "sourceUrl": job.get("url"),
             "status": {
                 "step": "video",
                 "progress": 100,
-                "message": "Video sẵn sàng (từ Download)",
+                "message": "Video + phụ đề sẵn sàng (từ Download)" if subtitle_source else "Video sẵn sàng (từ Download)",
                 "running": False,
             },
         },
@@ -235,6 +278,8 @@ def api_download_to_project(job_id: str):
         "videoUrl": f"/api/projects/{project_id}/video",
         "duration": duration,
         "cached": False,
-        "segments": [],
+        "segments": initial_segments,
+        "settings": init_settings,
+        "subtitleSources": subtitle_sources,
         "fromDownload": job_id,
     }

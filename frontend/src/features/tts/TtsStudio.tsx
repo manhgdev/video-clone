@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { localize, useLocale } from '@/app/i18n'
 import { api } from '@/features/project/project.api'
 import ProgressPopup from '@/shared/components/ProgressPopup'
 import { IconHeadphones, IconHeart, IconMic, IconSpeaker } from '@/shared/components/Icons'
@@ -127,6 +128,8 @@ export default function TtsStudio({
   sideOpen: sideOpenProp,
   onSideOpenChange,
 }: Props) {
+  const { locale } = useLocale()
+  const t = (vietnamese: string, english: string) => localize(locale, vietnamese, english)
   const savedRef = useRef(loadTtsSettings())
   const saved = savedRef.current
   /** Preferred voice across async voice-list loads — avoids wiping restored selection. */
@@ -721,7 +724,9 @@ export default function TtsStudio({
   async function onDeleteVoice(voiceId: string) {
     const label = voiceDisplayName(voiceId, voices)
     const isClone = voiceId.startsWith('vn:clone:')
-    if (!window.confirm(isClone ? `Xóa giọng clone «${label}»?` : `Ẩn / xóa giọng zmAI «${label}» khỏi danh sách?`)) return
+    if (!window.confirm(isClone
+      ? t(`Xóa giọng clone «${label}»?`, `Delete cloned voice “${label}”?`)
+      : t(`Ẩn / xóa giọng zmAI «${label}» khỏi danh sách?`, `Hide/delete zmAI voice “${label}” from the list?`))) return
     setBusyKind('clone')
     setBusy(true)
     setError('')
@@ -871,7 +876,10 @@ export default function TtsStudio({
         style,
         matchDuration: 'none',
         autoSplit: false,
-        title: `Nghe thử · ${voiceDisplayName(v.id, voices, v.name)}`.slice(0, 80),
+        title: t(
+          `Nghe thử · ${voiceDisplayName(v.id, voices, v.name)}`,
+          `Preview · ${voiceDisplayName(v.id, voices, v.name)}`,
+        ).slice(0, 80),
       })
       playVoicePreview(v.id, res.audioUrl)
     } catch (e) {
@@ -1517,7 +1525,7 @@ export default function TtsStudio({
               </label>
             </div>
             <label className="tts-field">
-              <span>Giọng nói ({engineVoices.length})</span>
+              <span>{t(`Giọng nói (${engineVoices.length})`, `Voices (${engineVoices.length})`)}</span>
               <div className="tts-inline">
                 <select
                   value={voice}
@@ -1581,7 +1589,7 @@ export default function TtsStudio({
                   value={previewSample}
                   onChange={(e) => setPreviewSample(e.target.value)}
                   placeholder={previewSampleFor(lang)}
-                  title={`Trống → tự dùng: ${previewSampleFor(lang)}`}
+                  title={t(`Trống → tự dùng: ${previewSampleFor(lang)}`, `Empty → use: ${previewSampleFor(lang)}`)}
                 />
                 <button
                   type="button"
@@ -1641,8 +1649,10 @@ export default function TtsStudio({
               <span>
                 Giữ nguyên timeline SRT
                 <small>
-                  Bật: audio và file xuất giữ đúng start/end của từng cue SRT.
-                  Tắt: nối tuần tự, timestamp SRT theo audio.
+                  {t(
+                    'Bật: audio và file xuất giữ đúng start/end của từng cue SRT. Tắt: nối tuần tự, timestamp SRT theo audio.',
+                    'On: audio and exported files keep each SRT cue’s exact start/end. Off: cues are joined sequentially and SRT timestamps follow the audio.',
+                  )}
                 </small>
               </span>
             </label>
@@ -1668,7 +1678,7 @@ export default function TtsStudio({
                       style={{ width: 72, marginLeft: 4, border: '1px solid var(--tts-line)', borderRadius: 6, padding: '2px 6px' }}
                     />
                   ) : null}
-                  {' '}ms — khoảng nghỉ ngắn giữa các câu
+                  {' '}ms — {t('khoảng nghỉ ngắn giữa các câu', 'a short pause between sentences')}
                 </small>
               </span>
             </label>
@@ -2048,7 +2058,7 @@ export default function TtsStudio({
                 disabled={busy || selectedVoiceCount === 0}
                 onClick={() => void confirmBulkMoveVoices()}
               >
-                {busy ? 'Đang chuyển…' : `Xác nhận · ${bulkMoveTargetLabel}`}
+                {busy ? t('Đang chuyển…', 'Moving…') : t(`Xác nhận · ${bulkMoveTargetLabel}`, `Confirm · ${bulkMoveTargetLabel}`)}
               </button>
             </div>
           </div>

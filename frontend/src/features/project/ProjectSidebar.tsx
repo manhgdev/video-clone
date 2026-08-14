@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
 import type { ProjectSettings } from '@/features/project/project.types'
+import { api } from '@/features/project/project.api'
 
 type AnalysisRegion = { x: number; y: number; w: number; h: number }
 
@@ -34,12 +35,25 @@ function numOr(raw: unknown, fallback: number): number {
   return Number.isFinite(n) ? n : fallback
 }
 
+function inputAspectLabel(width: number, height: number): string {
+  if (!width || !height) return ''
+  const ratio = width / height
+  if (Math.abs(ratio - 9 / 16) < 0.025) return '9:16'
+  if (Math.abs(ratio - 16 / 9) < 0.025) return '16:9'
+  if (Math.abs(ratio - 1) < 0.025) return '1:1'
+  const gcd = (a: number, b: number): number => (b ? gcd(b, a % b) : a)
+  const divisor = gcd(Math.round(width), Math.round(height)) || 1
+  return `${Math.round(width / divisor)}:${Math.round(height / divisor)}`
+}
+
 type Props = {
+  projectId: string | null
   videoUrl: string | null
   settings: ProjectSettings
   voices: { id: string; name: string }[]
   busy: boolean
   onSettings: (s: ProjectSettings) => void
+  onSubtitleApplied?: (segments: import('@/features/project/project.types').Segment[], settings: ProjectSettings) => void
   onUpload: (file: File) => void
   onTranslateAll: () => void
   /** previewSec = số giây từ ô Preview (đã commit draft) */
@@ -72,14 +86,16 @@ function Field({
   icon,
   children,
   hint,
+  className,
 }: {
   label: string
   icon?: ReactNode
   children: ReactNode
   hint?: string
+  className?: string
 }) {
   return (
-    <div className="field">
+    <div className={`field${className ? ` ${className}` : ''}`}>
       <span className="field-label">
         {icon}
         {label}
@@ -91,11 +107,13 @@ function Field({
 }
 
 export default function Sidebar({
+  projectId,
   videoUrl,
   settings,
   voices,
   busy,
   onSettings,
+  onSubtitleApplied,
   onUpload,
   onTranslateAll,
   onPreview,
@@ -104,14 +122,50 @@ export default function Sidebar({
   clearingCache = false,
 }: Props) {
   const inputRef = useRef<HTMLInputElement>(null)
+  const subtitleInputRef = useRef<HTMLInputElement>(null)
   const previewShellRef = useRef<HTMLDivElement>(null)
   const [portrait, setPortrait] = useState(false)
+  const [inputSize, setInputSize] = useState({ width: 0, height: 0 })
   const [showCancel, setShowCancel] = useState(false)
   const [confirmClear, setConfirmClear] = useState(false)
   const [clearParts, setClearParts] = useState<string[]>(() => [...ALL_CACHE_PARTS])
+  const [subtitleSources, setSubtitleSources] = useState<{ name: string; label: string }[]>([])
   const [previewDraft, setPreviewDraft] = useState(
     String(settings.previewSec > 0 ? settings.previewSec : 20),
   )
+
+  useEffect(() => {
+    if (!projectId) {
+      setSubtitleSources([])
+      return
+    }
+    void api.subtitles(projectId).then((r) => setSubtitleSources(r.items)).catch(() => setSubtitleSources([]))
+  }, [projectId])
+
+  useEffect(() => {
+    setInputSize({ width: 0, height: 0 })
+    setPortrait(false)
+  }, [videoUrl])
+
+  async function importSubtitle(file: File | undefined) {
+    if (!file || !projectId || busy) return
+    try {
+      const result = await api.uploadSubtitle(projectId, file)
+      setSubtitleSources(result.items)
+      const applied = await api.applySubtitle(projectId, result.name)
+      onSettings(applied.settings)
+      onSubtitleApplied?.(applied.segments, applied.settings)
+    } finally {
+      if (subtitleInputRef.current) subtitleInputRef.current.value = ''
+    }
+  }
+
+  async function selectSubtitle(name: string) {
+    if (!projectId || busy) return
+    const applied = await api.applySubtitle(projectId, name)
+    onSettings(applied.settings)
+    onSubtitleApplied?.(applied.segments, applied.settings)
+  }
   const regionDragRef = useRef<{
     mode: 'move' | 'nw' | 'ne' | 'sw' | 'se' | 'n' | 's' | 'e' | 'w'
     startX: number
@@ -272,6 +326,7 @@ export default function Sidebar({
             onLoadedMetadata={(e) => {
               const v = e.currentTarget
               setPortrait(v.videoHeight > v.videoWidth)
+              setInputSize({ width: v.videoWidth, height: v.videoHeight })
             }}
           />
         ) : (
@@ -315,17 +370,31 @@ export default function Sidebar({
           if (f && !busy) onUpload(f)
         }}
       />
+      <input
+        ref={subtitleInputRef}
+        type="file"
+        accept=".srt,application/x-subrip,text/plain"
+        hidden
+        onChange={(e) => void importSubtitle(e.target.files?.[0])}
+      />
       {videoUrl && (
-        <button
-          type="button"
-          className="linkish"
-          disabled={busy}
-          onClick={() => {
-            if (!busy) inputRef.current?.click()
-          }}
-        >
-          Đổi video
-        </button>
+        <div className="video-source-meta">
+          <button
+            type="button"
+            className="linkish"
+            disabled={busy}
+            onClick={() => {
+              if (!busy) inputRef.current?.click()
+            }}
+          >
+            Đổi video
+          </button>
+          {inputSize.width > 0 && (
+            <span title={`${inputSize.width}×${inputSize.height}`}>
+              Đầu vào · {inputAspectLabel(inputSize.width, inputSize.height)}
+            </span>
+          )}
+        </div>
       )}
 
       <div className="field-row">
@@ -335,6 +404,8 @@ export default function Sidebar({
           hint={
             settings.engine === 'paddleocr'
               ? 'Đọc chữ phụ đề trên khung hình'
+              : settings.engine === 'subtitle'
+                ? 'Dùng file phụ đề đã chọn'
               : 'Faster-Whisper'
           }
         >
@@ -345,6 +416,7 @@ export default function Sidebar({
           >
             <option value="whisper">Giọng nói (Whisper)</option>
             <option value="paddleocr">Chữ trên màn (OCR)</option>
+            <option value="subtitle">Phụ đề SRT</option>
           </select>
         </Field>
         <Field
@@ -356,7 +428,7 @@ export default function Sidebar({
               : settings.translator === 'mymemory'
                 ? 'Free — không key (có quota IP)'
                 : settings.translator === 'tiktok'
-                  ? 'TikTok translate free — không key.'
+                  ? 'TikTok translate free'
                   : settings.translator === 'ollama'
                     ? settings.ollamaMode === 'cloud'
                       ? 'Cloud'
@@ -384,6 +456,24 @@ export default function Sidebar({
           </select>
         </Field>
       </div>
+
+      {settings.engine === 'subtitle' && (
+        <Field className="subtitle-source-field" label="File phụ đề" icon={<IconType size={14} />} hint="Dùng timestamp từ file, không chạy Whisper/OCR">
+          <div className="subtitle-source-control">
+            <select
+              value={settings.subtitleSource || ''}
+              disabled={busy}
+              onChange={(e) => void selectSubtitle(e.target.value)}
+            >
+              {!subtitleSources.length && <option value="">Chưa có file SRT</option>}
+              {subtitleSources.map((source) => <option key={source.name} value={source.name}>{source.label}</option>)}
+            </select>
+            <button type="button" disabled={busy || !projectId} onClick={() => subtitleInputRef.current?.click()}>
+              + Nhập SRT
+            </button>
+          </div>
+        </Field>
+      )}
 
       {settings.translator === 'ollama' && (
         <div className="field-row">

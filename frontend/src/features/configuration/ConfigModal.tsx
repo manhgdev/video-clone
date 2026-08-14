@@ -3,6 +3,9 @@ import { createPortal } from 'react-dom'
 import type { AppConfig, CloudProviderId, SystemChecks } from '@/features/project/project.types'
 import { api } from '@/features/project/project.api'
 import ProgressPopup from '@/shared/components/ProgressPopup'
+import LicensePage from '@/features/license/LicensePage'
+import type { LicenseStatus } from '@/features/license/license.api'
+import { localize, useLocale } from '@/app/i18n'
 import './ConfigModal.css'
 
 const PROVIDERS: CloudProviderId[] = [
@@ -39,7 +42,7 @@ function nextAutoInstall(checks: SystemChecks): InstallKind | null {
   return null
 }
 
-type Section = 'setup' | 'cloud' | 'tts' | 'logs'
+type Section = 'setup' | 'cloud' | 'tts' | 'license' | 'logs'
 type CloudTab = CloudProviderId
 
 type CloudDraft = Record<
@@ -57,6 +60,8 @@ type Props = {
   onSetupReady?: () => void
   /** Sau lưu config (đặc biệt ElevenLabs key) — App reload /api/voices */
   onSaved?: () => void
+  licenseStatus?: LicenseStatus
+  onLicenseStatusChange?: (status: LicenseStatus) => void
 }
 
 function emptyCloud(): CloudDraft {
@@ -113,7 +118,11 @@ export default function ConfigModal({
   forceSetup = false,
   onSetupReady,
   onSaved,
+  licenseStatus,
+  onLicenseStatusChange,
 }: Props) {
+  const { locale } = useLocale()
+  const t = (vietnamese: string, english: string) => localize(locale, vietnamese, english)
   const [section, setSection] = useState<Section>(initialSection)
   const [draft, setDraft] = useState<CloudDraft>(emptyCloud)
   /** Mỗi ô 1 key; '' = ô trống mới / placeholder đã lưu */
@@ -435,18 +444,18 @@ export default function ConfigModal({
         className={`cfg-modal cfg-modal-wide${section === 'setup' ? ' cfg-modal-setup' : ''}`}
         role="dialog"
         aria-modal
-        aria-label="Cấu hình"
+        aria-label={t('Cấu hình', 'Settings')}
         onClick={(e) => e.stopPropagation()}
       >
         <header className="cfg-head">
           <div>
-            <h2>Cấu hình</h2>
+            <h2>{t('Cấu hình', 'Settings')}</h2>
             <p>
               {installing
                 ? `Đang cài ${installLabel(installing)}…`
                 : forceSetup && !checks?.ok
                   ? 'Cài đủ thành phần bắt buộc để bắt đầu'
-                  : 'Thiết lập hệ thống · API dịch · ElevenLabs'}
+                  : t('Thiết lập hệ thống · API dịch · ElevenLabs', 'System settings · Translation API · ElevenLabs')}
             </p>
           </div>
           {canClose ? (
@@ -462,11 +471,11 @@ export default function ConfigModal({
             className={section === 'setup' ? 'active' : undefined}
             onClick={() => setSection('setup')}
           >
-            Thiết lập
+            {t('Thiết lập', 'Settings')}
             {checks && !checks.ok ? (
               <span className="cfg-dot cfg-dot-warn" title="Thiếu dependency" />
             ) : checks?.ok ? (
-              <span className="cfg-dot" title="Sẵn sàng" />
+              <span className="cfg-dot" title={t('Sẵn sàng', 'Ready')} />
             ) : null}
           </button>
           {!forceSetup ? (
@@ -485,6 +494,13 @@ export default function ConfigModal({
               >
                 ElevenLabs
                 {elSavedCount > 0 ? <span className="cfg-dot" title="Đã có key" /> : null}
+              </button>
+              <button
+                type="button"
+                className={section === 'license' ? 'active' : undefined}
+                onClick={() => setSection('license')}
+              >
+                Kích hoạt
               </button>
               <button
                 type="button"
@@ -571,7 +587,7 @@ export default function ConfigModal({
                   disabled={checksLoading || !!installing}
                   onClick={() => loadChecks(true, false)}
                 >
-                  {checksLoading ? '…' : 'Kiểm tra lại'}
+                  {checksLoading ? '…' : t('Kiểm tra lại', 'Check again')}
                 </button>
               </div>
             </div>
@@ -607,7 +623,7 @@ export default function ConfigModal({
                     </div>
                     {it.ok ? (
                       ['ai_runtime', 'ai_runtime_ocr', 'ai_runtime_vieneu', 'ocr_cuda', 'demucs_cuda', 'nvm'].includes(it.install) ? (
-                        <span className="cfg-check-installed">Đã cài</span>
+                        <span className="cfg-check-installed">{t('Đã cài', 'Installed')}</span>
                       ) : null
                     ) : ['ai_runtime', 'ai_runtime_ocr', 'ai_runtime_vieneu', 'ocr_cuda', 'demucs_cuda', 'nvm'].includes(it.install) ? (
                       <button
@@ -627,10 +643,10 @@ export default function ConfigModal({
                           ? 'Đang cài…'
                           : it.installLabel ||
                             (it.install.startsWith('ai_runtime')
-                              ? 'Cài gói AI'
+                              ? t('Cài gói AI', 'Install AI packages')
                               : it.install === 'demucs_cuda'
-                              ? checks?.device?.install?.demucsLabel || 'Cài Demucs GPU'
-                              : checks?.device?.install?.ocrLabel || 'Cài OCR CUDA')}
+                              ? checks?.device?.install?.demucsLabel || t('Cài Demucs GPU', 'Install Demucs (GPU)')
+                              : checks?.device?.install?.ocrLabel || t('Cài OCR CUDA', 'Install OCR (CUDA)'))}
                       </button>
                     ) : it.install ? (
                       it.install.startsWith('http') ? (
@@ -704,7 +720,7 @@ export default function ConfigModal({
               />
             </label>
             <p className="cfg-hint">
-              Chọn provider ở sidebar → <strong>Công cụ dịch</strong>. Key lưu{' '}
+              {t('Chọn provider ở sidebar → Công cụ dịch. Key lưu ', 'Select a provider in the sidebar → Translation tools. Keys are stored in ')}
               <code>backend/data/app_config.json</code>.
             </p>
           </div>
@@ -746,14 +762,21 @@ export default function ConfigModal({
               + Thêm key
             </button>
             <p className="cfg-hint">
-              Giọng <strong>ElevenLabs</strong> ở sidebar. Nhiều key → xoay khi 401/429.
-              Để trống ô đã lưu = giữ nguyên; gõ key mới = thay / thêm.
+              {t(
+                'Giọng ElevenLabs ở sidebar. Nhiều key → xoay khi 401/429. Để trống ô đã lưu = giữ nguyên; gõ key mới = thay / thêm.',
+                'ElevenLabs voices are available in the sidebar. Multiple keys rotate after 401/429. Leave a saved field empty to keep it; enter a new key to replace or add one.',
+              )}
             </p>
           </div>
+        ) : section === 'license' ? (
+          licenseStatus && onLicenseStatusChange ? <LicensePage status={licenseStatus} embedded onStatusChange={onLicenseStatusChange} /> : null
         ) : section === 'logs' ? (
           <div className="cfg-log-panel">
             <p className="cfg-hint">
-              Lỗi job (Dịch / Lồng tiếng / Xuất), warm-models, crash hook. Copy gửi AI để sửa.
+              {t(
+                'Lỗi job (Dịch / Lồng tiếng / Xuất), warm-models, crash hook. Copy gửi AI để sửa.',
+                'Job errors (translation, dubbing, export), warm-models, and crash hooks. Copy this for AI troubleshooting.',
+              )}
               {logPath ? (
                 <>
                   {' '}
@@ -763,11 +786,11 @@ export default function ConfigModal({
             </p>
             {logErr ? <p className="cfg-msg cfg-msg-err">{logErr}</p> : null}
             <pre className="cfg-log-pre" tabIndex={0}>
-              {logLoading ? 'Đang tải…' : logText || '(trống)'}
+              {logLoading ? t('Đang tải…', 'Loading…') : logText || t('(trống)', '(empty)')}
             </pre>
             <div className="cfg-log-actions">
               <button type="button" className="cfg-secondary" disabled={logLoading} onClick={() => loadLogs()}>
-                {logLoading ? 'Đang tải…' : 'Tải lại'}
+                {logLoading ? t('Đang tải…', 'Loading…') : t('Tải lại', 'Reload')}
               </button>
               <button
                 type="button"
@@ -780,18 +803,18 @@ export default function ConfigModal({
                   })
                 }}
               >
-                {logCopied ? 'Đã copy' : 'Copy log'}
+                {logCopied ? t('Đã copy', 'Copied') : 'Copy log'}
               </button>
               <button
                 type="button"
                 className="cfg-secondary"
                 disabled={logLoading}
                 onClick={() => {
-                  if (!window.confirm('Xóa toàn bộ file log?')) return
+                  if (!window.confirm(t('Xóa toàn bộ file log?', 'Delete all log files?'))) return
                   void api.clearAppLogs().then(() => loadLogs()).catch((e: Error) => setLogErr(e.message))
                 }}
               >
-                Xóa log
+                {t('Xóa log', 'Delete logs')}
               </button>
             </div>
           </div>
@@ -828,10 +851,10 @@ export default function ConfigModal({
                   else loadChecks(true, false)
                 }}
               >
-                {checks?.ok ? 'Bắt đầu' : checksLoading ? 'Đang chuẩn bị…' : 'Thử lại'}
+                {checks?.ok ? t('Bắt đầu', 'Start') : checksLoading ? t('Đang chuẩn bị…', 'Preparing…') : t('Thử lại', 'Retry')}
               </button>
             </>
-          ) : section === 'logs' ? (
+          ) : section === 'logs' || section === 'license' ? (
             <button type="button" className="cfg-secondary" onClick={tryClose} disabled={!canClose}>
               Đóng
             </button>

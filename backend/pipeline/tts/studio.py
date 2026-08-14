@@ -701,16 +701,42 @@ def rebuild_srt(job_id: str, srt_style: str = "hard") -> Path:
     return cached
 
 
-def ensure_mp3(job_id: str) -> Path:
+def ensure_wav(job_id: str) -> Path:
     job_dir = _job_dir(job_id)
     wav = job_dir / "audio.wav"
-    mp3 = job_dir / "audio.mp3"
     if not wav.is_file():
         raise FileNotFoundError("audio.wav missing")
+    marker = job_dir / ".quicktime-wav-ready"
+    if marker.is_file() and marker.stat().st_mtime >= wav.stat().st_mtime:
+        return wav
+    temp = job_dir / ".audio-quicktime.wav"
+    try:
+        subprocess.check_call(
+            [
+                "ffmpeg", "-y", "-i", str(wav), "-map", "0:a:0", "-vn",
+                "-ac", "1", "-ar", "48000", "-c:a", "pcm_s16le", str(temp),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        temp.replace(wav)
+        marker.write_text("pcm_s16le/48000/mono\n", encoding="ascii")
+    finally:
+        temp.unlink(missing_ok=True)
+    return wav
+
+
+def ensure_mp3(job_id: str) -> Path:
+    wav = ensure_wav(job_id)
+    mp3 = wav.with_suffix(".mp3")
     if mp3.is_file() and mp3.stat().st_mtime >= wav.stat().st_mtime:
         return mp3
     subprocess.check_call(
-        ["ffmpeg", "-y", "-i", str(wav), "-codec:a", "libmp3lame", "-qscale:a", "2", str(mp3)],
+        [
+            "ffmpeg", "-y", "-i", str(wav), "-map", "0:a:0", "-vn",
+            "-ac", "1", "-ar", "44100", "-codec:a", "libmp3lame", "-qscale:a", "2",
+            "-id3v2_version", "3", str(mp3),
+        ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )

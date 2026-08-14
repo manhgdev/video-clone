@@ -185,6 +185,39 @@
   border-color: var(--primary);
 }
 
+.subtitle-source-control {
+  display: flex;
+  gap: 6px;
+}
+
+.subtitle-source-control select {
+  min-width: 0;
+  flex: 1;
+}
+
+.subtitle-source-control button {
+  flex: 0 0 auto;
+  border: 1px solid color-mix(in srgb, var(--primary) 38%, var(--line));
+  border-radius: 8px;
+  padding: 8px 9px;
+  background: color-mix(in srgb, var(--primary) 7%, var(--surface));
+  color: var(--primary);
+  font: inherit;
+  font-size: 0.74rem;
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.subtitle-source-control button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--primary) 14%, var(--surface));
+}
+
+.subtitle-source-control button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
 .field-inline {
   display: flex;
   gap: 6px;
@@ -296,8 +329,9 @@
   font-weight: 700;
   font-size: 0.82rem;
   padding: 9px 0;
-  width: 5.4em;
-  min-width: 5.4em;
+  /* "Automatic" plus the native select arrow needs more than 5.4em. */
+  width: 7.5em;
+  min-width: 7.5em;
   flex-shrink: 0;
   cursor: pointer;
 }
@@ -540,6 +574,23 @@
   padding: 0;
   align-self: flex-start;
   margin-top: -4px;
+}
+
+.video-source-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: -4px;
+}
+
+.video-source-meta .linkish {
+  margin-top: 0;
+}
+
+.video-source-meta span {
+  color: var(--muted-foreground);
+  font-size: 0.72rem;
+  font-weight: 600;
 }
 
 .field.check {

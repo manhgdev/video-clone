@@ -149,6 +149,16 @@ def create_app() -> FastAPI:
     )
 
     @app.middleware("http")
+    async def bind_locale(request, call_next):
+        from api.i18n import reset_request_locale, set_request_locale
+
+        token = set_request_locale(request)
+        try:
+            return await call_next(request)
+        finally:
+            reset_request_locale(token)
+
+    @app.middleware("http")
     async def require_license(request, call_next):
         path = request.url.path
         # ponytail: chỉ gate /api/* — static files (/, .js, .css) phải qua để FE tải

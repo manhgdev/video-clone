@@ -546,6 +546,40 @@ def reference_cache_token(voice: str) -> str:
         return f"{parsed[1]}:missing"
 
 
+def _enable_torchaudio_soundfile_fallback() -> None:
+    """Keep VieNeu reference WAV loading working with torchaudio builds needing TorchCodec."""
+    import torchaudio
+
+    if getattr(torchaudio.load, "_videoclone_soundfile_fallback", False):
+        return
+    native_load = torchaudio.load
+
+    def load(uri: Any, *args: Any, **kwargs: Any):
+        try:
+            return native_load(uri, *args, **kwargs)
+        except (ImportError, RuntimeError) as exc:
+            if "torchcodec" not in str(exc).lower() or not isinstance(uri, (str, os.PathLike)):
+                raise
+            import soundfile as sf
+            import torch
+
+            frame_offset = int(kwargs.get("frame_offset", 0) or 0)
+            num_frames = int(kwargs.get("num_frames", -1) or -1)
+            channels_first = bool(kwargs.get("channels_first", True))
+            samples, sample_rate = sf.read(
+                str(uri),
+                start=max(0, frame_offset),
+                frames=num_frames if num_frames > 0 else -1,
+                dtype="float32",
+                always_2d=True,
+            )
+            waveform = torch.from_numpy(samples.T if channels_first else samples)
+            return waveform, sample_rate
+
+    load._videoclone_soundfile_fallback = True  # type: ignore[attr-defined]
+    torchaudio.load = load
+
+
 def _encoded_reference(client: Any, voice_id: str) -> dict[str, Any]:
     item = voice_store.get_reference_voice(voice_id)
     if not item:
@@ -584,6 +618,7 @@ def _encoded_reference(client: Any, voice_id: str) -> dict[str, Any]:
             from pipeline.core.system_check import ensure_torchaudio
 
             ensure_torchaudio()
+            _enable_torchaudio_soundfile_fallback()
             speaker_emb, ref_codes = client.encode_reference(path, denoise=False)
         except Exception as e:
             msg = str(e)

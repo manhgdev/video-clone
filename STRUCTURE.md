@@ -121,7 +121,7 @@ backend/
 | `core/` | Helper hạ tầng đã dùng bởi nhiều domain |
 | Facade (`run.py`, `burn.py`, `mux.py`, `extract.py`, `translate.py`) | Re-export API ổn định sau khi tách file |
 
-- Bug dùng chung: sửa **một lần** ở helper/pipeline gốc + một check nhỏ (`backend/tests/` hoặc assert) nếu logic không tầm thường.
+- Bug dùng chung: sửa **một lần** ở helper/pipeline gốc + một check nhỏ (`tests/backend/` hoặc assert) nếu logic không tầm thường.
 - Job dài: `begin_job` / `arm_job` / `request_cancel` + `register_process` mọi subprocess để **Huỷ** kill được.
 - GPU: `core/accel.py` là nguồn sự thật cho device preference; engine chỉ gọi helper, không hardcode path Windows.
 

@@ -42,6 +42,10 @@ export const downloadApi = {
     return fetchJson(`${base}/root/reveal`, { method: 'POST' }, 8000)
   },
 
+  async pickFolder(): Promise<{ ok: boolean; path: string }> {
+    return fetchJson('/api/system/pick-folder', { method: 'POST' }, 300_000)
+  },
+
   async list(): Promise<DownloadJob[]> {
     return fetchJson<DownloadJob[]>(`${base}/jobs`, undefined, 8000)
   },

@@ -1,12 +1,13 @@
 {
   "name": "video-clone",
   "private": true,
-  "version": "3.1.6",
+  "version": "3.1.7",
   "type": "module",
   "scripts": {
     "setup": "node scripts/setup.mjs",
     "dev": "vite --config frontend/vite.config.ts",
     "build": "tsc -b frontend/tsconfig.json && vite build --config frontend/vite.config.ts",
+    "test:i18n": "node --test tests/i18n.catalog.test.mjs",
     "build:app": "node build_app/build.mjs",
     "check:build": "node build_app/check_build.mjs",
     "preview": "vite preview --config frontend/vite.config.ts",

@@ -1,7 +1,9 @@
 """Standalone subtitle export jobs for audio, video and caption files."""
 from __future__ import annotations
 
+import json
 import shutil
+import subprocess
 import threading
 import time
 import uuid
@@ -13,6 +15,7 @@ from pipeline.asr.whisper import asr_whisper
 from pipeline.core.config import DATA
 from pipeline.core.media import extract_audio
 from pipeline.export.srt import SRT_STYLES, _split_for_style, parse_srt, style_params, wrap_capcut_text, write_subtitle
+from pipeline.mt.api import translate_segments
 
 ROOT = DATA / "srt_export"
 _LOCK = threading.Lock()
@@ -35,18 +38,20 @@ def get_job(job_id: str) -> dict[str, Any] | None:
         return _JOBS.get(job_id)
 
 
-def create_job(filename: str, input_path: Path, source_kind: str) -> dict[str, Any]:
+def create_job(filename: str, input_path: Path | None, source_kind: str, *, source_url: str = "", options: dict[str, Any] | None = None) -> dict[str, Any]:
     ROOT.mkdir(parents=True, exist_ok=True)
     job_id = uuid.uuid4().hex[:10]
     work = ROOT / job_id
     work.mkdir(parents=True)
-    copied = work / f"input{input_path.suffix.lower()}"
-    shutil.move(str(input_path), copied)
+    copied = work / f"input{input_path.suffix.lower()}" if input_path else None
+    if input_path and copied:
+        shutil.move(str(input_path), copied)
     job = {
         "id": job_id, "filename": filename, "sourceKind": source_kind,
         "status": "queued", "progress": 0, "message": "Đang chờ xử lý",
         "error": None, "createdAt": time.time(), "outputDir": str(work),
-        "inputPath": str(copied), "files": [], "cancelled": False,
+        "inputPath": str(copied) if copied else "", "sourceUrl": source_url,
+        "options": options or {}, "files": [], "cancelled": False,
     }
     with _LOCK:
         _JOBS[job_id] = job
@@ -91,43 +96,154 @@ def _styled(cues: list[dict[str, Any]], style: str) -> list[dict[str, Any]]:
     return result
 
 
+def _pick_platform_language(info: dict[str, Any], preferred: str = "auto") -> tuple[str, str] | None:
+    """Return (language, source type), preferring creator subtitles over auto captions."""
+    pools = (("phụ đề có sẵn", info.get("subtitles") or {}), ("phụ đề tự động", info.get("automatic_captions") or {}))
+    wanted = (preferred or "auto").lower()
+    for label, pool in pools:
+        keys = [str(key) for key in pool if key and key != "live_chat"]
+        if not keys:
+            continue
+        if wanted != "auto":
+            exact = next((key for key in keys if key.lower() == wanted), None)
+            base = next((key for key in keys if key.lower().split("-", 1)[0] == wanted.split("-", 1)[0]), None)
+            if exact or base:
+                return exact or base, label
+            continue
+        for priority in ("vi", "en"):
+            match = next((key for key in keys if key.lower().split("-", 1)[0] == priority), None)
+            if match:
+                return match, label
+        return keys[0], label
+    return None
+
+
+def _platform_subtitles(work: Path, url: str, source_lang: str) -> tuple[list[dict[str, Any]] | None, str]:
+    ytdlp = shutil.which("yt-dlp")
+    if not ytdlp:
+        return None, "Không tìm thấy yt-dlp"
+    meta = subprocess.run([ytdlp, "--dump-single-json", "--skip-download", "--no-playlist", url], capture_output=True, text=True, timeout=90)
+    if meta.returncode:
+        return None, (meta.stderr.strip().splitlines()[-1] if meta.stderr.strip() else "Không đọc được phụ đề của nền tảng")
+    info = json.loads(meta.stdout)
+    picked = _pick_platform_language(info, source_lang)
+    if not picked:
+        return None, "Video không có phụ đề phù hợp"
+    language, label = picked
+    template = work / "platform.%(ext)s"
+    result = subprocess.run([
+        ytdlp, "--skip-download", "--no-playlist", "--write-subs", "--write-auto-subs",
+        "--sub-langs", language, "--sub-format", "srt/vtt/best", "--convert-subs", "srt",
+        "-o", str(template), url,
+    ], capture_output=True, text=True, timeout=180)
+    captions = sorted(work.glob("platform*.srt"))
+    if result.returncode or not captions:
+        detail = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "Không tải được phụ đề"
+        return None, detail
+    return _caption_cues(captions[0]), f"Đã lấy {label} ({language}), không cần Whisper"
+
+
+def _platform_audio(work: Path, url: str) -> Path:
+    ytdlp = shutil.which("yt-dlp")
+    if not ytdlp:
+        raise RuntimeError("Chưa cài yt-dlp để đọc URL nền tảng")
+    result = subprocess.run([ytdlp, "--no-playlist", "-f", "bestaudio/best", "-o", str(work / "input.%(ext)s"), url], capture_output=True, text=True, timeout=900)
+    sources = [path for path in work.glob("input.*") if path.suffix.lower() != ".part"]
+    if result.returncode or not sources:
+        detail = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "Không tải được audio từ nền tảng"
+        raise RuntimeError(detail)
+    return sources[0]
+
+
+def _translated_cues(cues: list[dict[str, Any]], translated: list[str]) -> list[dict[str, Any]]:
+    result = []
+    for cue, text in zip(cues, translated):
+        result.append({**cue, "text": str(text or cue.get("text") or "").strip()})
+    return result
+
+
+def _write_outputs(work: Path, cues: list[dict[str, Any]], prefix: str) -> list[str]:
+    files: list[str] = []
+    for style in SRT_STYLES:
+        name = f"{prefix}-{style}.srt"
+        write_subtitle(work / name, _styled(cues, style), "srt", capcut=False)
+        files.append(name)
+    write_subtitle(work / f"{prefix}.vtt", _styled(cues, "hard"), "vtt", capcut=False)
+    write_subtitle(work / f"{prefix}.txt", cues, "txt")
+    return files + [f"{prefix}.vtt", f"{prefix}.txt"]
+
+
+def _zip_outputs(work: Path, files: list[str], *, bilingual: bool = False, target_lang: str = "") -> None:
+    with zipfile.ZipFile(work / "subtitles-all.zip", "w", zipfile.ZIP_DEFLATED) as archive:
+        for name in files:
+            folder = ""
+            if bilingual:
+                folder = "phu-de-goc" if name.startswith("subtitles-source-") else f"ban-dich-{target_lang}"
+            archive.write(work / name, f"{folder}/{name}" if folder else name)
+
+
 def _run(job_id: str) -> None:
     job = get_job(job_id)
     if not job:
         return
     try:
         _update(job_id, status="processing", progress=5, message="Đang đọc đầu vào")
-        source = Path(job["inputPath"])
-        if job["sourceKind"] == "caption":
+        work = Path(job["outputDir"])
+        source = Path(job["inputPath"]) if job.get("inputPath") else None
+        platform_note = ""
+        if job["sourceKind"] == "platform":
+            cues, platform_note = _platform_subtitles(work, job["sourceUrl"], str(job.get("options", {}).get("sourceLang") or "auto"))
+            if cues:
+                _update(job_id, progress=55, message=platform_note)
+            else:
+                _update(job_id, progress=10, message="Nền tảng không có subtitle phù hợp — đang dùng Whisper")
+                source = _platform_audio(work, job["sourceUrl"])
+        elif job["sourceKind"] == "caption":
+            assert source is not None
             cues = _caption_cues(source)
-        else:
+        if job["sourceKind"] == "media" or (job["sourceKind"] == "platform" and not cues):
+            assert source is not None
             _update(job_id, progress=12, message="Đang tách audio")
             wav = source.with_suffix(".wav")
             extract_audio(source, wav)
             if get_job(job_id).get("cancelled"):
                 return
             _update(job_id, progress=25, message="Whisper đang nhận dạng")
-            segments = asr_whisper(wav, "auto", workers=0)
+            options = job.get("options") or {}
+            segments = asr_whisper(wav, str(options.get("sourceLang") or "auto"), workers=int(options.get("workers") or 0))
             cues = [{"start": row["start"], "end": row["end"], "text": row["source"]} for row in segments]
         if not cues:
             raise RuntimeError("Không tìm thấy nội dung phụ đề")
         if get_job(job_id).get("cancelled"):
             return
-        _update(job_id, progress=70, message="Đang tạo các định dạng phụ đề")
-        work = Path(job["outputDir"])
-        files: list[str] = []
-        for style in SRT_STYLES:
-            name = f"subtitles-{style}.srt"
-            write_subtitle(work / name, _styled(cues, style), "srt", capcut=False)
-            files.append(name)
-        write_subtitle(work / "subtitles.vtt", _styled(cues, "hard"), "vtt", capcut=False)
-        write_subtitle(work / "subtitles.txt", cues, "txt")
-        files.extend(["subtitles.vtt", "subtitles.txt"])
-        with zipfile.ZipFile(work / "subtitles-all.zip", "w", zipfile.ZIP_DEFLATED) as archive:
-            for name in files:
-                archive.write(work / name, name)
+        options = job.get("options") or {}
+        mode = str(options.get("outputMode") or "original")
+        translated_cues: list[dict[str, Any]] | None = None
+        if mode != "original":
+            _update(job_id, progress=65, message="Đang dịch phụ đề")
+            translated = translate_segments(
+                [str(cue.get("text") or "") for cue in cues], str(options.get("targetLang") or "vi"),
+                source_lang=str(options.get("sourceLang") or "auto"), translator=str(options.get("translator") or "google"),
+                workers=int(options.get("workers") or 2), ollama_mode=str(options.get("ollamaMode") or "cloud"),
+                ollama_model=str(options.get("ollamaModel") or "minimax-m3:cloud"), ollama_local_tier=str(options.get("ollamaLocalTier") or "balanced"),
+                durations=[max(0.1, float(cue["end"]) - float(cue["start"])) for cue in cues],
+            )
+            translated_cues = _translated_cues(cues, translated)
+        _update(job_id, progress=75, message="Đang tạo các định dạng phụ đề")
+        if mode == "translated":
+            assert translated_cues is not None
+            files = _write_outputs(work, translated_cues, "subtitles")
+        elif mode == "bilingual":
+            assert translated_cues is not None
+            lang = "".join(char for char in str(options.get("targetLang") or "translated") if char.isalnum() or char in "-_") or "translated"
+            files = _write_outputs(work, cues, "subtitles-source")
+            files.extend(_write_outputs(work, translated_cues, f"subtitles-{lang}"))
+        else:
+            files = _write_outputs(work, cues, "subtitles")
+        _zip_outputs(work, files, bilingual=mode == "bilingual", target_lang=lang if mode == "bilingual" else "")
         files.append("subtitles-all.zip")
-        _update(job_id, status="done", progress=100, message=f"Đã xuất {len(files)} file", files=files)
+        suffix = f" · {platform_note}" if platform_note else ""
+        _update(job_id, status="done", progress=100, message=f"Đã xuất {len(files)} file{suffix}", files=files)
     except Exception as exc:
         if not get_job(job_id).get("cancelled"):
             _update(job_id, status="error", error=str(exc), message="Xuất phụ đề thất bại")

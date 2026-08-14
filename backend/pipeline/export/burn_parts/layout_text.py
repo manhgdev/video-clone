@@ -378,7 +378,9 @@ def _layout_caption(
     probe = Image.new("RGB", (8, 8))
     draw = ImageDraw.Draw(probe)
     font_path = str(getattr(font, "path", "") or _subtitle_font())
-    max_lines = 3
+    # Khung dọc 9:16 phải giữ caption gọn: một dòng nếu đủ, tối đa hai dòng.
+    # Khung ngang vẫn có thể dùng ba dòng khi thật sự cần.
+    max_lines = 2 if frame_h > frame_w else 3
     # below/above: cỡ ≈ chiều cao bbox che (OCR) — không dùng 48/project to
     if ocr_box and place in ("below", "above"):
         ocr_w0 = max(16, int(ocr_box[2] - ocr_box[0]))
@@ -438,7 +440,7 @@ def _layout_caption(
         lbs = [draw.textbbox((0, 0), ln, font=font_use) for ln in cand]
         tw = max((b[2] - b[0]) for b in lbs) if lbs else 0
         th = sum(max(1, b[3] - b[1]) for b in lbs) + gap_line * max(0, len(cand) - 1)
-        # 3 dòng: nới max_box_h theo text thật (không kẹp OCR 1 dòng)
+        # Nới chiều cao theo text thật, nhưng không vượt giới hạn dòng của khung.
         need_h = th + pad_y * 2
         allow_h = max(max_box_h, need_h)
         allow_h = min(allow_h, int(frame_h * 0.34))
@@ -555,11 +557,16 @@ def _layout_mid_caption(
     def _fit(fs: int) -> list[str]:
         font_use = font_getter(fs)
         one_w = draw.textbbox((0, 0), raw, font=font_use)[2]
-        if one_w <= inner_w:
+        # Cỡ quá nhỏ không được đổi lấy một dòng: giữ hai dòng để đọc được.
+        if one_w <= inner_w and (frame_h <= frame_w or fs >= 11):
             return [raw]
         lines = _wrap_text(draw, raw, font_use, inner_w)
         if len(lines) == 2:
             lines = _wrap_balanced(draw, raw, font_use, inner_w)
+        elif frame_h > frame_w and len(lines) > 2:
+            # Caption ở vị trí OCR trong video dọc vẫn chỉ được chiếm hai dòng.
+            # Vòng fit bên dưới sẽ hạ cỡ chữ nếu hai dòng gộp còn quá rộng.
+            lines = _merge_to_n_lines(lines, 2)
         return lines
 
     def _kept(lines: list[str]) -> bool:
@@ -609,7 +616,9 @@ def _layout_mid_caption(
         ):
             size -= 1
             lines = _fit(size)
-        if draw.textbbox((0, 0), raw, font=font_getter(size))[2] <= inner_w:
+        # Không ép cả câu thành một dòng ở font quá nhỏ; với video dọc,
+        # hai dòng ở cỡ đọc được tốt hơn một dòng 8px.
+        if len(lines) == 1 and draw.textbbox((0, 0), raw, font=font_getter(size))[2] <= inner_w:
             lines = [raw]
     font_use = font_getter(size)
     line_boxes = [draw.textbbox((0, 0), ln, font=font_use) for ln in lines]

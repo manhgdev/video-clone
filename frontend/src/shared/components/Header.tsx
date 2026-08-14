@@ -4,7 +4,6 @@ import type { LicenseStatus } from '@/features/license/license.api'
 import {
   IconBook,
   IconCam,
-  IconClock,
   IconDownload,
   IconGear,
   IconLogo,
@@ -13,6 +12,7 @@ import {
   IconWand,
 } from '@/shared/components/Icons'
 import './Header.css'
+import { translate, type AppLocale } from '@/app/i18n'
 
 export type AppMode = 'clone' | 'tts' | 'download' | 'film' | 'batch' | 'renders' | 'cleaner' | 'srt-image' | 'srt-export' | 'license'
 
@@ -33,23 +33,21 @@ function IconMoon({ size = 16 }: { size?: number }) {
 }
 
 const NAV: {
-  id: AppMode | 'tools' | 'config' | 'help'
-  label: string
+  id: AppMode | 'tools' | 'config'
+  label: 'nav.clone' | 'nav.renders' | 'nav.download' | 'nav.tts' | 'nav.tools' | 'nav.settings'
   Icon: typeof IconCam
   mode?: AppMode
   action?: 'config' | 'tools'
 }[] = [
-  { id: 'clone', label: 'Clone Video', Icon: IconCam, mode: 'clone' },
-  { id: 'renders', label: 'Đã render', Icon: IconVideo, mode: 'renders' },
+  { id: 'clone', label: 'nav.clone', Icon: IconCam, mode: 'clone' },
+  { id: 'renders', label: 'nav.renders', Icon: IconVideo, mode: 'renders' },
   // ponytail: Film/Batch chỉ ẩn khỏi nav; giữ page để bật lại khi hai luồng hoàn thiện.
   // { id: 'film', label: 'Clone Phim', Icon: IconFilm, mode: 'film' },
   // { id: 'batch', label: 'Clone Hàng loạt', Icon: IconBatch, mode: 'batch' },
-  { id: 'download', label: 'Download Video', Icon: IconDownload, mode: 'download' },
-  { id: 'tts', label: 'Text to Speech', Icon: IconMic, mode: 'tts' },
-  { id: 'tools', label: 'Tools', Icon: IconWand, action: 'tools' },
-  { id: 'config', label: 'Cấu hình', Icon: IconGear, action: 'config' },
-  { id: 'license', label: 'Kích hoạt', Icon: IconClock, mode: 'license' },
-  { id: 'help', label: 'Hướng dẫn', Icon: IconBook },
+  { id: 'download', label: 'nav.download', Icon: IconDownload, mode: 'download' },
+  { id: 'tts', label: 'nav.tts', Icon: IconMic, mode: 'tts' },
+  { id: 'tools', label: 'nav.tools', Icon: IconWand, action: 'tools' },
+  { id: 'config', label: 'nav.settings', Icon: IconGear, action: 'config' },
 ]
 
 const SHORT: Record<string, string> = { cpu: 'CPU', cuda: 'GPU', metal: 'GPU' }
@@ -73,6 +71,9 @@ type Props = {
   onMenuClick?: () => void
   menuOpen?: boolean
   licenseStatus?: LicenseStatus
+  locale: AppLocale
+  onLocaleChange: (locale: AppLocale) => void
+  onOpenLicense?: () => void
 }
 
 export default function Header({
@@ -85,7 +86,11 @@ export default function Header({
   onMenuClick,
   menuOpen = false,
   licenseStatus,
+  locale,
+  onLocaleChange,
+  onOpenLicense,
 }: Props) {
+  const t = (key: Parameters<typeof translate>[1], values?: Record<string, string | number>) => translate(locale, key, values)
   const display = SHORT[hardware.accel] ?? hardware.accel.toUpperCase()
   const showTtsMenu = mode === 'tts' && typeof onMenuClick === 'function'
   const [toolsOpen, setToolsOpen] = useState(false)
@@ -115,7 +120,7 @@ export default function Header({
             type="button"
             className={`header-menu-btn${menuOpen ? ' is-open' : ''}`}
             onClick={onMenuClick}
-            aria-label={menuOpen ? 'Đóng menu TTS' : 'Mở menu TTS'}
+            aria-label={menuOpen ? t('header.closeTtsMenu') : t('header.openTtsMenu')}
             aria-expanded={menuOpen}
             title="Menu Text to Speech"
           >
@@ -127,7 +132,7 @@ export default function Header({
         </span>
         <div className="brand-text">
           <strong>ZM TOOL</strong>
-          <span>Studio Dịch Thuật & Ghép & Lồng Tiếng AI</span>
+          <span>{t('brand.tagline')}</span>
         </div>
       </div>
       <nav className="nav" aria-label="Chính">
@@ -145,7 +150,7 @@ export default function Header({
                   onClick={() => setToolsOpen((open) => !open)}
                 >
                   <item.Icon size={16} />
-                  <span>{item.label}</span>
+                  <span>{t(item.label)}</span>
                 </button>
                 {toolsOpen ? (
                   <div className="nav-tools-menu" role="menu">
@@ -171,7 +176,7 @@ export default function Header({
                       }}
                     >
                       <IconWand size={16} />
-                      <span>Làm sạch video</span>
+                      <span>{t('tools.cleanVideo')}</span>
                     </button>
                     <button
                       type="button"
@@ -183,7 +188,7 @@ export default function Header({
                       }}
                     >
                       <IconVideo size={16} />
-                      <span>Ghép ảnh/video SRT</span>
+                      <span>{t('tools.srtImage')}</span>
                     </button>
                     <button
                       type="button"
@@ -195,7 +200,7 @@ export default function Header({
                       }}
                     >
                       <IconBook size={16} />
-                      <span>Xuất Phụ Đề</span>
+                      <span>{t('tools.exportSubtitles')}</span>
                     </button>
                   </div>
                 ) : null}
@@ -222,19 +227,25 @@ export default function Header({
               }}
             >
               <item.Icon size={16} />
-              <span>{item.label}</span>
+              <span>{t(item.label)}</span>
             </button>
           )
         })}
       </nav>
       <div className="hw" title={hardware.label}>
+        <select className="locale-select" value={locale} onChange={(event) => onLocaleChange(event.target.value as AppLocale)} aria-label={t('header.interfaceLanguage')}>
+          <option value="vi">VI</option>
+          <option value="en">EN</option>
+        </select>
         {licenseStatus && (
-          <span
+          <button
+            type="button"
             className={`license-expiry${licenseStatus.remainingDay !== -1 && licenseStatus.remainingDay <= 7 ? ' is-warning' : ''}`}
-            title={licenseStatus.expiresAt ? `Hết hạn: ${new Date(licenseStatus.expiresAt).toLocaleString('vi-VN')}` : undefined}
+            onClick={onOpenLicense}
+            title={licenseStatus.expiresAt ? t('header.expires', { date: new Date(licenseStatus.expiresAt).toLocaleString(locale === 'vi' ? 'vi-VN' : 'en-US') }) : undefined}
           >
-            {licenseStatus.remainingDay === -1 ? 'Không giới hạn' : `Còn ${licenseStatus.remainingDay} ngày`}
-          </span>
+            {licenseStatus.remainingDay === -1 ? t('header.unlimited') : t('header.daysLeft', { count: licenseStatus.remainingDay })}
+          </button>
         )}
         <span className="dot" />
         {display}
@@ -242,7 +253,7 @@ export default function Header({
           type="button"
           className="theme-toggle"
           onClick={onToggleTheme}
-          title={dark ? 'Chuyển sang Light Mode' : 'Chuyển sang Dark Mode'}
+          title={dark ? t('header.switchLight') : t('header.switchDark')}
           aria-label={dark ? 'Light mode' : 'Dark mode'}
         >
           {dark ? <IconSun size={15} /> : <IconMoon size={15} />}

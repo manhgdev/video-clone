@@ -31,6 +31,7 @@ import { api } from '@/features/project/project.api'
 import { expandSegmentsForList } from '@/features/project/expandCompound'
 import type { HardwareInfo, JobStatus, ProjectSettings, Step, TextOverlay } from '@/features/project/project.types'
 import { loadAppMode, persistAppMode } from '@/app/appMode'
+import { LocaleContext, LocaleTextSync, loadLocale, persistLocale, type AppLocale } from '@/app/i18n'
 import {
   applyDefaultVoice,
   asSegmentList,
@@ -76,6 +77,7 @@ const EMPTY_LICENSE: LicenseStatus = {
 }
 
 export default function App() {
+  const [locale, setLocale] = useState<AppLocale>(loadLocale)
   const [dark, setDark] = useState(loadTheme)
   const [appMode, setAppMode] = useState<AppMode>(loadAppMode)
   const [hw, setHw] = useState<HardwareInfo>({ label: 'CPU', accel: 'cpu' })
@@ -85,7 +87,7 @@ export default function App() {
   ])
   const [settings, setSettings] = useState(loadSettings)
   const [configOpen, setConfigOpen] = useState(false)
-  const [configSection, setConfigSection] = useState<'setup' | 'cloud' | 'tts'>(() =>
+  const [configSection, setConfigSection] = useState<'setup' | 'cloud' | 'tts' | 'license'>(() =>
     loadSetupGate() ? 'cloud' : 'setup',
   )
   const [setupGatePassed, setSetupGatePassed] = useState(loadSetupGate)
@@ -110,6 +112,11 @@ export default function App() {
   /** Guards project/video switches from late restore, upload, and poll responses. */
   const projectSwitchRef = useRef(0)
   const activeProjectRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    persistLocale(locale)
+    document.documentElement.lang = locale
+  }, [locale])
 
   const {
     segments,
@@ -570,7 +577,7 @@ export default function App() {
       const snapped = snapshotEngineProfile({ ...prev, engine: prev.engine })
       out = applyEngineProfile(
         { ...snapped, ...next, engine: next.engine, engineProfiles: snapped.engineProfiles },
-        next.engine === 'paddleocr' ? 'paddleocr' : 'whisper',
+        next.engine === 'paddleocr' || next.engine === 'subtitle' ? next.engine : 'whisper',
       )
     } else {
       out = snapshotEngineProfile(next)
@@ -594,6 +601,8 @@ export default function App() {
         message:
           out.engine === 'paddleocr'
             ? 'Nhận dạng chữ trên màn — chạy Dịch toàn bộ'
+            : out.engine === 'subtitle'
+              ? 'Dùng file phụ đề SRT — chạy Dịch toàn bộ'
             : 'Nhận dạng giọng nói — chạy Dịch toàn bộ rồi Lồng tiếng',
         running: false,
       })
@@ -755,6 +764,8 @@ export default function App() {
   const configModalOpen = configOpen || firstRunBlocked
 
   return (
+    <LocaleContext.Provider value={{ locale, setLocale }}>
+    <LocaleTextSync />
     <div className={editorOpen && appMode === 'clone' ? 'app app--editor' : 'app'}>
       {!appUsable ? (
         <p className="cfg-boot-msg">
@@ -782,6 +793,12 @@ export default function App() {
           setPreviewEditorOpen(false)
         }}
         onToggleTheme={() => setDark(d => !d)}
+        locale={locale}
+        onLocaleChange={setLocale}
+        onOpenLicense={() => {
+          setConfigSection('license')
+          setConfigOpen(true)
+        }}
         onOpenConfig={() => {
           if (setupGatePassed) setConfigSection('cloud')
           setConfigOpen(true)
@@ -797,6 +814,8 @@ export default function App() {
           const l = settings.targetLang === 'none' ? 'vi' : settings.targetLang
           void api.voices(l).then(setVoices).catch(() => {})
         }}
+        licenseStatus={licenseStatus || undefined}
+        onLicenseStatusChange={setLicenseStatus}
         onClose={() => {
           if (firstRunBlocked) return
           setConfigOpen(false)
@@ -837,7 +856,12 @@ export default function App() {
             setDuration(meta.duration || 0)
             setExportUrl(null)
             setExportPath(null)
-            setSegments([])
+            setSegments((meta.segments || []) as never[])
+            if (meta.settings) {
+              const next = { ...settings, ...meta.settings } as ProjectSettings
+              setSettings(next)
+              persistSettings(next)
+            }
             setOverlays([])
             setWorkClipSec(0)
             workClipSecRef.current = 0
@@ -906,11 +930,18 @@ export default function App() {
         style={{ gridTemplateColumns: `${sidebarWidth}px 6px 1fr` }}
       >
         <ProjectSidebar
+          projectId={projectId}
           videoUrl={videoUrl}
           settings={settings}
           voices={voices}
           busy={status.running}
           onSettings={onSettings}
+          onSubtitleApplied={(nextSegments, nextSettings) => {
+            setSegments(nextSegments)
+            setSettings(nextSettings)
+            persistSettings(nextSettings)
+            setStatus({ step: 'asr', progress: 100, message: `Đã nạp ${nextSegments.length} câu từ phụ đề SRT`, running: false })
+          }}
           onUpload={onUpload}
           onTranslateAll={() => onTranslateAll(0)}
           onPreview={(previewSec) => {
@@ -1109,5 +1140,6 @@ export default function App() {
         onCancel={status.running ? onCancel : undefined}
       />
     </div>
+    </LocaleContext.Provider>
   )
 }

@@ -159,5 +159,18 @@ def activate_license(key: str) -> dict[str, Any]:
     return activated
 
 
+def deactivate_license() -> dict[str, Any]:
+    """Remove this computer's saved key without changing the key server."""
+    global _cache, _cache_at
+    try:
+        LICENSE_FILE.unlink(missing_ok=True)
+    except OSError as exc:
+        raise RuntimeError(f"Không thể xoá key đã lưu: {exc}") from exc
+    with _cache_lock:
+        _cache = None
+        _cache_at = 0.0
+    return license_status(force=True)
+
+
 def license_cached_valid() -> bool:
     return bool(license_status().get("valid"))

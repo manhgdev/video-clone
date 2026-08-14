@@ -172,7 +172,8 @@ Schema đầy đủ: `/docs` khi API chạy.
 
 ```text
 frontend/src/   app · pages · features · shared
-backend/        api/routes · pipeline · tests
+backend/        api/routes · pipeline
+tests/          backend tests · frontend tests
 scripts/        setup · dev
 build_app/      launcher · PyInstaller · release
 ```
@@ -185,10 +186,10 @@ Chi tiết module và quy tắc phụ thuộc: **[STRUCTURE.md](STRUCTURE.md)**.
 
 ```bash
 npm run build
-backend/.venv/Scripts/python.exe -m pytest backend/tests
+backend/.venv/Scripts/python.exe -m pytest tests/backend
 ```
 
-macOS/Linux: `backend/.venv/bin/python -m pytest backend/tests`.
+macOS/Linux: `backend/.venv/bin/python -m pytest tests/backend`.
 
 ---
 

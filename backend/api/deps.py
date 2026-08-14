@@ -14,6 +14,7 @@ from pipeline.core.media import video_size
 class Settings(BaseModel):
     workflow: str | None = None
     engine: str = "whisper"
+    subtitleSource: str = ""
     sourceLang: str = "auto"
     targetLang: str = "vi"
     translator: str = "google"

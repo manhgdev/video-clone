@@ -48,4 +48,6 @@ export const licenseApi = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ key }),
     }, 65_000).then(cacheStatus),
+  deactivate: () =>
+    fetchJson<LicenseStatus>('/api/license/deactivate', { method: 'POST' }, 15_000).then(cacheStatus),
 }

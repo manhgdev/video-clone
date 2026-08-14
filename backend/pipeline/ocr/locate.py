@@ -4,11 +4,13 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -152,8 +154,15 @@ from .locate_worker import (  # noqa: F401
 
 def _source_matches(text: str, source: str) -> bool:
     """Khớp OCR với source; không cho 1 glyph chung kéo cả box nhiễu vào cue dài."""
-    tx = "".join((text or "").split())
-    src = "".join((source or "").split())
+    # OCR commonly drops Vietnamese accents ("chàng" → "chang").
+    def fold(value: str) -> str:
+        return "".join(
+            char for char in unicodedata.normalize("NFD", value or "")
+            if not unicodedata.combining(char)
+        ).casefold().replace("đ", "d")
+
+    tx = "".join(fold(text).split())
+    src = "".join(fold(source).split())
     if not tx or not src:
         return False
     if tx == src or src in tx:
@@ -161,6 +170,12 @@ def _source_matches(text: str, source: str) -> bool:
     tc = {c for c in tx if 0x4E00 <= ord(c) <= 0x9FFF}
     sc = {c for c in src if 0x4E00 <= ord(c) <= 0x9FFF}
     if tx in src and (len(tc) >= 2 or len(sc) <= 2):
+        return True
+    # Latin OCR commonly loses accents and a character or two. Match a short
+    # displayed fragment only when most of its meaningful words occur in SRT.
+    tx_words = {word for word in re.findall(r"[\w]+", fold(text)) if len(word) >= 2}
+    src_words = {word for word in re.findall(r"[\w]+", fold(source)) if len(word) >= 2}
+    if tx_words and src_words and len(tx_words & src_words) >= max(2, round(len(tx_words) * 0.7)):
         return True
     overlap = len(tc & sc)
     need = 1 if len(sc) <= 2 else 2
@@ -516,10 +531,13 @@ def _probe_mid_hardsub(
         if not text:
             continue
         cjk = sum(1 for c in text if 0x4E00 <= ord(c) <= 0x9FFF)
-        is_sub = bool(src and len(text) >= 2 and text.lower() in src.lower())
+        letters = sum(1 for c in text if c.isalpha())
+        is_sub = bool(src and _source_matches(text, src))
         
         if cjk < 1 or cjk > 28:
-            if not is_sub:
+            # Generic SRT locator has no source text to compare. Vietnamese and
+            # other Latin-script hard-subs must remain valid OCR candidates.
+            if not is_sub and not (not src and letters >= 2):
                 continue
         # mảnh quá thiếu so với Whisper — bỏ; dòng dài hơn thì GIỮ (Whisper cắt nửa hardsub)
         if not is_sub and src_cjk >= 3 and cjk < max(2, int(src_cjk * 0.55)):
@@ -551,7 +569,7 @@ def _probe_mid_hardsub(
             if not is_sub and src_cjk >= 3 and bw < src_cjk * max(28, int(w * 0.028)):
                 continue
         bb = (max(0, bx0), max(0, by0), min(w, bx1), min(h, by1))
-        score = float(cjk) + (bw / max(1, w)) * 4
+        score = float(cjk or letters) + (bw / max(1, w)) * 4
         if src:
             from .extract import _ocr_sim
 
@@ -638,6 +656,11 @@ def _bbox_cy_frac(bbox: dict[str, Any] | None, fh: int) -> float | None:
 
 def _cjk_len(text: str) -> int:
     return sum(1 for c in text if 0x4E00 <= ord(c) <= 0x9FFF)
+
+
+def _caption_glyph_len(text: str) -> int:
+    """Visible glyph estimate for CJK and Latin-script captions alike."""
+    return _cjk_len(text) or sum(char.isalpha() for char in text or "")
 
 
 def _similar_hardsub_len(a: str, b: str) -> bool:
@@ -744,7 +767,7 @@ def _inherit_caption_bboxes(
                     "y": int(bb["y"]),
                     "w": int(bb["w"]),
                     "h": int(bb["h"]),
-                    "cjk": _cjk_len(str(seg.get("source") or "")),
+                    "cjk": _caption_glyph_len(str(seg.get("source") or "")),
                 }
             )
         else:
@@ -771,7 +794,7 @@ def _inherit_caption_bboxes(
         if lay in ("vertical", "label"):
             continue
         src = str(seg.get("source") or "")
-        if _cjk_len(src) < 1:
+        if _caption_glyph_len(src) < 1:
             continue
         bb = seg.get("bbox")
         if isinstance(bb, dict) and bb.get("w") and bb.get("h"):
@@ -781,13 +804,18 @@ def _inherit_caption_bboxes(
             continue
         # Chỉ OCR ba câu: mượn vị trí từ câu mẫu nhưng ước lượng lại chiều
         # ngang theo số glyph nguồn. Không sao chép nguyên bbox dài sang câu ngắn.
-        target_cjk = max(1, _cjk_len(src))
-        glyph_w = median_glyph_w or donor["w"] / max(1, int(donor.get("cjk") or 1))
-        glyph_w = max(donor["h"] * 0.42, min(donor["h"] * 0.95, glyph_w))
-        bleed = max(12, round(glyph_w * 0.45))
-        width = max(48, min(fw, round(target_cjk * glyph_w + bleed * 2)))
-        cx = donor["x"] + donor["w"] * 0.5
-        x = max(0, min(fw - width, round(cx - width * 0.5)))
+        if seg.get("_locatorProbeEarly"):
+            # SRT wording can be longer than the rolling hard-sub fragment.
+            # Keep the measured visible lane instead of widening it from SRT.
+            width, x = donor["w"], donor["x"]
+        else:
+            target_cjk = max(1, _caption_glyph_len(src))
+            glyph_w = median_glyph_w or donor["w"] / max(1, int(donor.get("cjk") or 1))
+            glyph_w = max(donor["h"] * 0.42, min(donor["h"] * 0.95, glyph_w))
+            bleed = max(12, round(glyph_w * 0.45))
+            width = max(48, min(fw, round(target_cjk * glyph_w + bleed * 2)))
+            cx = donor["x"] + donor["w"] * 0.5
+            x = max(0, min(fw - width, round(cx - width * 0.5)))
         cy = donor["y"] + donor["h"] * 0.5
         seg["bbox"] = {
             "x": x,
@@ -816,7 +844,7 @@ def _ensure_cover_times(
         lay = str(seg.get("layout") or "horizontal")
         if lay in ("vertical", "label"):
             continue
-        if _cjk_len(str(seg.get("source") or "")) < 1:
+        if _caption_glyph_len(str(seg.get("source") or "")) < 1:
             continue
         attach_cover_times(seg, video_end=video_end)
 
@@ -990,7 +1018,8 @@ def attach_speech_hardsub_boxes_inprocess(
     for seg in segments:
         lay = str(seg.get("layout") or "horizontal")
         src = str(seg.get("source") or "")
-        if _cjk_len(src) < 1:
+        # Caption source may be Vietnamese/Latin, not just CJK.
+        if _cjk_len(src) < 1 and sum(char.isalpha() for char in src) < 2:
             continue
         bb = seg.get("bbox")
         if only_missing and isinstance(bb, dict) and bb.get("w") and bb.get("h"):
@@ -1124,7 +1153,12 @@ def attach_speech_hardsub_boxes_inprocess(
             e0 = float(seg.get("end") or s0)
             if e0 <= s0:
                 e0 = s0 + 0.4
-            out.append((si, s0 + max(0.2, e0 - s0) * 0.5))
+            if seg.get("_locatorProbeEarly"):
+                # SRT cue starts align with the first visible rolling words;
+                # its midpoint may already show the next hard-sub fragment.
+                out.append((si, s0 + min(0.16, max(0.05, (e0 - s0) * 0.2))))
+            else:
+                out.append((si, s0 + max(0.2, e0 - s0) * 0.5))
         return out
 
     def _run_probe_round(indices: list[int], total: int) -> None:

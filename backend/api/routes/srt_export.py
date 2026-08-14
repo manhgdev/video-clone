@@ -5,6 +5,7 @@ import shutil
 import urllib.request
 import uuid
 from pathlib import Path
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
@@ -27,6 +28,14 @@ async def create(
     source_kind: str = Form("media"),
     manual_text: str = Form(""),
     source_url: str = Form(""),
+    output_mode: str = Form("original"),
+    source_lang: str = Form("auto"),
+    target_lang: str = Form("vi"),
+    translator: str = Form("google"),
+    workers: int = Form(0),
+    ollama_mode: str = Form("cloud"),
+    ollama_model: str = Form("minimax-m3:cloud"),
+    ollama_local_tier: str = Form("balanced"),
 ):
     kind = source_kind if source_kind in {"media", "caption", "manual", "url"} else "media"
     if kind == "manual":
@@ -36,10 +45,11 @@ async def create(
     elif kind == "url":
         if not source_url.strip() or not source_url.lower().startswith(("http://", "https://")):
             raise HTTPException(400, "URL phải bắt đầu bằng http:// hoặc https://")
-        suffix = Path(source_url.split("?", 1)[0]).suffix.lower() or ".mp3"
-        if suffix not in (_CAPTION_EXTS | _MEDIA_EXTS):
-            raise HTTPException(400, "URL không có định dạng audio, video hoặc caption được hỗ trợ")
-        filename = Path(source_url.split("?", 1)[0]).name or f"source{suffix}"
+        host = (urlparse(source_url.strip()).hostname or "").lower()
+        if not host:
+            raise HTTPException(400, "URL không hợp lệ")
+        suffix = Path(source_url.split("?", 1)[0]).suffix.lower()
+        filename = host or (Path(source_url.split("?", 1)[0]).name or f"source{suffix}")
     else:
         if not file or not file.filename:
             raise HTTPException(400, "Chưa chọn file")
@@ -47,6 +57,18 @@ async def create(
         if suffix not in (_CAPTION_EXTS if kind == "caption" else _MEDIA_EXTS):
             raise HTTPException(400, "Định dạng file không phù hợp")
         filename = file.filename
+    options = {
+        "outputMode": output_mode if output_mode in {"original", "translated", "bilingual"} else "original",
+        "sourceLang": source_lang or "auto", "targetLang": target_lang or "vi",
+        "translator": translator or "google", "workers": max(0, workers),
+        "ollamaMode": ollama_mode, "ollamaModel": ollama_model,
+        "ollamaLocalTier": ollama_local_tier,
+    }
+    if kind == "url":
+        job = create_job(filename, None, "platform", source_url=source_url.strip(), options=options)
+        start(job["id"])
+        return job
+
     ROOT.mkdir(parents=True, exist_ok=True)
     temp = ROOT / f"upload-{uuid.uuid4().hex}{suffix}"
     try:
@@ -62,7 +84,7 @@ async def create(
     except Exception as exc:
         temp.unlink(missing_ok=True)
         raise HTTPException(400, f"Không thể đọc nguồn: {exc}") from exc
-    job = create_job(filename, temp, "caption" if kind == "manual" or suffix in _CAPTION_EXTS else "media")
+    job = create_job(filename, temp, "caption" if kind == "manual" or suffix in _CAPTION_EXTS else "media", options=options)
     start(job["id"])
     return job
 

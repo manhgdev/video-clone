@@ -147,8 +147,11 @@ def _job_dir(job_id: str) -> Path:
 @router.get("/api/tts/studio/jobs/{job_id}/audio.wav")
 def api_tts_studio_audio(job_id: str, download: int = 0):
     """Phát inline (mặc định). ?download=1 → tải file."""
-    path = _job_dir(job_id) / "audio.wav"
-    if not path.is_file():
+    from pipeline.tts.studio import ensure_wav
+
+    try:
+        path = ensure_wav(job_id)
+    except FileNotFoundError:
         raise HTTPException(404, "Không thấy audio")
     return FileResponse(
         path,
@@ -495,4 +498,3 @@ def api_tts_studio_voice_delete(voice_id: str):
     if voice_store.remove_cloned(vid):
         return {"ok": True}
     raise HTTPException(404, "Không tìm thấy giọng")
-

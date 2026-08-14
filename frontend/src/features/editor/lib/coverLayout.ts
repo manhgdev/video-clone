@@ -544,18 +544,16 @@ export function fitOutsideCaption(
   const baseFont = Math.max(12, Math.round(preferred || AUTO_SUBTITLE_FONT))
   const maxInnerW = Math.max(24, Math.round(frameW * 0.92))
   let fontPx = baseFont
-  // Keep the shared font for up to three lines. Shrinking a two-line caption
-  // to 12px is what made wide portrait captions unreadably tiny.
-  let lines = wrapCaptionText(text, maxInnerW, fontPx, 3)
-  // First choice: one horizontal line at the shared font. Otherwise keep the
-  // same font and wrap; shrink only as a last resort when a 3-line unit still
-  // exceeds the video width.
+  // Portrait captions stay compact: one line when possible, otherwise two.
+  let lines = wrapCaptionText(text, maxInnerW, fontPx, 2)
+  // First choice: one horizontal line at the shared font. Otherwise wrap to
+  // two lines; shrink only when either line still exceeds the video width.
   while (
     fontPx > 12
     && lines.some((line) => measureLineWidth(line, fontPx) > maxInnerW)
   ) {
     fontPx -= 1
-    lines = wrapCaptionText(text, maxInnerW, fontPx, 3)
+    lines = wrapCaptionText(text, maxInnerW, fontPx, 2)
   }
   return { lines, fontPx }
 }

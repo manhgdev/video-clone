@@ -197,7 +197,8 @@ def asr_cache_key(settings: dict[str, Any], source_fp: str, speed: float = 1.0) 
     # a15: Whisper siết biên theo words, KHÔNG tách 1 câu thành nhiều mảnh.
     ver = "o20" if engine in ("paddleocr", "screen") else "a15"
     # speed = tốc độ file thật sự ASR (preferVideo bake 0.8 TRƯỚC khi dịch)
-    return f"{engine}|{src}|{source_fp}|p{prev}|{ver}|{_speed_key_tag(speed)}"
+    subtitle = str(settings.get("subtitleSource") or "") if engine == "subtitle" else ""
+    return f"{engine}|{src}|{subtitle}|{source_fp}|p{prev}|{ver}|{_speed_key_tag(speed)}"
 
 
 def trans_cache_key(settings: dict[str, Any]) -> str:

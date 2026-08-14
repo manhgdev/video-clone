@@ -1440,6 +1440,8 @@ def extract_audio(video: Path, wav: Path, project_id: str | None = None) -> None
             "1",
             "-ar",
             "16000",
+            "-c:a",
+            "pcm_s16le",
             str(wav),
         ],
     )

@@ -290,6 +290,72 @@ def _ytdlp_bin() -> str:
     return shutil.which("yt-dlp") or "yt-dlp"
 
 
+def _platform_subtitle_selection(bin_: str, url: str) -> tuple[list[str], bool]:
+    """Pick one vi/en caption from metadata; manual captions win over automatic ones."""
+    try:
+        proc = subprocess.run(
+            [bin_, "--no-playlist", "--ignore-config", "--skip-download", "--dump-single-json", url],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
+        if proc.returncode:
+            return [], False
+        data = json.loads(proc.stdout)
+        manual = data.get("subtitles") if isinstance(data, dict) else None
+        automatic = data.get("automatic_captions") if isinstance(data, dict) else None
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return [], False
+    for available, is_automatic in ((manual, False), (automatic, True)):
+        if not isinstance(available, dict):
+            continue
+        for wanted in ("vi", "en"):
+            exact = next((lang for lang in available if lang.lower() == wanted), None)
+            variant = next((lang for lang in available if lang.lower().split("-", 1)[0] == wanted), None)
+            if exact or variant:
+                return [exact or variant], is_automatic
+    return [], False
+
+
+def _srt_timestamp(ms: int) -> str:
+    ms = max(0, int(ms))
+    hours, ms = divmod(ms, 3_600_000)
+    minutes, ms = divmod(ms, 60_000)
+    seconds, ms = divmod(ms, 1_000)
+    return f"{hours:02}:{minutes:02}:{seconds:02},{ms:03}"
+
+
+def _json3_to_srt(source: Path) -> Path | None:
+    """Write one non-overlapping SRT from a single provider JSON3 subtitle track."""
+    try:
+        events = json.loads(source.read_text(encoding="utf-8")).get("events", [])
+    except (OSError, ValueError, AttributeError):
+        return None
+    cues: list[tuple[int, int, str]] = []
+    for event in events if isinstance(events, list) else []:
+        if not isinstance(event, dict):
+            continue
+        text = "".join(str(part.get("utf8") or "") for part in event.get("segs", []) if isinstance(part, dict))
+        # Auto-caption sound labels (e.g. [âm nhạc], [music]) are not dialogue.
+        text = re.sub(r"\[[^\]\n]{1,80}\]", "", text)
+        text = re.sub(r"\s{2,}", " ", text).strip()
+        if text:
+            start = int(event.get("tStartMs") or 0)
+            cues.append((start, start + max(1, int(event.get("dDurationMs") or 0)), text))
+    if not cues:
+        return None
+    lines: list[str] = []
+    for number, (start, end, text) in enumerate(cues, 1):
+        if number < len(cues):
+            end = min(end, cues[number][0])
+        lines.extend((str(number), f"{_srt_timestamp(start)} --> {_srt_timestamp(max(start + 1, end))}", text, ""))
+    target = source.with_suffix(".srt")
+    target.write_text("\n".join(lines), encoding="utf-8")
+    return target
+
+
 def _format_for(
     quality: str,
     *,
@@ -517,15 +583,14 @@ def _normalize_urls(url: str | None = None, urls: list[str] | None = None) -> li
     out: list[str] = []
     seen: set[str] = set()
     for line in raw:
-        u = line.strip()
-        if not u or u.startswith("#"):
-            continue
-        if not re.match(r"^https?://", u, re.I):
-            continue
-        if u in seen:
-            continue
-        seen.add(u)
-        out.append(u)
+        for candidate in re.split(r"(?=https?://)", line.strip(), flags=re.I):
+            u = candidate.strip()
+            if not u or u.startswith("#") or not re.match(r"^https?://", u, re.I):
+                continue
+            if u in seen:
+                continue
+            seen.add(u)
+            out.append(u)
     return out
 
 
@@ -672,6 +737,13 @@ def _run_ytdlp(job_id: str) -> None:
     )
 
     bin_ = _ytdlp_bin()
+    subtitle_langs, automatic_subs = _platform_subtitle_selection(bin_, url) if write_subs else ([], False)
+    if write_subs:
+        _append_log(
+            job_id,
+            f"Phụ đề nền tảng: {', '.join(subtitle_langs) if subtitle_langs else 'không có (bỏ qua)'}"
+            + (" · tự động" if automatic_subs else ""),
+        )
     out_tmpl = str(job_dir / "%(title).80B [%(id)s].%(ext)s")
     fmt = _format_for(
         quality,
@@ -712,20 +784,22 @@ def _run_ytdlp(job_id: str) -> None:
             # giới hạn bitrate thô (yt-dlp format sort)
             cmd.extend(["-S", "res,br,size"])
 
-    if write_subs:
+    if subtitle_langs:
         cmd.extend(
             [
+                # A platform can rate-limit one subtitle language while the media is fine.
+                "--ignore-errors",
                 "--write-subs",
-                "--write-auto-subs",
                 "--sub-langs",
-                "vi.*,en.*,en,vi,all,-live_chat",
-                "--convert-subs",
-                "srt",
+                ",".join(subtitle_langs),
+                "--sub-format",
+                "json3/srt",
             ]
         )
-        # nhúng phụ đề vào mp4/mkv nếu merge
-        if merge_av and merge_fmt in ("mp4", "mkv"):
-            cmd.append("--embed-subs")
+        if automatic_subs:
+            cmd.append("--write-auto-subs")
+        # JSON3 is downloaded for YouTube auto-captions then converted locally
+        # to SRT. ffmpeg cannot mux JSON3, so keep it as a sidecar file.
     if write_meta:
         cmd.extend(["--write-info-json", "--write-description"])
         if merge_fmt in ("mp4", "mkv", "m4a"):
@@ -802,6 +876,13 @@ def _run_ytdlp(job_id: str) -> None:
         _patch(job_id, status="error", message=f"yt-dlp exit {code}", progress=0)
         _append_log(job_id, f"exit {code}")
         return
+
+    # JSON3 is the one original provider track. Its SRT rendition represents
+    # the on-screen rolling display; create a non-overlapping SRT for editing.
+    for raw_subtitle in job_dir.glob("*.json3"):
+        created = _json3_to_srt(raw_subtitle)
+        if created:
+            _append_log(job_id, f"Đã xuất phụ đề SRT: {created.name}")
 
     media_ext = {".mp4", ".mkv", ".webm", ".mp3", ".m4a", ".opus", ".flac"}
     files = [p for p in job_dir.iterdir() if p.is_file() and p.suffix.lower() in media_ext]

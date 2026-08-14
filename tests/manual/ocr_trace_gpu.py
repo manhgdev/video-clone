@@ -1,12 +1,15 @@
-import sys, os
-os.environ['PYTHONIOENCODING'] = 'utf-8'
-sys.path.insert(0, r'd:\DEV\video-clone\backend')
+import os
+import sys
 from pathlib import Path
+
+os.environ['PYTHONIOENCODING'] = 'utf-8'
+ROOT = Path(__file__).parents[2]
+sys.path.insert(0, str(ROOT / 'backend'))
 from rapidocr_onnxruntime import RapidOCR
 from pipeline.ocr.extract_parts.runtime import _rapidocr_gpu_kwargs
 import cv2
 
-video = Path(r'd:\DEV\video-clone\backend\tests\video\ocr_9_16_chanh_30.mp4')
+video = ROOT / 'tests' / 'backend' / 'video' / 'ocr_9_16_chanh_30.mp4'
 # extract 1 frame
 frame_path = video.parent / "test_frame.jpg"
 os.system(f"ffmpeg -y -i {str(video)} -vf fps=1 -vframes 1 {str(frame_path)}")
