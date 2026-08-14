@@ -132,10 +132,13 @@ def _blur_tint_region(
     color_hex: str = "#4c1d95",
     opacity_pct: int = 40,
 ) -> Any:
-    """Làm mờ = kính CapCut khớp editor: blur CSS + saturate(0.88) + tint mỏng.
+    """Render the editor's clean frosted cover without leaking old subtitle glyphs.
 
-    Preview: backdrop-filter blur(22–42px) saturate(0.88) + rgba tint.
-    Export cũ (2× Gaussian theo chiều box) nhìn khác hẳn — đổi sang downscale-blur.
+    A browser backdrop blur looks like a quiet, flat plate in the editor.  Blurring
+    the pixels *inside* a detected hard-subtitle box in an exported video is not
+    equivalent: high-contrast glyphs become a bright halo.  Build the plate from
+    pixels around the box instead, then apply the same light UI tint.  This keeps
+    the old glyphs out of the published frame entirely.
     """
     import cv2
     import numpy as np
@@ -150,25 +153,56 @@ def _blur_tint_region(
     bw, bh = x1 - x0, y1 - y0
     if bw < 8 or bh < 8:
         return frame_bgr
+    # Reconstruct the source under the caption *before* blurring.  This is the
+    # missing part of the old renderer: it blurred the white source glyphs and
+    # produced the bright stain seen in the published video.  Inpainting keeps
+    # the local scene's gradients/colours, unlike a flat solid block, so it also
+    # tracks the editor preview as the video changes shot.
     css_blur = _blur_css_radius(opacity_pct)
-    # Map CSS-px → pixel nguồn: stage editor ~560 CSS-px cạnh ngắn
     css_to_src = max(1.0, min(w, h) / 560.0)
     radius = css_blur * css_to_src
     pad = max(int(round(radius)) + 4, 16)
     ex0, ey0 = max(0, x0 - pad), max(0, y0 - pad)
     ex1, ey1 = min(w, x1 + pad), min(h, y1 + pad)
-    expanded = frame_bgr[ey0:ey1, ex0:ex1]
-    blurred_exp = _css_glass_blur(expanded, radius)
-    ly0, lx0 = y0 - ey0, x0 - ex0
+    expanded = frame_bgr[ey0:ey1, ex0:ex1].copy()
+    lx0, ly0 = x0 - ex0, y0 - ey0
+    # Rebuild only the bright subtitle ink, not the entire rectangle.  Filling
+    # the whole box made dark scenes visibly change colour compared with the
+    # browser preview.  Source hardsubs are high-value, low-saturation glyphs;
+    # dilating their mask also removes the anti-aliased outline.
+    roi = expanded[ly0 : ly0 + bh, lx0 : lx0 + bw]
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    white_ink = ((hsv[:, :, 2] >= 190) & (hsv[:, :, 1] <= 105)).astype(np.uint8) * 255
+    kernel = np.ones((3, 3), dtype=np.uint8)
+    white_ink = cv2.dilate(white_ink, kernel, iterations=1)
+    mask = np.zeros(expanded.shape[:2], dtype=np.uint8)
+    mask[ly0 : ly0 + bh, lx0 : lx0 + bw] = white_ink
+    rebuilt = (
+        cv2.inpaint(expanded, mask, max(2.0, min(8.0, min(bw, bh) * 0.07)), cv2.INPAINT_TELEA)
+        if np.any(mask)
+        else expanded
+    )
+    blurred_exp = _css_glass_blur(rebuilt, radius)
     covered = blurred_exp[ly0 : ly0 + bh, lx0 : lx0 + bw].copy()
-    covered = _desaturate_bgr(covered, 0.88)
+    covered = _desaturate_bgr(covered, 0.88).astype(np.float32)
     r, g, b = _parse_hex_color(color_hex)
     tint_bgr = np.array([b, g, r], dtype=np.float32)
     alpha = _blur_tint_alpha(opacity_pct)
     if alpha >= 0.005:
-        covered = (covered.astype(np.float32) * (1.0 - alpha) + tint_bgr * alpha).astype(np.uint8)
-    # Thay ROI 100% (mép mềm nhờ pad lấy pixel ngoài)
-    frame_bgr[y0:y1, x0:x1] = covered
+        covered = covered * (1.0 - alpha) + tint_bgr * alpha
+    # Browser backdrop compositing lifts dark detail while compressing bright
+    # detail.  Apply the same frosted-glass tone curve before the highlight cap;
+    # a raw OpenCV blur otherwise renders materially darker than the editor.
+    covered = covered * 0.65 + np.array([66.0, 63.0, 59.0], dtype=np.float32)
+    # The preview's frosted plate has a deliberately narrow luminance range.
+    # Preserve gentle scene variation, but stop a bright shirt/light directly
+    # behind the old subtitle from washing out the cover in the encoded video.
+    channel_median = np.median(covered.reshape(-1, 3), axis=0)
+    covered = np.minimum(covered, channel_median + 64.0)
+    # A two-pixel vertical feather prevents a hard compositing seam while the
+    # body stays fully opaque, so no source letters are visible underneath.
+    roi = frame_bgr[y0:y1, x0:x1].copy()
+    _feather_vertical_blend(frame_bgr, roi, covered.astype(np.uint8), y0, y1, x0, x1)
     return frame_bgr
 
 
@@ -274,5 +308,3 @@ def _apply_cover_mask(
         # ponytail: "Khối" = _blur_region cũ (median + pixelate + gaussian) — che hardsub thật
         return _blur_region(frame_bgr, box)
     return _blur_tint_region(frame_bgr, box, color_hex, opacity_pct)
-
-

@@ -131,9 +131,18 @@ def _mask_ops(
     down = max(1.0, radius / 8.0)
     # gblur (IIR) sinh rác xanh lá khi plane quá nhỏ so với sigma (đã tái hiện:
     # 121×12 + sigma 4 → bậc thang xanh ở góc). Giữ trung gian ≥24 và sigma ≤ cạnh/3.
-    down = max(1.0, min(down, mh / 24.0, mw / 24.0))
-    sw = max(4, int(round(mw / down)))
-    sh = max(4, int(round(mh / down)))
+    # CSS backdrop-filter samples pixels *outside* the visible bbox.  The
+    # Python fallback does the same with an expanded ROI; doing it here too
+    # makes the fast FFmpeg route match the editor instead of making a darker,
+    # self-contained blur from only the pixels inside the mask.
+    pad = max(int(round(radius)) + 4, 16)
+    ex0, ey0 = max(0, x0 - pad), max(0, y0 - pad)
+    ex1, ey1 = min(w, x1 + pad), min(h, y1 + pad)
+    ew, eh = ex1 - ex0, ey1 - ey0
+    lx, ly = x0 - ex0, y0 - ey0
+    down = max(1.0, min(down, eh / 24.0, ew / 24.0))
+    sw = max(4, int(round(ew / down)))
+    sh = max(4, int(round(eh / down)))
     sigma = max(0.5, radius / (2.0 * down))
     sigma = min(sigma, max(0.5, sh / 3.0), max(0.5, sw / 3.0))
     tint = _blur_tint_alpha(opacity)
@@ -142,9 +151,10 @@ def _mask_ops(
     # chỉ còn ~60×6 — scaler/gblur sinh rác bậc thang XANH LÁ bất định trên vùng
     # che (đã tái hiện + đo). 444 giữ chroma cùng cỡ luma → sạch, overlay tự đổi lại.
     lines.append(
-        f"[fg{k}]crop={mw}:{mh}:{x0}:{y0},format=yuv444p,"
+        f"[fg{k}]crop={ew}:{eh}:{ex0}:{ey0},format=yuv444p,"
         f"scale={sw}:{sh}:flags=area,gblur=sigma={sigma:.2f},"
-        f"scale={mw}:{mh}:flags=bilinear,eq=saturation=0.88[reg{k}]"
+        f"scale={ew}:{eh}:flags=bilinear,eq=saturation=0.88,"
+        f"crop={mw}:{mh}:{lx}:{ly}[reg{k}]"
     )
     lines.append(f"[bg{k}][reg{k}]overlay={x0}:{y0}:{en}[vb{k}]")
     lines.append(
@@ -367,8 +377,18 @@ def _run_ffmpeg(
     return proc.returncode
 
 
-def _nvenc_on() -> bool:
-    return "h264_nvenc" in h264_encoder_args(throughput=True)
+def _hardware_label() -> str:
+    """Human-readable encoder label for render progress."""
+    args = h264_encoder_args(throughput=True)
+    if "h264_nvenc" in args:
+        return "NVENC"
+    if "h264_videotoolbox" in args:
+        return "VideoToolbox"
+    if "h264_qsv" in args:
+        return "Intel QSV"
+    if "h264_amf" in args:
+        return "AMD AMF"
+    return "CPU"
 
 
 def _make_reporter(project_id: str | None, total: float, label: str, base: float = 0.0):
@@ -581,7 +601,7 @@ def _render_segmented(
         final_parts.append(None)
         jobs.append((len(final_parts) - 1, cmd, enc, b - a))
 
-    enc_label = "Xuất khung (chia lô · NVENC)" if _nvenc_on() else "Xuất khung (chia lô · CPU)"
+    enc_label = f"Xuất khung (chia lô · {_hardware_label()})"
     if len(jobs) == 1:
         # Một lô lớn → giữ % theo giây cho mượt
         idx, cmd, enc, _dur = jobs[0]
@@ -678,6 +698,14 @@ def try_render_ffmpeg(
             cues, cue_need_mask, cue_fits, cue_overlays, cue_segment_ids,
             segments_by_id, mask_style, mask_color, mask_opacity, burn,
         )
+        # A browser backdrop-filter has compositing semantics that FFmpeg's
+        # graph cannot reproduce pixel-for-pixel (especially across animated
+        # source subtitles).  The frame compositor uses the same expanded-ROI
+        # glass algorithm as the preview contract, so prefer it for blur masks
+        # instead of trading visual fidelity for segmented-filter throughput.
+        if any(op.get("kind") == "mask" and op.get("style") == "blur" for op in ops):
+            _log("[ffgraph] fallback legacy: blur mask needs WYSIWYG compositor")
+            return False
         if not ops:
             import shutil
 
@@ -752,7 +780,7 @@ def try_render_ffmpeg(
             project_id,
             progress_cb=_make_reporter(
                 project_id, src_dur,
-                "Xuất khung (ffmpeg · NVENC)" if _nvenc_on() else "Xuất khung (ffmpeg · CPU)",
+                f"Xuất khung (ffmpeg · {_hardware_label()})",
             ),
         )
         if rc != 0 or not _validate():

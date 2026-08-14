@@ -213,9 +213,14 @@ def _h264_encoder_available(codec: str) -> bool:
 
 
 def h264_hardware_encoder() -> str | None:
-    """Best working Windows H.264 encoder: NVIDIA, AMD, or Intel."""
+    """Best available native H.264 encoder for the active machine."""
     if nvenc_available():
         return "h264_nvenc"
+    # Apple Silicon / Intel Macs use the platform VideoToolbox encoder.
+    # Probe an actual frame first: FFmpeg may list the codec even when the
+    # runtime is missing the required hardware service.
+    if sys.platform == "darwin" and _h264_encoder_available("h264_videotoolbox"):
+        return "h264_videotoolbox"
     if sys.platform != "win32":
         return None
     try:
@@ -254,6 +259,16 @@ def nvdec_available(path: Path) -> bool:
 def h264_encoder_args(
     *, fast: bool = False, throughput: bool = False, quality: int | None = None
 ) -> list[str]:
+    # The editor's <video> displays the source as limited-range BT.709.  Every
+    # H.264 render must carry the same signalling; otherwise players may assume
+    # a different range/transfer and the published mask changes colour even when
+    # the compositor pixels were correct.
+    color_tags = [
+        "-color_range", "tv",
+        "-colorspace", "bt709",
+        "-color_primaries", "bt709",
+        "-color_trc", "bt709",
+    ]
     q = max(0, min(51, int(quality))) if quality is not None else (28 if throughput else 18)
     encoder = h264_hardware_encoder()
     if encoder == "h264_nvenc":
@@ -262,27 +277,34 @@ def h264_encoder_args(
             return [
                 "-c:v", "h264_nvenc", "-preset", "p1",
                 "-tune", "ll", "-rc", "vbr", "-cq", str(q), "-b:v", "0",
-                "-pix_fmt", "yuv420p",
+                "-pix_fmt", "yuv420p", *color_tags,
             ]
         return [
             "-c:v", "h264_nvenc", "-preset", "p3" if fast else "p5",
             "-tune", "hq", "-rc", "vbr", "-cq", str(q), "-b:v", "0",
-            "-pix_fmt", "yuv420p",
+            "-pix_fmt", "yuv420p", *color_tags,
         ]
     if encoder == "h264_qsv":
         return [
             "-c:v", "h264_qsv", "-preset", "veryfast" if throughput else "faster",
-            "-global_quality", str(q), "-pix_fmt", "nv12",
+            "-global_quality", str(q), "-pix_fmt", "nv12", *color_tags,
         ]
     if encoder == "h264_amf":
         return [
             "-c:v", "h264_amf", "-quality", "speed" if throughput or fast else "balanced",
             "-rc", "cqp", "-qp_i", str(q),
-            "-qp_p", str(q), "-pix_fmt", "nv12",
+            "-qp_p", str(q), "-pix_fmt", "nv12", *color_tags,
+        ]
+    if encoder == "h264_videotoolbox":
+        # VideoToolbox quality is 1–100 (higher is better), unlike x264 CRF.
+        vt_quality = 58 if throughput else (72 if fast else 78)
+        return [
+            "-c:v", "h264_videotoolbox", "-realtime", "1" if throughput else "0",
+            "-q:v", str(vt_quality), "-pix_fmt", "yuv420p", *color_tags,
         ]
     return [
         "-c:v", "libx264", "-preset", "ultrafast" if throughput else ("veryfast" if fast else "fast"),
-        "-crf", str(q), "-pix_fmt", "yuv420p",
+        "-crf", str(q), "-pix_fmt", "yuv420p", *color_tags,
     ]
 
 def detect_device() -> dict[str, Any]:

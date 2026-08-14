@@ -2,7 +2,7 @@ from pathlib import Path
 
 import numpy as np
 
-from pipeline.export.cover_mask import _inpaint_region
+from pipeline.export.cover_mask import _blur_tint_region, _inpaint_region
 from pipeline.orchestrate import export_job
 
 
@@ -53,3 +53,17 @@ def test_logo_mask_disabled_is_noop():
         )
         is None
     )
+
+
+def test_blur_cover_does_not_turn_source_caption_into_a_bright_halo():
+    """The export cover must hide, not blur, high-contrast source subtitles."""
+    frame = np.full((120, 240, 3), (92, 86, 80), dtype=np.uint8)
+    # Simulate white source glyphs that were inside an OCR bbox.
+    frame[48:72, 65:175] = 255
+    result = _blur_tint_region(frame, (40, 36, 200, 84), "#4c1d95", 40)
+
+    center = result[48:72, 65:175]
+    # The plate can be tinted, but it must not retain the near-white lettering.
+    assert int(center.max()) < 150
+    # The surrounding video remains untouched.
+    assert np.array_equal(result[:20, :20], np.full((20, 20, 3), (92, 86, 80), dtype=np.uint8))

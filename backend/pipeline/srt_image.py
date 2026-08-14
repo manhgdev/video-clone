@@ -634,7 +634,11 @@ def run(job_id: str) -> None:
         preview = max(0, min(120, float(opts.get("previewSeconds", 0))))
         subtitle_font = str(opts.get("subtitleFontFamily", "system"))
         subtitle_size = max(6, min(120, int(opts.get("subtitleSize", 8))))
-        subtitle_margin = max(0, min(1000, int(opts.get("subtitleMargin", 18))))
+        subtitle_margin = max(0, min(1000, int(opts.get("subtitleMargin", 34))))
+        # Facebook's portrait chrome occupies more of the lower safe area.
+        # Keep the rendered caption aligned with the Facebook live preview.
+        if str(opts.get("targetPlatform", "")) == "facebook":
+            subtitle_margin = min(1000, subtitle_margin + 16)
         subtitle_offset = max(-3600, min(3600, float(opts.get("subtitleOffset", 0))))
         _raw_bg = opts.get("subtitleBackground", "solid")
         # ponytail: backward compat — old payloads sent 0/1; new sends none/solid/box

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import './SrtImagePage.css'
+import { localize, useLocale } from '../app/i18n'
 import { CAPTION_FONT_PRESETS, captionChromeStyle, captionFontCss } from '../features/editor/lib/previewStyles'
 
 type Job = {
@@ -21,7 +22,7 @@ const HELP = {
   subtitleFontFamily: ['Phông chữ', 'Kiểu chữ (font) dùng cho phụ đề.', 'Nên chọn các font không chân (sans-serif) nét rõ như Noto Sans, Inter, Roboto để dễ đọc trên mọi thiết bị.'],
   subtitleSize: ['Cỡ chữ', 'Điều chỉnh kích thước chữ phụ đề khi chèn vào video.', 'Giá trị mặc định là 8. Tăng nếu chữ quá nhỏ, giảm nếu chữ chiếm nhiều khung hình.'],
   subtitleOffset: ['Lệch phụ đề', 'Dịch toàn bộ phụ đề sớm hoặc muộn hơn so với audio.', 'Số dương làm phụ đề xuất hiện muộn hơn; số âm làm phụ đề xuất hiện sớm hơn. Đơn vị là giây.'],
-  subtitleMargin: ['Lề dưới', 'Điều chỉnh khoảng cách từ phụ đề đến mép dưới video.', 'Giá trị càng lớn thì phụ đề càng được đẩy lên cao. Mặc định là 18.'],
+  subtitleMargin: ['Lề dưới', 'Điều chỉnh khoảng cách từ phụ đề đến mép dưới video.', 'Giá trị càng lớn thì phụ đề càng được đẩy lên cao. Mặc định là 34.'],
   subtitleBackground: ['Nền chữ', 'Kiểu nền phía sau chữ phụ đề, giống tùy chọn nền bản dịch bên Clone Video.', 'Tắt: chỉ viền · Đặc: nền đen mờ · Hộp: nền bo góc viền trắng.'],
   subtitleColor: ['Màu chữ', 'Màu sắc chính của chữ phụ đề.', 'Thường nên để màu trắng (#FFFFFF) hoặc vàng nhạt để tương phản tốt với các nền tối.'],
   effect: ['Hiệu ứng', 'Chọn cách chuyển từ cảnh hiện tại sang cảnh kế tiếp. Tắt sẽ giữ chuyển cảnh trực tiếp và render nhanh nhất.', 'Mặc định nên để Tắt. Chỉ bật khi muốn video có chuyển cảnh mềm hơn.'],
@@ -50,6 +51,8 @@ function cachedSettings(): Record<string, unknown> {
 }
 
 export default function SrtImagePage() {
+  const { locale } = useLocale()
+  const t = (vietnamese: string, english: string) => localize(locale, vietnamese, english)
   const cached = useRef(cachedSettings()).current
   const [tab, setTab] = useState<'project' | 'settings'>('project')
   const [helpKey, setHelpKey] = useState<HelpKey | null>(null)
@@ -60,12 +63,18 @@ export default function SrtImagePage() {
   const [subtitleSize, setSubtitleSize] = useState(Number(cached.subtitleSize ?? 8))
   const [subtitleOffset, setSubtitleOffset] = useState(Number(cached.subtitleOffset ?? 0))
   const [subtitleFontFamily, setSubtitleFontFamily] = useState(String(cached.subtitleFontFamily ?? 'system'))
-  const [subtitleMargin, setSubtitleMargin] = useState(Number(cached.subtitleMargin ?? 18))
+  // Migrate former defaults so existing projects also keep captions
+  // clear of the bottom edge on both portrait and landscape output.
+  const [subtitleMargin, setSubtitleMargin] = useState(() => {
+    const saved = Number(cached.subtitleMargin ?? 34)
+    return saved === 18 || saved === 28 ? 34 : saved
+  })
   const [subtitleBackground, setSubtitleBackground] = useState(String(cached.subtitleBackground ?? 'solid'))
   const [subtitleColor, setSubtitleColor] = useState(String(cached.subtitleColor ?? '#ffffff'))
   const [subtitleBgColor, setSubtitleBgColor] = useState(String(cached.subtitleBgColor ?? '#000000'))
   const [subtitleOpacity, setSubtitleOpacity] = useState(Number(cached.subtitleOpacity ?? 55))
   const [resolution, setResolution] = useState(String(cached.resolution ?? 'auto'))
+  const [targetPlatform, setTargetPlatform] = useState(String(cached.targetPlatform ?? 'auto'))
   const [fps, setFps] = useState(Number(cached.fps ?? 30))
   const [crf, setCrf] = useState(Number(cached.crf ?? 20))
   const [effect, setEffect] = useState(String(cached.effect ?? 'none'))
@@ -133,7 +142,7 @@ export default function SrtImagePage() {
   useEffect(() => {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify({
       mediaFolder, audioPath, timelinePath, srtPath, watermarkPath, outputName, outputPath,
-      resolution, fps, crf, effect, transitionDuration, zoom, speed, volume,
+      resolution, targetPlatform, fps, crf, effect, transitionDuration, zoom, speed, volume,
       previewSeconds, encoder, removeMetadata, delogoEnabled, delogoAuto, delogoRect,
       subtitleSize, subtitleOffset, subtitleFontFamily,
       subtitleMargin, subtitleBackground, subtitleColor, subtitleBgColor, subtitleOpacity, logoEnabled, logoSource, logoText,
@@ -143,7 +152,7 @@ export default function SrtImagePage() {
     }))
   }, [
     mediaFolder, audioPath, timelinePath, srtPath, watermarkPath, outputName, outputPath,
-    resolution, fps, crf, effect, transitionDuration, zoom, speed, volume,
+    resolution, targetPlatform, fps, crf, effect, transitionDuration, zoom, speed, volume,
     previewSeconds, encoder, removeMetadata, delogoEnabled, delogoAuto, delogoRect,
     subtitleSize, subtitleOffset, subtitleFontFamily,
     subtitleMargin, subtitleBackground, subtitleColor, subtitleBgColor, subtitleOpacity, logoEnabled, logoSource, logoText,
@@ -165,7 +174,7 @@ export default function SrtImagePage() {
       form.append('output_name', preview ? `${outputName.replace(/\.mp4$/i, '')}-preview.mp4` : outputName)
       if (outputPath && !preview) form.append('output_path', outputPath)
       form.append('options', JSON.stringify({
-        resolution, fps, crf, effect, transitionDuration, zoom, speed, volume,
+        resolution, targetPlatform, fps, crf, effect, transitionDuration, zoom, speed, volume,
         encoder, removeMetadata, subtitleSize, subtitleOffset, subtitleFontFamily, subtitleMargin,
         subtitleBackground, subtitleColor, subtitleBgColor, subtitleOpacity, previewSeconds: preview ? previewSeconds : 0,
         delogo: { enabled: delogoEnabled, ...delogoRect },
@@ -262,20 +271,24 @@ export default function SrtImagePage() {
 
   const busy = sending || job?.status === 'queued' || job?.status === 'processing' || job?.status === 'paused'
   const statusText = job?.status === 'done'
-    ? 'Hoàn thành'
+    ? localize(locale, 'Hoàn thành', 'Complete')
     : job?.status === 'error'
-      ? 'Render thất bại'
+      ? localize(locale, 'Render thất bại', 'Render failed')
       : job?.status === 'paused'
-        ? 'Đang tạm dừng'
+        ? localize(locale, 'Đang tạm dừng', 'Paused')
       : job?.status === 'cancelled'
-        ? 'Đã hủy'
-        : busy ? 'Đang render…' : 'Sẵn sàng render'
+        ? localize(locale, 'Đã hủy', 'Cancelled')
+        : busy
+          ? localize(locale, 'Đang render…', 'Rendering…')
+          : localize(locale, 'Sẵn sàng render', 'Ready to render')
   const outputSlash = Math.max(outputPath.lastIndexOf('\\'), outputPath.lastIndexOf('/'))
-  const outputDirectory = outputPath ? outputPath.slice(0, outputSlash + 1) : 'Thư mục mặc định\\'
+  const outputDirectory = outputPath
+    ? outputPath.slice(0, outputSlash + 1)
+    : localize(locale, 'Thư mục mặc định\\', 'Default directory\\')
   const visibleLogs = (job?.logs || []).slice(logStart)
   const logText = visibleLogs.length
     ? visibleLogs.join('\n')
-    : `[${new Date().toLocaleTimeString('vi-VN')}] ${job?.error || statusText}`
+    : `[${new Date().toLocaleTimeString(locale === 'en' ? 'en-US' : 'vi-VN')}] ${job?.error || statusText}`
   const logRef = useRef<HTMLPreElement>(null)
   useEffect(() => {
     const node = logRef.current
@@ -421,14 +434,18 @@ export default function SrtImagePage() {
                   </div>
                 </div>
               )}
-              <p className="siv-hint">Timeline quyết định thời lượng từng ảnh/clip; SRT chỉ dùng để chèn phụ đề.</p>
+              <p className="siv-hint">{localize(
+                locale,
+                'Timeline quyết định thời lượng từng ảnh/clip; SRT chỉ dùng để chèn phụ đề.',
+                'Timeline controls each image/clip duration; SRT is used only to insert subtitles.',
+              )}</p>
             </div>
           ) : (
             <div className="siv-settings">
-              <div className="siv-set-row">
-                <label><span className="siv-setting-title">Độ phân giải <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('resolution') }}>i</span></span>
+              <div className="siv-set-row siv-set-row--four">
+                <label><span className="siv-setting-title">{t('Độ phân giải', 'Resolution')} <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('resolution') }}>i</span></span>
                   <select value={resolution} onChange={(e) => setResolution(e.target.value)}>
-                    <option value="auto">Auto (theo ảnh)</option>
+                    <option value="auto">{t('Auto (theo ảnh)', 'Auto (according to media)')}</option>
                     <option value="1920x1080">1920 × 1080 (16:9)</option>
                     <option value="1080x1920">1080 × 1920 (9:16)</option>
                     <option value="1080x1080">1080 × 1080 (1:1)</option>
@@ -440,76 +457,76 @@ export default function SrtImagePage() {
                     <option>24</option><option>25</option><option>30</option><option>60</option>
                   </select>
                 </label>
-                <label><span className="siv-setting-title">Chất lượng <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('quality') }}>i</span></span>
+                <label><span className="siv-setting-title">{t('Chất lượng', 'Quality')} <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('quality') }}>i</span></span>
                   <select value={crf} onChange={(e) => setCrf(Number(e.target.value))}>
-                    <option value="18">Cao</option><option value="20">Cân bằng</option><option value="24">Nhanh</option>
+                    <option value="18">{t('Cao', 'High')}</option><option value="20">{t('Cân bằng', 'Balanced')}</option><option value="24">{t('Nhanh', 'Fast')}</option>
                   </select>
                 </label>
-                <label><span className="siv-setting-title">Encoder <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('encoder') }}>i</span></span>
+                <label><span className="siv-setting-title">{t('Bộ mã hóa', 'Encoder')} <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('encoder') }}>i</span></span>
                   <select value={encoder} onChange={(e) => setEncoder(e.target.value)}>
-                    <option value="auto">Tự động</option><option value="gpu">GPU</option><option value="cpu">CPU</option>
+                    <option value="auto">{t('Tự động', 'Automatic')}</option><option value="gpu">GPU</option><option value="cpu">CPU</option>
                   </select>
                 </label>
               </div>
-              <div className="siv-set-row">
-                <label><span className="siv-setting-title">Hiệu ứng <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('effect') }}>i</span></span>
+              <div className="siv-set-row siv-set-row--two">
+                <label><span className="siv-setting-title">{t('Hiệu ứng', 'Effect')} <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('effect') }}>i</span></span>
                   <select value={effect} onChange={(e) => setEffect(e.target.value)}>
-                    <option value="random">Ngẫu nhiên</option><option value="fade">Fade</option>
-                    <option value="dissolve">Dissolve</option><option value="none">Tắt</option>
+                    <option value="random">{t('Ngẫu nhiên', 'Random')}</option><option value="fade">Fade</option>
+                    <option value="dissolve">Dissolve</option><option value="none">{t('Tắt', 'Off')}</option>
                   </select>
                 </label>
                 <label><span className="siv-setting-title">Zoom <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('zoom') }}>i</span></span>
                   <select value={zoom} onChange={(e) => setZoom(e.target.value)}>
-                      <option value="off">Tắt</option><option value="random">Ngẫu nhiên</option>
+                      <option value="off">{t('Tắt', 'Off')}</option><option value="random">{t('Ngẫu nhiên', 'Random')}</option>
                       <option value="zoomIn">Zoom in</option><option value="zoomOut">Zoom out</option>
                       <option value="left">Trái → phải</option><option value="right">Phải → trái</option>
                       <option value="up">Dưới → trên</option><option value="down">Trên → dưới</option>
                   </select>
                 </label>
               </div>
-              <div className="siv-set-row">
+              <div className="siv-set-row siv-set-row--three">
                 <label><span className="siv-setting-title">Speed (%) <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('speed') }}>i</span></span>
                   <input type="number" min="25" max="400" value={speed} onChange={(e) => setSpeed(Number(e.target.value))} />
                 </label>
-                <label><span className="siv-setting-title">Âm lượng (%) <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('volume') }}>i</span></span>
+                <label><span className="siv-setting-title">{t('Âm lượng', 'Volume')} (%) <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('volume') }}>i</span></span>
                   <input type="number" min="0" max="300" value={volume} onChange={(e) => setVolume(Number(e.target.value))} />
                 </label>
                 <label><span className="siv-setting-title">Preview (s) <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('preview') }}>i</span></span>
                   <input type="number" min="1" max="120" value={previewSeconds} onChange={(e) => setPreviewSeconds(Number(e.target.value))} />
                 </label>
               </div>
-              <div className="siv-set-row">
-                <label><span className="siv-setting-title">Xóa metadata <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('metadata') }}>i</span></span>
+              <div className="siv-set-row siv-set-row--three">
+                <label><span className="siv-setting-title">{t('Xóa metadata', 'Remove metadata')} <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('metadata') }}>i</span></span>
                   <select value={removeMetadata ? 'on' : 'off'} onChange={(e) => setRemoveMetadata(e.target.value === 'on')}>
-                    <option value="off">Tắt</option><option value="on">Bật</option>
+                    <option value="off">{t('Tắt', 'Off')}</option><option value="on">{t('Bật', 'On')}</option>
                   </select>
                 </label>
-                <label><span className="siv-setting-title">Xóa logo gốc <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('delogo') }}>i</span></span>
+                <label><span className="siv-setting-title">{t('Xóa logo gốc', 'Remove original logo')} <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('delogo') }}>i</span></span>
                   <select value={delogoEnabled ? 'on' : 'off'} onChange={(e) => setDelogoEnabled(e.target.value === 'on')}>
-                    <option value="off">Tắt</option><option value="on">Bật</option>
+                    <option value="off">{t('Tắt', 'Off')}</option><option value="on">{t('Bật', 'On')}</option>
                   </select>
                 </label>
-                {delogoEnabled && <label><span className="siv-setting-title">Tự định vị <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('delogoAuto') }}>i</span></span>
+                {delogoEnabled && <label><span className="siv-setting-title">{t('Tự định vị', 'Auto position')} <span role="button" tabIndex={0} className="siv-info" onClick={(e) => { e.stopPropagation(); setHelpKey('delogoAuto') }}>i</span></span>
                   <select value={delogoAuto ? 'on' : 'off'} onChange={(e) => setDelogoAuto(e.target.value === 'on')}>
-                    <option value="on">Bật</option><option value="off">Tắt (kéo tay)</option>
+                    <option value="on">{t('Bật', 'On')}</option><option value="off">{t('Tắt (kéo tay)', 'Off (drag manually)')}</option>
                   </select>
                 </label>}
               </div>
               <div className="siv-logo">
-                <div className="siv-logo-head"><strong>Logo / Watermark VideoClone</strong><label><input type="checkbox" checked={logoEnabled} onChange={(e) => setLogoEnabled(e.target.checked)} /> Áp dụng</label></div>
+                <div className="siv-logo-head"><strong>Logo / Watermark VideoClone</strong><label><input type="checkbox" checked={logoEnabled} onChange={(e) => setLogoEnabled(e.target.checked)} /> {t('Áp dụng', 'Apply')}</label></div>
                 <div className="siv-logo-sources">
-                  {(['text', 'image', 'icon'] as const).map((source) => <button key={source} className={logoSource === source ? 'active' : ''} onClick={() => setLogoSource(source)}>{source === 'text' ? 'T  Chữ' : source === 'image' ? '▧  Ảnh' : '★  Icon'}</button>)}
+                  {(['text', 'image', 'icon'] as const).map((source) => <button key={source} className={logoSource === source ? 'active' : ''} onClick={() => setLogoSource(source)}>{source === 'text' ? `T  ${t('Chữ', 'Text')}` : source === 'image' ? `▧  ${t('Ảnh', 'Image')}` : '★  Icon'}</button>)}
                 </div>
-                {logoSource === 'text' && <><label>Nội dung<input value={logoText} onChange={(e) => setLogoText(e.target.value)} /></label><label>Màu chữ<input type="color" value={logoColor} onChange={(e) => setLogoColor(e.target.value)} /></label></>}
-                {logoSource === 'image' && <div className="siv-logo-file"><span title={watermarkPath}>{watermarkPath || 'Chưa chọn ảnh logo'}</span><button className="siv-choose" onClick={() => chooseInputFile('watermark')}>Chọn ảnh</button></div>}
+                {logoSource === 'text' && <><label>{t('Nội dung', 'Content')}<input value={logoText} onChange={(e) => setLogoText(e.target.value)} /></label><label>{t('Màu chữ', 'Font color')}<input type="color" value={logoColor} onChange={(e) => setLogoColor(e.target.value)} /></label></>}
+                {logoSource === 'image' && <div className="siv-logo-file"><span title={watermarkPath}>{watermarkPath || t('Chưa chọn ảnh logo', 'No logo image selected')}</span><button className="siv-choose" onClick={() => chooseInputFile('watermark')}>{t('Chọn ảnh', 'Select image')}</button></div>}
                 {logoSource === 'icon' && <label>Icon<select value={logoIcon} onChange={(e) => setLogoIcon(e.target.value)}><option>★</option><option>▶</option><option>●</option><option>◆</option></select></label>}
                 {logoSource === 'text'
-                  ? <label>Cỡ chữ: {logoFontSize}px<input type="range" min="6" max="160" value={logoFontSize} onChange={(e) => setLogoFontSize(Number(e.target.value))} /></label>
-                  : <label>Kích thước: {logoSize}%<input type="range" min="2" max="30" value={logoSize} onChange={(e) => setLogoSize(Number(e.target.value))} /></label>}
-                <label>Độ mờ: {logoOpacity}%<input type="range" min="5" max="100" value={logoOpacity} onChange={(e) => setLogoOpacity(Number(e.target.value))} /></label>
+                  ? <label>{t('Cỡ chữ', 'Font size')}: {logoFontSize}px<input type="range" min="6" max="160" value={logoFontSize} onChange={(e) => setLogoFontSize(Number(e.target.value))} /></label>
+                  : <label>{t('Kích thước', 'Size')}: {logoSize}%<input type="range" min="2" max="30" value={logoSize} onChange={(e) => setLogoSize(Number(e.target.value))} /></label>}
+                <label>{t('Độ mờ', 'Opacity')}: {logoOpacity}%<input type="range" min="5" max="100" value={logoOpacity} onChange={(e) => setLogoOpacity(Number(e.target.value))} /></label>
                 <div className="siv-logo-range"><label>X (%)<input type="number" min="0" max="100" value={logoX} onChange={(e) => setLogoX(Number(e.target.value))} /></label><label>Y (%)<input type="number" min="0" max="100" value={logoY} onChange={(e) => setLogoY(Number(e.target.value))} /></label></div>
-                <label>Chuyển động<select value={logoMotion} onChange={(e) => setLogoMotion(e.target.value)}><option value="fixed">Cố định</option><option value="random">Ngẫu nhiên</option></select></label>
-                <label>Phạm vi<select value={logoScope} onChange={(e) => setLogoScope(e.target.value)}><option value="full">Toàn video</option><option value="range">Theo đoạn</option></select></label>
+                <label>{t('Chuyển động', 'Motion')}<select value={logoMotion} onChange={(e) => setLogoMotion(e.target.value)}><option value="fixed">{t('Cố định', 'Static')}</option><option value="random">{t('Ngẫu nhiên', 'Random')}</option></select></label>
+                <label>{t('Phạm vi', 'Scope')}<select value={logoScope} onChange={(e) => setLogoScope(e.target.value)}><option value="full">{t('Toàn video', 'Entire video')}</option><option value="range">{t('Theo đoạn', 'Selected range')}</option></select></label>
                 {logoMotion === 'random' && <div className="siv-logo-motion"><label>Hiện (s)<input type="number" min="0.5" step="0.1" value={logoVisibleSec} onChange={(e) => setLogoVisibleSec(Number(e.target.value))} /></label><label>Ẩn (s)<input type="number" min="0" step="0.1" value={logoHiddenSec} onChange={(e) => setLogoHiddenSec(Number(e.target.value))} /></label><label>Fade (s)<input type="number" min="0" step="0.1" value={logoFadeSec} onChange={(e) => setLogoFadeSec(Number(e.target.value))} /></label><label>Lề (%)<input type="number" min="0" max="20" value={logoSafeMargin} onChange={(e) => setLogoSafeMargin(Number(e.target.value))} /></label></div>}
                 {logoScope === 'range' && <div className="siv-logo-range"><label>Hiện từ<input type="number" min="0" value={logoStart} onChange={(e) => setLogoStart(Number(e.target.value))} /></label><label>Đến<input type="number" min="0" value={logoEnd} onChange={(e) => setLogoEnd(Number(e.target.value))} /></label></div>}
               </div>
@@ -588,6 +605,8 @@ export default function SrtImagePage() {
               marginBottom={subtitleMargin}
               resolution={resolution}
               onResolutionChange={setResolution}
+              platform={targetPlatform}
+              onPlatformChange={setTargetPlatform}
               mediaFolder={mediaFolder}
               videoSrc={`/api/srt-image/jobs/${job.id}/file`}
             />
@@ -602,6 +621,8 @@ export default function SrtImagePage() {
               marginBottom={subtitleMargin}
               resolution={resolution}
               onResolutionChange={setResolution}
+              platform={targetPlatform}
+              onPlatformChange={setTargetPlatform}
               mediaFolder={mediaFolder}
               delogoEnabled={delogoEnabled}
               delogoAuto={delogoAuto}
@@ -643,6 +664,8 @@ type PreviewProps = {
   marginBottom: number
   resolution: string
   onResolutionChange: (r: string) => void
+  platform: string
+  onPlatformChange: (platform: string) => void
   mediaFolder: string
   videoSrc?: string
   delogoEnabled?: boolean
@@ -655,8 +678,8 @@ const SAMPLE_LINES = ['Đây là dòng phụ đề mẫu,', 'hiển thị trực
 
 // Platform → resolution mapping (exact specs)
 const PLATFORM_OPTIONS = [
-  { id: 'auto',      label: 'Theo media', res: 'auto',      w: 16, h: 9,
-    icon: <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><rect x="2" y="4" width="20" height="14" rx="2" fill="none" stroke="currentColor" strokeWidth="2"/><path d="M8 10l4 3 4-3" stroke="currentColor" strokeWidth="1.5" fill="none"/></svg> },
+  { id: 'auto',      label: 'Media',      res: 'auto',      w: 16, h: 9,
+    icon: <svg viewBox="0 0 24 24" fill="none" width="16" height="16" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="6" width="13" height="12" rx="2"/><path d="m16 10 5-3v10l-5-3z"/></svg> },
   { id: 'tiktok',    label: 'TikTok',     res: '1080x1920', w: 9,  h: 16,
     icon: <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><path d="M19.59 6.69a4.83 4.83 0 01-3.77-4.25V2h-3.45v13.67a2.89 2.89 0 01-2.88 2.5 2.89 2.89 0 01-2.89-2.89 2.89 2.89 0 012.89-2.89c.28 0 .54.04.79.1V9.01a6.29 6.29 0 00-.79-.05 6.34 6.34 0 00-6.34 6.34 6.34 6.34 0 006.34 6.34 6.34 6.34 0 006.33-6.34V8.82a8.18 8.18 0 004.79 1.53V6.88a4.85 4.85 0 01-1.02-.19z"/></svg> },
   { id: 'yt-shorts', label: 'Shorts',      res: '1080x1920', w: 9,  h: 16,
@@ -667,7 +690,7 @@ const PLATFORM_OPTIONS = [
     icon: <svg viewBox="0 0 24 24" fill="#1877F2" width="16" height="16"><path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/></svg> },
 ]
 
-function SubtitleLivePreview({ fontFamily, textColor, bgStyle, bgColor, bgOpacity, fontSize, marginBottom, resolution, onResolutionChange, mediaFolder, videoSrc, delogoEnabled, delogoAuto, delogoRect, onDelogoRectChange }: PreviewProps) {
+function SubtitleLivePreview({ fontFamily, textColor, bgStyle, bgColor, bgOpacity, fontSize, marginBottom, resolution, onResolutionChange, platform, onPlatformChange, mediaFolder, videoSrc, delogoEnabled, delogoAuto, delogoRect, onDelogoRectChange }: PreviewProps) {
   // Fetch kích thước thực tế của media khi resolution=auto
   const [mediaAp, setMediaAp] = useState<{ w: number; h: number } | null>(null)
   useEffect(() => {
@@ -688,7 +711,15 @@ function SubtitleLivePreview({ fontFamily, textColor, bgStyle, bgColor, bgOpacit
   }
   // Ưu tiên kích thước thực tế từ media khi đang ở chế độ auto
   const ap = (resolution === 'auto' && mediaAp) ? mediaAp : (resMap[resolution] ?? { w: 16, h: 9 })
-  const activePlatform = PLATFORM_OPTIONS.find(p => p.res === resolution)?.id ?? 'auto'
+  // Several platforms share 1080×1920. Keep the target in the project state
+  // so its platform-safe subtitle placement is also sent to the renderer.
+  useEffect(() => {
+    const selected = PLATFORM_OPTIONS.find(p => p.id === platform)
+    if (!selected || selected.res !== resolution) {
+      onPlatformChange(PLATFORM_OPTIONS.find(p => p.res === resolution)?.id ?? 'auto')
+    }
+  }, [resolution, platform, onPlatformChange])
+  const activePlatform = platform
   const frameRef = useRef<HTMLDivElement>(null)
   const [frameH, setFrameH] = useState(300)
   const [thumbIdx, setThumbIdx] = useState(0)
@@ -720,7 +751,10 @@ function SubtitleLivePreview({ fontFamily, textColor, bgStyle, bgColor, bgOpacit
   // ponytail: ASS FontSize = em-square, CSS fontSize = bounding box (ascender+descender).
   // Hệ số ~0.75 để CSS khớp kết quả libass render thực tế.
   const scaledFontSize = Math.round(fontSize * scale * 0.75)
-  const scaledMarginBottom = Math.round(marginBottom * scale)
+  // Facebook Reels reserves more room for its lower action and description UI.
+  // The same safe area is sent to the backend as targetPlatform.
+  const platformMargin = activePlatform === 'facebook' ? 16 : 0
+  const scaledMarginBottom = Math.round((marginBottom + platformMargin) * scale)
   // ponytail: ASS Outline (padding hộp nền) là giá trị cố định PlayRes, không phải em-based
   // solid: Outline=1.2, box: Outline=2 — scale giống fontSize/margin
   const outlinePx = bgStyle === 'box' ? Math.round(2 * scale) : bgStyle === 'solid' ? Math.round(1.2 * scale) : 0
@@ -734,7 +768,10 @@ function SubtitleLivePreview({ fontFamily, textColor, bgStyle, bgColor, bgOpacit
             key={p.id}
             type="button"
             className={p.id === activePlatform ? 'active' : ''}
-            onClick={() => onResolutionChange(p.res)}
+            onClick={() => {
+              onPlatformChange(p.id)
+              onResolutionChange(p.res)
+            }}
             title={`${p.label} · ${p.res}`}
           >
             {p.icon}

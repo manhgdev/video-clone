@@ -418,6 +418,30 @@ def _windows_native_dialog(script: str, extra_env: dict[str, str] | None = None)
     return result.stdout.strip()
 
 
+def _macos_native_dialog(script: str) -> str:
+    """Run an AppleScript picker without requiring Python's optional Tk build."""
+    result = subprocess.run(
+        ["osascript", "-e", script],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=300,
+    )
+    if result.returncode:
+        # Cancelling a macOS picker is normal UI flow, not an API failure.
+        message = result.stderr.strip()
+        if "User canceled" in message or "user canceled" in message:
+            return ""
+        raise RuntimeError(message or f"osascript kết thúc với mã {result.returncode}")
+    return result.stdout.strip()
+
+
+def _apple_script_string(value: str) -> str:
+    """Quote a trusted dialog string for use as an AppleScript literal."""
+    return json.dumps(value, ensure_ascii=False)
+
+
 def _pick_folder(title: str) -> str:
     if os.name == "nt":
         return _windows_native_dialog(
@@ -439,6 +463,10 @@ if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) {
 $owner.Close()
 """,
             {"VIDEOCLONE_DIALOG_TITLE": title},
+        )
+    if sys.platform == "darwin":
+        return _macos_native_dialog(
+            f"return POSIX path of (choose folder with prompt {_apple_script_string(title)})"
         )
     import tkinter as tk
     from tkinter import filedialog
@@ -476,6 +504,10 @@ $owner.Close()
                 "VIDEOCLONE_DIALOG_TITLE": title,
                 "VIDEOCLONE_FILE_FILTER": file_filter,
             },
+        )
+    if sys.platform == "darwin":
+        return _macos_native_dialog(
+            f"return POSIX path of (choose file with prompt {_apple_script_string(title)})"
         )
     import tkinter as tk
     from tkinter import filedialog
@@ -543,6 +575,13 @@ if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) {
 $owner.Close()
 """,
                 {"VIDEOCLONE_SAVE_NAME": initial},
+            )
+        elif sys.platform == "darwin":
+            path = _macos_native_dialog(
+                "set outputFile to choose file name with prompt "
+                f"{_apple_script_string('Chọn nơi lưu video')} "
+                f"default name {_apple_script_string(initial)}\n"
+                "return POSIX path of outputFile"
             )
         else:
             import tkinter as tk
