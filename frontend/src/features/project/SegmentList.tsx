@@ -105,7 +105,7 @@ export default function SegmentList({
                 <div className="logo-summary__title">Logo</div>
                 <div className="logo-summary__content">
                   <span className="logo-summary__caption">
-                    {dynamic ? 'Watermark động · không che tự động' : 'Watermark cố định · sẽ che khi xuất'}
+                    {dynamic ? 'Watermark động' : 'Watermark cố định'}
                   </span>
                   <strong title={label}>{label}</strong>
                 </div>
@@ -115,7 +115,7 @@ export default function SegmentList({
                     checked={covered}
                     disabled={dynamic}
                     onChange={(event) => onCoverLogoChange?.(label, event.target.checked)}
-                    aria-label={dynamic ? `Không che tự động logo động ${label}` : `Che logo ${label} trong video`}
+                    aria-label={dynamic ? `Không che logo động ${label}` : `Che logo ${label}`}
                   />
                   <span>{dynamic ? 'Không che tự động' : 'Che khi xuất'}</span>
                 </label>

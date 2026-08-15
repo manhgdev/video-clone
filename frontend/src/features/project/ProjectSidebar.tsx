@@ -594,7 +594,7 @@ export default function Sidebar({
             disabled={busy}
             title={
               settings.matchDuration === 'preferVideo'
-                ? 'Phân tích video ở 0.70×, vào editor trở về 1×'
+                ? 'Ưu tiên video gốc, TTS tự nén vào khung'
                 : settings.matchDuration === 'none'
                   ? 'Giữ TTS nguyên tốc độ'
                   : settings.matchDuration === 'stretch'
@@ -605,7 +605,7 @@ export default function Sidebar({
               set('matchDuration', e.target.value as ProjectSettings['matchDuration'])
             }
           >
-            <option value="preferVideo">Ưu tiên phân tích 0.70× (editor 1×)</option>
+            <option value="preferVideo">Ưu tiên video gốc</option>
             <option value="none">Giữ nguyên TTS</option>
             <option value="natural">Tự nhiên, rút gọn nhẹ</option>
             <option value="stretch">Kéo giãn khớp đoạn</option>

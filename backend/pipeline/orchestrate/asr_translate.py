@@ -157,38 +157,10 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
             meta.pop("workDuration", None)
             meta["workVideo"] = str(video.resolve())
 
-        # «Ưu tiên chậm 0.8»: làm chậm clip TRƯỚC rồi ASR/dịch/OCR trên chính
-        # file đó (cửa sổ đo rộng 1.25×); PHÂN TÍCH XONG tự nâng timeline về
-        # 1.00× (khối cuối) — editor/xuất luôn ở tốc độ thật.
+        # «Ưu tiên chậm» TẮT: phân tích ở 1× gốc — tránh lệch timestamp
+        # logo/caption khi remap tốc độ. TTS vẫn dùng preferVideo ở bước dub.
         auto_baked_prefer = False
-        if (
-            str(settings.get("engine") or "") != "subtitle"
-            and
-            str(settings.get("matchDuration") or "") == "preferVideo"
-            and meta.get("bakedSpeed") is None
-        ):
-            auto_baked_prefer = True
-            from pipeline.core.media import ensure_playback_speed, speed_cache_tag
-
-            set_status(
-                project_id,
-                step="asr",
-                progress=4,
-                message="Làm chậm video 0.70× (ưu tiên chậm) trước khi dịch…",
-                running=True,
-            )
-            s070 = speed_cache_tag(0.7)
-            dest = ensure_layout(project_id) / "cache" / (
-                f"preview_{preview_sec}_{s070}.mp4"
-                if preview_sec > 0
-                else f"source_{s070}.mp4"
-            )
-            video = ensure_playback_speed(video, dest, 0.7, project_id=project_id)
-            meta["bakedPreferVideo"] = True
-            meta["bakedSpeed"] = 0.7
-            meta["workDuration"] = float(ffprobe_duration(video) or 0)
-            meta["workVideo"] = str(video.resolve())
-            meta["timelineClock"] = "display"
+        video_1x = video
 
         # Cache key theo tốc độ file thật sự ASR (0.8 bake trước ≠ cache 1×)
         from pipeline.core.media import meta_baked_speed as _meta_baked_speed
@@ -597,8 +569,10 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                     message="Định vị logo…",
                     running=True,
                 )
+                # Dùng video gốc 1× — logo detection không cần 0.7× và
+                # timestamps sẽ khớp timeline cuối (1×) mà không cần remap.
                 logo_detection = _detect_logo_via_runtime_subprocess(
-                    video, project_id=project_id, segments=segments
+                    video_1x, project_id=project_id, segments=segments
                 )
                 if logo_detection:
                     meta["logoDetection"] = logo_detection

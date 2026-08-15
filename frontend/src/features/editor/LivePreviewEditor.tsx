@@ -1052,6 +1052,7 @@ export default function LivePreviewEditor({
   // The user can now trim it on the timeline and drag/resize its bbox in the
   // preview; export consumes this exact same overlay.
   useEffect(() => {
+    if (!videoFrameReady) return
     const tracks = (logoDetection?.tracks || []).filter((track) => {
       const label = (track.text || '').trim()
       return Boolean(track.bbox) && !label.startsWith('@') && label.includes('生成')
@@ -1087,7 +1088,7 @@ export default function LivePreviewEditor({
       watermarkSource: 'AI生成+',
     }
     onOverlayChange(overlay, true)
-  }, [hasEditableWatermark, logoDetection?.tracks, onOverlayChange, sourceHeight, sourceWidth])
+  }, [hasEditableWatermark, logoDetection?.tracks, onOverlayChange, sourceHeight, sourceWidth, videoFrameReady])
 
   // One-shot repair for the first automatic clip created before source video
   // metadata was available. It prevents the fallback 1080×1920 coordinates
