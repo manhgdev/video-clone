@@ -196,18 +196,25 @@ export function segmentForDub(
   videoRate = 1,
   finishedIds?: Set<string>,
   bakedSpeed = 1,
+  cascadePlan?: Map<string, CascadeInfo>,
 ): Segment | null {
   let best: Segment | null = null
   for (const s of segments) {
     if (!segmentHasDub(s) || !s.audioUrl) continue
     if (finishedIds?.has(s.id)) continue
-    if (time + 0.03 < s.start) continue
-    if (time >= dubAudioAbsEnd(s, segments, videoRate, bakedSpeed)) continue
-    // Ưu tiên câu bắt đầu gần playhead nhất (không nhảy lung tung)
+    
+    const info = cascadePlan?.get(s.id)
+    const effectiveStart = info?.effectiveStart ?? s.start
+    const effectiveEnd = info?.effectiveEnd ?? dubAudioAbsEnd(s, segments, videoRate, bakedSpeed)
+
+    if (time + 0.03 < effectiveStart) continue
+    if (time >= effectiveEnd) continue
+    
+    const bestStart = best ? (cascadePlan?.get(best.id)?.effectiveStart ?? best.start) : 0
     if (
       !best
-      || Math.abs(s.start - time) < Math.abs(best.start - time)
-      || (Math.abs(s.start - time) === Math.abs(best.start - time) && s.start > best.start)
+      || Math.abs(effectiveStart - time) < Math.abs(bestStart - time)
+      || (Math.abs(effectiveStart - time) === Math.abs(bestStart - time) && effectiveStart > bestStart)
     ) {
       best = s
     }
@@ -223,4 +230,48 @@ export function dubClipSeconds(
   bakedSpeed = 1,
 ): number {
   return Math.max(0.05, dubAudioAbsEnd(seg, segments, videoRate, bakedSpeed) - seg.start)
+}
+
+export interface CascadeInfo {
+  effectiveStart: number
+  effectiveEnd: number
+}
+
+/**
+ * Tính toán timeline thực tế khi các câu bị đẩy lùi (cascade).
+ * Mô phỏng lại logic `mux_audio.py` ở backend.
+ */
+export function buildCascadePlan(
+  segments: Segment[],
+  bakedSpeed = 1,
+): Map<string, CascadeInfo> {
+  const plan = new Map<string, CascadeInfo>()
+  let cursor = 0
+
+  const sorted = [...segments]
+    .filter((s) => segmentHasDub(s) && s.audioUrl)
+    .sort((a, b) => a.start - b.start)
+
+  for (const seg of sorted) {
+    const start = Math.max(seg.start, cursor)
+
+    const ttsSpeed = dubPlaybackSpeed(seg, bakedSpeed)
+    const ad = seg.audioDuration ?? 0
+
+    const rate = Math.max(0.2, previewVideoRate(undefined, undefined, seg.videoSpeed))
+
+    let durationInVideoTime = 0
+    if (ad > 0.05) {
+      durationInVideoTime = (ad / Math.max(0.5, ttsSpeed)) * rate + 0.04
+    } else {
+      durationInVideoTime = Math.max(0, seg.end - seg.start) + 0.05
+    }
+
+    const end = start + durationInVideoTime
+    plan.set(seg.id, { effectiveStart: start, effectiveEnd: end })
+
+    cursor = end + 0.02 * rate
+  }
+
+  return plan
 }

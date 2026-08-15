@@ -264,6 +264,13 @@ def detect_logo_bbox_inprocess(
         times = [duration * 0.5]
     else:
         times = [edge + (duration - edge * 2) * index / (probe_count - 1) for index in range(probe_count)]
+        
+        # Always sample the first 3 seconds densely to catch early watermarks (e.g. AI generated)
+        # which might disappear later in the video.
+        for t in [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]:
+            if t < duration and not any(abs(t - existing) < 0.2 for existing in times):
+                times.append(t)
+        times.sort()
     try:
         from pipeline.core.media import nvdec_available
 

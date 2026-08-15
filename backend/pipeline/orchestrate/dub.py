@@ -159,8 +159,9 @@ def run_dub(project_id: str, *, finalize: bool = True, nested: bool = False) -> 
                     next_start = ns
                     break
             if next_start is not None:
-                # Slot cứng = đến câu sau (không dùng window*0.7 — gây tràn/cắt)
-                target = max(0.15, next_start - start - 0.03)
+                # Đảm bảo slot tối thiểu bằng thời lượng gốc (window) để tránh 
+                # các câu đè nhau (overlap) bị bóp thời gian quá mức gây cắt cụt/đọc quá nhanh.
+                target = max(0.15, max(window, next_start - start - 0.03))
             else:
                 target = max(0.15, window)
             key = tts_cache_key(

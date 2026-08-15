@@ -12,6 +12,7 @@ import {
   segmentForDub,
   segmentHasDub,
   speedSegmentAt,
+  buildCascadePlan,
 } from '@/features/editor/lib'
 
 type DubAudioSyncDeps = {
@@ -64,6 +65,10 @@ export function useDubAudioSync(deps: DubAudioSyncDeps) {
     // Fallback shell mix (không có TTS từng câu)
     return segments.filter((s) => s.isCompound && segmentHasDub(s) && s.audioUrl)
   }, [segments])
+
+  const cascadePlan = useMemo(() => {
+    return buildCascadePlan(dubPlaySegments, bakedSpeed)
+  }, [dubPlaySegments, bakedSpeed])
 
   function syncOriginalBg(
     videoTime: number,
@@ -167,15 +172,20 @@ export function useDubAudioSync(deps: DubAudioSyncDeps) {
     // Đang phát dở → giữ nguyên câu (không nhảy / không lặp)
     const holdId = dubTokenRef.current.split('|')[0]
     const held = holdId ? dubSegs.find((s) => s.id === holdId) : undefined
-    const heldClipEnded = held
-      ? videoTime >= held.start + dubClipSeconds(
+    const heldInfo = held ? cascadePlan.get(held.id) : undefined
+    const heldEffectiveStart = heldInfo?.effectiveStart ?? (held?.start || 0)
+    const heldEffectiveEnd = heldInfo?.effectiveEnd ?? (held
+      ? held.start + dubClipSeconds(
           held,
           dubSegs,
           previewVideoRate(settings.matchDuration, bakedPreferVideo, held.videoSpeed, bakedSpeed, hasBakedSpeed),
           bakedSpeed,
-        ) - 0.01
-      : false
-    if (held?.audioUrl && !heldClipEnded && !a.ended && a.currentTime > 0.02 && videoTime >= held.start - 0.08) {
+        )
+      : 0)
+    
+    const heldClipEnded = held ? videoTime >= heldEffectiveEnd - 0.01 : false
+    
+    if (held?.audioUrl && !heldClipEnded && !a.ended && a.currentTime > 0.02 && videoTime >= heldEffectiveStart - 0.08) {
       const playRate = previewVideoRate(
         settings.matchDuration,
         bakedPreferVideo,
@@ -189,7 +199,7 @@ export function useDubAudioSync(deps: DubAudioSyncDeps) {
       a.volume = Math.min(1, Math.max(0, (held.ttsVolume ?? 100) / 100))
       if (hardSync) {
         // TTS wav 1×: offset = wall * bake; wall ≈ (videoTime-start)/playRate
-        const wantTime = Math.max(0, ((videoTime - held.start) / Math.max(0.2, playRate)) * speed)
+        const wantTime = Math.max(0, ((videoTime - heldEffectiveStart) / Math.max(0.2, playRate)) * speed)
         try {
           if (Math.abs(a.currentTime - wantTime) > 0.2) a.currentTime = wantTime
         } catch { /* ignore */ }
@@ -216,7 +226,7 @@ export function useDubAudioSync(deps: DubAudioSyncDeps) {
     )
     const seg = dubMuted
       ? null
-      : segmentForDub(dubSegs, videoTime, playRateProbe, finished, bakedSpeed)
+      : segmentForDub(dubSegs, videoTime, playRateProbe, finished, bakedSpeed, cascadePlan)
 
     if (!seg?.audioUrl) {
       if (dubTokenRef.current) {
@@ -246,7 +256,9 @@ export function useDubAudioSync(deps: DubAudioSyncDeps) {
 
     const speed = dubPlaybackSpeed(seg, bakedSpeed)
     const vol = Math.min(1, Math.max(0, (seg.ttsVolume ?? 100) / 100))
-    const wantTime = Math.max(0, ((videoTime - seg.start) / Math.max(0.2, playRate)) * speed)
+    const segInfo = cascadePlan.get(seg.id)
+    const effectiveStart = segInfo?.effectiveStart ?? seg.start
+    const wantTime = Math.max(0, ((videoTime - effectiveStart) / Math.max(0.2, playRate)) * speed)
     const token = `${seg.id}|${seg.audioUrl}`
 
     syncOriginalBg(videoTime, true, true, playRate, hardSync)

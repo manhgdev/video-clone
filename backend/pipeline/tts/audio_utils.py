@@ -26,7 +26,8 @@ def fit_duration(
         if dur <= target_sec * 1.04 and not force_refit:
             return dur
         fit_sec = target_sec
-    max_speed = 1.25 if match == "natural" else 2.0
+    # Giảm tốc độ tối đa xuống 1.15x để giọng đọc luôn đều, không bị lúc nhanh lúc chậm
+    max_speed = 1.15 if match == "natural" else 1.15
     fit_sec = max(fit_sec, dur / max_speed)
     ratio = dur / fit_sec
     if ratio > 1.02 or (match == "stretch" and abs(ratio - 1.0) > 0.03):
