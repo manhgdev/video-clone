@@ -573,11 +573,11 @@ def _probe_mid_hardsub(
         if src:
             from .extract import _ocr_sim
 
-            if _source_matches(text, src):
+            if is_sub:
                 score = 30 + cjk + (bw / max(1, w)) * 6
-            # ưu tiên dòng hardsub đủ bề ngang khi Whisper chỉ có nửa câu
-            if cjk > src_cjk + 1:
-                score += 14 + (bw / max(1, w)) * 10
+                # ưu tiên dòng hardsub đủ bề ngang khi Whisper chỉ có nửa câu
+                if cjk > src_cjk + 1:
+                    score += 14 + (bw / max(1, w)) * 10
             else:
                 sim = float(_ocr_sim(text, src) or 0)
                 min_sim = 0.28 if src_cjk <= 8 else 0.42

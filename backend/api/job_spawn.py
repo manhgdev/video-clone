@@ -9,6 +9,12 @@ def spawn(fn, *args) -> None:
     """Chạy job trên thread daemon — lỗi không lan ra main (kéo sập desktop)."""
 
     def wrap() -> None:
+        import time
+
+        # Yield GIL to allow FastAPI main thread to flush HTTP response
+        # before this background thread starts loading heavy models (PyTorch etc.)
+        time.sleep(0.2)
+
         job = getattr(fn, "__name__", "job")
         try:
             fn(*args)
