@@ -25,7 +25,7 @@ _whisper_lock = threading.Lock()
 # Siết biên segment theo word timestamps — KHÔNG tách text (tránh 1 câu → nhiều mảnh).
 _WORD_PAD_START = 0.08
 _WORD_PAD_END = 0.18
-_WORD_MIN_PROB = 0.12
+_WORD_MIN_PROB = 0.01  # giữ gần hết words — tránh mất chữ Trung 1 ký tự
 _MAX_SEG_DUR = 14.0  # trần nếu không có words / words lỗi
 _MIN_SEG_DUR = 0.12
 
@@ -192,21 +192,67 @@ def _tighten_bounds(
 
 
 def _segments_from_whisper(seg: Any) -> list[dict[str, Any]]:
-    """1 segment Whisper → đúng 1 segment (text gốc, biên siết)."""
+    """1 segment Whisper → 1+ segment: tách khi có khoảng im > _SPLIT_GAP giữa words."""
     text = (getattr(seg, "text", None) or "").strip()
     if not text:
         return []
     seg_start = float(getattr(seg, "start", 0) or 0)
     seg_end = float(getattr(seg, "end", seg_start) or seg_start)
     parts = _word_parts(seg)
-    start, end = _tighten_bounds(seg_start, seg_end, parts)
-    return [
+
+    # Không có word timestamps → giữ nguyên 1 segment
+    if not parts:
+        start, end = _tighten_bounds(seg_start, seg_end, parts)
+        return [
+            {
+                "id": str(uuid.uuid4()),
+                "index": 0,
+                "start": start,
+                "end": end,
+                "source": text,
+                "translation": "",
+                "voice": "",
+            }
+        ]
+
+    # Tìm điểm cắt: gap giữa word[i].end → word[i+1].start > threshold
+    _SPLIT_GAP = 0.7  # giây — khoảng im đủ lâu để tách câu
+    groups: list[list[tuple[float, float, str, float]]] = [[]]
+    for i, wp in enumerate(parts):
+        groups[-1].append(wp)
+        if i < len(parts) - 1:
+            gap = parts[i + 1][0] - wp[1]
+            if gap >= _SPLIT_GAP:
+                groups.append([])
+
+    # Mỗi group → 1 segment
+    out: list[dict[str, Any]] = []
+    for group in groups:
+        if not group:
+            continue
+        g_text = "".join(w[2] for w in group).strip()
+        if not g_text:
+            continue
+        g_start = max(0.0, group[0][0] - _WORD_PAD_START)
+        g_end = max(g_start + _MIN_SEG_DUR, group[-1][1] + _WORD_PAD_END)
+        out.append(
+            {
+                "id": str(uuid.uuid4()),
+                "index": 0,
+                "start": g_start,
+                "end": g_end,
+                "source": g_text,
+                "translation": "",
+                "voice": "",
+            }
+        )
+    return out if out else [
         {
             "id": str(uuid.uuid4()),
             "index": 0,
-            "start": start,
-            "end": end,
-            "source": text,  # luôn full text Whisper — không ghép/tách theo words
+            "start": seg_start,
+            "end": seg_end,
+            "source": text,
             "translation": "",
             "voice": "",
         }
@@ -260,12 +306,9 @@ def asr_whisper(
     segments, _info = model.transcribe(
         str(wav),
         language=lang,
-        vad_filter=True,
-        # 350ms: tách câu sát hơn; vẫn giữ pause ngắn trong câu
-        vad_parameters=dict(
-            min_silence_duration_ms=350,
-            speech_pad_ms=120,
-        ),
+        # VAD OFF: video anime có nhạc nền → VAD bỏ sót câu ngắn.
+        # Word-split (_SPLIT_GAP) tách segment dài thay VAD.
+        vad_filter=False,
         beam_size=1,
         best_of=1,
         temperature=0.0,
