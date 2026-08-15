@@ -11,6 +11,104 @@ from pipeline.core.jobs import check_cancel
 _LOGO_DETECTION_VERSION = 1
 
 
+def _branding_text(text: str) -> bool:
+    """Only promote explicit watermark-like text to a moving logo track.
+
+    A normal subtitle can sit at the edge too.  The static detector below is
+    still useful for graphical logos, while this deliberately conservative
+    path handles the common ``@account`` / ``AI generated`` watermarks.
+    """
+    compact = "".join(str(text or "").split()).casefold()
+    return compact.startswith("@") or "生成" in compact
+
+
+def _padded_normalized_box(
+    box: tuple[int, int, int, int], fw: int, fh: int
+) -> dict[str, float]:
+    x0, y0, x1, y1 = box
+    pad_x = max(4, round((x1 - x0) * 0.15))
+    pad_y = max(4, round((y1 - y0) * 0.18))
+    x0, y0 = max(0, x0 - pad_x), max(0, y0 - pad_y)
+    x1, y1 = min(fw, x1 + pad_x), min(fh, y1 + pad_y)
+    return {
+        "x": round(x0 / fw, 6),
+        "y": round(y0 / fh, 6),
+        "w": round((x1 - x0) / fw, 6),
+        "h": round((y1 - y0) / fh, 6),
+    }
+
+
+def _moving_branding_tracks(
+    samples: list[list[dict[str, Any]]], times: list[float], fw: int, fh: int
+) -> list[dict[str, Any]]:
+    """Return short, time-bound masks for watermarks that change position."""
+    if not samples or len(samples) != len(times):
+        return []
+    detections: list[tuple[int, dict[str, Any]]] = []
+    for sample_index, items in enumerate(samples):
+        for item in items:
+            if _branding_text(str(item.get("text") or "")):
+                detections.append((sample_index, item))
+    if not detections:
+        return []
+
+    def key(item: dict[str, Any]) -> str:
+        text = str(item.get("text") or "").strip()
+        # A handle may have one OCR-misread glyph as it moves; it is still the
+        # same platform watermark for tracking purposes.
+        return "@handle" if text.startswith("@") else "generated"
+
+    grouped: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    for detection in detections:
+        grouped.setdefault(key(detection[1]), []).append(detection)
+
+    probe_gap = (times[1] - times[0]) if len(times) > 1 else 0.25
+    tracks: list[dict[str, Any]] = []
+    for group in grouped.values():
+        group.sort(key=lambda item: item[0])
+        runs: list[list[tuple[int, dict[str, Any]]]] = []
+        for item in group:
+            if not runs or times[item[0]] - times[runs[-1][-1][0]] > probe_gap * 2.2:
+                runs.append([item])
+            else:
+                runs[-1].append(item)
+        for run in runs:
+            # A one-frame OCR false-positive must not create a logo mask.
+            if len(run) < 2:
+                continue
+            for index, (sample_index, item) in enumerate(run):
+                prev_index = run[index - 1][0] if index else sample_index
+                next_index = run[index + 1][0] if index + 1 < len(run) else sample_index
+                # A brand visible in the very first probe can already be on
+                # frame 0.  Do not leave the initial half-probe uncovered.
+                start = (
+                    0.0
+                    if index == 0 and sample_index == 0
+                    else max(0.0, times[sample_index] - probe_gap * 0.5)
+                ) if index == 0 else (times[prev_index] + times[sample_index]) * 0.5
+                end = min(times[-1] + probe_gap * 0.5, times[sample_index] + probe_gap * 0.5) if index + 1 == len(run) else (times[sample_index] + times[next_index]) * 0.5
+                # Cover the union between adjacent positions.  This costs a little
+                # more background area, but prevents a fast TikTok watermark from
+                # escaping between two otherwise correct tracking probes.
+                boxes = [item["box"]]
+                if index + 1 < len(run):
+                    boxes.append(run[index + 1][1]["box"])
+                x0 = min(box[0] for box in boxes)
+                y0 = min(box[1] for box in boxes)
+                x1 = max(box[2] for box in boxes)
+                y1 = max(box[3] for box in boxes)
+                tracks.append(
+                    {
+                        "start": round(start, 3),
+                        "end": round(max(start + 0.04, end), 3),
+                        "bbox": _padded_normalized_box((x0, y0, x1, y1), fw, fh),
+                        "text": str(item.get("text") or ""),
+                        "confidence": round(float(item.get("confidence") or 0.0), 4),
+                    }
+                )
+    return tracks
+
+
 def _logo_candidates(
     frame_bgr: Any,
     ocr: Any,
@@ -119,20 +217,11 @@ def pick_logo_detection(
     boxes = [item["box"] for item in best]
     x0, y0 = median(box[0] for box in boxes), median(box[1] for box in boxes)
     x1, y1 = median(box[2] for box in boxes), median(box[3] for box in boxes)
-    pad_x = max(4, round((x1 - x0) * 0.15))
-    pad_y = max(4, round((y1 - y0) * 0.18))
-    x0, y0 = max(0, x0 - pad_x), max(0, y0 - pad_y)
-    x1, y1 = min(fw, x1 + pad_x), min(fh, y1 + pad_y)
     texts = [str(item["text"]) for item in best]
     text = max(texts, key=lambda value: (texts.count(value), len(value)))
     return {
         "version": _LOGO_DETECTION_VERSION,
-        "bbox": {
-            "x": round(x0 / fw, 6),
-            "y": round(y0 / fh, 6),
-            "w": round((x1 - x0) / fw, 6),
-            "h": round((y1 - y0) / fh, 6),
-        },
+        "bbox": _padded_normalized_box((int(x0), int(y0), int(x1), int(y1)), fw, fh),
         "samples": len(best),
         "total": len(samples),
         "confidence": round(sum(float(item["confidence"]) for item in best) / len(best), 4),
@@ -165,8 +254,16 @@ def detect_logo_bbox_inprocess(
     if fw <= 0 or fh <= 0 or frames <= 0:
         return None
     duration = frames / fps
-    fractions = (0.08, 0.50, 0.92) if duration < 600 else (0.05, 0.25, 0.50, 0.75, 0.95)
-    times = [duration * fraction for fraction in fractions]
+    # More probes are needed for platform watermarks which deliberately move
+    # around the frame.  Keep long videos bounded to avoid slowing export.
+    # Short clips are the common preview/export case.  Probe them densely so a
+    # bouncing platform watermark cannot move to an uncovered position.
+    probe_count = min(81, max(12, int(math.ceil(duration / 0.25)) + 1)) if duration <= 30 else (12 if duration <= 90 else (5 if duration < 600 else 7))
+    edge = min(0.5, duration * 0.025)
+    if probe_count == 1:
+        times = [duration * 0.5]
+    else:
+        times = [edge + (duration - edge * 2) * index / (probe_count - 1) for index in range(probe_count)]
     try:
         from pipeline.core.media import nvdec_available
 
@@ -179,13 +276,34 @@ def detect_logo_bbox_inprocess(
         for segment in (segments or [])
         if str(segment.get("source") or "").strip()
     }
-    samples: list[list[dict[str, Any]]] = []
-    for sample, (_idx, frame) in enumerate(
+    requested = [max(0, int(round(t * fps))) for t in times]
+    time_by_frame = {frame_index: time for frame_index, time in zip(requested, times)}
+    sample_by_frame: dict[int, list[dict[str, Any]]] = {}
+    for frame_index, frame in (
         _decode_frames_batch(path, times, fps, fw, fh, use_cuda=use_cuda)
     ):
         check_cancel(project_id)
-        samples.append(_logo_candidates(frame, ocr, sample, exclude_texts))
-    return pick_logo_detection(samples, fw, fh)
+        sample_by_frame[frame_index] = _logo_candidates(
+            frame, ocr, frame_index, exclude_texts
+        )
+    ordered_frames = sorted(time_by_frame)
+    times = [time_by_frame[frame_index] for frame_index in ordered_frames]
+    samples = [sample_by_frame.get(frame_index, []) for frame_index in ordered_frames]
+    static = pick_logo_detection(samples, fw, fh)
+    tracks = _moving_branding_tracks(samples, times, fw, fh)
+    if not static and not tracks:
+        return None
+    result: dict[str, Any] = static or {
+        "version": _LOGO_DETECTION_VERSION,
+        "bbox": None,
+        "samples": 0,
+        "total": len(samples),
+        "confidence": 0.0,
+        "text": "",
+    }
+    if tracks:
+        result["tracks"] = tracks
+    return result
 
 
 __all__ = ["detect_logo_bbox_inprocess", "pick_logo_detection"]

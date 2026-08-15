@@ -500,6 +500,10 @@ def api_status(project_id: str):
     st["projectInitialPlaybackRate"] = float(init_rate)
     if meta.get("settings"):
         st["settings"] = meta["settings"]
+    # Watermark discovery is separate from caption segments so the UI can show
+    # what will be covered without putting handles into the dubbing script.
+    if isinstance(meta.get("logoDetection"), dict):
+        st["logoDetection"] = meta["logoDetection"]
     if meta.get("outputRel"):
         st["outputRel"] = st.get("outputRel") or meta.get("outputRel")
     return st

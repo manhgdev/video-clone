@@ -114,6 +114,22 @@
   background: #000;
 }
 
+/* Mask live dùng đúng bbox + thời gian mà backend sẽ đưa vào bản xuất.
+   Video native vẫn nhận click/control vì lớp này không bắt sự kiện. */
+.preview-logo-mask {
+  position: absolute;
+  z-index: 3;
+  pointer-events: none;
+  box-sizing: border-box;
+  min-width: 2px;
+  min-height: 2px;
+  background: rgb(11 18 28 / 78%);
+  backdrop-filter: blur(12px) saturate(70%);
+  -webkit-backdrop-filter: blur(12px) saturate(70%);
+  border-radius: 2px;
+  box-shadow: 0 0 10px rgb(0 0 0 / 35%);
+}
+
 .preview-empty {
   height: 100%;
   display: grid;

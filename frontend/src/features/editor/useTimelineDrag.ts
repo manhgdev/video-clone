@@ -44,7 +44,7 @@ type TimelineDragDeps = {
   sourceWidth: number
   sourceHeight: number
   crop: Box
-  trackFocus: 'video' | 'caption' | 'dub' | 'bg' | 'text'
+  trackFocus: 'video' | 'caption' | 'dub' | 'bg' | 'watermark' | 'text'
   selected: Segment | undefined
   selectedId: string | null
   selectedIds: string[]
@@ -75,7 +75,7 @@ type TimelineDragDeps = {
   setSelectedMediaIds: React.Dispatch<React.SetStateAction<string[]>>
   setSelectedDubIds: React.Dispatch<React.SetStateAction<string[]>>
   setSelectedOverlayId: React.Dispatch<React.SetStateAction<string | null>>
-  setTrackFocus: React.Dispatch<React.SetStateAction<'video' | 'caption' | 'dub' | 'bg' | 'text'>>
+  setTrackFocus: React.Dispatch<React.SetStateAction<'video' | 'caption' | 'dub' | 'bg' | 'watermark' | 'text'>>
   setPropTab: React.Dispatch<React.SetStateAction<PropTab>>
   setTool: React.Dispatch<React.SetStateAction<'select' | 'cover' | 'text'>>
   setVideoClips: React.Dispatch<React.SetStateAction<MediaClip[]>>

@@ -51,7 +51,7 @@ export function parseHexColor(hex: string): [number, number, number] {
 
 /** Preview mask «Làm mờ» — kính CapCut (blur + tint mỏng); xuất pad-blur khớp. */
 export function coverMaskPreviewStyle(
-  style: ProjectSettings['coverMaskStyle'],
+  style: ProjectSettings['coverMaskStyle'] | 'inpaint',
   color: string,
   opacity: number,
 ): React.CSSProperties {
@@ -67,6 +67,20 @@ export function coverMaskPreviewStyle(
       backdropFilter: 'blur(22px) saturate(0.4) contrast(0.92) brightness(0.92)',
       WebkitBackdropFilter: 'blur(22px) saturate(0.4) contrast(0.92) brightness(0.92)',
       // isolation giúp backdrop-filter không bị layer text che
+      isolation: 'isolate' as const,
+    }
+  }
+  if (style === 'inpaint') {
+    // Native inpainting happens during export. Never paint a coloured plate in
+    // the editor: it makes a real scene look like it has a UI bbox on top.
+    // A feathered, transparent backdrop blur is the closest browser proxy;
+    // only the watermark itself softens while the underlying video stays real.
+    return {
+      backgroundColor: 'transparent',
+      backdropFilter: 'blur(13px) saturate(0.82) brightness(0.96)',
+      WebkitBackdropFilter: 'blur(13px) saturate(0.82) brightness(0.96)',
+      maskImage: 'linear-gradient(to bottom, transparent 0%, #000 18%, #000 82%, transparent 100%)',
+      WebkitMaskImage: 'linear-gradient(to bottom, transparent 0%, #000 18%, #000 82%, transparent 100%)',
       isolation: 'isolate' as const,
     }
   }

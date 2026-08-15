@@ -29,6 +29,40 @@ _ocr_sem_n: int = 0
 
 from .textutil import *  # noqa: F403
 
+
+def _drop_non_caption_branding(segs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep source labels/watermarks out of the subtitle and translation timeline.
+
+    Paddle OCR first returns text only, then the locator assigns a speech-subtitle
+    bbox.  Handles and the common ``AI生成+`` source mark must be removed before
+    that locator runs; otherwise a corner watermark can be relocated to the
+    bottom and become a translated caption.
+    """
+    out: list[dict[str, Any]] = []
+    for segment in segs:
+        source = str(segment.get("source") or "").strip()
+        if not source:
+            continue
+        compact = re.sub(r"\s+", "", source).casefold()
+        # Platform/source watermark, e.g. ``AI生成+`` / ``AI生成＋``.
+        if re.fullmatch(r"(?:ai)?生成[+＋]?", compact):
+            continue
+        # A standalone @handle is attribution, never a spoken subtitle.
+        if re.fullmatch(r"@\S+", source):
+            continue
+        # OCR can join an on-screen subtitle and an edge handle into one line.
+        # Retain the subtitle, but never send the handle to translation/TTS.
+        cleaned = re.sub(r"(?:^|\s+)@\S+", " ", source).strip()
+        cleaned = re.sub(r"\s{2,}", " ", cleaned)
+        if not cleaned:
+            continue
+        if cleaned != source:
+            segment = {**segment, "source": cleaned}
+        out.append(segment)
+    for index, segment in enumerate(out, start=1):
+        segment["index"] = index
+    return out
+
 def _fold_duplicate_watermark_labels(segs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Label cùng cột/watermark với vertical → gộp timing, bỏ label mảnh."""
     verts = [s for s in segs if str(s.get("layout") or "") == "vertical"]
@@ -699,6 +733,7 @@ def _merge_horizontal_vertical(
 __all__ = [
     '_ocr_sem',
     '_ocr_sem_n',
+    '_drop_non_caption_branding',
     '_fold_duplicate_watermark_labels',
     '_trim_vertical_ocr_tail',
     '_fold_vertical_column_flickers',

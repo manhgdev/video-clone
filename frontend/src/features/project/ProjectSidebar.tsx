@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
-import type { ProjectSettings } from '@/features/project/project.types'
+import type { JobStatus, ProjectSettings } from '@/features/project/project.types'
 import { api } from '@/features/project/project.api'
 
 type AnalysisRegion = { x: number; y: number; w: number; h: number }
@@ -50,6 +50,7 @@ type Props = {
   projectId: string | null
   videoUrl: string | null
   settings: ProjectSettings
+  logoDetection?: JobStatus['logoDetection']
   voices: { id: string; name: string }[]
   busy: boolean
   onSettings: (s: ProjectSettings) => void
@@ -110,6 +111,7 @@ export default function Sidebar({
   projectId,
   videoUrl,
   settings,
+  logoDetection,
   voices,
   busy,
   onSettings,
@@ -126,6 +128,7 @@ export default function Sidebar({
   const previewShellRef = useRef<HTMLDivElement>(null)
   const [portrait, setPortrait] = useState(false)
   const [inputSize, setInputSize] = useState({ width: 0, height: 0 })
+  const [previewTime, setPreviewTime] = useState(0)
   const [showCancel, setShowCancel] = useState(false)
   const [confirmClear, setConfirmClear] = useState(false)
   const [clearParts, setClearParts] = useState<string[]>(() => [...ALL_CACHE_PARTS])
@@ -145,7 +148,27 @@ export default function Sidebar({
   useEffect(() => {
     setInputSize({ width: 0, height: 0 })
     setPortrait(false)
+    setPreviewTime(0)
   }, [videoUrl])
+
+  // Giống nguyên tắc che của backend: các OCR variant của watermark động
+  // @... là một logo; AI生成+ và AI生成十 cũng là một logo.
+  const excludedLogoTexts = settings.hiddenLogoTexts || []
+  const isLogoExcluded = (text: string) =>
+    excludedLogoTexts.includes(text)
+    || (text.startsWith('@') && excludedLogoTexts.some((item) => item.startsWith('@')))
+    || (text.includes('生成') && excludedLogoTexts.some((item) => item.includes('生成')))
+  const visibleLogoMasks = settings.coverLogo
+    ? (logoDetection?.tracks || []).filter((track) => {
+        const text = (track.text || '').trim()
+        const start = Number(track.start || 0)
+        const end = Number(track.end || 0)
+        return Boolean(track.bbox)
+          && !isLogoExcluded(text)
+          && previewTime >= start - 0.04
+          && previewTime <= end + 0.04
+      })
+    : []
 
   async function importSubtitle(file: File | undefined) {
     if (!file || !projectId || busy) return
@@ -323,6 +346,8 @@ export default function Sidebar({
             src={videoUrl}
             controls
             playsInline
+            onTimeUpdate={(e) => setPreviewTime(e.currentTarget.currentTime)}
+            onSeeked={(e) => setPreviewTime(e.currentTarget.currentTime)}
             onLoadedMetadata={(e) => {
               const v = e.currentTarget
               setPortrait(v.videoHeight > v.videoWidth)
@@ -335,6 +360,22 @@ export default function Sidebar({
             <span>MP4 9:16 hoặc 16:9</span>
           </div>
         )}
+        {visibleLogoMasks.map((track, index) => {
+          const box = track.bbox!
+          return (
+            <div
+              key={`${track.text || 'logo'}-${track.start || 0}-${index}`}
+              className="preview-logo-mask"
+              aria-label="Vùng logo đã che"
+              style={{
+                left: `${Math.max(0, box.x) * 100}%`,
+                top: `${Math.max(0, box.y) * 100}%`,
+                width: `${Math.max(0, box.w) * 100}%`,
+                height: `${Math.max(0, box.h) * 100}%`,
+              }}
+            />
+          )
+        })}
         {showAnalysisRoi && (
           <div
             className="analysis-roi"
@@ -403,7 +444,7 @@ export default function Sidebar({
           icon={<IconMic size={14} />}
           hint={
             settings.engine === 'paddleocr'
-              ? 'Đọc chữ phụ đề trên khung hình'
+              ? 'Đọc chữ trên khung hình'
               : settings.engine === 'subtitle'
                 ? 'Dùng file phụ đề đã chọn'
               : 'Faster-Whisper'

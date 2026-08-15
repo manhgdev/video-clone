@@ -25,6 +25,12 @@ class Settings(BaseModel):
     defaultVoice: str = "cc:BV075_streaming:7102355803792740865"
     stableCaptionLocate: bool = False
     analysisRegion: dict[str, float] | None = None
+    # Giữ nguyên cờ từ UI. Nếu thiếu field này Pydantic sẽ bỏ nó khỏi
+    # request, khiến exporter không bao giờ chạy bước che logo.
+    coverLogo: bool = False
+    # Watermarks the user explicitly chose to leave visible.  Kept separate
+    # from coverLogo so each detected logo can be toggled independently.
+    hiddenLogoTexts: list[str] = []
     coverHardsubs: bool = True
     coverMaskStyle: str = "blur"
     coverMaskColor: str = "#4c1d95"
@@ -124,6 +130,9 @@ class TextOverlayIn(BaseModel):
     maskStyle: str | None = None
     maskColor: str | None = None
     maskOpacity: int | None = None
+    # Marks an automatically detected static watermark. It must round-trip
+    # through the API so the editor does not repeatedly migrate/persist it.
+    watermarkSource: str | None = None
     logoSource: str | None = None
     assetUrl: str | None = None
     iconId: str | None = None

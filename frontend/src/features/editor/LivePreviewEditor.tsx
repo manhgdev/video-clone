@@ -1,7 +1,7 @@
 import ProgressPopup from '@/shared/components/ProgressPopup'
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { createPortal } from 'react-dom'
-import type { ProjectSettings, Segment, TextOverlay } from '@/features/project/project.types'
+import type { JobStatus, ProjectSettings, Segment, TextOverlay } from '@/features/project/project.types'
 import { api } from '@/features/project/project.api'
 import { IconHeadphones } from '@/shared/components/Icons'
 import { cn } from '@/shared/lib/cn'
@@ -141,6 +141,8 @@ type Props = {
   projectId: string
   segments: Segment[]
   settings: ProjectSettings
+  /** Watermark OCR tracks from the same project run as the exporter. */
+  logoDetection?: JobStatus['logoDetection']
   voices: { id: string; name: string }[]
   busy: boolean
   /** Tiến độ job (lồng tiếng / xuất…) — hiện % trên track như Âm gốc */
@@ -188,6 +190,7 @@ export default function LivePreviewEditor({
   projectId,
   segments,
   settings,
+  logoDetection,
   voices,
   busy,
   jobStep = '',
@@ -379,8 +382,12 @@ export default function LivePreviewEditor({
   /** true khi đang kéo pan aspect / crop tự do — hiện tia căn giữa giống bbox */
   const [panningCrop, setPanningCrop] = useState(false)
   const [selectedOverlayId, setSelectedOverlayId] = useState<string | null>(null)
+  // Avoid repeatedly creating the same automatic watermark while the parent
+  // persists the new overlay after OCR data arrives.
+  const autoWatermarkCreateRef = useRef('')
+  const legacyWatermarkSyncRef = useRef('')
   /** Track đang focus — click Caption ≠ TTS ≠ Âm gốc ≠ Text */
-  const [trackFocus, setTrackFocus] = useState<'video' | 'caption' | 'dub' | 'bg' | 'text'>('video')
+  const [trackFocus, setTrackFocus] = useState<'video' | 'caption' | 'dub' | 'bg' | 'watermark' | 'text'>('video')
   const [selectedMediaId, setSelectedMediaId] = useState<string | null>(null)
   const [videoClips, setVideoClips] = useState<MediaClip[]>([])
   const [bgClips, setBgClips] = useState<MediaClip[]>([])
@@ -991,6 +998,28 @@ export default function LivePreviewEditor({
   // lane from this display-only fallback.
   const sourceWidth = videoFrameReady ? videoSize.width : 1080
   const sourceHeight = videoFrameReady ? videoSize.height : 1920
+  // Editor used to play the raw <video> without the export mask.  Keep this
+  // in the preview layer so AI-generated static watermarks are visibly hidden
+  // before the user presses Export.
+  // `auto-watermark-ai-generated` existed briefly before watermarkSource was
+  // introduced. Treat it as a watermark too so an open project migrates cleanly
+  // instead of leaving the same logo in the Text lane.
+  const isWatermarkOverlay = (overlay: TextOverlay) =>
+    Boolean(overlay.watermarkSource) || overlay.id === 'auto-watermark-ai-generated'
+  const editableWatermarks = overlays.filter(isWatermarkOverlay)
+  const hasEditableWatermark = editableWatermarks.length > 0
+  const activeWatermarkMasks = (settings.coverLogo && !trackHidden.watermark && !hasEditableWatermark
+    ? (logoDetection?.tracks || []).filter((track) => {
+        const label = (track.text || '').trim()
+        const excluded = settings.hiddenLogoTexts || []
+        return Boolean(track.bbox)
+          && !label.startsWith('@')
+          && !excluded.includes(label)
+          && !(label.includes('生成') && excluded.some((text) => text.includes('生成')))
+          && time >= Number(track.start || 0) - 0.04
+          && time <= Number(track.end || 0) + 0.04
+      })
+    : [])
   const aspectId = settings.previewAspectRatio ?? 'original'
   const appliedCrop = useMemo(
     () => resolveCropRect(sourceWidth, sourceHeight, aspectId, settings.previewCrop),
@@ -1018,6 +1047,74 @@ export default function LivePreviewEditor({
     return val
   }
   const cropPortrait = crop.h >= crop.w
+
+  // Promote the detected static AI watermark to an ordinary effect overlay.
+  // The user can now trim it on the timeline and drag/resize its bbox in the
+  // preview; export consumes this exact same overlay.
+  useEffect(() => {
+    const tracks = (logoDetection?.tracks || []).filter((track) => {
+      const label = (track.text || '').trim()
+      return Boolean(track.bbox) && !label.startsWith('@') && label.includes('生成')
+    })
+    if (!tracks.length || hasEditableWatermark) return
+    const signature = tracks.map((track) => `${track.text}:${track.start}:${track.end}`).join('|')
+    if (autoWatermarkCreateRef.current === signature) return
+    autoWatermarkCreateRef.current = signature
+    // The detector samples several frames. A median bbox keeps a stable logo
+    // box and avoids the giant union / repeated blocks shown by raw OCR data.
+    const median = (values: number[]) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)]
+    const boxes = tracks.map((track) => track.bbox!).filter(Boolean)
+    const x = median(boxes.map((box) => box.x))
+    const y = median(boxes.map((box) => box.y))
+    const w = median(boxes.map((box) => box.w))
+    const h = median(boxes.map((box) => box.h))
+    const overlay: TextOverlay = {
+      id: 'auto-watermark-ai-generated',
+      start: Math.max(0, Math.min(...tracks.map((track) => Number(track.start) || 0))),
+      end: Math.max(0.04, Math.max(...tracks.map((track) => Number(track.end) || 0.04))),
+      text: 'AI生成+',
+      x: Math.round(x * sourceWidth),
+      y: Math.round(y * sourceHeight),
+      w: Math.max(8, Math.round(w * sourceWidth)),
+      h: Math.max(8, Math.round(h * sourceHeight)),
+      fontSize: 0,
+      color: '#ffffff',
+      kind: 'effect',
+      // Export uses native inpainting; preview uses a responsive glass blur.
+      maskStyle: 'inpaint',
+      maskColor: '#101827',
+      maskOpacity: 92,
+      watermarkSource: 'AI生成+',
+    }
+    onOverlayChange(overlay, true)
+  }, [hasEditableWatermark, logoDetection?.tracks, onOverlayChange, sourceHeight, sourceWidth])
+
+  // One-shot repair for the first automatic clip created before source video
+  // metadata was available. It prevents the fallback 1080×1920 coordinates
+  // from producing an oversized box on a 16:9 source. The ref is crucial:
+  // API round-trips must never turn this into a request loop.
+  useEffect(() => {
+    const legacy = overlays.find((overlay) => overlay.id === 'auto-watermark-ai-generated' && !overlay.watermarkSource)
+    const tracks = (logoDetection?.tracks || []).filter((track) => (track.text || '').includes('生成') && track.bbox)
+    if (!legacy || !tracks.length || !videoFrameReady) return
+    const signature = `${projectId}:${sourceWidth}x${sourceHeight}:${tracks.map((track) => `${track.start}:${track.end}`).join('|')}`
+    if (legacyWatermarkSyncRef.current === signature) return
+    legacyWatermarkSyncRef.current = signature
+    const median = (values: number[]) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)]
+    const boxes = tracks.map((track) => track.bbox!)
+    void onOverlayChange({
+      ...legacy,
+      x: Math.round(median(boxes.map((box) => box.x)) * sourceWidth),
+      y: Math.round(median(boxes.map((box) => box.y)) * sourceHeight),
+      w: Math.max(8, Math.round(median(boxes.map((box) => box.w)) * sourceWidth)),
+      h: Math.max(8, Math.round(median(boxes.map((box) => box.h)) * sourceHeight)),
+      kind: 'effect',
+      maskStyle: 'inpaint',
+      maskColor: '#101827',
+      maskOpacity: 92,
+      watermarkSource: 'AI生成+',
+    })
+  }, [logoDetection?.tracks, onOverlayChange, overlays, projectId, sourceHeight, sourceWidth, videoFrameReady])
 
   // Khi có size video thật: chuẩn hóa previewCrop theo aspect (giữ pan x/y nếu hợp lệ)
   useEffect(() => {
@@ -1241,7 +1338,9 @@ export default function LivePreviewEditor({
   const previewOverlays = previewLogoDraft
     ? [...overlays.filter((o) => o.id !== previewLogoDraft.id), previewLogoDraft]
     : overlays
-  const activeOverlays = previewOverlays.filter((o) => time >= o.start && time < o.end)
+  const activeOverlays = previewOverlays.filter((o) =>
+    time >= o.start && time < o.end && (!isWatermarkOverlay(o) || (settings.coverLogo && !trackHidden.watermark)),
+  )
   const selectedOverlay = overlays.find((o) => o.id === selectedOverlayId) ?? null
   const appliedLogo = overlays.find((o) => o.kind === 'logo') ?? null
   const logoUiState = logoDraft ?? appliedLogo
@@ -2084,6 +2183,8 @@ export default function LivePreviewEditor({
     const rect = canvas.getBoundingClientRect()
     const original = { x: overlay.x, y: overlay.y }
     setSelectedOverlayId(overlay.id)
+    setTrackFocus(isWatermarkOverlay(overlay) ? 'watermark' : 'text')
+    setPropTab('overlay')
     const histGate = { current: false }
 
     const update = (move: PointerEvent) => {
@@ -2438,6 +2539,8 @@ export default function LivePreviewEditor({
     const rect = canvas.getBoundingClientRect()
     const orig = { x: overlay.x, y: overlay.y, w: overlay.w, h: overlay.h }
     setSelectedOverlayId(overlay.id)
+    setTrackFocus(isWatermarkOverlay(overlay) ? 'watermark' : 'text')
+    setPropTab('overlay')
     const histGate = { current: false }
 
     const update = (move: PointerEvent) => {
@@ -2577,7 +2680,7 @@ export default function LivePreviewEditor({
     }
     setSelectedOverlayId(overlayId)
     setSelectedMediaId(null)
-    setTrackFocus('text')
+    setTrackFocus(overlay && isWatermarkOverlay(overlay) ? 'watermark' : 'text')
     setPropTab('overlay')
   }
 
@@ -2629,7 +2732,7 @@ export default function LivePreviewEditor({
       const clip = (byId && rangeUnderPlayhead(byId.start, byId.end) ? byId : null) || under || byId
       return clip ? { kind: 'media', track: 'bg', clip } : null
     }
-    if (trackFocus === 'text') {
+    if (trackFocus === 'text' || trackFocus === 'watermark') {
       return selectedOverlay ? { kind: 'ov', ov: selectedOverlay } : null
     }
     if (trackFocus === 'caption' || trackFocus === 'dub') {
@@ -4239,6 +4342,28 @@ export default function LivePreviewEditor({
                           }}
                         />
 
+                        {/* Logo cố định dùng cùng bbox/timestamp với exporter.
+                            Nhờ vậy preview Editor không còn hiển thị video nguồn trần. */}
+                        {activeWatermarkMasks.map((track, index) => {
+                          const bbox = track.bbox!
+                          const box = {
+                            x: bbox.x * sourceWidth,
+                            y: bbox.y * sourceHeight,
+                            w: bbox.w * sourceWidth,
+                            h: bbox.h * sourceHeight,
+                          }
+                          return (
+                            <div
+                              key={`watermark-mask-${track.start || 0}-${index}`}
+                              className="pointer-events-none absolute z-[18]"
+                              style={{
+                                ...sourceToDisplayStyle(box, crop),
+                                ...coverMaskPreviewStyle('blur', '#101827', 92),
+                              }}
+                            />
+                          )
+                        })}
+
                         {!cropEditing
                           && aspectId !== 'original'
                           && aspectId !== 'custom'
@@ -4593,7 +4718,10 @@ export default function LivePreviewEditor({
                               }}
                             >
                               <div
-                                className="absolute inset-0 overflow-hidden rounded-sm border border-dashed border-white/40"
+                                className={cn(
+                                  'absolute inset-0 overflow-hidden rounded-sm border border-dashed',
+                                  sel ? 'border-fuchsia-200/90' : 'border-transparent',
+                                )}
                                 style={coverMaskPreviewStyle(style, color, opacity)}
                               />
                               {sel && (
@@ -5155,6 +5283,16 @@ export default function LivePreviewEditor({
                         focus: 'bg' as const,
                       },
                       {
+                        id: 'watermark' as const,
+                        h: 'h-10',
+                        label: 'Watermark',
+                        icon: <span className="text-xs leading-none shrink-0">◈</span>,
+                        mute: false,
+                        hide: true,
+                        lock: false,
+                        focus: 'watermark' as const,
+                      },
+                      {
                         id: 'text' as const,
                         h: 'h-10',
                         label: 'Text',
@@ -5169,7 +5307,7 @@ export default function LivePreviewEditor({
                     // Compound: ẩn nhãn track Caption / Lồng tiếng / Âm gốc (gộp lên Video)
                     if (
                       compoundMode
-                      && (row.id === 'caption' || row.id === 'dub' || row.id === 'bg')
+                      && (row.id === 'caption' || row.id === 'dub' || row.id === 'bg' || row.id === 'watermark')
                     ) {
                       return null
                     }
@@ -5773,9 +5911,60 @@ export default function LivePreviewEditor({
                          </div>
                        )}
 
+                       {/* Watermark tĩnh là effect clip thực: trim/kéo/resize như Caption. */}
+                       {!compoundMode && (
+                       <div className={cn('relative h-10 box-border border-b border-border/80 overflow-hidden', trackHidden.watermark && 'opacity-30')} style={{ backgroundColor: 'var(--background)' }}>
+                         {overlays.filter(isWatermarkOverlay).map((overlay) => {
+                           const display = draft?.id === overlay.id ? { ...overlay, ...draft } : overlay
+                           return (
+                             <button
+                               key={overlay.id}
+                               type="button"
+                               data-text-clip=""
+                               data-overlay-id={overlay.id}
+                               className={cn(
+                                 'absolute top-1.5 h-[calc(100%-12px)] rounded-md border-0 text-[11px] text-white whitespace-nowrap overflow-hidden px-2 cursor-pointer flex items-center transition-opacity hover:opacity-90',
+                                 trackFocus === 'watermark' && overlay.id === selectedOverlayId && 'ring-[1.5px] ring-fuchsia-300',
+                                 trackLocked.text && 'cursor-not-allowed',
+                               )}
+                               style={{ left: display.start * pxPerSec, width: Math.max(2, (display.end - display.start) * pxPerSec), boxSizing: 'border-box', background: '#0f766e' }}
+                               onPointerDown={(e) => { if (e.button === 0) beginTimelineTextDrag(e, overlay, 'move') }}
+                               onClick={() => { focusText(overlay.id); selectClipKeepPlayhead(display.start, display.end) }}
+                             >
+                               <span className="absolute inset-y-0 left-0 w-2.5 cursor-ew-resize hover:bg-white/25 z-10" onPointerDown={(e) => beginTimelineTextDrag(e, overlay, 'start')} />
+                               <span className="truncate pointer-events-none">{overlay.watermarkSource || 'AI生成+'}</span>
+                               <span className="absolute inset-y-0 right-0 w-2.5 cursor-ew-resize hover:bg-white/25 z-10" onPointerDown={(e) => beginTimelineTextDrag(e, overlay, 'end')} />
+                             </button>
+                           )
+                         })}
+                         {(logoDetection?.tracks || [])
+                           .filter((track) => (track.text || '').trim().startsWith('@'))
+                           .map((track, index) => {
+                           const label = (track.text || '').trim()
+                           const start = Math.max(0, Number(track.start || 0))
+                           const end = Math.max(start + 0.04, Number(track.end || start + 0.04))
+                           return (
+                             <div
+                               key={`watermark-track-${label}-${start}-${index}`}
+                               title={`${label} · động — không che tự động`}
+                               className="absolute top-1.5 h-[calc(100%-12px)] rounded-md px-2 text-[10px] text-white whitespace-nowrap overflow-hidden flex items-center"
+                               style={{
+                                 left: start * pxPerSec,
+                                 width: Math.max(3, (end - start) * pxPerSec),
+                                 background: '#a16207',
+                                 opacity: 0.72,
+                               }}
+                             >
+                               {label}
+                             </div>
+                           )
+                         })}
+                       </div>
+                       )}
+
                        {/* Text overlay track */}
                        <div className={cn('relative h-10 box-border border-b border-border/80 overflow-hidden', trackHidden.text && 'opacity-30')} style={{ backgroundColor: 'var(--background)' }}>
-                         {overlays.map((overlay) => {
+                         {overlays.filter((overlay) => !isWatermarkOverlay(overlay)).map((overlay) => {
                            const display = draft?.id === overlay.id ? { ...overlay, ...draft } : overlay
                            return (
                            <button

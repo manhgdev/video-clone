@@ -159,6 +159,98 @@ def _logo_mask_cue(
     }
 
 
+def _logo_mask_cues(
+    meta: dict[str, Any], video: Path, duration: float, project_id: str
+) -> list[dict[str, Any]]:
+    """Build both the legacy fixed-logo mask and time-bound moving masks."""
+    detection = meta.get("logoDetection")
+    tracks = detection.get("tracks") if isinstance(detection, dict) else None
+    settings = meta.get("settings") or {}
+    excluded = {
+        str(text).strip()
+        for text in (settings.get("hiddenLogoTexts") or [])
+        if str(text).strip()
+    }
+    # A static watermark may be promoted to an editable effect clip by the
+    # editor. In that case the overlay is the single source of truth for bbox
+    # and duration; do not apply the detector mask a second time.
+    editable_watermarks = [
+        item for item in (meta.get("overlays") or [])
+        if isinstance(item, dict) and item.get("watermarkSource")
+    ]
+
+    def is_excluded(text: Any) -> bool:
+        value = str(text or "").strip()
+        if value in excluded:
+            return True
+        # OCR can misread a glyph while a platform watermark moves.  A user
+        # toggle for an @handle applies to all OCR variants of that handle.
+        if value.startswith("@") and any(item.startswith("@") for item in excluded):
+            return True
+        # Paddle OCR occasionally reads the final + as 十.  The checkbox is
+        # one logical AI watermark, so all those variants must follow it.
+        return "生成" in value and any("生成" in item for item in excluded)
+    # A detector result with dynamic tracks intentionally has no fixed bbox.
+    # Do not invoke OCR a second time merely because that bbox is absent.
+    fixed = (
+        None
+        if isinstance(tracks, list) and not isinstance((detection or {}).get("bbox"), dict)
+        else _logo_mask_cue(meta, video, duration, project_id)
+    )
+    if not isinstance(tracks, list):
+        return [fixed] if fixed else []
+
+    fw, fh = video_size(video)
+    cues: list[dict[str, Any]] = []
+    if fixed:
+        cues.append(fixed)
+    for index, track in enumerate(tracks):
+        if not isinstance(track, dict) or not isinstance(track.get("bbox"), dict):
+            continue
+        # TikTok/Douyin handles move around the frame.  Their per-frame OCR
+        # boxes cannot produce a reliable clean result, so leave them alone
+        # unless/ until a true motion tracker is available.
+        if str(track.get("text") or "").strip().startswith("@"):
+            continue
+        label = str(track.get("text") or "").strip()
+        if "生成" in label and any("生成" in str(item.get("watermarkSource") or "") for item in editable_watermarks):
+            continue
+        if is_excluded(track.get("text")):
+            continue
+        bbox = track["bbox"]
+        try:
+            x = max(0.0, min(1.0, float(bbox.get("x") or 0)))
+            y = max(0.0, min(1.0, float(bbox.get("y") or 0)))
+            bw = max(0.0, min(1.0 - x, float(bbox.get("w") or 0)))
+            bh = max(0.0, min(1.0 - y, float(bbox.get("h") or 0)))
+            start = max(0.0, float(track.get("start") or 0.0))
+            end = min(float(duration), float(track.get("end") or duration))
+        except (TypeError, ValueError):
+            continue
+        if bw < 0.002 or bh < 0.002 or end <= start:
+            continue
+        cues.append(
+            {
+                "id": f"detected-moving-logo-mask-{index}",
+                "start": start,
+                "end": end,
+                "coverStart": start,
+                "coverEnd": end,
+                "translation": "",
+                "source": "",
+                "layout": "horizontal",
+                "bbox": {
+                    "x": round(x * fw), "y": round(y * fh),
+                    "w": max(2, round(bw * fw)), "h": max(2, round(bh * fh)),
+                },
+                "maskOnly": True,
+                "coverMaskStyle": "inpaint",
+                "coverMaskOpacity": 100,
+            }
+        )
+    return cues
+
+
 def run_export(project_id: str, *, nested: bool = False) -> Path:
     job_gen: int | None = None
     if not nested:
@@ -255,9 +347,7 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
     if not any([do_video, do_audio, do_srt, do_gif]):
         do_video = True
     if do_video:
-        logo_mask = _logo_mask_cue(meta, video, vid_dur, project_id)
-        if logo_mask:
-            text_overlays.append(logo_mask)
+        text_overlays.extend(_logo_mask_cues(meta, video, vid_dur, project_id))
 
     # cover / burn độc lập; "Không dịch" → không chèn caption
     no_translate = str(settings.get("targetLang") or "") in ("none", "off", "source", "")

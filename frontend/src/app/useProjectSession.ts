@@ -127,6 +127,7 @@ export function useSessionRestore(deps: {
           running: Boolean(st.running),
           error: errMsg,
           outputRel: st.outputRel,
+          logoDetection: st.logoDetection,
         })
         if (!st.running) releaseDubLock()
         if (st.running) busyAt.current = Date.now()

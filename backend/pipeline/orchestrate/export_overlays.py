@@ -34,7 +34,12 @@ def build_text_overlay_cues(
     """Free text + effect + logo — cùng hệ tọa độ pixel với segment burn."""
     # Free text + effect regions (làm mờ tự do): cùng hệ tọa độ pixel.
     text_overlays: list[dict[str, Any]] = []
+    settings = meta.get("settings") or {}
     for item in meta.get("overlays") or []:
+        # Automatic watermark clips follow the main "cover original logo"
+        # switch. A user-created effect remains independent.
+        if item.get("watermarkSource") and not bool(settings.get("coverLogo")):
+            continue
         item_start = float(item.get("start") or 0) - export_start
         if item_start >= vid_dur:
             continue

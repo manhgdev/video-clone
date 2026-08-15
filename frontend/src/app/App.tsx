@@ -747,6 +747,7 @@ export default function App() {
       running: Boolean(st.running),
       error: st.error,
       outputRel: st.outputRel,
+      logoDetection: st.logoDetection,
     })
     if (st.running) busyAt.current = Date.now()
     setExportUrl(!st.running && st.outputRel && (st.progress || 0) >= 100 ? `/api/projects/${id}/output` : null)
@@ -906,6 +907,7 @@ export default function App() {
           projectId={projectId}
           segments={segments}
           settings={settings}
+          logoDetection={status.logoDetection}
           voices={voices}
           busy={status.running}
           jobStep={status.step}
@@ -933,6 +935,7 @@ export default function App() {
           projectId={projectId}
           videoUrl={videoUrl}
           settings={settings}
+          logoDetection={status.logoDetection}
           voices={voices}
           busy={status.running}
           onSettings={onSettings}
@@ -1046,6 +1049,23 @@ export default function App() {
             translator={settings.translator}
             videoUrl={videoUrl}
             projectId={projectId}
+            logoDetection={status.logoDetection}
+            coverLogo={settings.coverLogo}
+            hiddenLogoTexts={settings.hiddenLogoTexts}
+            onCoverLogoChange={(label, covered) => {
+              const old = settings.hiddenLogoTexts || []
+              const isHandle = label.startsWith('@')
+              const withoutLabel = old.filter((text) =>
+                isHandle ? !text.startsWith('@') : text !== label,
+              )
+              onSettings({
+                ...settings,
+                // Turning one logo on also enables logo masking globally;
+                // individual exclusions retain the state of every other logo.
+                coverLogo: covered ? true : settings.coverLogo,
+                hiddenLogoTexts: covered ? withoutLabel : [...withoutLabel, label],
+              })
+            }}
             onChange={onSegmentChange}
           />
         </main>

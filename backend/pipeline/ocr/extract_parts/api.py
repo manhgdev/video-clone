@@ -303,7 +303,9 @@ def asr_paddleocr_inprocess(
         _fvh = h  # chiều cao frame; w bị overwrite bởi _ocr_pool_workers bên dưới
         _fvw = w
 
-        if analysis_region and isinstance(analysis_region, dict):
+        # A saved rectangle is only configuration state.  Crop extraction only
+        # when the caller explicitly enables the constrained-locate mode.
+        if stable and analysis_region and isinstance(analysis_region, dict):
             rx = max(0.0, min(1.0, float(analysis_region.get("x", 0.0))))
             ry = max(0.0, min(1.0, float(analysis_region.get("y", 0.0))))
             rw = max(0.05, min(1.0, float(analysis_region.get("w", 1.0))))
@@ -404,7 +406,7 @@ def asr_paddleocr_inprocess(
             is_vert = False
             is_mid = False
             if _fvh > 0 and box:
-                if analysis_region and isinstance(analysis_region, dict):
+                if stable and analysis_region and isinstance(analysis_region, dict):
                     bottom_lines.append(text)
                     continue
 
@@ -497,6 +499,9 @@ def asr_paddleocr_inprocess(
         segs.extend(vert_segs)
 
     segs = sorted(segs, key=lambda x: x["start"])
+    # Must happen before speech-bbox location.  Location deliberately searches
+    # subtitle bands and would otherwise move an edge watermark into a caption.
+    segs = _drop_non_caption_branding(segs)
 
     # RapidOCR hay nhầm 免/兔… — sửa trên chữ nguồn trước khi dịch ngôn ngữ
     looks_zh = sum(1 for s in segs if any(_is_cjk(c) for c in s["source"])) >= max(
@@ -527,4 +532,3 @@ def asr_paddleocr_inprocess(
         except Exception:
             pass
     return segs
-

@@ -55,6 +55,62 @@ def test_logo_mask_disabled_is_noop():
     )
 
 
+def test_moving_logo_masks_follow_their_time_windows(monkeypatch):
+    monkeypatch.setattr(export_job, "video_size", lambda _video: (1920, 1080))
+    meta = {
+        "settings": {"coverLogo": True},
+        "logoDetection": {
+            "tracks": [
+                {
+                    "start": 4.0,
+                    "end": 6.0,
+                    "bbox": {"x": 0.8, "y": 0.1, "w": 0.1, "h": 0.05},
+                },
+                {
+                    "start": 6.0,
+                    "end": 8.0,
+                    "bbox": {"x": 0.8, "y": 0.8, "w": 0.1, "h": 0.05},
+                },
+            ]
+        },
+    }
+
+    cues = export_job._logo_mask_cues(meta, Path("video.mp4"), 20.0, "project")
+
+    assert [(cue["start"], cue["end"]) for cue in cues] == [(4.0, 6.0), (6.0, 8.0)]
+    assert cues[0]["bbox"]["y"] == 108
+    assert cues[1]["bbox"]["y"] == 864
+
+
+def test_editable_static_watermark_is_the_only_export_source(monkeypatch):
+    """Timeline edits must replace, not stack with, OCR's automatic mask."""
+    monkeypatch.setattr(export_job, "video_size", lambda _video: (1920, 1080))
+    meta = {
+        "settings": {"coverLogo": True},
+        "overlays": [{
+            "id": "auto-watermark-ai-generated",
+            "kind": "effect",
+            "watermarkSource": "AI生成+",
+            "start": 0.0,
+            "end": 2.0,
+            "x": 32,
+            "y": 24,
+            "w": 160,
+            "h": 44,
+        }],
+        "logoDetection": {"tracks": [
+            {"text": "AI生成+", "start": 0.0, "end": 2.0,
+             "bbox": {"x": 0.02, "y": 0.03, "w": 0.08, "h": 0.04}},
+            {"text": "@moving-handle", "start": 0.0, "end": 20.0,
+             "bbox": {"x": 0.7, "y": 0.8, "w": 0.1, "h": 0.04}},
+        ]},
+    }
+
+    # The automatic AI result and moving handle must not add another mask.
+    # build_text_overlay_cues will render the editable effect overlay instead.
+    assert export_job._logo_mask_cues(meta, Path("video.mp4"), 20.0, "project") == []
+
+
 def test_blur_cover_does_not_turn_source_caption_into_a_bright_halo():
     """The export cover must hide, not blur, high-contrast source subtitles."""
     frame = np.full((120, 240, 3), (92, 86, 80), dtype=np.uint8)

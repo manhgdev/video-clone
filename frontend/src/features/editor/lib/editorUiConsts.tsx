@@ -63,7 +63,7 @@ export function TabSvg({ children }: { children: React.ReactNode }) {
 export const FONT_SIZES = [16, 20, 24, 28, 32, 36, 40, 48, 56, 64, 72, 80, 96, 120]
 
 export type PropTab = 'caption' | 'video' | 'audio' | 'mask' | 'overlay'
-export type TrackId = 'video' | 'caption' | 'dub' | 'bg' | 'text'
+export type TrackId = 'video' | 'caption' | 'dub' | 'bg' | 'watermark' | 'text'
 export type CtxMenu =
   | { kind: 'segment'; segId: string; ids?: string[]; x: number; y: number }
   | { kind: 'dub'; segId: string; ids?: string[]; x: number; y: number }
@@ -72,7 +72,7 @@ export type CtxMenu =
   | { kind: 'track'; track: TrackId; x: number; y: number }
 
 export function emptyTrackFlags(): Record<TrackId, boolean> {
-  return { video: false, caption: false, dub: false, bg: false, text: false }
+  return { video: false, caption: false, dub: false, bg: false, watermark: false, text: false }
 }
 
 /** Video mặc định tắt tiếng — nghe từ Âm gốc / stem, tránh double audio */

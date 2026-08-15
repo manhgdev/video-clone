@@ -53,7 +53,9 @@ export type Segment = {
   compoundChildren?: Segment[]
 }
 
-export type OverlayMaskStyle = 'blur' | 'solid' | 'mosaic'
+/** `inpaint` is the high-quality export path used by automatic watermark removal.
+ * The editor shows it as a soft blur because browser preview cannot run native inpainting. */
+export type OverlayMaskStyle = 'blur' | 'solid' | 'mosaic' | 'inpaint'
 export type LogoKeyframe = { at: number; x: number; y: number }
 
 export type TextOverlay = {
@@ -75,6 +77,8 @@ export type TextOverlay = {
   maskColor?: string
   /** 0–100 */
   maskOpacity?: number
+  /** A detected static watermark promoted to an editable timeline clip. */
+  watermarkSource?: string
   logoSource?: 'text' | 'image' | 'icon'
   assetUrl?: string
   iconId?: string
@@ -128,6 +132,8 @@ export type ProjectSettings = {
   analysisRegion?: { x: number; y: number; w: number; h: number } | null
   /** Tự động tìm một logo cố định và xóa bằng native inpainting khi xuất. */
   coverLogo: boolean
+  /** Các watermark người dùng chọn không che khi xuất. */
+  hiddenLogoTexts?: string[]
   /** Che hardsub cũ (blur). Tắt = giữ chữ OCR trên khung */
   coverHardsubs: boolean
   /** Kiểu mặt nạ che chữ gốc khi cover: blur | solid | mosaic */
@@ -328,6 +334,17 @@ export type JobStatus = {
   bakedPreferVideo?: boolean
   /** Tốc độ đã bake vào file preview (1 = chưa bake) */
   bakedSpeed?: number
+  /** Watermark detected independently from subtitle / TTS segments. */
+  logoDetection?: {
+    text?: string
+    /** Tọa độ chuẩn hoá theo khung hình nguồn — dùng cho preview cùng mask xuất. */
+    tracks?: Array<{
+      text?: string
+      start?: number
+      end?: number
+      bbox?: { x: number; y: number; w: number; h: number }
+    }>
+  }
 }
 
 export type RenderedVideo = {

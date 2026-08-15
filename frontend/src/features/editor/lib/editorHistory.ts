@@ -8,7 +8,7 @@ export type EditorSnap = {
   bookmarks: number[]
   selectedId: string | null
   selectedOverlayId: string | null
-  trackFocus: 'video' | 'caption' | 'dub' | 'bg' | 'text'
+  trackFocus: 'video' | 'caption' | 'dub' | 'bg' | 'watermark' | 'text'
   videoClips: MediaClip[]
   bgClips: MediaClip[]
   selectedMediaId: string | null
@@ -37,4 +37,3 @@ export function cloneSnap(s: EditorSnap): EditorSnap {
     mediaDuration: s.mediaDuration,
   }
 }
-

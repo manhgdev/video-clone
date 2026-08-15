@@ -243,8 +243,10 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                 pass
             elif use_ocr:
                 ocr_req = int(settings.get("workers") or 0)
-                analysis_region = settings.get("analysisRegion")
                 stable = bool(settings.get("stableCaptionLocate", False))
+                # UI always retains the last rectangle.  It must not crop OCR
+                # until the user explicitly enables the locate-region toggle.
+                analysis_region = settings.get("analysisRegion") if stable else None
                 # Message chi tiết (N luồng) do asr_paddleocr/_report cập nhật
                 set_status(
                     project_id,
@@ -579,8 +581,7 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                 )
 
         if (
-            engine not in ("paddleocr", "screen")
-            and bool(settings.get("coverLogo", False))
+            bool(settings.get("coverLogo", False))
             and not (
                 isinstance(meta.get("logoDetection"), dict)
                 and isinstance(meta["logoDetection"].get("bbox"), dict)

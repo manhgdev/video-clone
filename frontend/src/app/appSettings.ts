@@ -68,6 +68,7 @@ export const defaultSettings: ProjectSettings = {
   stableCaptionLocate: false,
   analysisRegion: null,
   coverLogo: false,
+  hiddenLogoTexts: [],
   coverHardsubs: true,
   coverMaskStyle: 'blur',
   coverMaskColor: '#4c1d95',
