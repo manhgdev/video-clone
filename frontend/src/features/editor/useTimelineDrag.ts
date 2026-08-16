@@ -440,7 +440,10 @@ export function useTimelineDrag(deps: TimelineDragDeps) {
     overlay: TextOverlay,
     mode: 'move' | 'start' | 'end',
   ) {
-    if (timelineEditLocked || trackLocked.text) return
+    const isWatermark = Boolean(overlay.watermarkSource)
+      || overlay.id === 'auto-watermark-ai-generated'
+      || overlay.id === 'auto-watermark-static-logo'
+    if (timelineEditLocked || (isWatermark ? trackLocked.watermark : trackLocked.text)) return
     event.preventDefault()
     event.stopPropagation()
     focusText(overlay.id)

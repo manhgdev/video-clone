@@ -1,3 +1,4 @@
+import { InpaintCanvas } from './InpaintOverlay'
 import ProgressPopup from '@/shared/components/ProgressPopup'
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { createPortal } from 'react-dom'
@@ -52,6 +53,7 @@ import {
   clipAtTime,
   cloneSnap,
   coverMaskPreviewStyle,
+
   defaultTrackMute,
   dubClipSeconds,
   dubPlaybackSpeed,
@@ -386,6 +388,7 @@ export default function LivePreviewEditor({
   // persists the new overlay after OCR data arrives.
   const autoWatermarkCreateRef = useRef('')
   const legacyWatermarkSyncRef = useRef('')
+  const watermarkEndRepairRef = useRef('')
   /** Track đang focus — click Caption ≠ TTS ≠ Âm gốc ≠ Text */
   const [trackFocus, setTrackFocus] = useState<'video' | 'caption' | 'dub' | 'bg' | 'watermark' | 'text'>('video')
   const [selectedMediaId, setSelectedMediaId] = useState<string | null>(null)
@@ -1005,7 +1008,7 @@ export default function LivePreviewEditor({
   // introduced. Treat it as a watermark too so an open project migrates cleanly
   // instead of leaving the same logo in the Text lane.
   const isWatermarkOverlay = (overlay: TextOverlay) =>
-    Boolean(overlay.watermarkSource) || overlay.id === 'auto-watermark-ai-generated'
+    Boolean(overlay.watermarkSource) || overlay.id === 'auto-watermark-ai-generated' || overlay.id === 'auto-watermark-static-logo'
   const editableWatermarks = overlays.filter(isWatermarkOverlay)
   const hasEditableWatermark = editableWatermarks.length > 0
   const activeWatermarkMasks = (settings.coverLogo && !trackHidden.watermark && !hasEditableWatermark
@@ -1053,42 +1056,93 @@ export default function LivePreviewEditor({
   // preview; export consumes this exact same overlay.
   useEffect(() => {
     if (!videoFrameReady) return
-    const tracks = (logoDetection?.tracks || []).filter((track) => {
+    // Case 1: tracks with '生成' text (e.g. AI生成+)
+    const genTracks = (logoDetection?.tracks || []).filter((track) => {
       const label = (track.text || '').trim()
       return Boolean(track.bbox) && !label.startsWith('@') && label.includes('生成')
     })
-    if (!tracks.length || hasEditableWatermark) return
-    const signature = tracks.map((track) => `${track.text}:${track.start}:${track.end}`).join('|')
+    // Case 2: static bbox watermark (e.g. 纯属娱乐谨慎观看…)
+    const staticBbox = logoDetection?.bbox
+    const staticText = logoDetection?.text || ''
+
+    if (!genTracks.length && !staticBbox) return
+    if (hasEditableWatermark) return
+    // Don't create static overlay until duration is known
+    if (!genTracks.length && timelineDuration <= 0) return
+
+    const signature = genTracks.length
+      ? genTracks.map((track) => `${track.text}:${track.start}:${track.end}`).join('|')
+      : `static:${staticText}:${JSON.stringify(staticBbox)}`
     if (autoWatermarkCreateRef.current === signature) return
     autoWatermarkCreateRef.current = signature
-    // The detector samples several frames. A median bbox keeps a stable logo
-    // box and avoids the giant union / repeated blocks shown by raw OCR data.
-    const median = (values: number[]) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)]
-    const boxes = tracks.map((track) => track.bbox!).filter(Boolean)
-    const x = median(boxes.map((box) => box.x))
-    const y = median(boxes.map((box) => box.y))
-    const w = median(boxes.map((box) => box.w))
-    const h = median(boxes.map((box) => box.h))
-    const overlay: TextOverlay = {
-      id: 'auto-watermark-ai-generated',
-      start: Math.max(0, Math.min(...tracks.map((track) => Number(track.start) || 0))),
-      end: Math.max(0.04, Math.max(...tracks.map((track) => Number(track.end) || 0.04))),
-      text: 'AI生成+',
-      x: Math.round(x * sourceWidth),
-      y: Math.round(y * sourceHeight),
-      w: Math.max(8, Math.round(w * sourceWidth)),
-      h: Math.max(8, Math.round(h * sourceHeight)),
-      fontSize: 0,
-      color: '#ffffff',
-      kind: 'effect',
-      // Export uses native inpainting; preview uses a responsive glass blur.
-      maskStyle: 'inpaint',
-      maskColor: '#101827',
-      maskOpacity: 92,
-      watermarkSource: 'AI生成+',
+
+    let overlay: TextOverlay
+    if (genTracks.length) {
+      // The detector samples several frames. A median bbox keeps a stable logo
+      // box and avoids the giant union / repeated blocks shown by raw OCR data.
+      const median = (values: number[]) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)]
+      const boxes = genTracks.map((track) => track.bbox!).filter(Boolean)
+      const x = median(boxes.map((box) => box.x))
+      const y = median(boxes.map((box) => box.y))
+      const w = median(boxes.map((box) => box.w))
+      const h = median(boxes.map((box) => box.h))
+      overlay = {
+        id: 'auto-watermark-ai-generated',
+        start: Math.max(0, Math.min(...genTracks.map((track) => Number(track.start) || 0))),
+        end: Math.max(0.04, Math.max(...genTracks.map((track) => Number(track.end) || 0.04))),
+        text: 'AI生成+',
+        x: Math.round(x * sourceWidth),
+        y: Math.round(y * sourceHeight),
+        w: Math.max(8, Math.round(w * sourceWidth)),
+        h: Math.max(8, Math.round(h * sourceHeight)),
+        fontSize: 0,
+        color: '#ffffff',
+        kind: 'effect',
+        maskStyle: 'inpaint',
+        maskColor: '#101827',
+        maskOpacity: 92,
+        watermarkSource: 'AI生成+',
+      }
+    } else {
+      // Static bbox watermark covers exactly the editable timeline. Using a
+      // sentinel such as 99999 pushes the rounded end/resize handle offscreen.
+      overlay = {
+        id: 'auto-watermark-static-logo',
+        start: 0,
+        end: timelineDuration,
+        text: staticText || 'Watermark',
+        x: Math.round(staticBbox!.x * sourceWidth),
+        y: Math.round(staticBbox!.y * sourceHeight),
+        w: Math.max(8, Math.round(staticBbox!.w * sourceWidth)),
+        h: Math.max(8, Math.round(staticBbox!.h * sourceHeight)),
+        fontSize: 0,
+        color: '#ffffff',
+        kind: 'effect',
+        maskStyle: 'inpaint',
+        maskColor: '#101827',
+        maskOpacity: 92,
+        watermarkSource: staticText || 'Watermark',
+      }
     }
     onOverlayChange(overlay, true)
-  }, [hasEditableWatermark, logoDetection?.tracks, onOverlayChange, sourceHeight, sourceWidth, videoFrameReady])
+  }, [hasEditableWatermark, logoDetection?.tracks, logoDetection?.bbox, logoDetection?.text, timelineDuration, onOverlayChange, sourceHeight, sourceWidth, videoFrameReady])
+
+  // Repair projects created while the static watermark used end=99999. Keep
+  // the real clip edge inside the timeline so its rounding and resize handle
+  // remain visible and draggable.
+  useEffect(() => {
+    if (!(timelineDuration > 0)) return
+    const stale = overlays.find((overlay) =>
+      overlay.id === 'auto-watermark-static-logo'
+      && Math.abs(overlay.end - timelineDuration) > 0.01,
+    )
+    if (!stale) return
+    const signature = `${projectId}:${stale.id}:${timelineDuration}`
+    if (watermarkEndRepairRef.current === signature) return
+    watermarkEndRepairRef.current = signature
+    // Existing overlay: update it, never append it as a new clip.
+    onOverlayChange({ ...stale, end: timelineDuration })
+  }, [onOverlayChange, overlays, projectId, timelineDuration])
 
   // One-shot repair for the first automatic clip created before source video
   // metadata was available. It prevents the fallback 1080×1920 coordinates
@@ -1216,10 +1270,24 @@ export default function LivePreviewEditor({
   // old/new boxes appear outside their timeline clips and overlap at boundaries.
   const coverSegsRaw = settings.burnSubs
     ? (() => {
-        if (overCoverMode) {
-          return segmentsAt(layoutSegs, time)
+        let base = overCoverMode ? segmentsAt(layoutSegs, time) : solidAtPlayhead
+        // HACK: match backend gap-fill — extend the last horizontal cover to video end
+        // if the gap is small (<1.5s), so lingering hardsubs at the end are covered.
+        if (mediaDurationProp && time >= 0) {
+          const hors = layoutSegs.filter((s) => captionLaneOf(s, sourceHeight, sourceWidth) === 'horizontal')
+          if (hors.length > 0) {
+            const lastHorz = hors[hors.length - 1]
+            if (
+              !base.some((s) => s.id === lastHorz.id)
+              && time >= lastHorz.end
+              && time <= mediaDurationProp
+              && mediaDurationProp - lastHorz.end < 1.5
+            ) {
+              base = [...base, lastHorz]
+            }
+          }
         }
-        return solidAtPlayhead
+        return base
       })()
     : []
   const timelineSegsRaw = segmentsAt(layoutSegs, time)
@@ -1339,9 +1407,15 @@ export default function LivePreviewEditor({
   const previewOverlays = previewLogoDraft
     ? [...overlays.filter((o) => o.id !== previewLogoDraft.id), previewLogoDraft]
     : overlays
-  const activeOverlays = previewOverlays.filter((o) =>
-    time >= o.start && time < o.end && (!isWatermarkOverlay(o) || (settings.coverLogo && !trackHidden.watermark)),
-  )
+  const activeOverlays = previewOverlays.filter((o) => {
+    const watermark = isWatermarkOverlay(o)
+    // The video element can report currentTime === duration on its final
+    // decoded frame. Keep the watermark mask alive through that frame instead
+    // of exposing the logo at the exact end of the clip.
+    const insideTime = time >= o.start
+      && (time < o.end || (watermark && time <= o.end + 1 / 30))
+    return insideTime && (!watermark || (settings.coverLogo && !trackHidden.watermark))
+  })
   const selectedOverlay = overlays.find((o) => o.id === selectedOverlayId) ?? null
   const appliedLogo = overlays.find((o) => o.kind === 'logo') ?? null
   const logoUiState = logoDraft ?? appliedLogo
@@ -2177,7 +2251,8 @@ export default function LivePreviewEditor({
   }
 
   function beginOverlayDrag(event: ReactPointerEvent, overlay: TextOverlay) {
-    if (timelineEditLocked || tool === 'text' || trackLocked.text) return
+    const overlayLocked = isWatermarkOverlay(overlay) ? trackLocked.watermark : trackLocked.text
+    if (timelineEditLocked || tool === 'text' || overlayLocked) return
     const canvas = canvasRef.current
     if (!canvas) return
     event.preventDefault()
@@ -2532,7 +2607,8 @@ export default function LivePreviewEditor({
     overlay: TextOverlay,
     edge: 'nw' | 'ne' | 'sw' | 'se' | 'e' | 's' | 'w' | 'n',
   ) {
-    if (timelineEditLocked || trackLocked.text) return
+    const overlayLocked = isWatermarkOverlay(overlay) ? trackLocked.watermark : trackLocked.text
+    if (timelineEditLocked || overlayLocked) return
     const canvas = canvasRef.current
     if (!canvas) return
     event.preventDefault()
@@ -4674,6 +4750,16 @@ export default function LivePreviewEditor({
                         </div>
                       )}
 
+                      {/* Exact backend-rendered inpaint; crop away codec-only padding. */}
+                      {logoDetection?.inpaintPreview && logoDetection?.inpaintPatch && activeOverlays.some((o) => o.kind === 'effect' && o.maskStyle === 'inpaint') && (
+                        <InpaintCanvas
+                          videoEl={videoRef.current}
+                          patchUrl={logoDetection.inpaintPreview}
+                          patchBox={logoDetection.inpaintPatch}
+                          crop={crop}
+                        />
+                      )}
+
                       {/* Text + effect overlays */}
                       {activeOverlays.map((overlay) => {
                         const isFx = overlay.kind === 'effect'
@@ -4705,6 +4791,7 @@ export default function LivePreviewEditor({
                           const style = overlay.maskStyle ?? 'blur'
                           const color = overlay.maskColor ?? '#4c1d95'
                           const opacity = overlay.maskOpacity ?? 45
+                          const isInpaint = style === 'inpaint'
                           return (
                             <div
                               key={overlay.id}
@@ -4718,13 +4805,17 @@ export default function LivePreviewEditor({
                                 beginOverlayDrag(e, overlay)
                               }}
                             >
-                              <div
-                                className={cn(
-                                  'absolute inset-0 overflow-hidden rounded-sm border border-dashed',
-                                  sel ? 'border-fuchsia-200/90' : 'border-transparent',
-                                )}
-                                style={coverMaskPreviewStyle(style, color, opacity)}
-                              />
+                              {isInpaint && logoDetection?.inpaintPreview && logoDetection?.inpaintPatch ? (
+                                <div className="absolute inset-0" />
+                              ) : (
+                                <div
+                                  className={cn(
+                                    'absolute inset-0 overflow-hidden rounded-sm border border-dashed',
+                                    sel ? 'border-fuchsia-200/90' : 'border-transparent',
+                                  )}
+                                  style={coverMaskPreviewStyle(style, color, opacity)}
+                                />
+                              )}
                               {sel && (
                                 <>
 
@@ -4742,7 +4833,7 @@ export default function LivePreviewEditor({
                                     return (
                                       <span
                                         key={edge}
-                                        className={cn('absolute z-20 size-2.5 rounded-sm bg-fuchsia-400 border border-white', pos[edge])}
+                                        className={cn('absolute z-30 size-4 rounded-sm bg-fuchsia-400 border border-white shadow-sm', pos[edge])}
                                         onPointerDown={(e) => beginOverlayResize(e, overlay, edge)}
                                       />
                                     )
@@ -5916,7 +6007,11 @@ export default function LivePreviewEditor({
                        {!compoundMode && (
                        <div className={cn('relative h-10 box-border border-b border-border/80 overflow-hidden', trackHidden.watermark && 'opacity-30')} style={{ backgroundColor: 'var(--background)' }}>
                          {overlays.filter(isWatermarkOverlay).map((overlay) => {
-                           const display = draft?.id === overlay.id ? { ...overlay, ...draft } : overlay
+                           const rawDisplay = draft?.id === overlay.id ? { ...overlay, ...draft } : overlay
+                           // Render defensively even before the one-shot project
+                           // migration finishes, keeping the rounded edge and
+                           // end handle inside the visible timeline.
+                           const display = { ...rawDisplay, end: Math.min(rawDisplay.end, timelineDuration) }
                            return (
                              <button
                                key={overlay.id}
@@ -5926,7 +6021,7 @@ export default function LivePreviewEditor({
                                className={cn(
                                  'absolute top-1.5 h-[calc(100%-12px)] rounded-md border-0 text-[11px] text-white whitespace-nowrap overflow-hidden px-2 cursor-pointer flex items-center transition-opacity hover:opacity-90',
                                  trackFocus === 'watermark' && overlay.id === selectedOverlayId && 'ring-[1.5px] ring-fuchsia-300',
-                                 trackLocked.text && 'cursor-not-allowed',
+                                 trackLocked.watermark && 'cursor-not-allowed',
                                )}
                                style={{ left: display.start * pxPerSec, width: Math.max(2, (display.end - display.start) * pxPerSec), boxSizing: 'border-box', background: '#0f766e' }}
                                onPointerDown={(e) => { if (e.button === 0) beginTimelineTextDrag(e, overlay, 'move') }}

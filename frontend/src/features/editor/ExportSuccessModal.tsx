@@ -4,6 +4,7 @@ interface ExportSuccessModalProps {
   isOpen: boolean
   onClose: () => void
   onRevealFolder: () => void
+  onOpenVideo: () => void
   onOpenProject: () => void
   /** URL video đã xuất để preview (null nếu không có video) */
   videoSrc: string | null
@@ -61,6 +62,7 @@ export function ExportSuccessModal({
   isOpen,
   onClose,
   onRevealFolder,
+  onOpenVideo,
   onOpenProject,
   videoSrc,
   message,
@@ -176,6 +178,18 @@ export function ExportSuccessModal({
           className="flex items-center justify-end gap-2 px-5 py-3 border-t"
           style={{ backgroundColor: 'var(--surface, #131417)', borderColor: 'var(--border, #27272a)' }}
         >
+          <button
+            type="button"
+            onClick={onOpenVideo}
+            className="flex items-center gap-1.5 px-4 py-1.5 rounded-md text-xs font-medium transition-colors hover:opacity-80"
+            style={{ backgroundColor: 'var(--muted, #2d2e34)', color: 'var(--foreground, #e4e4e7)' }}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="m10 8 6 4-6 4V8z" fill="currentColor" stroke="none" />
+              <rect x="2" y="3" width="20" height="14" rx="2" />
+            </svg>
+            Mở video
+          </button>
           <button
             type="button"
             onClick={onRevealFolder}

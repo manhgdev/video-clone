@@ -1081,6 +1081,9 @@ export default function App() {
       <ExportSuccessModal
         isOpen={exportSuccessOpen}
         onClose={() => setExportSuccessOpen(false)}
+        onOpenVideo={() => {
+          void fetch(`/api/projects/${projectId}/open-output`, { method: 'POST' })
+        }}
         onRevealFolder={() => {
           void onRevealOutput()
         }}

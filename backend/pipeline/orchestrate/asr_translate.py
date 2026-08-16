@@ -576,6 +576,17 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                 )
                 if logo_detection:
                     meta["logoDetection"] = logo_detection
+                    # Generate inpaint preview patch so the editor can show
+                    # the same quality as the export (cv2.inpaint).
+                    try:
+                        from pipeline.ocr.logo import generate_inpaint_preview
+                        patch_rel = generate_inpaint_preview(
+                            video_1x, logo_detection, project_id
+                        )
+                        if patch_rel:
+                            meta["logoDetection"]["inpaintPreview"] = patch_rel
+                    except Exception:
+                        pass  # non-critical — CSS fallback still works
                 else:
                     meta.pop("logoDetection", None)
             except Cancelled:

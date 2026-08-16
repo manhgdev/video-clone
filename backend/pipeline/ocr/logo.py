@@ -313,4 +313,138 @@ def detect_logo_bbox_inprocess(
     return result
 
 
-__all__ = ["detect_logo_bbox_inprocess", "pick_logo_detection"]
+def generate_inpaint_preview(
+    video: Path | str,
+    logo_detection: dict[str, Any],
+    project_id: str,
+) -> str | None:
+    """Render an inpainted video patch covering just the watermark region.
+
+    Produces a small MP4 (only the watermark crop, ~50-200 KB) that the editor
+    preview plays in sync with the main video — giving a pixel-perfect match
+    with the export ``cv2.inpaint`` result.
+
+    Returns ``/data/<pid>/cache/inpaint_patch.mp4`` or ``None`` on failure.
+    """
+    bbox = logo_detection.get("bbox")
+    if not isinstance(bbox, dict):
+        return None
+    try:
+        import cv2
+        import numpy as np
+        from pipeline.core.media import video_size
+        from pipeline.export.cover_mask import _inpaint_region
+
+        video = Path(video)
+        fw, fh = video_size(video)
+        if fw <= 0 or fh <= 0:
+            return None
+
+        # Normalized bbox → pixel
+        x = max(0.0, min(1.0, float(bbox.get("x") or 0)))
+        y = max(0.0, min(1.0, float(bbox.get("y") or 0)))
+        bw = max(0.0, min(1.0 - x, float(bbox.get("w") or 0)))
+        bh = max(0.0, min(1.0 - y, float(bbox.get("h") or 0)))
+        if bw < 0.005 or bh < 0.005:
+            return None
+        x0 = round(x * fw)
+        y0 = round(y * fh)
+        x1 = round((x + bw) * fw)
+        y1 = round((y + bh) * fh)
+
+        # Extended region with padding (same as _inpaint_region)
+        pad = max(8, round(min(x1 - x0, y1 - y0) * 0.45))
+        ex0, ey0 = max(0, x0 - pad), max(0, y0 - pad)
+        ex1, ey1 = min(fw, x1 + pad), min(fh, y1 + pad)
+        crop_w, crop_h = ex1 - ex0, ey1 - ey0
+        # Ensure even dimensions for codec
+        crop_w = crop_w if crop_w % 2 == 0 else crop_w + 1
+        crop_h = crop_h if crop_h % 2 == 0 else crop_h + 1
+
+        cap = cv2.VideoCapture(str(video))
+        if not cap.isOpened():
+            return None
+        try:
+            fps_val = cap.get(cv2.CAP_PROP_FPS) or 30.0
+
+            from pipeline.core.project import project_dir
+            cache_dir = project_dir(project_id) / "cache"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            out_path = cache_dir / "inpaint_patch.mp4"
+            # Feed the processed BGR frames straight to ffmpeg.  The previous
+            # OpenCV mp4v -> ffmpeg H.264 double encode shifted colours and
+            # created banding that became obvious when the browser overlaid
+            # this small patch on the independently decoded source video.
+            import subprocess
+            encoder = subprocess.Popen(
+                [
+                    "ffmpeg", "-y", "-loglevel", "error",
+                    "-f", "rawvideo", "-pix_fmt", "bgr24",
+                    "-s", f"{crop_w}x{crop_h}", "-r", f"{fps_val:.8f}",
+                    "-i", "-", "-an", "-c:v", "libx264",
+                    "-preset", "veryfast", "-crf", "10",
+                    "-pix_fmt", "yuv420p",
+                    "-colorspace", "bt709", "-color_primaries", "bt709",
+                    "-color_trc", "bt709", "-color_range", "tv",
+                    "-movflags", "+faststart", str(out_path),
+                ],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+
+            frame_count = 0
+            while True:
+                ok, frame = cap.read()
+                if not ok:
+                    break
+                # Inpaint the watermark region
+                frame = _inpaint_region(frame, (x0, y0, x1, y1))
+                # Crop to the extended region
+                patch = frame[ey0 : ey0 + crop_h, ex0 : ex0 + crop_w]
+                # Pad if needed (edge frames)
+                ph, pw = patch.shape[:2]
+                if pw != crop_w or ph != crop_h:
+                    canvas = np.zeros((crop_h, crop_w, 3), dtype=np.uint8)
+                    canvas[: min(ph, crop_h), : min(pw, crop_w)] = patch[
+                        : min(ph, crop_h), : min(pw, crop_w)
+                    ]
+                    patch = canvas
+                if encoder.stdin is None:
+                    break
+                encoder.stdin.write(patch.tobytes())
+                frame_count += 1
+
+            if encoder.stdin is not None:
+                encoder.stdin.close()
+            encoder.wait(timeout=30)
+
+            if frame_count < 1 or encoder.returncode != 0:
+                out_path.unlink(missing_ok=True)
+                return None
+
+            if not out_path.exists() or out_path.stat().st_size < 100:
+                return None
+
+            # Save placement metadata
+            import json
+            meta_path = cache_dir / "inpaint_patch.json"
+            meta_path.write_text(
+                json.dumps({
+                    "x": ex0, "y": ey0, "w": crop_w, "h": crop_h,
+                    "origX": x0, "origY": y0,
+                    "origW": x1 - x0, "origH": y1 - y0,
+                }),
+                encoding="utf-8",
+            )
+
+            # URL version prevents Chromium from retaining an older, differently
+            # encoded patch after the project is analysed again.
+            return f"/data/{project_id}/cache/inpaint_patch.mp4?v={out_path.stat().st_mtime_ns}"
+        finally:
+            cap.release()
+    except Exception:
+        return None
+
+
+__all__ = ["detect_logo_bbox_inprocess", "pick_logo_detection", "generate_inpaint_preview"]

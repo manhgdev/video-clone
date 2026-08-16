@@ -133,6 +133,7 @@ def cover_and_burn(
     # Cover nới rộng hơn burn: hardsub hay hiện trước/sau ASR; burn vẫn bám timecode.
     cues: list[tuple[float, float, float, float, str, str, str]] = []
     cue_segment_ids: list[str] = []
+    _is_mask_only: list[bool] = []
     for seg in segments:
         raw = (seg.get("translation") or "").strip()
         source = (seg.get("source") or "").strip()
@@ -182,8 +183,11 @@ def cover_and_burn(
             (cover_start, cover_end, burn_start, burn_end, burn_text, source, layout)
         )
         cue_segment_ids.append(str(seg.get("id") or ""))
-    # Lấp khe cover nhỏ giữa 2 câu hardsub (không đụng tiêu đề dọc / nhãn).
+        _is_mask_only.append(mask_only)
+    # Lấp khe cover nhỏ giữa 2 câu hardsub (không đụng tiêu đề dọc / nhãn / maskOnly).
     for i in range(len(cues) - 1):
+        if _is_mask_only[i] or _is_mask_only[i + 1]:
+            continue
         cs0, ce0, bs0, be0, t0, src0, lay0 = cues[i]
         cs1, ce1, bs1, be1, t1, src1, lay1 = cues[i + 1]
         if lay0 in ("vertical", "label") or lay1 in ("vertical", "label"):
@@ -210,6 +214,8 @@ def cover_and_burn(
             cues[b] = (max(cs1, cut), ce1, max(bs1, cut), be1, t1, src1, lay1)
     # Horizontal-horizontal: cắt COVER chồng (tail câu trước đè bbox sau)
     for i in range(len(cues) - 1):
+        if _is_mask_only[i] or _is_mask_only[i + 1]:
+            continue
         cs0, ce0, bs0, be0, t0, src0, lay0 = cues[i]
         cs1, ce1, bs1, be1, t1, src1, lay1 = cues[i + 1]
         if lay0 != "horizontal" or lay1 != "horizontal":
@@ -230,6 +236,8 @@ def cover_and_burn(
     # Không cho cửa sổ burn chữ dịch chồng nhau — chỉ hardsub đáy (ngang).
     # vertical/label/mid khác vị trí → được phép overlap (watermark dọc xuyên clip).
     for i in range(len(cues) - 1):
+        if _is_mask_only[i] or _is_mask_only[i + 1]:
+            continue
         cs0, ce0, bs0, be0, t0, src0, lay0 = cues[i]
         cs1, ce1, bs1, be1, t1, src1, lay1 = cues[i + 1]
         if lay0 != "horizontal" or lay1 != "horizontal":
@@ -238,6 +246,21 @@ def cover_and_burn(
             cut = (be0 + bs1) * 0.5
             cues[i] = (cs0, ce0, bs0, max(bs0 + 0.04, cut), t0, src0, lay0)
             cues[i + 1] = (cs1, ce1, min(be1 - 0.04, cut), be1, t1, src1, lay1)
+
+    # Extend cover of the last horizontal cue to video end if there's a small gap
+    # — hardsub often lingers after the last ASR segment ends.
+    vid_dur = ffprobe_duration(video) or 0.0
+    if cues and vid_dur > 0:
+        last_horz = -1
+        for i in range(len(cues) - 1, -1, -1):
+            if not _is_mask_only[i] and cues[i][6] == "horizontal":
+                last_horz = i
+                break
+        if last_horz >= 0:
+            cs0, ce0, bs0, be0, t0, src0, lay0 = cues[last_horz]
+            gap_to_end = vid_dur - ce0
+            if 0.0 < gap_to_end < 1.5:
+                cues[last_horz] = (cs0, vid_dur, bs0, be0, t0, src0, lay0)
 
     ocr = None
     segments_by_id = {str(seg.get("id") or ""): seg for seg in segments}

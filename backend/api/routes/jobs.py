@@ -272,6 +272,39 @@ def api_output(project_id: str, download: bool = False):
     return FileResponse(path, media_type="video/mp4", content_disposition_type="inline")
 
 
+@router.post("/api/projects/{project_id}/open-output")
+def api_open_output(project_id: str):
+    """Mở video đã xuất bằng trình phát mặc định."""
+    import platform
+    import subprocess
+
+    from pipeline.core.project import load_meta
+
+    meta = load_meta(project_id) or {}
+    # Tìm file video đã xuất
+    for raw in (meta.get("exportCopy"), meta.get("outputPath")):
+        value = str(raw or "").strip()
+        if not value:
+            continue
+        p = Path(value)
+        if not p.is_absolute():
+            p = REPO_ROOT / p
+        if p.is_file():
+            system = platform.system()
+            try:
+                if system == "Darwin":
+                    subprocess.Popen(["open", str(p)])
+                elif system == "Windows":
+                    import os
+                    os.startfile(str(p))
+                else:
+                    subprocess.Popen(["xdg-open", str(p)])
+            except OSError as e:
+                raise HTTPException(500, str(e)) from e
+            return {"ok": True, "path": str(p.resolve())}
+    raise HTTPException(404, "Chưa có file xuất")
+
+
 @router.post("/api/projects/{project_id}/reveal-output")
 def api_reveal_output(project_id: str):
     """Mở Finder/Explorer tại file đã xuất (local app)."""

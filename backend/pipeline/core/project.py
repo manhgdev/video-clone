@@ -194,8 +194,8 @@ def asr_cache_key(settings: dict[str, Any], source_fp: str, speed: float = 1.0) 
     src = settings.get("sourceLang", "auto")
     prev = int(settings.get("previewSec") or 0)
     # o20: quét cả nhãn ngang ở 10–22% phía trên khung.
-    # a15: Whisper siết biên theo words, KHÔNG tách 1 câu thành nhiều mảnh.
-    ver = "o20" if engine in ("paddleocr", "screen") else "a15"
+    # a16: Whisper chống lặp token/ngram để không nuốt cả cửa sổ lời thoại.
+    ver = "o20" if engine in ("paddleocr", "screen") else "a16"
     # speed = tốc độ file thật sự ASR (preferVideo bake 0.8 TRƯỚC khi dịch)
     subtitle = str(settings.get("subtitleSource") or "") if engine == "subtitle" else ""
     return f"{engine}|{src}|{subtitle}|{source_fp}|p{prev}|{ver}|{_speed_key_tag(speed)}"

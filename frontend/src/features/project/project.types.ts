@@ -337,6 +337,9 @@ export type JobStatus = {
   /** Watermark detected independently from subtitle / TTS segments. */
   logoDetection?: {
     text?: string
+    /** Bbox chuẩn hoá (static logo, toàn bộ video). */
+    bbox?: { x: number; y: number; w: number; h: number } | null
+    confidence?: number
     /** Tọa độ chuẩn hoá theo khung hình nguồn — dùng cho preview cùng mask xuất. */
     tracks?: Array<{
       text?: string
@@ -344,6 +347,14 @@ export type JobStatus = {
       end?: number
       bbox?: { x: number; y: number; w: number; h: number }
     }>
+    /** URL of pre-rendered inpaint patch video for preview. */
+    inpaintPreview?: string
+    /** Source-pixel placement of the patch video (extended bbox with padding). */
+    inpaintPatch?: {
+      x: number; y: number; w: number; h: number
+      /** Exact logo mask inside the padded patch, in source pixels. */
+      origX?: number; origY?: number; origW?: number; origH?: number
+    }
   }
 }
 

@@ -71,10 +71,8 @@ export function coverMaskPreviewStyle(
     }
   }
   if (style === 'inpaint') {
-    // Native inpainting happens during export. Never paint a coloured plate in
-    // the editor: it makes a real scene look like it has a UI bbox on top.
-    // A feathered, transparent backdrop blur is the closest browser proxy;
-    // only the watermark itself softens while the underlying video stays real.
+    // Export uses native inpaint. In the browser, use a restrained feathered
+    // backdrop blur so the preview never exposes a rectangular patch seam.
     return {
       backgroundColor: 'transparent',
       backdropFilter: 'blur(13px) saturate(0.82) brightness(0.96)',

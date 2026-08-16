@@ -302,7 +302,9 @@ def asr_whisper(
             running=True,
         )
     lang = None if source_lang in ("", "auto") else source_lang
-    # beam=1 + VAD + word_timestamps: siết biên, tránh caption ôm silence 20–40s.
+    # Chặn decoder lặp một token (đặc biệt tiếng Trung: "嗚嗚嗚…") rồi nuốt
+    # trọn cửa sổ 30 giây.  Penalty nhẹ giữ được tiếng đệm thật, còn n-gram=3
+    # buộc decoder thoát khỏi vòng lặp trước khi lời thoại phía sau bị mất.
     segments, _info = model.transcribe(
         str(wav),
         language=lang,
@@ -312,6 +314,8 @@ def asr_whisper(
         beam_size=1,
         best_of=1,
         temperature=0.0,
+        repetition_penalty=1.15,
+        no_repeat_ngram_size=3,
         condition_on_previous_text=False,
         without_timestamps=False,
         word_timestamps=True,
@@ -364,6 +368,5 @@ def asr_whisper(
             running=True,
         )
     return out
-
 
 
