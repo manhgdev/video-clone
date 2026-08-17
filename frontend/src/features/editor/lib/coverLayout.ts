@@ -1,4 +1,5 @@
 import type { ProjectSettings, Segment } from '@/features/project/project.types'
+import { speakerTextColor } from '@/features/project/speakerProfiles'
 import {
   OCR_MID_PAD_EM,
   layoutOcrOverlay,
@@ -569,6 +570,7 @@ export function buildExportSegments(
   const stampFont = (seg: Segment): Segment => ({
     ...seg,
     fontFamily: seg.fontFamily || defaultFamily,
+    ...(speakerTextColor(seg, settings) ? { textColor: speakerTextColor(seg, settings) } : {}),
   })
   if (!settings.burnSubs || frameW <= 0) {
     return segments.map(stampFont)
@@ -576,38 +578,39 @@ export function buildExportSegments(
   const place = captionPlacement(settings)
   const crop = resolveCropRect(frameW, frameH, settings.previewAspectRatio ?? 'original', settings.previewCrop)
   return segments.map((seg) => {
-    if (!seg.translation.trim()) return stampFont(seg)
+    const styledSeg = stampFont(seg)
+    if (!styledSeg.translation.trim()) return styledSeg
     // below/above: preview hiện caption auto (mid/ngang chưa kéo tay) ở lane
     // đáy (activeCaptionBox) — bake đúng khung đó, KHÔNG neo bbox OCR.
     const bottomLane =
       place !== 'over'
-      && seg.layout !== 'vertical'
-      && seg.layout !== 'label'
-      && seg.bboxInherited !== false
+      && styledSeg.layout !== 'vertical'
+      && styledSeg.layout !== 'label'
+      && styledSeg.bboxInherited !== false
     if (!bottomLane) {
-      const layout = resolvePreviewOverLayout(seg, settings, frameW, frameH, crop)
+      const layout = resolvePreviewOverLayout(styledSeg, settings, frameW, frameH, crop)
       if (layout) {
-        const fontPx = layout.fontPx ?? resolveCaptionFontSize(seg, settings, frameW, frameH)
-        return segmentWithLayout(seg, layout, fontPx, settings)
+        const fontPx = layout.fontPx ?? resolveCaptionFontSize(styledSeg, settings, frameW, frameH)
+        return segmentWithLayout(styledSeg, layout, fontPx, settings)
       }
     }
     // Chèn dưới/trên: bake mid + horizontal (không dọc/nhãn) — khớp preview emerald box
     if (
       (place === 'below' || place === 'above')
-      && seg.layout !== 'vertical'
-      && seg.layout !== 'label'
+      && styledSeg.layout !== 'vertical'
+      && styledSeg.layout !== 'label'
     ) {
-      const baked = resolveBelowAboveLayout(seg, settings, frameW, frameH, crop, place)
+      const baked = resolveBelowAboveLayout(styledSeg, settings, frameW, frameH, crop, place)
       if (baked) {
         return segmentWithLayout(
-          seg,
+          styledSeg,
           baked,
-          baked.fontPx ?? resolveCaptionFontSize(seg, settings, frameW, frameH),
+          baked.fontPx ?? resolveCaptionFontSize(styledSeg, settings, frameW, frameH),
           settings,
         )
       }
     }
-    return stampFont(seg)
+    return styledSeg
   })
 }
 

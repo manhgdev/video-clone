@@ -24,6 +24,7 @@ from .probe import (
     _pkg_distributions,
     _run_ver,
     _runtime_modules_batch_ok,
+    _runtime_mod_ok,
     _runtime_venv_fast,
     _torch_cuda_ready_cached,
     _which,
@@ -41,7 +42,7 @@ def _invalidate_checks_cache() -> None:
 
 
 def _ai_runtime_detail(*, torch_cuda: bool | None = None) -> str:
-    base = "Whisper · OCR · zmAI · VieNeu Local"
+    base = "Whisper · OCR · Tách người nói · zmAI · VieNeu Local"
     if _nvidia_present():
         cuda = torch_cuda if torch_cuda is not None else _torch_cuda_ready_cached()
         if cuda:
@@ -296,6 +297,49 @@ def _system_checks_uncached(*, fast: bool = True) -> dict[str, Any]:
             hint="Bộ nhận dạng giọng nói Faster-Whisper · soundfile · soxr.",
             install="ai_runtime",
             installLabel="Cài gói AI",
+        )
+    )
+
+    # Nhóm 1b — Sherpa-ONNX + hai model offline. Hiển thị riêng để người dùng
+    # biết rõ vì sao công tắc «Tách người nói» có/không sẵn sàng.
+    from ..config import DATA
+    from pipeline.asr.speaker import diarization_provider_for_device
+
+    diarization_dir = Path(DATA) / "models" / "pyannote"
+    segmentation_model = diarization_dir / "model.int8.onnx"
+    embedding_model = diarization_dir / "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"
+    # find_spec() vẫn trả true khi native dylib của Sherpa bị thiếu. Riêng mục
+    # này phải import thật để không hiện «Đã cài» giả.
+    diarization_package_ok, diarization_package_detail = (
+        _runtime_mod_ok("sherpa_onnx") if getattr(sys, "frozen", False)
+        else _mod_ok("sherpa_onnx", dist_map=dist)
+    )
+    diarization_models_ok = segmentation_model.is_file() and embedding_model.is_file()
+    diarization_ok = diarization_package_ok and diarization_models_ok
+    diarization_provider = diarization_provider_for_device(device)
+    provider_label = {
+        "cuda": "NVIDIA CUDA",
+        "coreml": "Apple CoreML/Metal",
+        "cpu": "CPU đa luồng",
+    }.get(diarization_provider, diarization_provider)
+    diarization_missing: list[str] = []
+    if not diarization_package_ok:
+        diarization_missing.append("sherpa-onnx runtime")
+    if not diarization_models_ok:
+        diarization_missing.append("2 model speaker")
+    items.append(
+        _item(
+            id="ai_runtime_diarization",
+            name="Sherpa-ONNX (Tách người nói)",
+            ok=diarization_ok,
+            required=True,
+            detail=(
+                f"đã cài · tự động: {provider_label}" if diarization_ok
+                else f"thiếu: {', '.join(diarization_missing)} · {diarization_package_detail[:160]}"
+            ),
+            hint="Dùng kết quả nhận diện phần cứng chung của video-clone; nếu backend tăng tốc không tương thích sẽ fallback CPU.",
+            install="ai_runtime",
+            installLabel="Cài tách người nói",
         )
     )
 

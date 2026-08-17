@@ -7,6 +7,7 @@ import type {
   Segment,
   SystemChecks,
   TextOverlay,
+  ProjectMediaAsset,
 } from '@/features/project/project.types'
 import { fetchJson } from '@/shared/api/fetchJson'
 
@@ -359,6 +360,21 @@ export const api = {
     }>(`${base}/upload`, { method: 'POST', body: fd }, 120_000)
   },
 
+  mediaAssets: (projectId: string) =>
+    fetchJson<{ items: ProjectMediaAsset[] }>(`${base}/projects/${projectId}/assets`, undefined, 30_000),
+
+  uploadMediaAsset: async (projectId: string, file: File) => {
+    const body = new FormData()
+    body.append('file', file)
+    return fetchJson<{ item: ProjectMediaAsset }>(`${base}/projects/${projectId}/assets`, { method: 'POST', body }, 120_000)
+  },
+
+  deleteMediaAsset: (projectId: string, assetId: string) =>
+    fetchJson<{ ok: boolean }>(`${base}/projects/${projectId}/assets/${encodeURIComponent(assetId)}`, { method: 'DELETE' }, 30_000),
+
+  applyMediaSrt: (projectId: string, assetId: string) =>
+    fetchJson<{ segments: Segment[]; settings: ProjectSettings }>(`${base}/projects/${projectId}/assets/${encodeURIComponent(assetId)}/apply-srt`, { method: 'POST' }, 30_000),
+
   saveSettings: (projectId: string, settings: ProjectSettings) =>
     fetchJson<{ ok: boolean }>(`${base}/projects/${projectId}/settings`, {
       method: 'POST',
@@ -403,6 +419,17 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(segments),
     }),
+
+  retranscribeRange: (projectId: string, start: number, end: number, sourceLang = 'auto') =>
+    fetchJson<{ segments: Segment[]; replaced: number; inserted: number }>(
+      `${base}/projects/${projectId}/segments/retranscribe-range`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ start, end, sourceLang }),
+      },
+      10 * 60_000,
+    ),
 
   /** CapCut Alt+G — compound clip (giữ children + mix TTS). */
   createCompound: (projectId: string, segmentIds: string[]) =>

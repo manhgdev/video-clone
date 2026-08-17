@@ -1,5 +1,6 @@
 import type React from 'react'
 import type { ProjectSettings, Segment } from '@/features/project/project.types'
+import { speakerTextColor } from '@/features/project/speakerProfiles'
 import { cn } from '@/shared/lib/cn'
 
 export function formatTimecode(value: number) {
@@ -143,9 +144,9 @@ export function captionFontCss(family?: string): string {
  */
 export function captionChromeStyle(
   settings: ProjectSettings,
-  segment?: Pick<Segment, 'fontFamily' | 'textColor'>,
+  segment?: Segment,
 ): React.CSSProperties {
-  const color = segment?.textColor || settings.captionTextColor || '#ffffff'
+  const color = (segment ? speakerTextColor(segment, settings) : undefined) || settings.captionTextColor || '#ffffff'
   const bg = settings.captionBgStyle || 'none'
   const customColor = color.toLowerCase() !== '#ffffff'
   const family = segment?.fontFamily || settings.subtitleFontFamily || 'system'

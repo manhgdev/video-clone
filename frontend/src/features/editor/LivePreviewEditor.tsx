@@ -2,7 +2,9 @@ import { InpaintCanvas } from './InpaintOverlay'
 import ProgressPopup from '@/shared/components/ProgressPopup'
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { createPortal } from 'react-dom'
-import type { JobStatus, ProjectSettings, Segment, TextOverlay } from '@/features/project/project.types'
+import type { JobStatus, ProjectMediaAsset, ProjectSettings, Segment, TextOverlay } from '@/features/project/project.types'
+import { resolvedSpeakerProfiles } from '@/features/project/speakerProfiles'
+import { localize, useLocale } from '@/app/i18n'
 import { api } from '@/features/project/project.api'
 import { IconHeadphones } from '@/shared/components/Icons'
 import { cn } from '@/shared/lib/cn'
@@ -128,6 +130,8 @@ import { useSpeedTransaction } from '@/features/editor/useSpeedTransaction'
 import { useDubAudioSync } from '@/features/editor/useDubAudioSync'
 import { useTimelineDrag } from '@/features/editor/useTimelineDrag'
 import { EditorPropertiesPanel } from '@/features/editor/EditorPropertiesPanel'
+import { EditorProjectPanel } from '@/features/editor/EditorProjectPanel'
+import { EditorMediaPanel } from '@/features/editor/EditorMediaPanel'
 
 type Props = {
   videoUrl: string
@@ -153,6 +157,10 @@ type Props = {
   jobMessage?: string
   /** Tạo TTS toàn bộ (track Lồng tiếng trống → bấm) */
   onDub?: () => void
+  /** Nhận dạng + dịch trong editor: 0 = toàn video, >0 = preview N giây. */
+  onRunPipeline?: (previewSec: number, settingsOverride?: ProjectSettings) => void | Promise<void>
+  /** Hủy job đang chạy từ inspector của editor. */
+  onCancel?: () => void
   onBack: () => void
   onChange: (segment: Segment) => void | Promise<void>
   /** Thay cả list (split / duplicate / delete caption). persist:false = chỉ UI (compound API đã ghi meta). */
@@ -182,6 +190,8 @@ type Props = {
   onOverlaysReplace: (overlays: TextOverlay[]) => void | Promise<void>
 }
 
+type ImportedTimelineClip = { id: string; assetId: string; name: string; kind: 'video' | 'audio' | 'image'; start: number; end: number }
+
 export default function LivePreviewEditor({
   videoUrl,
   mediaDuration: mediaDurationProp,
@@ -199,6 +209,8 @@ export default function LivePreviewEditor({
   jobProgress = 0,
   jobMessage: _jobMessage = '',
   onDub,
+  onRunPipeline,
+  onCancel,
   onBack,
   onChange,
   onSegmentsReplace,
@@ -211,6 +223,8 @@ export default function LivePreviewEditor({
   onOverlayDelete,
   onOverlaysReplace,
 }: Props) {
+  const { locale } = useLocale()
+  const t = (vi: string, en: string) => localize(locale, vi, en)
   const videoRef = useRef<HTMLVideoElement>(null)
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const dubAudioRef = useRef<HTMLAudioElement | null>(null)
@@ -394,6 +408,17 @@ export default function LivePreviewEditor({
   const [selectedMediaId, setSelectedMediaId] = useState<string | null>(null)
   const [videoClips, setVideoClips] = useState<MediaClip[]>([])
   const [bgClips, setBgClips] = useState<MediaClip[]>([])
+  const [importedClips, setImportedClips] = useState<ImportedTimelineClip[]>(() => {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(`videoclone.importedClips.${projectId}`) || '[]')
+      if (!Array.isArray(parsed)) return []
+      return parsed.filter((clip): clip is ImportedTimelineClip =>
+        clip && typeof clip.id === 'string' && typeof clip.assetId === 'string'
+        && typeof clip.name === 'string' && ['video', 'audio', 'image'].includes(clip.kind)
+        && Number.isFinite(clip.start) && Number.isFinite(clip.end) && clip.end > clip.start,
+      )
+    } catch { return [] }
+  })
 
   const wantNoVocals =
     settings.processOriginalAudio && settings.originalAudioMode === 'no_vocals'
@@ -481,8 +506,34 @@ export default function LivePreviewEditor({
       localStorage.setItem(TIMELINE_TOOLS_STORAGE_KEY, JSON.stringify({ mainTrackMagnet, autoSnapping, mediaLinked }))
     } catch { /* Trình duyệt chặn storage: vẫn giữ trạng thái trong phiên hiện tại. */ }
   }, [mainTrackMagnet, autoSnapping, mediaLinked])
-  const [assetsTab, setAssetsTab] = useState<AssetsTab>('media')
-  const [propTab, setPropTab] = useState<PropTab>('caption')
+  const [assetsTab, setAssetsTab] = useState<AssetsTab>('workflow')
+  const speakerProfiles = useMemo(() => resolvedSpeakerProfiles(segments, settings, locale), [segments, settings, locale])
+  const speakerById = useMemo(
+    () => Object.fromEntries(speakerProfiles.map((profile) => [profile.id, profile])),
+    [speakerProfiles],
+  )
+
+  function updateSpeakerProfile(id: string, patch: Partial<(typeof speakerProfiles)[number]>) {
+    const current = speakerById[id]
+    if (!current) return
+    const next = { ...current, ...patch, id }
+    onSettings({
+      ...settings,
+      speakerProfiles: { ...(settings.speakerProfiles || {}), [id]: next },
+      speakerVoices: { ...(settings.speakerVoices || {}), [id]: next.voice },
+    })
+    if (patch.voice !== undefined && patch.voice !== current.voice) {
+      pushHistory()
+      void Promise.resolve(onSegmentsReplace(segments.map((segment) => segment.speaker === id ? {
+        ...segment,
+        voice: next.voice,
+        audioFile: undefined,
+        audioUrl: undefined,
+        audioDuration: undefined,
+      } : segment))).then(() => { if (onDub) void onDub() })
+    }
+  }
+  const [propTab, setPropTab] = useState<PropTab>('video')
   const [fontSizeDraft, setFontSizeDraft] = useState(0)
   const [aspectMenuOpen, setAspectMenuOpen] = useState(false)
   const aspectMenuRef = useRef<HTMLDivElement>(null)
@@ -524,6 +575,41 @@ export default function LivePreviewEditor({
   useEffect(() => {
     persistMediaClips(projectId, 'bg', bgClips)
   }, [projectId, bgClips])
+  useEffect(() => {
+    try { localStorage.setItem(`videoclone.importedClips.${projectId}`, JSON.stringify(importedClips)) } catch { /* ignore */ }
+  }, [projectId, importedClips])
+
+  function placeImportedAsset(asset: ProjectMediaAsset, start: number) {
+    if (asset.kind === 'srt') return
+    const kind = asset.kind === 'audio' ? 'audio' : asset.kind === 'image' ? 'image' : 'video'
+    const duration = Math.max(0.25, asset.duration || (kind === 'image' ? 3 : 5))
+    const safeStart = Math.max(0, Math.min(timelineDuration, start))
+    setImportedClips((prev) => [...prev, { id: crypto.randomUUID(), assetId: asset.id, name: asset.name, kind, start: safeStart, end: safeStart + duration }])
+  }
+
+  function beginImportedClipDrag(event: React.PointerEvent, clip: ImportedTimelineClip, edge: 'move' | 'start' | 'end') {
+    event.preventDefault()
+    event.stopPropagation()
+    const x0 = event.clientX
+    const start0 = clip.start
+    const end0 = clip.end
+    const move = (next: PointerEvent) => {
+      const delta = (next.clientX - x0) / pxPerSec
+      setImportedClips((prev) => prev.map((item) => {
+        if (item.id !== clip.id) return item
+        if (edge === 'move') {
+          const duration = end0 - start0
+          const start = Math.max(0, start0 + delta)
+          return { ...item, start, end: start + duration }
+        }
+        if (edge === 'start') return { ...item, start: Math.max(0, Math.min(end0 - 0.1, start0 + delta)) }
+        return { ...item, end: Math.max(start0 + 0.1, end0 + delta) }
+      }))
+    }
+    const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up) }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+  }
 
   /** Tốc độ bake file (remap/API). Soft preferVideo không dùng — chỉ sau Áp dụng. */
   function effectiveBakedSpeed(): number {
@@ -1389,6 +1475,10 @@ export default function LivePreviewEditor({
       ?? selectedBoxSource
   // Khung kéo (handles): Caption / Cover tool / tab Vùng che chữ
   const showBboxAtPlayhead = (() => {
+    // Watermark/OCR owns a TextOverlay box.  Do not show the subtitle bbox
+    // when that timeline clip is selected: otherwise the user drags a
+    // caption region simply because both happen to share the playhead.
+    if (selectedOverlayId && overlays.some((overlay) => overlay.id === selectedOverlayId && isWatermarkOverlay(overlay))) return false
     if (tool === 'text') return false
     if (bboxDraft) return true
     if (!(trackFocus === 'caption' || tool === 'cover' || propTab === 'mask')) return false
@@ -2259,8 +2349,10 @@ export default function LivePreviewEditor({
     const rect = canvas.getBoundingClientRect()
     const original = { x: overlay.x, y: overlay.y }
     setSelectedOverlayId(overlay.id)
-    setTrackFocus(isWatermarkOverlay(overlay) ? 'watermark' : 'text')
-    setPropTab('overlay')
+    const watermark = isWatermarkOverlay(overlay)
+    setTrackFocus(watermark ? 'watermark' : 'text')
+    setPropTab(watermark ? 'mask' : 'overlay')
+    if (watermark) setTool('cover')
     const histGate = { current: false }
 
     const update = (move: PointerEvent) => {
@@ -2597,7 +2689,7 @@ export default function LivePreviewEditor({
     setTrackFocus('text')
     setTool('select')
     setPropTab('overlay')
-    setAssetsTab('effects')
+    setAssetsTab('add')
     pushHistory()
     editOverlay(overlay, true)
   }
@@ -2616,8 +2708,10 @@ export default function LivePreviewEditor({
     const rect = canvas.getBoundingClientRect()
     const orig = { x: overlay.x, y: overlay.y, w: overlay.w, h: overlay.h }
     setSelectedOverlayId(overlay.id)
-    setTrackFocus(isWatermarkOverlay(overlay) ? 'watermark' : 'text')
-    setPropTab('overlay')
+    const watermark = isWatermarkOverlay(overlay)
+    setTrackFocus(watermark ? 'watermark' : 'text')
+    setPropTab(watermark ? 'mask' : 'overlay')
+    if (watermark) setTool('cover')
     const histGate = { current: false }
 
     const update = (move: PointerEvent) => {
@@ -2751,13 +2845,27 @@ export default function LivePreviewEditor({
 
   function focusText(overlayId: string) {
     const overlay = overlays.find((item) => item.id === overlayId)
-    if (overlay?.kind === 'logo') {
+    if (!overlay) return
+
+    // A watermark is an OCR/cover mask, even when its persisted representation
+    // happens to use the `logo` kind.  It must never enter the manual-logo
+    // editor: selecting it from the timeline should expose the cover controls.
+    if (isWatermarkOverlay(overlay)) {
+      setSelectedOverlayId(overlayId)
+      setSelectedMediaId(null)
+      setTrackFocus('watermark')
+      setTool('cover')
+      setPropTab('mask')
+      return
+    }
+
+    if (overlay.kind === 'logo') {
       editLogo(overlay.logoSource ?? 'text')
       return
     }
     setSelectedOverlayId(overlayId)
     setSelectedMediaId(null)
-    setTrackFocus(overlay && isWatermarkOverlay(overlay) ? 'watermark' : 'text')
+    setTrackFocus('text')
     setPropTab('overlay')
   }
 
@@ -3796,6 +3904,47 @@ export default function LivePreviewEditor({
   })()
 
   const [isExportModalOpen, setIsExportModalOpen] = useState(false)
+  const [rangeAsrBusy, setRangeAsrBusy] = useState(false)
+  const [fastPreviewBusy, setFastPreviewBusy] = useState(false)
+
+  async function retranscribeSelectedRange() {
+    if (!selected || busy || rangeAsrBusy) return
+    setRangeAsrBusy(true)
+    try {
+      const result = await api.retranscribeRange(projectId, selected.start, selected.end, settings.sourceLang)
+      pushHistory()
+      await Promise.resolve(onSegmentsReplace(result.segments, { persist: false }))
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : 'Không thể nhận dạng lại vùng đã chọn')
+    } finally {
+      setRangeAsrBusy(false)
+    }
+  }
+
+  async function renderFastPreview() {
+    if (busy || rangeAsrBusy || fastPreviewBusy) return
+    setFastPreviewBusy(true)
+    try {
+      await Promise.all([...new Set([
+        settings.subtitleFontFamily || 'system',
+        ...segments.map((seg) => seg.fontFamily || settings.subtitleFontFamily || 'system'),
+      ])].map((family) => loadCaptionFont(family)))
+      layoutCacheRef.current = {}
+      const payload = buildExportSegments(segments, settings, sourceWidth, sourceHeight)
+      const start = Math.max(0, Math.min(time, Math.max(0, timelineDuration - 0.15)))
+      const end = Math.min(timelineDuration, start + 5)
+      await Promise.resolve(onExport(payload, end, start, `fast-preview-${start.toFixed(1)}s`, {
+        exportVideo: true,
+        exportVideoFormat: 'mp4',
+        exportAudio: false,
+        exportSrt: false,
+        exportGif: false,
+        exportResolution: '720',
+      }))
+    } finally {
+      setFastPreviewBusy(false)
+    }
+  }
 
   async function handleConfirmExport(options: ExportModalOptions) {
     if (busy) return
@@ -3880,6 +4029,24 @@ export default function LivePreviewEditor({
           </span>
         </div>
         <nav className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            className="h-8 rounded-md border border-border bg-background px-3 text-xs font-medium hover:bg-accent disabled:opacity-50"
+            onClick={() => void retranscribeSelectedRange()}
+            disabled={busy || rangeAsrBusy || !selected}
+            title="Chạy Whisper lại đúng khoảng của clip đang chọn"
+          >
+            {rangeAsrBusy ? 'Đang nhận dạng…' : 'Nhận dạng vùng'}
+          </button>
+          <button
+            type="button"
+            className="h-8 rounded-md border border-border bg-background px-3 text-xs font-medium hover:bg-accent disabled:opacity-50"
+            onClick={() => void renderFastPreview()}
+            disabled={busy || fastPreviewBusy || timelineDuration <= 0}
+            title="Render 5 giây từ đầu phát bằng đúng pipeline xuất"
+          >
+            {fastPreviewBusy ? 'Đang render…' : 'Preview thật 5s'}
+          </button>
           <span
             className="text-xs text-muted-foreground max-w-[300px] truncate"
             title={[
@@ -4046,16 +4213,39 @@ export default function LivePreviewEditor({
 
                   {/* Active view */}
                   <div className="flex-1 overflow-hidden">
-                    {assetsTab === 'media' && (
-                      <PanelView title="Media">
-                        <p className="px-2 py-6 text-center text-[12px] text-muted-foreground">
-                          Media sắp ra mắt...
-                        </p>
-                      </PanelView>
+                    {assetsTab === 'workflow' && (
+                      <EditorProjectPanel
+                        tab="workflow"
+                        segments={segments}
+                        settings={settings}
+                        voices={voices}
+                        busy={busy}
+                        jobStep={jobStep}
+                        jobProgress={jobProgress}
+                        onSettings={onSettings}
+                        onRunPipeline={onRunPipeline}
+                        onCancel={onCancel}
+                        onDub={onDub}
+                        onExport={() => setIsExportModalOpen(true)}
+                        onUpdateSpeakerProfile={updateSpeakerProfile}
+                      />
                     )}
 
-                    {assetsTab === 'text' && (
-                      <PanelView title="Text">
+                    {assetsTab === 'media' && (
+                      <EditorMediaPanel
+                        projectId={projectId}
+                        busy={busy}
+                        onApplySrt={async (asset) => {
+                          const result = await api.applyMediaSrt(projectId, asset.id)
+                          await onSegmentsReplace(result.segments)
+                          onSettings(result.settings)
+                          setAssetsTab('captions')
+                        }}
+                      />
+                    )}
+
+                    {assetsTab === 'add' && (
+                      <PanelView title={t('Thêm vào timeline', 'Add to timeline')}>
                         {/* Add-text card, like OpenCut TextView's "Default text" */}
                         <button
                           type="button"
@@ -4136,6 +4326,7 @@ export default function LivePreviewEditor({
                               )}
                               onClick={() => seek(segment)}
                             >
+                              {segment.speaker && <span className="mr-1.5 inline-block size-2 rounded-full" style={{ background: speakerById[segment.speaker]?.color }} />}
                               <span className="tabular-nums opacity-60 mr-1.5">{formatTime(segment.start)}</span>
                               {segment.translation || '(chưa dịch)'}
                             </button>
@@ -4144,7 +4335,25 @@ export default function LivePreviewEditor({
                       </PanelView>
                     )}
 
-                    {assetsTab === 'effects' && (
+                    {assetsTab === 'speakers' && (
+                      <EditorProjectPanel
+                        tab="speakers"
+                        segments={segments}
+                        settings={settings}
+                        voices={voices}
+                        busy={busy}
+                        jobStep={jobStep}
+                        jobProgress={jobProgress}
+                        onSettings={onSettings}
+                        onRunPipeline={onRunPipeline}
+                        onCancel={onCancel}
+                        onDub={onDub}
+                        onExport={() => setIsExportModalOpen(true)}
+                        onUpdateSpeakerProfile={updateSpeakerProfile}
+                      />
+                    )}
+
+                    {assetsTab === 'add' && (
                       <PanelView title="Effects">
                         <p className="px-1 pb-2 text-[11px] text-muted-foreground leading-snug">
                           Kéo preset vào preview hoặc bấm để thêm vùng làm mờ — chỉnh khung tự do, mặt nạ blur/màu/khối.
@@ -4206,11 +4415,6 @@ export default function LivePreviewEditor({
                       </PanelView>
                     )}
 
-                    {!['media', 'text', 'logo', 'captions', 'effects'].includes(assetsTab) && (
-                      <div className="text-muted-foreground p-4 text-sm">
-                        {ASSET_TABS.find((t) => t.key === assetsTab)?.label} sắp ra mắt...
-                      </div>
-                    )}
                   </div>
                 </div>
                     </SortablePanel>
@@ -4778,7 +4982,16 @@ export default function LivePreviewEditor({
                             && display.y + display.h > layout.cover.y,
                           )
                           return (
-                            <div key={overlay.id} className={cn('group absolute z-[25] cursor-move overflow-visible outline outline-1 outline-transparent hover:outline-cyan-300/70', isLogoDraft && 'outline-dashed !outline-amber-300', sel && !isLogoDraft && 'outline-2 !outline-cyan-300')} style={{ ...sourceToDisplayStyle(display, crop), containerType: 'size', opacity: blockedByCaption ? 0 : frame.opacity * (isLogoDraft ? .55 : 1) }} onPointerDown={(e) => { if (isLogoDraft) beginOverlayDrag(e, overlay); else { e.stopPropagation(); editLogo(overlay.logoSource ?? 'text') } }}>
+                            <div key={overlay.id} className={cn('group absolute z-[25] cursor-move overflow-visible outline outline-1 outline-transparent hover:outline-cyan-300/70', isLogoDraft && 'outline-dashed !outline-amber-300', sel && !isLogoDraft && 'outline-2 !outline-cyan-300')} style={{ ...sourceToDisplayStyle(display, crop), containerType: 'size', opacity: blockedByCaption ? 0 : frame.opacity * (isLogoDraft ? .55 : 1) }} onPointerDown={(e) => {
+                              if (isWatermarkOverlay(overlay)) {
+                                beginOverlayDrag(e, overlay)
+                              } else if (isLogoDraft) {
+                                beginOverlayDrag(e, overlay)
+                              } else {
+                                e.stopPropagation()
+                                editLogo(overlay.logoSource ?? 'text')
+                              }
+                            }}>
                               {overlay.logoSource !== 'text' && overlay.assetUrl
                                 ? <img src={overlay.assetUrl} className="size-full object-contain pointer-events-none" draggable={false} />
                                 : <div className="size-full flex items-center justify-center text-center font-bold" style={{ ...captionFontStyle(overlay.fontSize, overlay.h), fontFamily: captionFontCss(overlay.fontFamily ?? 'system'), color: overlay.color, textShadow: '0 2px 4px #000' }}>{overlay.text || 'LOGO'}</div>}
@@ -5104,6 +5317,11 @@ export default function LivePreviewEditor({
                         segments={segments}
                         settings={settings}
                         onSettings={onSettings}
+                        onRunPipeline={onRunPipeline}
+                        onCancel={onCancel}
+                        onOpenExport={() => setIsExportModalOpen(true)}
+                        onUpdateSpeakerProfile={updateSpeakerProfile}
+                        onOpenProjectSpeakers={() => setAssetsTab('speakers')}
                         voices={voices}
                         selected={selected}
                         selectedOverlay={selectedOverlay}
@@ -5339,6 +5557,17 @@ export default function LivePreviewEditor({
                         lock: true,
                         focus: 'video' as const,
                       },
+                      ...importedClips.filter((clip) => clip.kind === 'video' || clip.kind === 'image').map((clip) => ({
+                        id: 'video' as const,
+                        h: 'h-[52px]',
+                        label: `${clip.kind === 'image' ? 'Ảnh' : 'Video'} · ${clip.name}`,
+                        icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="shrink-0" aria-hidden><polygon points="5 3 19 12 5 21 5 3" /></svg>,
+                        mute: false,
+                        hide: false,
+                        lock: false,
+                        focus: 'video' as const,
+                        assetLane: true,
+                      })),
                       ...captionLanes.map((lane) => ({
                         id: 'caption' as const,
                         h: 'h-10',
@@ -5374,6 +5603,17 @@ export default function LivePreviewEditor({
                         lock: false,
                         focus: 'bg' as const,
                       },
+                      ...importedClips.filter((clip) => clip.kind === 'audio').map((clip) => ({
+                        id: 'bg' as const,
+                        h: 'h-10',
+                        label: `Audio · ${clip.name}`,
+                        icon: <IconHeadphones size={13} className="shrink-0" />,
+                        mute: false,
+                        hide: false,
+                        lock: false,
+                        focus: 'bg' as const,
+                        assetLane: true,
+                      })),
                       {
                         id: 'watermark' as const,
                         h: 'h-10',
@@ -5405,6 +5645,9 @@ export default function LivePreviewEditor({
                     }
                     // Chưa lồng tiếng: ẩn tab Lồng tiếng
                     if (row.id === 'dub' && !showDubTrack) return null
+                    // Không để lane rỗng chiếm chỗ: chỉ hiện Caption/Text khi có clip.
+                    if (row.id === 'caption' && 'laneKey' in row && !timelineLayoutSegs.some((seg) => captionLaneOf(seg, sourceHeight, sourceWidth) === row.laneKey)) return null
+                    if (row.id === 'text' && !overlays.some((overlay) => !isWatermarkOverlay(overlay))) return null
                     const muted =
                       row.id === 'bg'
                         ? settings.processOriginalAudio && settings.originalAudioMode === 'mute'
@@ -5553,6 +5796,21 @@ export default function LivePreviewEditor({
                     className="flex-1 overflow-x-auto overflow-y-auto scrollbar-thin bg-black/25"
                     ref={tracksScrollRef}
                     onScroll={syncFollowers}
+                    onDragOver={(e) => {
+                      if (e.dataTransfer.types.includes('application/x-videoclone-asset')) {
+                        e.preventDefault()
+                        e.dataTransfer.dropEffect = 'copy'
+                      }
+                    }}
+                    onDrop={(e) => {
+                      const raw = e.dataTransfer.getData('application/x-videoclone-asset')
+                      if (!raw) return
+                      try {
+                        const asset = JSON.parse(raw) as ProjectMediaAsset
+                        const rect = e.currentTarget.getBoundingClientRect()
+                        placeImportedAsset(asset, (e.clientX - rect.left + e.currentTarget.scrollLeft) / pxPerSec)
+                      } catch { /* invalid drag payload */ }
+                    }}
                     onPointerDown={(e) => {
                       // Kéo trên vùng trống (không trúng clip) → marquee chọn
                       if ((e.target as HTMLElement).closest(
@@ -5712,8 +5970,16 @@ export default function LivePreviewEditor({
                         })}
                       </div>
 
+                      {/* CapCut-style: every imported visual asset owns its own layer. */}
+                      {importedClips.filter((clip) => clip.kind === 'video' || clip.kind === 'image').map((clip) => (
+                        <div key={`asset-track-${clip.id}`} className="relative h-[52px] box-border border-b border-border/80 bg-violet-950/15 overflow-hidden">
+                          <span className="absolute left-2 top-1 z-10 rounded bg-black/55 px-1.5 py-0.5 text-[10px] text-white">{clip.kind === 'image' ? 'Ảnh' : 'Video'} · {clip.name}</span>
+                          <button type="button" data-media-clip="asset-video" className="absolute top-4 h-[calc(100%-20px)] overflow-hidden rounded-md border border-violet-200/70 bg-violet-950 text-left text-[11px] text-white hover:ring-1 hover:ring-violet-200" style={{ left: clip.start * pxPerSec, width: Math.max(28, (clip.end - clip.start) * pxPerSec) }} title={`${clip.name} · ${formatTime(clip.start)}–${formatTime(clip.end)}`} onPointerDown={(e) => beginImportedClipDrag(e, clip, 'move')} onContextMenu={(e) => { e.preventDefault(); setImportedClips((prev) => prev.filter((item) => item.id !== clip.id)) }}><img className="absolute inset-0 size-full object-cover opacity-70" src={`/api/projects/${projectId}/assets/${clip.assetId}/thumbnail`} alt="" /><span className="absolute inset-0 bg-gradient-to-r from-black/55 via-transparent to-black/35" /><span className="absolute inset-y-0 left-0 z-20 w-2 cursor-ew-resize hover:bg-white/30" onPointerDown={(e) => beginImportedClipDrag(e, clip, 'start')} /><span className="absolute inset-y-0 right-0 z-20 w-2 cursor-ew-resize hover:bg-white/30" onPointerDown={(e) => beginImportedClipDrag(e, clip, 'end')} /><span className="relative z-10 flex h-full items-center gap-1 px-2 font-medium"><span className="truncate">{clip.name}</span></span></button>
+                        </div>
+                      ))}
+
                       {/* Caption lanes — ẩn khi compound (gộp lên Video, giống CapCut) */}
-                      {!compoundMode && captionLanes.map((lane) => (
+                      {!compoundMode && captionLanes.filter((lane) => timelineLayoutSegs.some((seg) => captionLaneOf(seg, sourceHeight, sourceWidth) === lane.key)).map((lane) => (
                       <div
                         key={lane.key}
                         className={cn('relative h-10 box-border border-b border-border/80 overflow-hidden', trackHidden.caption && 'opacity-30')}
@@ -5754,7 +6020,9 @@ export default function LivePreviewEditor({
                                 left: display.start * pxPerSec,
                                 width: Math.max(2, (display.end - display.start) * pxPerSec),
                                 boxSizing: 'border-box',
-                                background: isSelected ? lane.selected : lane.color,
+                                background: seg.speaker && speakerById[seg.speaker]
+                                  ? speakerById[seg.speaker].color
+                                  : (isSelected ? lane.selected : lane.color),
                               }}
                               onClick={(e) => {
                                 e.stopPropagation()
@@ -5790,7 +6058,7 @@ export default function LivePreviewEditor({
                                   beginDrag(e, seg, 'start')
                                 }}
                               />
-                              <span className="truncate relative z-[1] pointer-events-none">{seg.translation || lane.label}</span>
+                              <span className="truncate relative z-[1] pointer-events-none">{seg.speaker && speakerById[seg.speaker] ? `${speakerById[seg.speaker].name} · ` : ''}{seg.translation || lane.label}</span>
                               <span
                                 className="absolute inset-y-0 right-0 w-2.5 cursor-ew-resize rounded-r-md hover:bg-white/25 transition-colors z-10"
                                 onPointerDown={(e) => {
@@ -5845,7 +6113,9 @@ export default function LivePreviewEditor({
                                     Math.min(clipSec, Math.max(0.05, timelineDuration - seg.start)) * pxPerSec,
                                   ),
                                   boxSizing: 'border-box',
-                                  background: isSelected ? '#c2780a' : '#E8A045',
+                                  background: seg.speaker && speakerById[seg.speaker]
+                                    ? speakerById[seg.speaker].color
+                                    : (isSelected ? '#c2780a' : '#E8A045'),
                                 }}
                                 onClick={() => {
                                   focusDub(seg)
@@ -6058,8 +6328,11 @@ export default function LivePreviewEditor({
                        </div>
                        )}
 
-                       {/* Text overlay track */}
-                       <div className={cn('relative h-10 box-border border-b border-border/80 overflow-hidden', trackHidden.text && 'opacity-30')} style={{ backgroundColor: 'var(--background)' }}>
+                       {importedClips.filter((clip) => clip.kind === 'audio').map((clip) => <div key={`asset-audio-${clip.id}`} className="relative h-10 box-border border-b border-border/80 overflow-hidden bg-emerald-950/15"><span className="absolute left-2 top-1 z-10 rounded bg-black/55 px-1.5 py-0.5 text-[10px] text-white">Audio · {clip.name}</span><button type="button" className="absolute top-4 h-[calc(100%-18px)] rounded-md bg-emerald-600/90 px-2 text-left text-[11px] text-white hover:bg-emerald-500" style={{ left: clip.start * pxPerSec, width: Math.max(2, (clip.end - clip.start) * pxPerSec) }} title={`${clip.name} · ${formatTime(clip.start)}–${formatTime(clip.end)}`} onPointerDown={(e) => beginImportedClipDrag(e, clip, 'move')} onContextMenu={(e) => { e.preventDefault(); setImportedClips((prev) => prev.filter((item) => item.id !== clip.id)) }}><AudioWaveformBg /><span className="absolute inset-y-0 left-0 z-20 w-2 cursor-ew-resize hover:bg-white/30" onPointerDown={(e) => beginImportedClipDrag(e, clip, 'start')} /><span className="absolute inset-y-0 right-0 z-20 w-2 cursor-ew-resize hover:bg-white/30" onPointerDown={(e) => beginImportedClipDrag(e, clip, 'end')} /><span className="relative z-10 truncate">{clip.name}</span></button></div>)}
+
+
+                       {/* Text overlay track — chỉ tạo khi thực sự có text. */}
+                       {overlays.some((overlay) => !isWatermarkOverlay(overlay)) && <div className={cn('relative h-10 box-border border-b border-border/80 overflow-hidden', trackHidden.text && 'opacity-30')} style={{ backgroundColor: 'var(--background)' }}>
                          {overlays.filter((overlay) => !isWatermarkOverlay(overlay)).map((overlay) => {
                            const display = draft?.id === overlay.id ? { ...overlay, ...draft } : overlay
                            return (
@@ -6104,7 +6377,7 @@ export default function LivePreviewEditor({
                            </button>
                            )
                          })}
-                      </div>
+                       </div>}
 
                     </div>
                   </div>

@@ -243,7 +243,6 @@ html.dark .panel {
 /* App grid (used by App.tsx for header + workspace) */
 .app { display: grid; grid-template-rows: 58px 1fr; height: 100%; min-height: 0; overflow: hidden; }
 .app > * { min-height: 0; min-width: 0; }
-.app--editor { grid-template-rows: 1fr; }
 .workspace { display: grid; grid-template-columns: 360px 6px 1fr; min-height: 0; height: 100%; }
 .sidebar-resizer { width: 6px; margin-left: -3px; cursor: col-resize; z-index: 5; background: transparent; position: relative; touch-action: none; }
 .sidebar-resizer::after { content: ''; position: absolute; inset: 0 2px; border-radius: 2px; background: transparent; transition: background 0.15s; }

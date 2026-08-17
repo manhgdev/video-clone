@@ -7,6 +7,8 @@ import re
 import shutil
 import threading
 import uuid
+import mimetypes
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -78,6 +80,121 @@ def _subtitle_file(project_id: str, name: str) -> Path:
     if not safe or Path(safe).suffix.lower() != ".srt":
         raise HTTPException(422, "Chỉ hỗ trợ file phụ đề .srt")
     return ensure_layout(project_id) / "subtitles" / safe
+
+
+_MEDIA_ASSET_EXTS = {
+    ".mp4", ".mov", ".mkv", ".webm", ".avi",
+    ".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac",
+    ".png", ".jpg", ".jpeg", ".webp", ".gif", ".srt",
+}
+
+
+def _media_asset_kind(name: str) -> str:
+    ext = Path(name).suffix.lower()
+    if ext == ".srt": return "srt"
+    if ext in {".png", ".jpg", ".jpeg", ".webp", ".gif"}: return "image"
+    if ext in {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"}: return "audio"
+    return "video"
+
+
+@router.get("/api/projects/{project_id}/assets")
+def api_project_assets(project_id: str):
+    meta = load_meta(project_id)
+    if not meta: raise HTTPException(404)
+    return {"items": meta.get("mediaAssets") or []}
+
+
+@router.post("/api/projects/{project_id}/assets")
+async def api_upload_project_asset(project_id: str, file: UploadFile = File(...)):
+    meta = load_meta(project_id)
+    if not meta: raise HTTPException(404)
+    name = Path(file.filename or "").name
+    ext = Path(name).suffix.lower()
+    if not name or ext not in _MEDIA_ASSET_EXTS:
+        raise HTTPException(422, "Chỉ hỗ trợ video, audio, ảnh hoặc SRT")
+    asset_id = uuid.uuid4().hex[:12]
+    folder = ensure_layout(project_id) / "assets"
+    folder.mkdir(parents=True, exist_ok=True)
+    stored = f"{asset_id}{ext}"
+    target = folder / stored
+    with target.open("wb") as out:
+        shutil.copyfileobj(file.file, out)
+    kind = _media_asset_kind(name)
+    item: dict[str, Any] = {"id": asset_id, "name": name, "kind": kind, "file": stored, "mime": file.content_type or mimetypes.guess_type(name)[0] or "application/octet-stream"}
+    if kind in {"video", "audio"}:
+        item["duration"] = max(0.0, float(ffprobe_duration(target) or 0))
+    if kind == "srt":
+        try: item["cueCount"] = len(subtitle_segments(target))
+        except OSError: item["cueCount"] = 0
+    assets = [x for x in meta.get("mediaAssets") or [] if isinstance(x, dict)]
+    assets.append(item)
+    meta["mediaAssets"] = assets
+    save_meta(project_id, meta)
+    return {"item": item}
+
+
+@router.get("/api/projects/{project_id}/assets/{asset_id}/file")
+def api_project_asset_file(project_id: str, asset_id: str):
+    meta = load_meta(project_id)
+    if not meta: raise HTTPException(404)
+    item = next((x for x in meta.get("mediaAssets") or [] if x.get("id") == asset_id), None)
+    path = ensure_layout(project_id) / "assets" / str((item or {}).get("file") or "")
+    if not item or not path.is_file(): raise HTTPException(404)
+    return FileResponse(path, media_type=item.get("mime"), filename=item.get("name"))
+
+
+@router.get("/api/projects/{project_id}/assets/{asset_id}/thumbnail")
+def api_project_asset_thumbnail(project_id: str, asset_id: str):
+    meta = load_meta(project_id)
+    if not meta: raise HTTPException(404)
+    item = next((x for x in meta.get("mediaAssets") or [] if x.get("id") == asset_id), None)
+    src = ensure_layout(project_id) / "assets" / str((item or {}).get("file") or "")
+    if not item or not src.is_file(): raise HTTPException(404)
+    if item.get("kind") == "image":
+        return FileResponse(src, media_type=item.get("mime"))
+    if item.get("kind") != "video": raise HTTPException(404)
+    thumb = ensure_layout(project_id) / "assets" / f"{asset_id}.thumb.jpg"
+    if not thumb.is_file() or thumb.stat().st_mtime < src.stat().st_mtime:
+        temp = thumb.with_suffix(".tmp.jpg")
+        try:
+            subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-ss", "0.5", "-i", str(src), "-frames:v", "1", "-vf", "scale=320:-2", str(temp)], check=True, timeout=45)
+            temp.replace(thumb)
+        except (OSError, subprocess.SubprocessError):
+            temp.unlink(missing_ok=True)
+            raise HTTPException(422, "Không tạo được thumbnail video") from None
+    return FileResponse(thumb, media_type="image/jpeg")
+
+
+@router.delete("/api/projects/{project_id}/assets/{asset_id}")
+def api_delete_project_asset(project_id: str, asset_id: str):
+    meta = load_meta(project_id)
+    if not meta: raise HTTPException(404)
+    assets = [x for x in meta.get("mediaAssets") or [] if isinstance(x, dict)]
+    item = next((x for x in assets if x.get("id") == asset_id), None)
+    if not item: raise HTTPException(404)
+    # Timeline references are intentionally protected before destructive removal.
+    if any(str(c.get("assetId")) == asset_id for c in meta.get("mediaTimeline") or [] if isinstance(c, dict)):
+        raise HTTPException(409, "Asset đang được dùng trên timeline")
+    (ensure_layout(project_id) / "assets" / str(item.get("file") or "")).unlink(missing_ok=True)
+    meta["mediaAssets"] = [x for x in assets if x.get("id") != asset_id]
+    save_meta(project_id, meta)
+    return {"ok": True}
+
+
+@router.post("/api/projects/{project_id}/assets/{asset_id}/apply-srt")
+def api_apply_project_asset_srt(project_id: str, asset_id: str):
+    meta = load_meta(project_id)
+    if not meta: raise HTTPException(404)
+    item = next((x for x in meta.get("mediaAssets") or [] if x.get("id") == asset_id and x.get("kind") == "srt"), None)
+    path = ensure_layout(project_id) / "assets" / str((item or {}).get("file") or "")
+    if not item or not path.is_file(): raise HTTPException(404)
+    segments = subtitle_segments(path)
+    if not segments: raise HTTPException(422, "File SRT không có cue hợp lệ")
+    settings = dict(meta.get("settings") or {})
+    settings.update({"engine": "subtitle", "subtitleSource": str(item.get("name") or ""), "matchDuration": "none"})
+    meta["segments"], meta["settings"] = segments, settings
+    save_meta(project_id, meta)
+    return {"segments": segments, "settings": settings}
 
 
 @router.get("/api/projects/{project_id}/subtitles")

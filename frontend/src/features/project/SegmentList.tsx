@@ -1,6 +1,8 @@
 import { useMemo } from 'react'
 import type { JobStatus, ProjectSettings, Segment } from '@/features/project/project.types'
 import SegmentCard from './SegmentCard'
+import { resolvedSpeakerProfiles, speakerRoleOptions } from './speakerProfiles'
+import { localize, useLocale } from '@/app/i18n'
 import { expandSegmentsForList } from './expandCompound'
 import './SegmentList.css'
 
@@ -27,6 +29,9 @@ type Props = {
   hiddenLogoTexts?: string[]
   onCoverLogoChange?: (label: string, covered: boolean) => void
   onChange: (seg: Segment) => void
+  settings: ProjectSettings
+  onSettings: (settings: ProjectSettings) => void
+  onSegmentsReplace: (segments: Segment[]) => void | Promise<void>
 }
 
 export default function SegmentList({
@@ -43,12 +48,35 @@ export default function SegmentList({
   hiddenLogoTexts = [],
   onCoverLogoChange,
   onChange,
+  settings,
+  onSettings,
+  onSegmentsReplace,
 }: Props) {
+  const { locale } = useLocale()
+  const t = (vi: string, en: string) => localize(locale, vi, en)
   // Alt+G: list vẫn hiện từng câu (không hiện shell [Compound ×N])
   const list = useMemo(
     () => expandSegmentsForList(Array.isArray(segments) ? segments : []).map(safeSeg),
     [segments],
   )
+  const speakerProfiles = useMemo(() => resolvedSpeakerProfiles(list, settings, locale), [list, settings, locale])
+  const roleOptions = speakerRoleOptions(locale)
+
+  function updateSpeakerProfile(id: string, patch: Partial<(typeof speakerProfiles)[number]>) {
+    const current = speakerProfiles.find((profile) => profile.id === id)
+    if (!current) return
+    const next = { ...current, ...patch }
+    onSettings({
+      ...settings,
+      speakerProfiles: { ...(settings.speakerProfiles || {}), [id]: next },
+      speakerVoices: { ...(settings.speakerVoices || {}), [id]: next.voice },
+    })
+    if (patch.voice && patch.voice !== current.voice) {
+      void onSegmentsReplace(segments.map((segment) => segment.speaker === id ? {
+        ...segment, voice: patch.voice!, audioUrl: undefined, audioFile: undefined, audioDuration: undefined,
+      } : segment))
+    }
+  }
 
   if (list.length === 0) {
     return (
@@ -61,6 +89,32 @@ export default function SegmentList({
 
   return (
     <div className="segments">
+      {speakerProfiles.length > 0 && (
+        <section className="speaker-manager" aria-label={t('Quản lý người nói', 'Speaker management')}>
+          <div className="speaker-manager-head">
+            <div><strong>{t('Người nói trong video', 'Speakers in this video')}</strong><span>{locale === 'en' ? `${speakerProfiles.length} speakers · name, color, and voice by role` : `${speakerProfiles.length} người · đổi tên, màu và giọng theo vai`}</span></div>
+            <label><input type="checkbox" checked={Boolean(settings.speakerCaptionColors)} onChange={(event) => onSettings({ ...settings, speakerCaptionColors: event.target.checked })} /> {t('Màu khi xuất', 'Colors in export')}</label>
+          </div>
+          <div className="speaker-profile-grid">
+            {speakerProfiles.map((profile) => {
+              const owned = list.filter((segment) => segment.speaker === profile.id)
+              return (
+                <article className="speaker-profile-card" key={profile.id} style={{ borderTopColor: profile.color }}>
+                  <div className="speaker-profile-name">
+                    <input type="color" value={profile.color} aria-label={`${t('Màu', 'Color')} ${profile.name}`} onChange={(event) => updateSpeakerProfile(profile.id, { color: event.target.value })} />
+                    <input list={`speaker-role-options-${profile.id}`} value={profile.name} aria-label={`${t('Tên vai', 'Role name')} ${profile.id}`} onChange={(event) => updateSpeakerProfile(profile.id, { name: event.target.value })} />
+                    <datalist id={`speaker-role-options-${profile.id}`}>
+                      {roleOptions.map((role) => <option key={role} value={role} />)}
+                    </datalist>
+                  </div>
+                  <select value={profile.voice} aria-label={`Giọng ${profile.name}`} onChange={(event) => updateSpeakerProfile(profile.id, { voice: event.target.value })}>{voices.map((voice) => <option key={voice.id} value={voice.id}>{voice.name}</option>)}</select>
+                  <small>{owned.length} {t('câu', 'segments')} · {owned.reduce((sum, segment) => sum + Math.max(0, segment.end - segment.start), 0).toFixed(1)}s</small>
+                </article>
+              )
+            })}
+          </div>
+        </section>
+      )}
       {(() => {
         const rawLabels = [
           logoDetection?.text,
@@ -137,6 +191,7 @@ export default function SegmentList({
           videoUrl={videoUrl}
           projectId={projectId}
           onChange={onChange}
+          speakerProfiles={speakerProfiles}
         />
       ))}
     </div>

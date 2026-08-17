@@ -107,3 +107,15 @@
 }
 
 .empty p { margin: 0 0 6px; }
+.speaker-manager { margin-bottom: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+.speaker-manager-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:10px; }
+.speaker-manager-head>div { display:grid; gap:2px; }
+.speaker-manager-head strong { color:var(--ink); font-size:.88rem; }
+.speaker-manager-head span,.speaker-profile-card small { color:var(--muted-foreground); font-size:.7rem; }
+.speaker-manager-head label { display:flex; align-items:center; gap:6px; white-space:nowrap; color:var(--ink); font-size:.72rem; }
+.speaker-manager-head input[type=checkbox] { accent-color:var(--primary); }
+.speaker-profile-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:8px; }
+.speaker-profile-card { display:grid; gap:7px; min-width:0; padding:9px; border:1px solid var(--line); border-top-width:3px; border-radius:8px; background:var(--background); }
+.speaker-profile-name { display:grid; grid-template-columns:28px minmax(0,1fr); gap:6px; }
+.speaker-profile-name input[type=color] { width:28px; height:30px; padding:2px; border:1px solid var(--line); border-radius:6px; background:var(--surface); }
+.speaker-profile-name input:not([type=color]),.speaker-profile-card select { min-width:0; height:30px; border:1px solid var(--line); border-radius:6px; padding:0 7px; background:var(--input,var(--surface)); color:var(--ink); font:inherit; font-size:.74rem; }

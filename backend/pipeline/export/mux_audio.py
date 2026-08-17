@@ -330,32 +330,27 @@ def _mix_tts_track(
             + f"amix=inputs={len(labels)}:duration=longest:normalize=0,"
             f"alimiter=limit=0.95[aout]"
         )
-        fc = root / "cache" / f"tts_mix_{key}_part{batch_i}_fc.txt"
-        fc.write_text(";\n".join(filters) + "\n", encoding="utf-8")
-        try:
-            run_cmd(
-                project_id,
-                [
-                    "ffmpeg",
-                    "-y",
-                    "-hide_banner",
-                    "-loglevel",
-                    "error",
-                    *inputs,
-                    "-filter_complex_script",
-                    str(fc),
-                    "-map",
-                    "[aout]",
-                    "-c:a",
-                    "pcm_s16le",
-                    str(batch_out),
-                ],
-            )
-        finally:
-            try:
-                fc.unlink(missing_ok=True)
-            except OSError:
-                pass
+        # Some bundled/macOS FFmpeg builds omit -filter_complex_script entirely
+        # (exit 8: "Unrecognized option"). A batch has at most 20 clips, so the
+        # inline graph remains safely below OS command-size limits.
+        run_cmd(
+            project_id,
+            [
+                "ffmpeg",
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                *inputs,
+                "-filter_complex",
+                ";\n".join(filters),
+                "-map",
+                "[aout]",
+                "-c:a",
+                "pcm_s16le",
+                str(batch_out),
+            ],
+        )
         batches.append(batch_out)
 
     if len(batches) == 1:
@@ -363,37 +358,29 @@ def _mix_tts_track(
     else:
         inputs = [arg for wav in batches for arg in ("-i", str(wav))]
         labels = "".join(f"[{i}:a]" for i in range(len(batches)))
-        fc_join = root / "cache" / f"tts_mix_{key}_join_fc.txt"
-        fc_join.write_text(
+        join_graph = (
             labels
             + f"amix=inputs={len(batches)}:duration=longest:normalize=0,"
-            f"alimiter=limit=0.95[aout]\n",
-            encoding="utf-8",
+            f"alimiter=limit=0.95[aout]"
         )
-        try:
-            run_cmd(
-                project_id,
-                [
-                    "ffmpeg",
-                    "-y",
-                    "-hide_banner",
-                    "-loglevel",
-                    "error",
-                    *inputs,
-                    "-filter_complex_script",
-                    str(fc_join.resolve()),
-                    "-map",
-                    "[aout]",
-                    "-c:a",
-                    "pcm_s16le",
-                    str(out),
-                ],
-            )
-        finally:
-            try:
-                fc_join.unlink(missing_ok=True)
-            except OSError:
-                pass
+        run_cmd(
+            project_id,
+            [
+                "ffmpeg",
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                *inputs,
+                "-filter_complex",
+                join_graph,
+                "-map",
+                "[aout]",
+                "-c:a",
+                "pcm_s16le",
+                str(out),
+            ],
+        )
         for wav in batches:
             wav.unlink(missing_ok=True)
     return out
@@ -524,61 +511,47 @@ def mux_dub(
         vcodec = ["-c:v", "copy"]
 
     out = out_final(project_id)
-    # LUÔN script file — không bao giờ nhét filter vào argv (Windows)
-    fc_path = root / "cache" / "mux_fc.txt"
-    fc_path.parent.mkdir(parents=True, exist_ok=True)
-    # filter_complex_script: dùng ';' một dòng hoặc xuống dòng — không BOM
+    # Keep a debug copy, but pass the graph inline.  The FFmpeg bundled with
+    # this macOS runtime does not expose -filter_complex_script (exit 8), while
+    # this final mux graph is small enough to stay well below argv limits.
     fc_body = ";\n".join(filters) + "\n"
-    fc_path.write_text(fc_body, encoding="utf-8")
-    # Giữ bản debug khi fail
     fc_dbg = root / "cache" / "mux_fc_last.txt"
     try:
         fc_dbg.write_text(fc_body, encoding="utf-8")
     except OSError:
         pass
-    try:
-        cmd = [
-            "ffmpeg",
-            "-y",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            *inputs,
-            "-filter_complex_script",
-            str(fc_path.resolve()),
-            "-map",
-            map_video,
-            "-map",
-            map_audio,
-            *vcodec,
-            "-c:a",
-            "aac",
-            "-b:a",
-            "192k",
-            "-ar",
-            "44100",
-            "-ac",
-            "2",
-            "-map_metadata",
-            "-1",
-            "-map_chapters",
-            "-1",
-            "-shortest",
-            "-t",
-            f"{float(out_dur):.3f}",
-            str(out),
-        ]
-        # Guard: argv không được chứa filter_complex dài
-        assert all(
-            not (isinstance(a, str) and a.startswith("[") and "between(t" in a)
-            for a in cmd
-        ), "filter leak into argv"
-        run_cmd(project_id, cmd)
-    finally:
-        try:
-            fc_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        *inputs,
+        "-filter_complex",
+        fc_body,
+        "-map",
+        map_video,
+        "-map",
+        map_audio,
+        *vcodec,
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-ar",
+        "44100",
+        "-ac",
+        "2",
+        "-map_metadata",
+        "-1",
+        "-map_chapters",
+        "-1",
+        "-shortest",
+        "-t",
+        f"{float(out_dur):.3f}",
+        str(out),
+    ]
+    run_cmd(project_id, cmd)
     return out
 
 
@@ -628,4 +601,3 @@ def mux_original_audio(
     cmd += ["-map_metadata", "-1", "-map_chapters", "-1", "-shortest", str(out)]
     run_cmd(project_id, cmd)
     return out
-

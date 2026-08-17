@@ -11,7 +11,7 @@ from typing import Any
 
 from pipeline.asr import asr_paddleocr, asr_whisper
 from pipeline.export.burn import cover_and_burn
-from pipeline.core.config import PUBLIC_DATA
+from pipeline.core.config import DATA, PUBLIC_DATA
 from pipeline.core.jobs import Cancelled, begin_job, check_cancel, clear_job, short_cmd_error
 from pipeline.core.media import (
     crop_export_aspect,
@@ -261,6 +261,35 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                     workers=w,
                     project_id=project_id,
                 )
+                if settings.get("speakerDiarization"):
+                    from pipeline.asr.speaker import assign_speakers, diarize_audio
+
+                    set_status(project_id, step="asr", progress=44, message="Đang tách người nói…", running=True)
+                    model_dir = DATA / "models" / "pyannote"
+                    provider_info: dict[str, str] = {}
+                    turns = diarize_audio(
+                        wav, model_dir, int(settings.get("speakerCount") or 0), provider_out=provider_info,
+                    )
+                    assign_speakers(segments, turns)
+                    speaker_voices = settings.get("speakerVoices") or {}
+                    profiles = settings.get("speakerProfiles") or {}
+                    palette = ("#0ea5a8", "#8b5cf6", "#e58a2b", "#3b82f6", "#ec4899", "#22c55e", "#ef4444", "#a855f7")
+                    for position, speaker in enumerate(sorted({str(s.get("speaker")) for s in segments if s.get("speaker")})):
+                        old_profile = profiles.get(speaker) if isinstance(profiles.get(speaker), dict) else {}
+                        profiles[speaker] = {
+                            "id": speaker,
+                            "name": str(old_profile.get("name") or f"Người nói {position + 1}"),
+                            "color": str(old_profile.get("color") or palette[position % len(palette)]),
+                            "voice": str(old_profile.get("voice") or speaker_voices.get(speaker) or settings.get("defaultVoice") or "system"),
+                        }
+                    settings["speakerProfiles"] = profiles
+                    settings["speakerVoices"] = {key: str(value.get("voice") or "") for key, value in profiles.items()}
+                    for seg in segments:
+                        speaker = str(seg.get("speaker") or "")
+                        if speaker and profiles.get(speaker, {}).get("voice"):
+                            seg["voice"] = profiles[speaker]["voice"]
+                    meta["speakerTurns"] = turns
+                    meta["speakerDiarizationProvider"] = provider_info.get("provider", "cpu")
 
             if not segments:
                 raise RuntimeError("Không nhận được đoạn thoại nào từ video.")

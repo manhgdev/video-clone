@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
 import type { JobStatus, ProjectSettings } from '@/features/project/project.types'
 import { api } from '@/features/project/project.api'
+import { localize, useLocale } from '@/app/i18n'
 
 type AnalysisRegion = { x: number; y: number; w: number; h: number }
 
@@ -123,6 +124,8 @@ export default function Sidebar({
   onClearCache,
   clearingCache = false,
 }: Props) {
+  const { locale } = useLocale()
+  const t = (vi: string, en: string) => localize(locale, vi, en)
   const inputRef = useRef<HTMLInputElement>(null)
   const subtitleInputRef = useRef<HTMLInputElement>(null)
   const previewShellRef = useRef<HTMLDivElement>(null)
@@ -738,32 +741,64 @@ export default function Sidebar({
         </label>
       </div>
 
-      <div className="audio-filter">
-        <label
-          className="audio-filter-toggle"
-          title="Bật để xử lý track gốc khi lồng tiếng / xuất (xóa lời Demucs, tắt lời…)"
-        >
-          <span className="field-label">
-            <IconSpeaker size={14} />
-            Lọc âm thanh gốc
-          </span>
-          <input
-            type="checkbox"
-            checked={settings.processOriginalAudio}
-            disabled={busy}
-            onChange={(e) => {
-              const on = e.target.checked
-              onSettings({
-                ...settings,
-                processOriginalAudio: on,
-                originalAudioMode:
-                  on && settings.originalAudioMode === 'original'
-                    ? 'no_vocals'
-                    : settings.originalAudioMode,
-              })
-            }}
-          />
-        </label>
+      <div className="audio-filter audio-feature-filter">
+        <div className="audio-feature-row">
+          <label
+            className="audio-filter-toggle"
+            title="Bật để xử lý track gốc khi lồng tiếng / xuất (xóa lời Demucs, tắt lời…)"
+          >
+            <span className="field-label">
+              <IconSpeaker size={14} />
+              Lọc âm thanh gốc
+            </span>
+            <input
+              type="checkbox"
+              checked={settings.processOriginalAudio}
+              disabled={busy}
+              onChange={(e) => {
+                const on = e.target.checked
+                onSettings({
+                  ...settings,
+                  processOriginalAudio: on,
+                  originalAudioMode:
+                    on && settings.originalAudioMode === 'original'
+                      ? 'no_vocals'
+                      : settings.originalAudioMode,
+                })
+              }}
+            />
+          </label>
+          <label
+            className="audio-filter-toggle"
+            title={settings.engine === 'whisper'
+              ? t('Tự phát hiện người nói và gán speaker cho từng câu khi chạy nhận dạng.', 'Automatically detect speakers and assign one to each transcript segment.')
+              : t('Tách người nói chỉ dùng với nhận dạng Whisper.', 'Speaker separation is available only with Whisper recognition.')}
+          >
+            <span className="field-label">
+              <IconMic size={14} />
+              {t('Tách người nói', 'Separate speakers')}
+            </span>
+            <input
+              type="checkbox"
+              checked={Boolean(settings.speakerDiarization)}
+              disabled={busy || settings.engine !== 'whisper'}
+              onChange={(e) => onSettings({ ...settings, speakerDiarization: e.target.checked })}
+            />
+          </label>
+        </div>
+        {settings.speakerDiarization && settings.engine === 'whisper' && (
+          <label className="speaker-count-row">
+            <span>{t('Số người nói', 'Speaker count')}</span>
+            <select
+              value={settings.speakerCount || 0}
+              disabled={busy}
+              onChange={(e) => onSettings({ ...settings, speakerCount: Number(e.target.value) })}
+            >
+              <option value={0}>{t('Tự phát hiện', 'Auto-detect')}</option>
+              {[2, 3, 4, 5, 6, 7, 8].map((count) => <option key={count} value={count}>{locale === 'en' ? `${count} speakers` : `${count} người`}</option>)}
+            </select>
+          </label>
+        )}
         {settings.processOriginalAudio && (
           <>
             <div className="audio-filter-options" role="radiogroup" aria-label="Lọc âm thanh gốc">

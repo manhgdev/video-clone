@@ -4,6 +4,8 @@
  */
 import React from 'react'
 import type { ProjectSettings, Segment, TextOverlay } from '@/features/project/project.types'
+import { resolvedSpeakerProfiles, speakerRoleOptions } from '@/features/project/speakerProfiles'
+import { localize, useLocale } from '@/app/i18n'
 import { cn } from '@/shared/lib/cn'
 import { IconHeadphones } from '@/shared/components/Icons'
 import { ScrollArea } from '@/shared/ui/scroll-area'
@@ -46,6 +48,12 @@ type Props = {
   segments: Segment[]
   settings: ProjectSettings
   onSettings: (settings: ProjectSettings) => void
+  /** Retained for the hidden compatibility views; project actions render on the left rail. */
+  onRunPipeline?: (previewSec: number, settingsOverride?: ProjectSettings) => void | Promise<void>
+  onCancel?: () => void
+  onOpenExport: () => void
+  onUpdateSpeakerProfile: (id: string, patch: { name?: string; color?: string; voice?: string }) => void
+  onOpenProjectSpeakers: () => void
   voices: { id: string; name: string }[]
   selected: Segment | undefined
   selectedOverlay: TextOverlay | null
@@ -143,6 +151,11 @@ export function EditorPropertiesPanel({
   segments,
   settings,
   onSettings,
+  onRunPipeline,
+  onCancel,
+  onOpenExport,
+  onUpdateSpeakerProfile,
+  onOpenProjectSpeakers,
   voices,
   selected,
   selectedOverlay,
@@ -219,6 +232,23 @@ export function EditorPropertiesPanel({
   appliedLogo,
   editLogo,
 }: Props) {
+  const { locale } = useLocale()
+  const t = (vi: string, en: string) => localize(locale, vi, en)
+  const speakerProfiles = React.useMemo(() => resolvedSpeakerProfiles(segments, settings, locale), [segments, settings, locale])
+  const selectedSpeaker = selected?.speaker
+    ? speakerProfiles.find((profile) => profile.id === selected.speaker)
+    : undefined
+  // OCR/cover watermarks are persisted as overlays for timing, but their box
+  // is not a caption bbox. Keep this distinction here as well as on canvas.
+  const selectedIsWatermark = Boolean(
+    selectedOverlay && (
+      selectedOverlay.watermarkSource
+      || selectedOverlay.id === 'auto-watermark-ai-generated'
+      || selectedOverlay.id === 'auto-watermark-static-logo'
+    ),
+  )
+  // Kept only so existing state remains safe during editor-session restoration.
+  const [previewRunSec, setPreviewRunSec] = React.useState(() => Math.max(5, Number(settings.previewSec) || 30))
   const PROP_TABS: { key: PropTab; label: string; icon: React.ReactNode; hidden?: boolean }[] = [
     {
       key: 'caption', label: 'Phụ đề',
@@ -233,11 +263,11 @@ export function EditorPropertiesPanel({
       icon: <TabSvg><path d="M3 14h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a9 9 0 0 1 18 0v7a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3" /></TabSvg>,
     },
     {
-      key: 'mask', label: 'Vùng che chữ',
+      key: 'mask', label: selectedIsWatermark ? 'Vùng che logo' : 'Vùng che chữ',
       icon: <TabSvg><rect x="4" y="4" width="16" height="16" rx="1" strokeDasharray="3 3" /></TabSvg>,
     },
     {
-      key: 'overlay', label: logoDraft || selectedOverlay?.kind === 'logo' ? 'Logo / Watermark' : 'Text overlay', hidden: !selectedOverlay && !logoDraft,
+      key: 'overlay', label: logoDraft || (selectedOverlay?.kind === 'logo' && !selectedIsWatermark) ? 'Logo' : 'Text overlay', hidden: !selectedOverlay && !logoDraft,
       icon: <TabSvg><path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" /></TabSvg>,
     },
   ]
@@ -260,7 +290,7 @@ export function EditorPropertiesPanel({
                               : 'text-muted-foreground hover:bg-accent/60 hover:text-foreground',
                           )}
                           onClick={() => {
-                            if (tab.key === 'overlay' && appliedLogo && !logoDraft) editLogo(appliedLogo.logoSource ?? 'text')
+                            if (tab.key === 'overlay' && appliedLogo && !logoDraft && !selectedIsWatermark) editLogo(appliedLogo.logoSource ?? 'text')
                             else setPropTab(tab.key)
                           }}
                           onPointerDown={() => {
@@ -280,6 +310,63 @@ export function EditorPropertiesPanel({
                             ? `${PROP_TABS.find((t) => t.key === effectivePropTab)?.label} — Đoạn #${String(selected.index).padStart(2, '0')}`
                             : `${PROP_TABS.find((t) => t.key === effectivePropTab)?.label ?? 'Thuộc tính'} — Tất cả`}
                         </div>
+
+                        {(effectivePropTab as string) === 'workflow' && (
+                          <section className="space-y-3">
+                            <p className="text-[11px] leading-snug text-muted-foreground">{t('Chạy nhận dạng, dịch, lồng tiếng và xuất video ngay trong editor.', 'Run recognition, translation, dubbing, and export directly in the editor.')}</p>
+                            <div className="grid grid-cols-2 gap-2">
+                              <PropLabel label={t('Nhận dạng', 'Recognition')}>
+                                <select className="h-8 w-full rounded-md border border-border bg-background px-2 text-xs" value={settings.engine} disabled={busy} onChange={(event) => onSettings({ ...settings, engine: event.target.value as ProjectSettings['engine'] })}>
+                                  <option value="whisper">Whisper</option><option value="paddleocr">OCR</option><option value="subtitle">SRT</option>
+                                </select>
+                              </PropLabel>
+                              <PropLabel label={t('Công cụ dịch', 'Translator')}>
+                                <select className="h-8 w-full rounded-md border border-border bg-background px-2 text-xs" value={settings.translator} disabled={busy} onChange={(event) => onSettings({ ...settings, translator: event.target.value as ProjectSettings['translator'] })}>
+                                  {(['google', 'mymemory', 'tiktok', 'ollama', 'openai', 'gemini', 'deepseek', 'openrouter', 'grok', 'nvidia'] as const).map((item) => <option key={item} value={item}>{item}</option>)}
+                                </select>
+                              </PropLabel>
+                              <PropLabel label={t('Ngôn ngữ gốc', 'Source language')}>
+                                <select className="h-8 w-full rounded-md border border-border bg-background px-2 text-xs" value={settings.sourceLang} disabled={busy} onChange={(event) => onSettings({ ...settings, sourceLang: event.target.value })}>
+                                  <option value="auto">{t('Tự động', 'Auto')}</option><option value="zh">中文</option><option value="en">English</option><option value="ja">日本語</option><option value="ko">한국어</option><option value="vi">Tiếng Việt</option>
+                                </select>
+                              </PropLabel>
+                              <PropLabel label={t('Dịch sang', 'Translate to')}>
+                                <select className="h-8 w-full rounded-md border border-border bg-background px-2 text-xs" value={settings.targetLang} disabled={busy} onChange={(event) => onSettings({ ...settings, targetLang: event.target.value })}>
+                                  <option value="vi">Tiếng Việt</option><option value="en">English</option><option value="zh">中文</option><option value="ja">日本語</option><option value="ko">한국어</option><option value="none">{t('Không dịch', 'No translation')}</option>
+                                </select>
+                              </PropLabel>
+                            </div>
+                            <div className="rounded-md border border-border p-2">
+                              <div className="flex items-center justify-between gap-2"><b className="text-xs text-foreground">{t('Phạm vi chạy', 'Run range')}</b><input className="h-7 w-16 rounded border border-border bg-background px-1.5 text-right text-xs" type="number" min={5} max={3600} value={previewRunSec} disabled={busy} aria-label={t('Số giây preview', 'Preview seconds')} onChange={(event) => setPreviewRunSec(Math.max(5, Math.min(3600, Number(event.target.value) || 5)))} /></div>
+                              <div className="mt-2 grid grid-cols-2 gap-1.5">
+                                <button type="button" disabled={busy || !onRunPipeline} className="rounded-md border border-border px-2 py-2 text-xs font-medium hover:bg-accent disabled:opacity-50" onClick={() => { const next = { ...settings, previewSec: previewRunSec }; onSettings(next); void onRunPipeline?.(previewRunSec, next) }}>{t('Chạy preview', 'Run preview')}</button>
+                                <button type="button" disabled={busy || !onRunPipeline} className="rounded-md bg-primary px-2 py-2 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50" onClick={() => void onRunPipeline?.(0, settings)}>{t('Chạy toàn video', 'Run full video')}</button>
+                              </div>
+                              {busy && <div className="mt-2 flex items-center justify-between gap-2 text-[11px] text-muted-foreground"><span className="min-w-0 truncate">{jobStep || t('Đang xử lý', 'Processing')} · {Math.round(jobProgress || 0)}%</span>{onCancel && <button type="button" className="shrink-0 text-xs font-medium text-destructive hover:underline" onClick={onCancel}>{t('Hủy', 'Cancel')}</button>}</div>}
+                            </div>
+                            <div className="grid grid-cols-2 gap-1.5">
+                              <button type="button" disabled={busy || segments.length === 0 || !onDub} className="rounded-md border border-primary/40 bg-primary/10 px-2 py-2 text-xs font-medium text-primary hover:bg-primary/20 disabled:opacity-50" onClick={() => void onDub?.()}>{settings.speakerDiarization ? t('Tạo TTS theo vai', 'Generate TTS by role') : t('Tạo TTS', 'Generate TTS')}</button>
+                              <button type="button" disabled={busy} className="rounded-md border border-border px-2 py-2 text-xs font-medium hover:bg-accent disabled:opacity-50" onClick={onOpenExport}>{t('Xuất video', 'Export video')}</button>
+                            </div>
+                          </section>
+                        )}
+
+                        {(effectivePropTab as string) === 'speakers' && (
+                          <section className="space-y-2">
+                            {speakerProfiles.length === 0 ? <p className="py-3 text-center text-[11px] leading-snug text-muted-foreground">{t('Chưa có người nói. Bật Tách người nói ở tab Âm thanh rồi chạy Nhận dạng & dịch.', 'No speakers yet. Enable speaker separation in Audio, then run recognition and translation.')}</p> : <>
+                              <p className="text-[11px] text-muted-foreground">{locale === 'en' ? `${speakerProfiles.length} roles detected` : `Đã nhận ${speakerProfiles.length} vai`}</p>
+                              {speakerProfiles.map((profile) => {
+                                const owned = segments.filter((segment) => segment.speaker === profile.id)
+                                const seconds = owned.reduce((sum, segment) => sum + Math.max(0, segment.end - segment.start), 0)
+                                return <div key={profile.id} className="space-y-1.5 rounded-md border border-border bg-background p-2" style={{ borderLeft: `4px solid ${profile.color}` }}>
+                                  <div className="flex gap-1.5"><input type="color" className="size-8 shrink-0 rounded border border-border bg-transparent p-0.5" value={profile.color} disabled={busy} aria-label={`${t('Màu', 'Color')} ${profile.name}`} onChange={(event) => onUpdateSpeakerProfile(profile.id, { color: event.target.value })} /><input className="min-w-0 flex-1 rounded-md border border-border bg-background px-2 text-xs font-medium" value={profile.name} list={`speaker-role-${profile.id}`} disabled={busy} aria-label={`${t('Tên', 'Name')} ${profile.id}`} onChange={(event) => onUpdateSpeakerProfile(profile.id, { name: event.target.value })} /><datalist id={`speaker-role-${profile.id}`}>{speakerRoleOptions(locale).map((role) => <option key={role} value={role} />)}</datalist></div>
+                                  <select className="h-8 w-full rounded-md border border-border bg-background px-2 text-[11px]" value={profile.voice || ''} disabled={busy} onChange={(event) => onUpdateSpeakerProfile(profile.id, { voice: event.target.value })}><option value="">{t('Giọng mặc định', 'Default voice')}</option>{voices.map((voice) => <option key={voice.id} value={voice.id}>{voice.name}</option>)}</select>
+                                  <div className="flex justify-between text-[10px] text-muted-foreground"><span>{owned.length} {t('đoạn', 'segments')}</span><span>{formatTimecode(seconds)}</span></div>
+                                </div>
+                              })}
+                            </>}
+                          </section>
+                        )}
 
                         {effectivePropTab === 'caption' && selected && (
                           <>
@@ -846,6 +933,26 @@ export function EditorPropertiesPanel({
 
                         {effectivePropTab === 'audio' && (
                           <>
+                            <section className="space-y-2 border-b border-border pb-2" aria-label={t('Thiết lập tách người nói', 'Speaker separation settings')}>
+                              <label className="flex cursor-pointer items-center justify-between gap-3 text-xs">
+                                <span className="min-w-0"><b className="block text-foreground">{t('Tách người nói', 'Separate speakers')}</b><span className="block pt-0.5 text-[10px] leading-snug text-muted-foreground">{t('Phân vai và dùng giọng riêng cho từng người.', 'Assign roles and an individual voice to each speaker.')}</span></span>
+                                <input type="checkbox" className="size-4 shrink-0 accent-primary" checked={Boolean(settings.speakerDiarization)} disabled={busy || settings.engine !== 'whisper'} aria-label={t('Bật tách người nói', 'Enable speaker separation')} onChange={(event) => onSettings({ ...settings, speakerDiarization: event.target.checked })} />
+                              </label>
+                              {settings.engine !== 'whisper' && <p className="text-[10px] text-amber-700 dark:text-amber-300">{t('Chỉ khả dụng khi nhận dạng bằng Whisper.', 'Available only with Whisper recognition.')}</p>}
+                              {settings.speakerDiarization && settings.engine === 'whisper' && (
+                                <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 border-t border-border pt-2 text-[11px]">
+                                  <span className="text-foreground">{t('Số người nói', 'Speaker count')}</span>
+                                  <select className="h-7 rounded border border-border bg-background px-1.5 text-[11px]" value={settings.speakerCount || 0} disabled={busy} aria-label={t('Số người nói', 'Speaker count')} onChange={(event) => onSettings({ ...settings, speakerCount: Number(event.target.value) })}>
+                                    <option value={0}>{t('Tự phát hiện', 'Auto-detect')}</option>
+                                    {[2, 3, 4, 5, 6, 7, 8].map((count) => <option key={count} value={count}>{locale === 'en' ? `${count} speakers` : `${count} người`}</option>)}
+                                  </select>
+                                  <span className="text-foreground">{t('Màu phụ đề theo vai', 'Caption color by role')}</span>
+                                  <input type="checkbox" className="size-4 justify-self-end accent-primary" checked={Boolean(settings.speakerCaptionColors)} disabled={busy} aria-label={t('Màu phụ đề theo vai', 'Caption color by role')} onChange={(event) => onSettings({ ...settings, speakerCaptionColors: event.target.checked })} />
+                                  <button type="button" className="col-span-2 justify-self-start text-[11px] font-medium text-primary hover:underline" onClick={onOpenProjectSpeakers}>{t('Quản lý vai và giọng →', 'Manage roles and voices →')}</button>
+                                </div>
+                              )}
+                              <p className="text-[10px] leading-snug text-muted-foreground">{t('Đổi thiết lập sẽ áp dụng khi nhận dạng lại.', 'Setting changes apply when recognition runs again.')}</p>
+                            </section>
                             <div className="space-y-2 pb-2 border-b border-border">
                               <label className="flex items-center justify-between gap-2 text-xs cursor-pointer">
                                 <span className="font-medium text-foreground">Lọc âm thanh gốc</span>
@@ -952,15 +1059,49 @@ export function EditorPropertiesPanel({
 
                             {/* Clip lồng tiếng + giọng — 1 đoạn hoặc tất cả */}
                             <div className="space-y-2 pb-2 border-b border-border">
+                              {selected && speakerProfiles.length > 0 && (
+                                <PropLabel label={t('Người nói', 'Speaker')}>
+                                  <div className="flex min-w-0 items-center gap-1.5">
+                                    <span className="size-3 shrink-0 rounded-full border border-white/50" style={{ background: selectedSpeaker?.color || 'var(--muted)' }} />
+                                    <select
+                                      className="min-w-0 flex-1 rounded-md border border-border bg-background px-2 py-1.5 text-xs"
+                                      value={selected.speaker || ''}
+                                      disabled={busy}
+                                      onChange={(event) => {
+                                        const profile = speakerProfiles.find((item) => item.id === event.target.value)
+                                        void editSegment({
+                                          ...selected,
+                                          speaker: event.target.value,
+                                          ...(profile?.voice ? { voice: profile.voice } : {}),
+                                          audioFile: undefined,
+                                          audioUrl: undefined,
+                                          audioDuration: undefined,
+                                        })
+                                      }}
+                                    >
+                                      <option value="">{t('Chưa gán', 'Unassigned')}</option>
+                                      {speakerProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
+                                    </select>
+                                  </div>
+                                </PropLabel>
+                              )}
                               <PropLabel label="Clip lồng tiếng">
                                 <span className="text-xs text-muted-foreground">
                                   {selected
                                     ? `#${String(selected.index).padStart(2, '0')} · ${(selected.audioDuration ?? 0).toFixed(2)}s · slot ${(selected.end - selected.start).toFixed(2)}s`
-                                    : `Tất cả · ${segments.filter((s) => segmentHasDub(s)).length} đoạn bật TTS`}
+                                    : settings.speakerDiarization
+                                      ? `${t('Theo vai', 'By role')} · ${speakerProfiles.length} ${t('vai', 'roles')} · ${segments.filter((s) => segmentHasDub(s)).length} ${t('đoạn TTS', 'TTS segments')}`
+                                      : `${t('Tất cả', 'All')} · ${segments.filter((s) => segmentHasDub(s)).length} ${t('đoạn bật TTS', 'segments with TTS enabled')}`}
                                 </span>
                               </PropLabel>
-                              <PropLabel label="Giọng đọc">
+                              <PropLabel label={settings.speakerDiarization && !selected ? t('Giọng đọc theo vai', 'Voice by role') : t('Giọng đọc', 'Voice')}>
                                 <div className="flex gap-1.5 items-stretch">
+                                  {settings.speakerDiarization && !selected ? (
+                                    <div className="flex w-full gap-1.5">
+                                      <button type="button" className="min-w-0 flex-1 rounded-md border border-border px-2 py-1.5 text-[11px] font-medium text-primary hover:bg-accent" onClick={onOpenProjectSpeakers}>{t('Quản lý vai/giọng', 'Manage roles/voices')}</button>
+                                      <button type="button" className="shrink-0 rounded-md border border-primary/40 bg-primary/10 px-2.5 py-1.5 text-[11px] font-medium text-primary hover:bg-primary/20 disabled:opacity-50" disabled={busy || !onDub || segments.length === 0} title={t('Tạo TTS bằng giọng đã gán cho từng vai', 'Generate TTS using the voice assigned to each role')} onClick={() => void onDub?.()}>{busy && jobStep === 'dub' ? `${Math.round(jobProgress || 0)}%` : t('Tạo TTS theo vai', 'Generate TTS by role')}</button>
+                                    </div>
+                                  ) : <>
                                   <select
                                     className="min-w-0 flex-1 rounded-md border border-border bg-background px-2 py-1.5 text-xs"
                                     value={
@@ -993,6 +1134,39 @@ export function EditorPropertiesPanel({
                                       <option key={v.id} value={v.id}>{v.name}</option>
                                     ))}
                                   </select>
+                                  {selected?.speaker && (
+                                    <button
+                                      type="button"
+                                      className="shrink-0 rounded-md border border-border px-2 py-1.5 text-[11px] hover:bg-accent disabled:opacity-50"
+                                      disabled={busy}
+                                      title={locale === 'en' ? `Assign this voice to every ${selectedSpeaker?.name || selected.speaker} segment` : `Gán giọng này cho mọi đoạn của ${selectedSpeaker?.name || selected.speaker}`}
+                                      onClick={() => {
+                                        const voice = selected.voice || settings.defaultVoice
+                                        const speaker = selected.speaker
+                                        if (!speaker || !voice) return
+                                        pushHistory()
+                                        void onSegmentsReplace(segments.map((s) => s.speaker === speaker ? {
+                                          ...s, voice, audioFile: undefined, audioUrl: undefined, audioDuration: undefined,
+                                        } : s))
+                                        onSettings({
+                                          ...settings,
+                                          speakerVoices: { ...(settings.speakerVoices || {}), [speaker]: voice },
+                                          speakerProfiles: {
+                                            ...(settings.speakerProfiles || {}),
+                                            [speaker]: {
+                                              id: speaker,
+                                              name: selectedSpeaker?.name || speaker,
+                                              color: selectedSpeaker?.color || '#0ea5a8',
+                                              voice,
+                                            },
+                                          },
+                                        })
+                                        if (onDub) queueMicrotask(() => void onDub())
+                                      }}
+                                    >
+                                      {t('Áp dụng cho vai', 'Apply to speaker')}
+                                    </button>
+                                  )}
                                   {!selected && (
                                     <button
                                       type="button"
@@ -1028,6 +1202,7 @@ export function EditorPropertiesPanel({
                                         : 'Tạo TTS tất cả'}
                                     </button>
                                   )}
+                                  </>}
                                 </div>
                               </PropLabel>
                               {selected && segmentHasDub(selected) && (
@@ -1277,7 +1452,29 @@ export function EditorPropertiesPanel({
                           </>
                         )}
 
-                        {effectivePropTab === 'mask' && (
+                        {effectivePropTab === 'mask' && selectedIsWatermark && selectedOverlay && (
+                          <section className="space-y-3" aria-label="Watermark bbox">
+                            <div className="rounded-md border border-teal-400/40 bg-teal-500/5 p-2 text-[11px] leading-relaxed text-muted-foreground">
+                              <p className="font-medium text-foreground">Vùng che logo</p>
+                              <p>Khung này chỉ áp dụng cho logo/OCR đang chọn. Không làm thay đổi bbox của phụ đề.</p>
+                            </div>
+                            <div className="grid grid-cols-2 gap-2">
+                              <NumField label="X" value={selectedOverlay.x} disabled={busy} onCommit={(x) => editOverlay({ ...selectedOverlay, x: Math.round(Math.max(0, Math.min(sourceWidth - selectedOverlay.w, x))) })} />
+                              <NumField label="Y" value={selectedOverlay.y} disabled={busy} onCommit={(y) => editOverlay({ ...selectedOverlay, y: Math.round(Math.max(0, Math.min(sourceHeight - selectedOverlay.h, y))) })} />
+                              <NumField label="Rộng" value={selectedOverlay.w} disabled={busy} onCommit={(w) => editOverlay({ ...selectedOverlay, w: Math.round(Math.max(12, Math.min(sourceWidth - selectedOverlay.x, w))) })} />
+                              <NumField label="Cao" value={selectedOverlay.h} disabled={busy} onCommit={(h) => editOverlay({ ...selectedOverlay, h: Math.round(Math.max(12, Math.min(sourceHeight - selectedOverlay.y, h))) })} />
+                            </div>
+                            <div className="grid grid-cols-2 gap-2">
+                              <NumField label="Bắt đầu" value={selectedOverlay.start} disabled={busy} step={0.1} formatDisplay={formatTimecode} parseDisplay={parseTimecode} onCommit={(start) => editOverlay({ ...selectedOverlay, start: Math.max(0, Math.min(selectedOverlay.end - 0.04, start)) })} />
+                              <NumField label="Kết thúc" value={selectedOverlay.end} disabled={busy} step={0.1} formatDisplay={formatTimecode} parseDisplay={parseTimecode} onCommit={(end) => editOverlay({ ...selectedOverlay, end: Math.min(timelineDuration, Math.max(selectedOverlay.start + 0.04, end)) })} />
+                            </div>
+                            <button type="button" className="w-full rounded-md border border-destructive/50 px-3 py-2 text-xs text-destructive hover:bg-destructive/10" disabled={busy} onClick={() => { onOverlayDelete(selectedOverlay.id); setSelectedOverlayId(null) }}>
+                              Xóa vùng che logo
+                            </button>
+                          </section>
+                        )}
+
+                        {effectivePropTab === 'mask' && !selectedIsWatermark && (
                           <EditorMaskPanel
                             busy={busy}
                             settings={settings}

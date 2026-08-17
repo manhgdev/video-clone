@@ -4,6 +4,10 @@ python-multipart>=0.0.12
 faster-whisper>=1.1.0
 httpx>=0.27.0
 rapidocr-onnxruntime>=1.3.20
+# Offline multi-speaker diarization (models live in data/models/pyannote).
+sherpa-onnx>=1.12.0
+sherpa-onnx-bin>=1.12.0
+soundfile>=0.12.1
 # Optional Vietnamese local TTS (ONNX CPU) — https://github.com/pnnbao97/VieNeu-TTS
 # pip install vieneu onnxruntime soundfile soxr sea-g2p perth
 # (gradio optional — only for upstream web UI)

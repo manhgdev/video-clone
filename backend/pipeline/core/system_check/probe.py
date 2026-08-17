@@ -138,6 +138,7 @@ _AI_RUNTIME_MODULES = (
     "transformers",
     "vieneu",
     "soundfile",
+    "sherpa_onnx",
     "cffi",
 )
 

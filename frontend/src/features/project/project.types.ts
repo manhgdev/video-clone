@@ -36,6 +36,8 @@ export type Segment = {
   source: string
   translation: string
   voice: string
+  /** Nhãn người nói do diarization tạo, ví dụ SPEAKER_00. */
+  speaker?: string
   audioUrl?: string
   audioFile?: string
   audioDuration?: number
@@ -51,6 +53,23 @@ export type Segment = {
   /** CapCut Alt+G compound shell — children giữ caption+TTS gốc. */
   isCompound?: boolean
   compoundChildren?: Segment[]
+}
+
+export type SpeakerProfile = {
+  id: string
+  name: string
+  color: string
+  voice: string
+}
+
+export type ProjectMediaAsset = {
+  id: string
+  name: string
+  kind: 'video' | 'audio' | 'image' | 'srt'
+  file: string
+  mime: string
+  duration?: number
+  cueCount?: number
 }
 
 /** `inpaint` is the high-quality export path used by automatic watermark removal.
@@ -117,6 +136,14 @@ export type ProjectSettings = {
   ollamaLocalTier: 'fast' | 'balanced' | 'quality'
   matchDuration: 'natural' | 'stretch' | 'none' | 'preferVideo'
   defaultVoice: string
+  /** Tách người nói sau Whisper và gán giọng TTS theo từng speaker. */
+  speakerDiarization?: boolean
+  /** 0 = tự phát hiện. */
+  speakerCount?: number
+  speakerVoices?: Record<string, string>
+  speakerProfiles?: Record<string, SpeakerProfile>
+  /** Dùng màu profile speaker cho chữ preview/export. */
+  speakerCaptionColors?: boolean
   /** true khi bấm Lồng tiếng — server xóa cache TTS và gen lại */
   forceTts?: boolean
   /**

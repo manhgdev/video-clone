@@ -112,6 +112,8 @@ _AI_RUNTIME_PACKAGES = (
     "pyyaml",
     "sea-g2p",
     "soundfile",
+    "sherpa-onnx>=1.12.0",
+    "sherpa-onnx-bin>=1.12.0",
     "cffi",
     "soxr",
     "httpx",
@@ -121,6 +123,7 @@ _AI_RUNTIME_PACKAGES = (
 
 # 3 nhóm riêng — mỗi nhóm cài 1 pip call với --no-deps, có header log riêng.
 _PKG_WHISPER = ("faster-whisper>=1.1.0", "soundfile", "cffi", "pycparser", "soxr", "tokenizers")
+_PKG_DIARIZATION = ("sherpa-onnx>=1.12.0", "sherpa-onnx-bin>=1.12.0", "soundfile")
 _PKG_OCR     = ("rapidocr-onnxruntime>=1.3.20", "pillow", "opencv-python-headless<5.0")
 _PKG_VIENEU  = (
     "huggingface-hub>=0.34", "httpx", "pyyaml",
@@ -135,6 +138,36 @@ _TORCH_ROCM_INDEX = "https://download.pytorch.org/whl/rocm6.2"
 _ORT_GPU_CUDA12_INDEX = "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/"
 _ORT_GPU_PKG = "onnxruntime-gpu==1.19.2"
 _ORT_DIRECTML_PKG = "onnxruntime-directml"
+_SHERPA_CUDA_SPEC = "sherpa-onnx==1.13.5+cuda12.cudnn9"
+_SHERPA_CUDA_INDEX = "https://k2-fsa.github.io/sherpa/onnx/cuda.html"
+
+
+def _sherpa_cuda_ready(python: Path | str = sys.executable) -> bool:
+    if _runtime_ort_accel() != "cuda":
+        return True
+    try:
+        proc = subprocess.run(
+            [str(python), "-c", "import sherpa_onnx; print(sherpa_onnx.__version__)"],
+            capture_output=True, text=True, timeout=30,
+        )
+        return proc.returncode == 0 and ("+cuda" in proc.stdout.lower())
+    except Exception:
+        return False
+
+
+def _install_sherpa_cuda(python: Path | str, uv: str | None = None) -> None:
+    if _runtime_ort_accel() != "cuda" or _sherpa_cuda_ready(python):
+        return
+    if _install_log_fn:
+        _install_log_fn("\n=== Speaker diarization GPU (Sherpa CUDA 12) ===\n")
+    cmd = (
+        [uv, "pip", "install", "--python", str(python), "--force-reinstall", _SHERPA_CUDA_SPEC, "-f", _SHERPA_CUDA_INDEX]
+        if uv else
+        [str(python), "-m", "pip", "install", "--force-reinstall", _SHERPA_CUDA_SPEC, "-f", _SHERPA_CUDA_INDEX]
+    )
+    proc = _pip_stream(cmd, timeout=1800)
+    if proc.returncode:
+        raise RuntimeError("[Sherpa CUDA] " + (proc.stderr or proc.stdout)[-3000:])
 
 
 def _runtime_ort_accel() -> str:
@@ -156,6 +189,7 @@ _MODULE_TO_PACKAGE: dict[str, str] = {
     "transformers": "transformers>=4.46.0",
     "vieneu": "vieneu>=3.2.0",
     "soundfile": "soundfile",
+    "sherpa_onnx": "sherpa-onnx>=1.12.0",
     "cffi": "cffi",
 }
 
@@ -356,10 +390,14 @@ def ensure_torchaudio() -> None:
 
 def install_ai_runtime() -> dict[str, Any]:
     """Cài nhóm ASR/OCR nặng vào venv riêng của bản desktop."""
+    from pipeline.asr.speaker import ensure_diarization_models
+    from pipeline.core.config import DATA
+
+    ensure_diarization_models(DATA / "models" / "pyannote", log=_install_log_fn)
     if getattr(sys, "frozen", False):
         ok, detail = _runtime_venv_fast()
         cv2_ok = ok and _runtime_mod_ok("cv2")[0]
-        if ok and cv2_ok:
+        if ok and cv2_ok and (_runtime_ort_accel() != "cuda" or _sherpa_cuda_ready(_video_clone_home() / ".venv-runtime" / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python"))):
             return {
                 "ok": True,
                 "message": "Gói AI đã sẵn sàng",
@@ -380,7 +418,7 @@ def install_ai_runtime() -> dict[str, Any]:
             )
         missing = [name for name in _AI_RUNTIME_MODULES if not _mod_ok(name)[0]]
         needs_torch = _runtime_torch_needs_install()
-    if not missing and not needs_torch:
+    if not missing and not needs_torch and _sherpa_cuda_ready():
         return {
             "ok": True,
             "message": "Gói AI đã sẵn sàng",
@@ -422,6 +460,8 @@ def install_ai_runtime() -> dict[str, Any]:
         _PKG_MOD: dict[str, str] = {
             "faster-whisper": "faster_whisper",
             "soundfile": "soundfile",
+            "sherpa-onnx": "sherpa_onnx",
+            "sherpa-onnx-bin": "sherpa_onnx_bin",
             "cffi": "cffi",
             "pycparser": "pycparser",
             "soxr": "soxr",
@@ -463,6 +503,10 @@ def install_ai_runtime() -> dict[str, Any]:
 
         # Nhóm 1 — Whisper
         _pip_group("Whisper (ASR)", *_PKG_WHISPER)
+
+        # Nhóm 1b — speaker diarization, dùng chung audio 16 kHz của Whisper.
+        _pip_group("Speaker diarization", *_PKG_DIARIZATION)
+        _install_sherpa_cuda(sys.executable)
 
         # Nhóm 2 — OCR
         _pip_group("OCR", *_PKG_OCR)
@@ -529,6 +573,8 @@ def install_ai_runtime() -> dict[str, Any]:
                 proc_provider = _pip_stream(provider_cmd)
                 if proc_provider.returncode:
                     raise RuntimeError((proc_provider.stderr or proc_provider.stdout)[-3000:])
+            if getattr(sys, "frozen", False):
+                _install_sherpa_cuda(py, uv)
             # transformers cài riêng --no-deps — tránh conflict tokenizers (không có version nào
             # hỗ trợ tokenizers>=0.23.1; --no-deps bỏ qua dep resolution hoàn toàn).
             if "transformers" in missing:

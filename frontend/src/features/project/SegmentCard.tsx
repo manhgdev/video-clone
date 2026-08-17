@@ -1,6 +1,7 @@
 import { memo, useEffect, useRef, useState } from 'react'
-import type { ProjectSettings, Segment } from '@/features/project/project.types'
+import type { ProjectSettings, Segment, SpeakerProfile } from '@/features/project/project.types'
 import { api } from '@/features/project/project.api'
+import { localize, useLocale } from '@/app/i18n'
 import { IconPlay, IconRefresh } from '@/shared/components/Icons'
 import './SegmentCard.css'
 
@@ -14,6 +15,7 @@ type Props = {
   videoUrl: string | null
   projectId: string | null
   onChange: (seg: Segment) => void
+  speakerProfiles?: SpeakerProfile[]
 }
 
 function fmt(t: number, precise = false) {
@@ -47,7 +49,10 @@ function SegmentCard({
   videoUrl,
   projectId,
   onChange,
+  speakerProfiles = [],
 }: Props) {
+  const { locale } = useLocale()
+  const t = (vi: string, en: string) => localize(locale, vi, en)
   const voice = !segment.voice || segment.voice === 'system' ? defaultVoice : segment.voice
   const sourceSafe = segment.source ?? ''
   const translationSafe = segment.translation ?? ''
@@ -252,7 +257,7 @@ function SegmentCard({
   }
 
   return (
-    <article className="seg">
+    <article className="seg" style={segment.speaker ? { borderLeft: `4px solid ${speakerProfiles.find((p) => p.id === segment.speaker)?.color || 'var(--primary)'}` } : undefined}>
       <div className="seg-body">
         <div className="seg-rail">
           <div className="idx-row">
@@ -261,6 +266,23 @@ function SegmentCard({
               {layoutBadge}
             </span>
           </div>
+          {segment.speaker && (
+            <select
+              className="speaker-segment-select"
+              aria-label={t('Người nói của đoạn', 'Segment speaker')}
+              value={segment.speaker}
+              onChange={(event) => {
+                const profile = speakerProfiles.find((item) => item.id === event.target.value)
+                onChange({
+                  ...segmentRef.current,
+                  speaker: event.target.value,
+                  ...(profile?.voice ? { voice: profile.voice, audioUrl: undefined, audioFile: undefined, audioDuration: undefined } : {}),
+                })
+              }}
+            >
+              {speakerProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
+            </select>
+          )}
           <span className="time">
             {(() => {
               const short = segment.end - segment.start < 1.0

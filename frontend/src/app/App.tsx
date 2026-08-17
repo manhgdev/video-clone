@@ -532,7 +532,7 @@ export default function App() {
     }
   }
 
-  async function onTranslateAll(runWindowSec = 0) {
+  async function onTranslateAll(runWindowSec = 0, settingsOverride?: ProjectSettings) {
     if (!projectId || status.running) return
     setExportUrl(null)
     // 0 = Dịch cả video (full); >0 = ▶ Preview Ns — tách khỏi ô settings.previewSec
@@ -560,7 +560,7 @@ export default function App() {
     })
     // previewSec = ô UI (giữ nguyên); runPreviewSec = cửa sổ lần này
     await api.run(projectId, {
-      ...settings,
+      ...(settingsOverride ?? settings),
       runPreviewSec: wc,
     })
     setStatus((s) => ({ ...s, running: true }))
@@ -767,7 +767,7 @@ export default function App() {
   return (
     <LocaleContext.Provider value={{ locale, setLocale }}>
     <LocaleTextSync />
-    <div className={editorOpen && appMode === 'clone' ? 'app app--editor' : 'app'}>
+    <div className="app">
       {!appUsable ? (
         <p className="cfg-boot-msg">
           {setupChecked
@@ -777,7 +777,7 @@ export default function App() {
             : 'Đang kết nối backend…'}
         </p>
       ) : null}
-      {appUsable && !licenseBlocked && !(editorOpen && appMode === 'clone') && (
+      {appUsable && !licenseBlocked && (
       <Header
         hardware={hw}
         dark={dark}
@@ -788,10 +788,11 @@ export default function App() {
           appMode === 'tts' ? () => setTtsSideOpen((o) => !o) : undefined
         }
         onModeChange={(m) => {
+          // Navigation is global, including inside Live Preview. Leaving Clone
+          // closes the editor first so the selected destination is visible.
+          if (editorOpen) setPreviewEditorOpen(false)
           setAppMode(m)
           setTtsSideOpen(false)
-          if (m === 'clone') return
-          setPreviewEditorOpen(false)
         }}
         onToggleTheme={() => setDark(d => !d)}
         locale={locale}
@@ -914,6 +915,8 @@ export default function App() {
           jobProgress={status.progress}
           jobMessage={status.message}
           onDub={onDub}
+          onRunPipeline={onTranslateAll}
+          onCancel={onCancel}
           onBack={() => setPreviewEditorOpen(false)}
           onChange={onSegmentChange}
           onSegmentsReplace={onSegmentsReplace}
@@ -1067,6 +1070,9 @@ export default function App() {
               })
             }}
             onChange={onSegmentChange}
+            settings={settings}
+            onSettings={onSettings}
+            onSegmentsReplace={onSegmentsReplace}
           />
         </main>
       </div>

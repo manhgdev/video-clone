@@ -79,6 +79,72 @@ _validate_segment_editor_fields = validate_segment_editor_fields
 _SEG_PRESERVE = SEG_PRESERVE
 
 
+class RetranscribeRangeIn(BaseModel):
+    start: float
+    end: float
+    sourceLang: str = "auto"
+
+
+@router.post("/api/projects/{project_id}/segments/retranscribe-range")
+def api_retranscribe_range(project_id: str, body: RetranscribeRangeIn):
+    """Run Whisper only on a selected timeline range and atomically replace overlaps."""
+    from pipeline.asr import asr_whisper
+    from pipeline.core.jobs import run_cmd
+
+    meta = load_meta(project_id)
+    if not meta:
+        raise HTTPException(404)
+    source = Path(str(meta.get("workVideo") or meta.get("videoPath") or ""))
+    if not source.is_file():
+        raise HTTPException(404, "Không tìm thấy video nguồn")
+    duration = max(0.0, ffprobe_duration(source))
+    start = max(0.0, min(float(body.start), duration))
+    end = max(start, min(float(body.end), duration))
+    if not math.isfinite(start) or not math.isfinite(end) or end - start < 0.15:
+        raise HTTPException(422, "Vùng nhận dạng phải dài ít nhất 0.15 giây")
+
+    cache_dir = ensure_layout(project_id) / "cache"
+    wav = cache_dir / f"retranscribe_{start:.3f}_{end:.3f}.wav"
+    set_status(project_id, step="asr", progress=10, message=f"Nhận dạng lại {start:.2f}–{end:.2f}s…", running=True)
+    try:
+        run_cmd(project_id, [
+            "ffmpeg", "-y", "-ss", f"{start:.6f}", "-t", f"{end - start:.6f}",
+            "-i", str(source), "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(wav),
+        ])
+        fresh = asr_whisper(wav, body.sourceLang or "auto", workers=0, project_id=project_id)
+        default_voice = str((meta.get("settings") or {}).get("defaultVoice") or "system")
+        for item in fresh:
+            item["start"] = start + max(0.0, float(item.get("start") or 0))
+            item["end"] = min(end, start + max(0.05, float(item.get("end") or 0)))
+            item["translation"] = ""
+            item["voice"] = default_voice
+
+        result: dict[str, Any] = {}
+        def apply(current: dict) -> list[dict]:
+            old = list(current.get("segments") or [])
+            kept = [s for s in old if float(s.get("end") or 0) <= start or float(s.get("start") or 0) >= end]
+            replaced = len(old) - len(kept)
+            merged = sorted([*kept, *fresh], key=lambda s: (float(s.get("start") or 0), float(s.get("end") or 0)))
+            for index, seg in enumerate(merged):
+                seg["index"] = index
+                seg.setdefault("id", f"seg-{uuid.uuid4().hex[:12]}")
+            current["segments"] = merged
+            current.pop("timelineBaseline", None)
+            result.update(replaced=replaced, inserted=len(fresh))
+            return merged
+        segments = mutate_meta(project_id, apply)
+        set_status(project_id, step="asr", progress=100, message=f"Đã nhận dạng lại {len(fresh)} đoạn", running=False)
+        return {"segments": segments, **result}
+    except Exception as exc:
+        set_status(project_id, step="asr", progress=0, message=f"Nhận dạng lại lỗi: {exc}", running=False)
+        raise HTTPException(500, f"Nhận dạng lại thất bại: {exc}") from exc
+    finally:
+        try:
+            wav.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def _validate_segment_editor_fields(body: SegmentIn, meta: dict) -> None:
     if body.videoSpeed is not None:
         if not math.isfinite(body.videoSpeed) or not 0.5 <= body.videoSpeed <= 2.0:
@@ -396,4 +462,3 @@ def api_uncompound(project_id: str, seg_id: str):
     meta["segments"] = next_segs
     apply_meta_patch(project_id, {"segments": next_segs}, remove=("timelineBaseline",))
     return {"ok": True, "segments": next_segs, "restored": len(restored)}
-

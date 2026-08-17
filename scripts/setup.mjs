@@ -73,4 +73,23 @@ console.log('Cài backend dependencies...')
 run(venvPython, ['-m', 'pip', 'install', '--upgrade', 'pip'])
 run(venvPython, ['-m', 'pip', 'install', '-r', path.join(root, 'backend', 'requirements.txt')])
 
+const detectedAccel = spawnSync(venvPython, [
+  '-c',
+  'import sys; sys.path.insert(0, "backend"); from pipeline.core.media import detect_device; print(detect_device().get("accel", "cpu"))',
+], { cwd: root, encoding: 'utf8', shell: false }).stdout.trim()
+if ((process.platform === 'win32' || process.platform === 'linux') && detectedAccel === 'cuda') {
+  console.log('Phát hiện NVIDIA — cài Sherpa-ONNX CUDA 12 cho tách người nói...')
+  run(venvPython, [
+    '-m', 'pip', 'install', '--force-reinstall',
+    'sherpa-onnx==1.13.5+cuda12.cudnn9',
+    '-f', 'https://k2-fsa.github.io/sherpa/onnx/cuda.html',
+  ])
+}
+
+console.log('Tải model tách người nói...')
+run(venvPython, [
+  '-c',
+  'import sys; from pathlib import Path; sys.path.insert(0, "backend"); from pipeline.asr.speaker import ensure_diarization_models; ensure_diarization_models(Path("backend/data/models/pyannote"), log=print)',
+],)
+
 console.log('\nĐã cài xong. Chạy: npm run dev:all')

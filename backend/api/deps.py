@@ -70,6 +70,11 @@ class Settings(BaseModel):
     exportGif: bool = False
     exportGifRes: str = "240"
     forceTts: bool = False
+    speakerDiarization: bool = False
+    speakerCount: int = 0
+    speakerVoices: dict[str, str] = Field(default_factory=dict)
+    speakerProfiles: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    speakerCaptionColors: bool = False
 
 
 class SegmentIn(BaseModel):
@@ -80,6 +85,7 @@ class SegmentIn(BaseModel):
     source: str
     translation: str
     voice: str
+    speaker: str | None = None
     audioUrl: str | None = None
     audioFile: str | None = None
     audioDuration: float | None = None
@@ -269,6 +275,7 @@ class VoiceBulkMoveIn(BaseModel):
 
 # Field editor có thể bỏ sót khi PUT full list — giữ từ meta cũ theo id
 SEG_PRESERVE = (
+    "speaker",
     "audioUrl",
     "audioFile",
     "audioDuration",
