@@ -127,6 +127,28 @@ def preferred_torch_device(*, refresh: bool = False) -> TorchDevice:
     return device
 
 
+def local_ai_runtime_profile(*, refresh: bool = False) -> dict[str, object]:
+    """Single hardware decision used by local AI adapters.
+
+    Callers must consume this profile rather than choosing CUDA/MPS themselves.
+    It keeps Apple, NVIDIA, Windows/Linux CPU, and explicit environment
+    overrides on one shared decision path.
+    """
+    device = preferred_torch_device(refresh=refresh)
+    label = {
+        "cuda": "NVIDIA GPU",
+        "mps": "Apple GPU (Metal)",
+        "cpu": "CPU",
+    }[device]
+    return {
+        "device": device,
+        "label": label,
+        # GPU inference should not compete with the model itself for all CPU
+        # cores; CPU fallback keeps the runtime's normal auto thread count.
+        "cpuThreads": 2 if device != "cpu" else max(1, (os.cpu_count() or 4) - 1),
+    }
+
+
 def preferred_vieneu_backend() -> tuple[VieNeuBackend, str]:
     """(backend, device) for VieNeu — GPU when possible, else ONNX/CPU."""
     env = (os.environ.get("VIENEU_BACKEND") or "auto").strip().lower()

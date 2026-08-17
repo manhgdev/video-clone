@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
-from pipeline.asr import asr_paddleocr, asr_whisper
+from pipeline.asr import asr_paddleocr, hybrid_asr, asr_whisper
 from pipeline.export.burn import cover_and_burn
 from pipeline.core.config import DATA, PUBLIC_DATA
 from pipeline.core.jobs import Cancelled, begin_job, check_cancel, clear_job, short_cmd_error
@@ -39,6 +39,7 @@ from pipeline.core.project import (
     preview_tag,
     save_meta,
     set_status,
+    append_job_event,
     trans_cache_key,
     video_fingerprint,
 )
@@ -244,9 +245,13 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                         "Hoặc đổi Nhận dạng → Giọng nói (Whisper)."
                     )
             else:
-                w = adaptive_workers(
-                    int(settings.get("workers") or 0), kind="cpu", cap=16
-                )
+                engine = str(settings.get("engine") or "whisper")
+                # Legacy projects may still contain engine=sensevoice. Always
+                # migrate them to the one supported speech recognizer.
+                if engine == "sensevoice":
+                    engine = "whisper"
+                    settings["engine"] = engine
+                w = adaptive_workers(int(settings.get("workers") or 0), kind="cpu", cap=16)
                 set_status(
                     project_id,
                     step="asr",
@@ -255,12 +260,10 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                     running=True,
                 )
                 check_cancel(project_id)
-                segments = asr_whisper(
-                    wav,
-                    settings.get("sourceLang", "auto"),
-                    workers=w,
-                    project_id=project_id,
-                )
+                if float(ffprobe_duration(wav) or 0) > 55:
+                    segments = hybrid_asr(wav, engine, settings.get("sourceLang", "auto"), project_id=project_id, on_chunk=lambda index, rows: append_job_event(project_id, "ASR_CHUNK_READY", {"chunkId": index, "segments": rows}))
+                else:
+                    segments = asr_whisper(wav, settings.get("sourceLang", "auto"), workers=w, project_id=project_id)
                 if settings.get("speakerDiarization"):
                     from pipeline.asr.speaker import assign_speakers, diarize_audio
 
@@ -293,6 +296,8 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
 
             if not segments:
                 raise RuntimeError("Không nhận được đoạn thoại nào từ video.")
+
+            append_job_event(project_id, "ASR_CHUNK_READY", {"range": [0, float(ffprobe_duration(video) or 0)], "segments": segments})
 
             # Whisper/SRT timestamps describe speech, not the small batches of
             # text visible on a vertical video.  Split only true portrait input
@@ -455,6 +460,9 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                     segments[i]["translation"] = (tr or "").strip() or segments[i].get(
                         "translation"
                     ) or ""
+                    segments[i]["dubSubtitle"] = segments[i]["translation"]
+                    segments[i]["sourceSubtitle"] = str(segments[i].get("source") or "")
+                append_job_event(project_id, "TRANSLATION_CHUNK_READY", {"segmentIds": [str(segments[i].get("id") or "") for i in need_idx], "segments": [segments[i] for i in need_idx]})
             else:
                 set_status(
                     project_id,

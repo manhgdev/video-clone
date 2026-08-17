@@ -7,6 +7,7 @@ import {
   type MouseEvent as ReactMouseEvent,
 } from 'react'
 import Header, { type AppMode } from '@/shared/components/Header'
+import { IconVideo } from '@/shared/components/Icons'
 import ProgressPopup from '@/shared/components/ProgressPopup'
 import ProjectSidebar from '@/features/project/ProjectSidebar'
 import PipelineStepper from '@/features/project/PipelineStepper'
@@ -30,8 +31,8 @@ import { ExportSuccessModal } from '@/features/editor/ExportSuccessModal'
 import { api } from '@/features/project/project.api'
 import { expandSegmentsForList } from '@/features/project/expandCompound'
 import type { HardwareInfo, JobStatus, ProjectSettings, Step, TextOverlay } from '@/features/project/project.types'
-import { loadAppMode, persistAppMode } from '@/app/appMode'
-import { LocaleContext, LocaleTextSync, loadLocale, persistLocale, type AppLocale } from '@/app/i18n'
+import { appModeFromPath, appModePath, loadAppMode, persistAppMode } from '@/app/appMode'
+import { LocaleContext, LocaleTextSync, loadLocale, localizePipelineMessage, persistLocale, type AppLocale } from '@/app/i18n'
 import {
   applyDefaultVoice,
   asSegmentList,
@@ -104,7 +105,6 @@ export default function App() {
   const [status, setStatus] = useState<JobStatus>(idleStatus)
   /** App desktop: file đã trên máy — chỉ Xem / Mở thư mục */
   const [isDesktopApp, setIsDesktopApp] = useState(false)
-  const [previewEditorOpen, setPreviewEditorOpen] = useState(false)
   const [progressMinimized, setProgressMinimized] = useState(false)
   const [ttsSideOpen, setTtsSideOpen] = useState(false)
   const [clearingCache, setClearingCache] = useState(false)
@@ -238,7 +238,33 @@ export default function App() {
   // F5: giữ tab top-level (TTS / Film / …); editor preview không persist → không ép mode
   useEffect(() => {
     persistAppMode(appMode)
+    // Các thao tác nội bộ (ví dụ “Dùng trong Clone” từ Download) cũng đổi URL.
+    // replaceState tránh tạo một lịch sử giả; click tab vẫn dùng pushState ở dưới.
+    const destination = appModePath(appMode)
+    if (window.location.pathname !== destination) {
+      window.history.replaceState({ appMode }, '', destination)
+    }
   }, [appMode])
+
+  // Browser history cũng là một phần của navigation: link trực tiếp, Back/Forward
+  // và các tab ở Header luôn cùng một state thay vì chỉ dựa vào localStorage.
+  useEffect(() => {
+    const onPopState = () => {
+      const modeFromUrl = appModeFromPath(window.location.pathname)
+      if (modeFromUrl) setAppMode(modeFromUrl)
+    }
+    window.addEventListener('popstate', onPopState)
+    return () => window.removeEventListener('popstate', onPopState)
+  }, [])
+
+  const navigateToMode = (mode: AppMode) => {
+    const destination = appModePath(mode)
+    if (window.location.pathname !== destination) {
+      window.history.pushState({ appMode: mode }, '', destination)
+    }
+    setAppMode(mode)
+    setTtsSideOpen(false)
+  }
 
   useEffect(() => {
     api.getConfig()
@@ -390,7 +416,7 @@ export default function App() {
     bakedPreferVideoRef.current = false
     setBakedSpeed(1)
     setViewExportSrc(null)
-    setPreviewEditorOpen(false)
+    if (appMode === 'live-preview') setAppMode('clone')
     setStatus({ step: 'video', progress: 10, message: 'Đang tải video…', running: true })
     try {
       const res = await api.upload(file)
@@ -458,7 +484,7 @@ export default function App() {
       if (res.clearedSegments) {
         setSegments([])
         setOverlays([])
-        setPreviewEditorOpen(false)
+        if (appMode === 'live-preview') setAppMode('clone')
       } else {
         const dropCover = Boolean(res.clearedCovers)
         const dropTts = Boolean(res.clearedTts)
@@ -577,7 +603,9 @@ export default function App() {
       const snapped = snapshotEngineProfile({ ...prev, engine: prev.engine })
       out = applyEngineProfile(
         { ...snapped, ...next, engine: next.engine, engineProfiles: snapped.engineProfiles },
-        next.engine === 'paddleocr' || next.engine === 'subtitle' ? next.engine : 'whisper',
+        next.engine === 'paddleocr' || next.engine === 'subtitle'
+          ? next.engine
+          : 'whisper',
       )
     } else {
       out = snapshotEngineProfile(next)
@@ -708,7 +736,7 @@ export default function App() {
     document.body.classList.add('resizing-sidebar')
   }
 
-  const editorOpen = previewEditorOpen && !!videoUrl && !!projectId
+  const editorOpen = appMode === 'live-preview' && !!videoUrl && !!projectId
 
   async function editRenderedProject(id: string) {
     const switchVersion = ++projectSwitchRef.current
@@ -753,8 +781,7 @@ export default function App() {
     setExportUrl(!st.running && st.outputRel && (st.progress || 0) >= 100 ? `/api/projects/${id}/output` : null)
     setExportPath(!st.running && st.outputRel && (st.progress || 0) >= 100 ? st.outputRel : null)
     setViewExportSrc(null)
-    setAppMode('clone')
-    setPreviewEditorOpen(true)
+    setAppMode('live-preview')
   }
 
   // Chỉ sau Bắt đầu / đã lưu cổng — tránh Header+Modal+workspace cùng chiếm CSS grid → trắng.
@@ -787,13 +814,7 @@ export default function App() {
         onMenuClick={
           appMode === 'tts' ? () => setTtsSideOpen((o) => !o) : undefined
         }
-        onModeChange={(m) => {
-          // Navigation is global, including inside Live Preview. Leaving Clone
-          // closes the editor first so the selected destination is visible.
-          if (editorOpen) setPreviewEditorOpen(false)
-          setAppMode(m)
-          setTtsSideOpen(false)
-        }}
+        onModeChange={navigateToMode}
         onToggleTheme={() => setDark(d => !d)}
         locale={locale}
         onLocaleChange={setLocale}
@@ -872,7 +893,7 @@ export default function App() {
             setBakedSpeed(1)
             setHasBakedSpeed(false)
             setViewExportSrc(null)
-            setPreviewEditorOpen(false)
+            setAppMode('clone')
             setStatus({
               step: 'video',
               progress: 100,
@@ -913,11 +934,11 @@ export default function App() {
           busy={status.running}
           jobStep={status.step}
           jobProgress={status.progress}
-          jobMessage={status.message}
+          jobMessage={localizePipelineMessage(locale, status.message || '')}
           onDub={onDub}
           onRunPipeline={onTranslateAll}
           onCancel={onCancel}
-          onBack={() => setPreviewEditorOpen(false)}
+          onBack={() => navigateToMode('clone')}
           onChange={onSegmentChange}
           onSegmentsReplace={onSegmentsReplace}
           onPreviewRebaked={onPreviewRebaked}
@@ -929,6 +950,15 @@ export default function App() {
           onOverlayDelete={onOverlayDelete}
           onOverlaysReplace={onOverlaysReplace}
         />
+      ) : appMode === 'live-preview' ? (
+        <main className="live-preview-empty" aria-labelledby="live-preview-empty-title">
+          <div className="live-preview-empty-card">
+            <IconVideo size={32} />
+            <h1 id="live-preview-empty-title">Chưa có video để xem trước</h1>
+            <p>Mở hoặc tải video ở Clone Video rồi quay lại đây để chỉnh sửa theo timeline.</p>
+            <button type="button" onClick={() => navigateToMode('clone')}>Đi tới Clone Video</button>
+          </div>
+        </main>
       ) : (
       <div
         className="workspace"
@@ -980,7 +1010,7 @@ export default function App() {
               if (projectId) {
                 void api.saveSettings(projectId, settings).catch(() => { /* ignore */ })
               }
-              setPreviewEditorOpen(true)
+              navigateToMode('live-preview')
             }}
             onExport={onExport}
             canDub={
@@ -1003,8 +1033,8 @@ export default function App() {
               <h2>Kịch bản lồng tiếng</h2>
               <p className="status-line">
                 {status.running
-                  ? `${status.message || 'Đang xử lý…'} — ${Math.round(status.progress)}% (vẫn chạy, % có thể đứng lâu)`
-                  : status.message}
+                  ? `${localizePipelineMessage(locale, status.message || '') || (locale === 'en' ? 'Processing…' : 'Đang xử lý…')} — ${Math.round(status.progress)}% ${locale === 'en' ? '(still running; progress may pause)' : '(vẫn chạy, % có thể đứng lâu)'}`
+                  : localizePipelineMessage(locale, status.message || '')}
               </p>
             </div>
             <div className="meta">
@@ -1093,7 +1123,7 @@ export default function App() {
         onRevealFolder={() => {
           void onRevealOutput()
         }}
-        onOpenProject={() => { setExportSuccessOpen(false); setPreviewEditorOpen(true) }}
+        onOpenProject={() => { setExportSuccessOpen(false); navigateToMode('live-preview') }}
         videoSrc={viewExportSrc}
         message={status.message || ''}
         exportedTypes={lastExportedTypes}

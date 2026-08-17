@@ -88,6 +88,34 @@ from pipeline.orchestrate.export_overlays import build_text_overlay_cues
 from pipeline.orchestrate.tts_fit import assign_tts_fit_speeds
 
 
+def _color_adjusted_video(project_id: str, root: Path, video: Path, settings: dict[str, Any]) -> Path:
+    """Apply the same project color contract before every export path."""
+    adjust = settings.get("colorAdjust") if isinstance(settings.get("colorAdjust"), dict) else {}
+    bright = max(-100.0, min(100.0, float(adjust.get("brightness") or 0)))
+    contrast = max(-100.0, min(100.0, float(adjust.get("contrast") or 0)))
+    saturation = max(0.0, min(200.0, float(adjust.get("saturation") if adjust.get("saturation") is not None else 100)))
+    temp = max(-100.0, min(100.0, float(adjust.get("temperature") or 0)))
+    tint = max(-100.0, min(100.0, float(adjust.get("tint") or 0)))
+    lut_id = str(settings.get("lutAssetId") or "")
+    neutral = not any((bright, contrast, temp, tint)) and abs(saturation - 100.0) < 0.01 and not lut_id
+    if neutral:
+        return video
+    filters = [f"eq=brightness={bright / 100:.4f}:contrast={1 + contrast / 100:.4f}:saturation={saturation / 100:.4f}"]
+    if temp or tint:
+        filters.append(f"colorbalance=rs={temp / 100:.4f}:bs={-temp / 100:.4f}:gs={tint / 100:.4f}")
+    if lut_id:
+        asset = next((item for item in settings.get("mediaAssets", []) if isinstance(item, dict) and item.get("id") == lut_id), None)
+        # mediaAssets lives on meta in normal projects; caller may inject it below.
+        if asset and str(asset.get("file") or "").lower().endswith(".cube"):
+            lut = root / "assets" / str(asset["file"])
+            if lut.is_file():
+                filters.append("lut3d=file=" + str(lut).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'"))
+    out = root / "cache" / "color_pipeline.mp4"
+    from pipeline.core.jobs import run_cmd
+    run_cmd(project_id, ["ffmpeg", "-y", "-i", str(video), "-vf", ",".join(filters), "-map", "0:a?", "-c:v", "libx264", "-crf", "18", "-c:a", "copy", str(out)])
+    return out
+
+
 def _logo_mask_cue(
     meta: dict[str, Any],
     video: Path,
@@ -95,6 +123,9 @@ def _logo_mask_cue(
     project_id: str,
 ) -> dict[str, Any] | None:
     settings = meta.get("settings") or {}
+    # Color pipeline resolves LUTs from the project asset library without
+    # widening the public settings schema with raw filesystem paths.
+    settings = {**settings, "mediaAssets": meta.get("mediaAssets") or []}
     if not bool(settings.get("coverLogo", False)):
         return None
     detection = meta.get("logoDetection")
@@ -295,6 +326,15 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
     # giữ mốc nguồn ở đây sẽ làm bbox/caption/TTS lệch khi exportStartSec > 0.
     vid_dur = ffprobe_duration(video) or 1e9
     segments = [dict(s) for s in (meta.get("segments") or [])]
+    subtitle_track = str(settings.get("subtitleExportTrack") or "dub")
+    for cue in segments:
+        source_text = str(cue.get("sourceSubtitle") if cue.get("sourceSubtitle") is not None else cue.get("source") or "")
+        dub_text = str(cue.get("dubSubtitle") if cue.get("dubSubtitle") is not None else cue.get("translation") or "")
+        cue["sourceSubtitle"] = source_text
+        cue["dubSubtitle"] = dub_text
+        # Renderer still consumes `translation`; adapt only its render view so
+        # legacy TTS/metadata remains untouched.
+        cue["translation"] = source_text if subtitle_track == "source" else ("\n".join(x for x in (source_text, dub_text) if x) if subtitle_track == "both" else dub_text)
     if export_start > 0:
         for s in segments:
             for key in ("start", "end", "coverStart", "coverEnd"):
@@ -326,6 +366,7 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
         project_id,
         base_speed=retime_base,
     )
+    video = _color_adjusted_video(project_id, root, video, settings)
     vid_dur = ffprobe_duration(video) or vid_dur
     text_overlays = build_text_overlay_cues(
         meta,

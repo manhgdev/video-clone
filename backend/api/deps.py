@@ -44,6 +44,11 @@ class Settings(BaseModel):
     captionBgColor: str = "#000000"
     captionBgOpacity: int = 55
     captionStroke: bool = True
+    sourceSubtitleVisible: bool = False
+    dubSubtitleVisible: bool = True
+    subtitleExportTrack: str = "dub"
+    colorAdjust: dict[str, float] = Field(default_factory=dict)
+    lutAssetId: str = ""
     processOriginalAudio: bool = False
     originalAudioMode: str = "original"
     originalAudioVolume: int = 100
@@ -84,6 +89,8 @@ class SegmentIn(BaseModel):
     end: float
     source: str
     translation: str
+    sourceSubtitle: str | None = None
+    dubSubtitle: str | None = None
     voice: str
     speaker: str | None = None
     audioUrl: str | None = None
@@ -139,12 +146,17 @@ class TextOverlayIn(BaseModel):
     # Marks an automatically detected static watermark. It must round-trip
     # through the API so the editor does not repeatedly migrate/persist it.
     watermarkSource: str | None = None
+    ocrSource: str | None = None
+    track: str | None = None
     logoSource: str | None = None
     assetUrl: str | None = None
     iconId: str | None = None
     scope: str | None = None
     motion: str | None = None
     opacity: int | None = None
+    zIndex: int | None = None
+    blendMode: str | None = None
+    keyframes: list[dict[str, float]] | None = None
     visibleSec: float | None = None
     hiddenSec: float | None = None
     fadeSec: float | None = None
@@ -155,6 +167,7 @@ class TextOverlayIn(BaseModel):
 
 class CloudBlock(BaseModel):
     apiKey: str | None = None
+    apiKeys: str | None = None
     baseUrl: str | None = None
     model: str | None = None
 

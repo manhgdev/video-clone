@@ -82,6 +82,11 @@ export const defaultSettings: ProjectSettings = {
   captionBgColor: '#000000',
   captionBgOpacity: 55,
   captionStroke: true,
+  sourceSubtitleVisible: false,
+  dubSubtitleVisible: true,
+  subtitleExportTrack: 'dub',
+  colorAdjust: { brightness: 0, contrast: 0, saturation: 100, temperature: 0, tint: 0 },
+  lutAssetId: '',
   processOriginalAudio: ENGINE_DEFAULTS.whisper.processOriginalAudio,
   originalAudioMode: ENGINE_DEFAULTS.whisper.originalAudioMode,
   originalAudioVolume: ENGINE_DEFAULTS.whisper.originalAudioVolume,
@@ -254,6 +259,7 @@ export function loadSettings(): ProjectSettings {
     if (!okMatch.includes(s.matchDuration as (typeof okMatch)[number])) {
       s.matchDuration = 'preferVideo'
     }
+    // Migrate projects saved while SenseVoice existed back to Whisper.
     const eng = s.engine === 'paddleocr' || s.engine === 'subtitle' ? s.engine : 'whisper'
     const profiles = {
       whisper: {

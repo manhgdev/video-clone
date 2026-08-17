@@ -65,6 +65,17 @@ export function logoFrame(logo: TextOverlay, time: number) {
   return { x: frame.x, y: frame.y, opacity: alpha * (logo.opacity ?? 85) / 100 }
 }
 
+/** Linear keyframe interpolation shared by text, OCR and effect layers. */
+export function overlayKeyframeFrame(overlay: TextOverlay, time: number) {
+  const frames = [...(overlay.keyframes ?? [])].sort((a, b) => a.at - b.at)
+  if (!frames.length) return { x: overlay.x, y: overlay.y, opacity: overlay.opacity ?? 100 }
+  const before = [...frames].reverse().find((frame) => frame.at <= time) ?? frames[0]
+  const after = frames.find((frame) => frame.at >= time) ?? before
+  const ratio = after.at === before.at ? 0 : Math.max(0, Math.min(1, (time - before.at) / (after.at - before.at)))
+  const lerp = (key: 'x' | 'y' | 'opacity', fallback: number) => (Number(before[key] ?? fallback) + (Number(after[key] ?? before[key] ?? fallback) - Number(before[key] ?? fallback)) * ratio)
+  return { x: lerp('x', overlay.x), y: lerp('y', overlay.y), opacity: lerp('opacity', overlay.opacity ?? 100) }
+}
+
 export function __checkLogoMotion() {
   const logo = { id: 'x', start: 0, end: 20, text: 'L', x: 0, y: 0, w: 100, h: 40, fontSize: 24, color: '#fff', kind: 'logo', motion: 'random', visibleSec: 4, hiddenSec: 2, fadeSec: .5 } as TextOverlay
   const frames = generateLogoKeyframes(logo, 20, 1000, 600, [], 7)

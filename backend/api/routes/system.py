@@ -214,6 +214,7 @@ def api_save_config(body: AppConfigIn):
         for k, v in body.cloud.items():
             patch["cloud"][k] = {
                 "apiKey": v.apiKey if v.apiKey is not None else "",
+                "apiKeys": v.apiKeys if v.apiKeys is not None else None,
                 "baseUrl": v.baseUrl or "",
                 "model": v.model or "",
             }
@@ -262,6 +263,30 @@ def api_system_checks(refresh: bool = False, deep: bool = False):
         return _sc.system_checks(refresh=refresh and not installing, fast=True)
     except Exception as e:
         raise HTTPException(500, f"system checks failed: {e}") from e
+
+
+@router.get("/api/resources")
+def api_resources():
+    """Unified view for optional AI runtimes/models; no project media here."""
+    from importlib.util import find_spec
+    from pipeline.core.config import DATA
+    from pipeline.core.accel import local_ai_runtime_profile
+
+    diarization = Path(DATA) / "models" / "pyannote"
+    runtime = local_ai_runtime_profile()
+    resources = [
+        {"id": "whisper", "name": "Whisper", "kind": "asr", "installed": find_spec("faster_whisper") is not None, "provider": runtime["label"], "action": "ai_runtime"},
+        {"id": "diarization", "name": "Sherpa-ONNX (Tách người nói)", "kind": "diarization", "installed": find_spec("sherpa_onnx") is not None and (diarization / "model.int8.onnx").is_file(), "provider": runtime["label"], "action": "ai_runtime"},
+        {"id": "ocr", "name": "RapidOCR", "kind": "ocr", "installed": find_spec("rapidocr_onnxruntime") is not None, "provider": runtime["label"], "action": "ai_runtime"},
+    ]
+    return {"items": resources}
+
+
+@router.post("/api/resources/{resource_id}/install")
+def api_install_resource(resource_id: str):
+    if resource_id in {"whisper", "diarization", "ocr"}:
+        return api_install_ai_runtime()
+    raise HTTPException(404, "Resource không tồn tại")
 
 
 @router.post("/api/system/ollama/signin")

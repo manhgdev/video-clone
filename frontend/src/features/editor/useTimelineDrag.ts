@@ -31,6 +31,7 @@ type MarqueeBox = { x0: number; y0: number; x1: number; y1: number }
 
 type TimelineDragDeps = {
   segments: Segment[]
+  overlays: TextOverlay[]
   settings: ProjectSettings
   busy: boolean
   timelineEditLocked: boolean
@@ -44,11 +45,12 @@ type TimelineDragDeps = {
   sourceWidth: number
   sourceHeight: number
   crop: Box
-  trackFocus: 'video' | 'caption' | 'dub' | 'bg' | 'watermark' | 'text'
+  trackFocus: 'video' | 'caption' | 'dub' | 'bg' | 'watermark' | 'ocr' | 'text'
   selected: Segment | undefined
   selectedId: string | null
   selectedIds: string[]
   selectedMediaIds: string[]
+  selectedOverlayIds: string[]
   selectedBox: PixelBox
   fallbackBox: PixelBox
   bboxDraft: Box | null
@@ -75,7 +77,8 @@ type TimelineDragDeps = {
   setSelectedMediaIds: React.Dispatch<React.SetStateAction<string[]>>
   setSelectedDubIds: React.Dispatch<React.SetStateAction<string[]>>
   setSelectedOverlayId: React.Dispatch<React.SetStateAction<string | null>>
-  setTrackFocus: React.Dispatch<React.SetStateAction<'video' | 'caption' | 'dub' | 'bg' | 'watermark' | 'text'>>
+  setSelectedOverlayIds: React.Dispatch<React.SetStateAction<string[]>>
+  setTrackFocus: React.Dispatch<React.SetStateAction<TrackId>>
   setPropTab: React.Dispatch<React.SetStateAction<PropTab>>
   setTool: React.Dispatch<React.SetStateAction<'select' | 'cover' | 'text'>>
   setVideoClips: React.Dispatch<React.SetStateAction<MediaClip[]>>
@@ -101,11 +104,13 @@ type TimelineDragDeps = {
     override?: PixelBox,
   ) => ReturnType<typeof resolvePreviewOverLayout>
   onSegmentsReplace: (segments: Segment[], opts?: { persist?: boolean }) => void | Promise<void>
+  onOverlaysReplace: (overlays: TextOverlay[]) => void | Promise<void>
 }
 
 export function useTimelineDrag(deps: TimelineDragDeps) {
   const {
     segments,
+    overlays,
     settings,
     busy,
     timelineEditLocked,
@@ -123,6 +128,7 @@ export function useTimelineDrag(deps: TimelineDragDeps) {
     selected,
     selectedIds,
     selectedMediaIds,
+    selectedOverlayIds,
     selectedBox,
     fallbackBox,
     bboxDraft,
@@ -147,6 +153,7 @@ export function useTimelineDrag(deps: TimelineDragDeps) {
     setSelectedMediaIds,
     setSelectedDubIds,
     setSelectedOverlayId,
+    setSelectedOverlayIds,
     setTrackFocus,
     setPropTab,
     setTool,
@@ -165,6 +172,7 @@ export function useTimelineDrag(deps: TimelineDragDeps) {
     editOverlay,
     getCachedPreviewLayout,
     onSegmentsReplace,
+    onOverlaysReplace,
   } = deps
 
   /**
@@ -443,14 +451,48 @@ export function useTimelineDrag(deps: TimelineDragDeps) {
     const isWatermark = Boolean(overlay.watermarkSource)
       || overlay.id === 'auto-watermark-ai-generated'
       || overlay.id === 'auto-watermark-static-logo'
-    if (timelineEditLocked || (isWatermark ? trackLocked.watermark : trackLocked.text)) return
+    const overlayTrack = isWatermark ? 'watermark' : overlay.track === 'ocr' ? 'ocr' : 'text'
+    if (timelineEditLocked || trackLocked[overlayTrack]) return
     event.preventDefault()
     event.stopPropagation()
     focusText(overlay.id)
     pushHistory()
+    const moveIds = selectedOverlayIds.includes(overlay.id)
+      ? selectedOverlayIds.filter((id) => overlays.some((item) => item.id === id && item.track === overlay.track))
+      : [overlay.id]
     const original = { start: overlay.start, end: overlay.end }
     const minDuration = 0.12
     const maxT = Math.max(timelineDuration, overlay.end, 1)
+    if (mode === 'move' && moveIds.length > 1) {
+      const group = overlays.filter((item) => moveIds.includes(item.id))
+      const origins = Object.fromEntries(group.map((item) => [item.id, { start: item.start, end: item.end }]))
+      const groupStart = Math.min(...group.map((item) => item.start))
+      const groupEnd = Math.max(...group.map((item) => item.end))
+      const span = groupEnd - groupStart
+      const updateGroup = (move: PointerEvent) => {
+        let delta = (move.clientX - event.clientX) / pxPerSec
+        const nextStart = Math.max(0, Math.min(Math.max(0, timelineDuration - span), groupStart + delta))
+        delta = nextStart - groupStart
+        const next = Object.fromEntries(group.map((item) => [item.id, {
+          start: origins[item.id].start + delta,
+          end: origins[item.id].end + delta,
+        }]))
+        groupDraftRef.current = next
+        setGroupDraft(next)
+      }
+      const commitGroup = () => {
+        window.removeEventListener('pointermove', updateGroup)
+        window.removeEventListener('pointerup', commitGroup)
+        const current = groupDraftRef.current
+        groupDraftRef.current = null
+        setGroupDraft(null)
+        if (!current) return
+        void onOverlaysReplace(overlays.map((item) => current[item.id] ? { ...item, ...current[item.id] } : item))
+      }
+      window.addEventListener('pointermove', updateGroup)
+      window.addEventListener('pointerup', commitGroup, { once: true })
+      return
+    }
     const update = (move: PointerEvent) => {
       const delta = (move.clientX - event.clientX) / pxPerSec
       let start = original.start
@@ -555,10 +597,12 @@ export function useTimelineDrag(deps: TimelineDragDeps) {
         setSelectedIds((prev) => [...new Set([...prev, ...hits.caps])])
         setSelectedMediaIds((prev) => [...new Set([...prev, ...hits.media])])
         setSelectedDubIds((prev) => [...new Set([...prev, ...hits.dubs])])
+        setSelectedOverlayIds((prev) => [...new Set([...prev, ...hits.texts])])
       } else {
         setSelectedIds(hits.caps)
         setSelectedMediaIds(hits.media)
         setSelectedDubIds(hits.dubs)
+        setSelectedOverlayIds(hits.texts)
       }
       if (hits.caps.length) {
         setSelectedId(hits.caps[hits.caps.length - 1])
@@ -579,8 +623,9 @@ export function useTimelineDrag(deps: TimelineDragDeps) {
           setSelectedOverlayId(null)
         }
       } else if (hits.texts.length) {
-        setSelectedOverlayId(hits.texts[hits.texts.length - 1])
-        setTrackFocus('text')
+        const lastId = hits.texts[hits.texts.length - 1]
+        setSelectedOverlayId(lastId)
+        setTrackFocus(overlays.find((item) => item.id === lastId)?.track === 'ocr' ? 'ocr' : 'text')
         if (!additiveHit) {
           setSelectedId(null)
           setSelectedMediaId(null)
@@ -589,6 +634,7 @@ export function useTimelineDrag(deps: TimelineDragDeps) {
         setSelectedId(null)
         setSelectedMediaId(null)
         setSelectedOverlayId(null)
+        setSelectedOverlayIds([])
         setSelectedMediaIds([])
         setSelectedDubIds([])
       }

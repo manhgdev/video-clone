@@ -300,6 +300,7 @@ def _system_checks_uncached(*, fast: bool = True) -> dict[str, Any]:
         )
     )
 
+
     # Nhóm 1b — Sherpa-ONNX + hai model offline. Hiển thị riêng để người dùng
     # biết rõ vì sao công tắc «Tách người nói» có/không sẵn sàng.
     from ..config import DATA

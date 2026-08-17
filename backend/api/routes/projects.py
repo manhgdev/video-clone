@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Body, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -85,12 +85,13 @@ def _subtitle_file(project_id: str, name: str) -> Path:
 _MEDIA_ASSET_EXTS = {
     ".mp4", ".mov", ".mkv", ".webm", ".avi",
     ".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac",
-    ".png", ".jpg", ".jpeg", ".webp", ".gif", ".srt",
+    ".png", ".jpg", ".jpeg", ".webp", ".gif", ".srt", ".cube",
 }
 
 
 def _media_asset_kind(name: str) -> str:
     ext = Path(name).suffix.lower()
+    if ext == ".cube": return "lut"
     if ext == ".srt": return "srt"
     if ext in {".png", ".jpg", ".jpeg", ".webp", ".gif"}: return "image"
     if ext in {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"}: return "audio"
@@ -104,6 +105,30 @@ def api_project_assets(project_id: str):
     return {"items": meta.get("mediaAssets") or []}
 
 
+@router.get("/api/projects/{project_id}/media-timeline")
+def api_media_timeline(project_id: str):
+    meta = load_meta(project_id)
+    if not meta: raise HTTPException(404)
+    return {"items": meta.get("mediaTimeline") or []}
+
+
+@router.put("/api/projects/{project_id}/media-timeline")
+def api_replace_media_timeline(project_id: str, body: list[dict[str, Any]] = Body(...)):
+    meta = load_meta(project_id)
+    if not meta: raise HTTPException(404)
+    assets = {str(item.get("id")) for item in meta.get("mediaAssets") or [] if isinstance(item, dict)}
+    cleaned = []
+    for clip in body:
+        if not isinstance(clip, dict) or str(clip.get("assetId") or "") not in assets:
+            raise HTTPException(422, "Timeline chứa asset không tồn tại")
+        start, end = float(clip.get("start") or 0), float(clip.get("end") or 0)
+        if start < 0 or end <= start: raise HTTPException(422, "Khoảng clip không hợp lệ")
+        cleaned.append({**clip, "start": start, "end": end})
+    meta["mediaTimeline"] = cleaned
+    save_meta(project_id, meta)
+    return {"items": cleaned}
+
+
 @router.post("/api/projects/{project_id}/assets")
 async def api_upload_project_asset(project_id: str, file: UploadFile = File(...)):
     meta = load_meta(project_id)
@@ -111,7 +136,7 @@ async def api_upload_project_asset(project_id: str, file: UploadFile = File(...)
     name = Path(file.filename or "").name
     ext = Path(name).suffix.lower()
     if not name or ext not in _MEDIA_ASSET_EXTS:
-        raise HTTPException(422, "Chỉ hỗ trợ video, audio, ảnh hoặc SRT")
+        raise HTTPException(422, "Chỉ hỗ trợ video, audio, ảnh, SRT hoặc LUT .cube")
     asset_id = uuid.uuid4().hex[:12]
     folder = ensure_layout(project_id) / "assets"
     folder.mkdir(parents=True, exist_ok=True)

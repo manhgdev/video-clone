@@ -44,3 +44,14 @@ test('English catalog covers interrupted TTS and Log UI text', () => {
     assert.notEqual(catalog[vietnamese], vietnamese, vietnamese)
   }
 })
+
+test('English catalog covers Live Preview empty page', () => {
+  const expected = {
+    'Chưa có video để xem trước': 'No video to preview yet',
+    'Mở hoặc tải video ở Clone Video rồi quay lại đây để chỉnh sửa theo timeline.': 'Open or upload a video in Clone Video, then return here to edit it on the timeline.',
+    'Đi tới Clone Video': 'Go to Clone Video',
+  }
+  for (const [vietnamese, english] of Object.entries(expected)) {
+    assert.equal(catalog[vietnamese], english, vietnamese)
+  }
+})

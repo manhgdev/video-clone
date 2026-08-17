@@ -301,6 +301,9 @@ export default function Sidebar({
     if (busy) return
     onSettings({ ...settings, [key]: value })
   }
+  const selectEngine = (engine: ProjectSettings['engine']) => {
+    set('engine', engine)
+  }
 
   /** Commit ô Preview → settings; trả về số giây đã chốt (dùng khi bấm Preview ngay). */
   const commitPreviewSec = (): number => {
@@ -431,11 +434,11 @@ export default function Sidebar({
               if (!busy) inputRef.current?.click()
             }}
           >
-            Đổi video
+            {t('Đổi video', 'Change video')}
           </button>
           {inputSize.width > 0 && (
             <span title={`${inputSize.width}×${inputSize.height}`}>
-              Đầu vào · {inputAspectLabel(inputSize.width, inputSize.height)}
+              {t('Đầu vào', 'Input')} · {inputAspectLabel(inputSize.width, inputSize.height)}
             </span>
           )}
         </div>
@@ -456,7 +459,7 @@ export default function Sidebar({
           <select
             value={settings.engine}
             disabled={busy}
-            onChange={(e) => set('engine', e.target.value as ProjectSettings['engine'])}
+            onChange={(e) => selectEngine(e.target.value as ProjectSettings['engine'])}
           >
             <option value="whisper">Giọng nói (Whisper)</option>
             <option value="paddleocr">Chữ trên màn (OCR)</option>
@@ -597,21 +600,21 @@ export default function Sidebar({
             disabled={busy}
             title={
               settings.matchDuration === 'preferVideo'
-                ? 'Ưu tiên video gốc, TTS tự nén vào khung'
+                ? t('Ưu tiên video gốc, TTS tự nén vào khung', 'Prioritize the original video; TTS is compressed to fit')
                 : settings.matchDuration === 'none'
-                  ? 'Giữ TTS nguyên tốc độ'
+                  ? t('Giữ TTS nguyên tốc độ', 'Keep the original TTS speed')
                   : settings.matchDuration === 'stretch'
-                    ? 'Ép TTS đúng khung gốc (nhanh/chậm)'
-                    : 'TTS dài hơn khung → tăng tốc nhẹ (≤1.25×)'
+                    ? t('Ép TTS đúng khung gốc (nhanh/chậm)', 'Force TTS to the original duration (faster/slower)')
+                    : t('TTS dài hơn khung → tăng tốc nhẹ (≤1.25×)', 'TTS longer than the cue → slightly speed up (≤1.25×)')
             }
             onChange={(e) =>
               set('matchDuration', e.target.value as ProjectSettings['matchDuration'])
             }
           >
-            <option value="preferVideo">Ưu tiên video gốc</option>
-            <option value="none">Giữ nguyên TTS</option>
-            <option value="natural">Tự nhiên, rút gọn nhẹ</option>
-            <option value="stretch">Kéo giãn khớp đoạn</option>
+            <option value="preferVideo">{t('Ưu tiên video gốc', 'Prioritize original video')}</option>
+            <option value="none">{t('Giữ nguyên TTS', 'Keep TTS intact')}</option>
+            <option value="natural">{t('Tự nhiên, rút gọn nhẹ', 'Natural, slightly shortened')}</option>
+            <option value="stretch">{t('Kéo giãn khớp đoạn', 'Stretch to match the cue')}</option>
           </select>
         </Field>
         <Field label="Giọng mặc định" icon={<IconSpeaker size={14} />}>
@@ -724,11 +727,11 @@ export default function Sidebar({
         </label>
         <label
           className="audio-filter-toggle"
-          title="Tự động tìm một logo cố định và tái tạo nền để xóa logo khi xuất."
+          title={t('Tự động tìm một logo cố định và tái tạo nền để xóa logo khi xuất.', 'Automatically detect a fixed logo and reconstruct its background when exporting.')}
         >
           <span className="field-label">
             <IconWand size={14} />
-            Che Logo
+            {t('Che Logo', 'Remove logo')}
           </span>
           <input
             type="checkbox"

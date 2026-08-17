@@ -1,4 +1,5 @@
 import { useCallback, useRef, useState, useEffect, type DragEvent } from 'react'
+import { localize, useLocale } from '@/app/i18n'
 import './VideoCleanerPage.css'
 
 // Types
@@ -148,6 +149,8 @@ function loadOpts(): AdvancedOptions {
 import { cleanerApi } from '@/features/cleaner/cleaner.api'
 
 export default function VideoCleanerPage() {
+  const { locale } = useLocale()
+  const t = (vi: string, en: string) => localize(locale, vi, en)
   const [selectedFiles, setSelectedFiles] = useState<FileInfo[]>([])
   const [method, setMethod] = useState<CleanMethod>(loadMethod)
   const [options, setOptions] = useState<AdvancedOptions>(loadOpts)
@@ -291,10 +294,10 @@ export default function VideoCleanerPage() {
                   onClick={() => fileInputRef.current?.click()}
                 >
                   <SvgCloud />
-                  <div className="vc-dropzone-text">Kéo &amp; thả file vào đây</div>
-                  <div className="vc-dropzone-or">hoặc</div>
-                  <button className="vc-btn" type="button" onClick={e => { e.stopPropagation(); fileInputRef.current?.click() }}>Chọn file</button>
-                  <div className="vc-dropzone-note">Hỗ trợ: MP4, MOV, MKV, WebM — tối đa 10GB</div>
+                  <div className="vc-dropzone-text">{t('Kéo & thả file vào đây', 'Drag & drop files here')}</div>
+                  <div className="vc-dropzone-or">{t('hoặc', 'or')}</div>
+                  <button className="vc-btn" type="button" onClick={e => { e.stopPropagation(); fileInputRef.current?.click() }}>{t('Chọn file', 'Choose files')}</button>
+                  <div className="vc-dropzone-note">{t('Hỗ trợ: MP4, MOV, MKV, WebM — tối đa 10GB', 'Supports MP4, MOV, MKV, WebM — up to 10 GB')}</div>
                 </div>
               ) : (
                 <div className="vc-file-list">

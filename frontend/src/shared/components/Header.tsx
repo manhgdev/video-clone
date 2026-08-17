@@ -14,7 +14,7 @@ import {
 import './Header.css'
 import { translate, type AppLocale } from '@/app/i18n'
 
-export type AppMode = 'clone' | 'tts' | 'download' | 'film' | 'batch' | 'renders' | 'cleaner' | 'srt-image' | 'srt-export' | 'license'
+export type AppMode = 'clone' | 'live-preview' | 'tts' | 'download' | 'film' | 'batch' | 'renders' | 'cleaner' | 'srt-image' | 'srt-export' | 'license'
 
 function IconSun({ size = 16 }: { size?: number }) {
   return (
@@ -34,12 +34,15 @@ function IconMoon({ size = 16 }: { size?: number }) {
 
 const NAV: {
   id: AppMode | 'tools' | 'config'
-  label: 'nav.clone' | 'nav.renders' | 'nav.download' | 'nav.tts' | 'nav.tools' | 'nav.settings'
+  label: 'nav.clone' | 'nav.livePreview' | 'nav.renders' | 'nav.download' | 'nav.tts' | 'nav.tools' | 'nav.settings'
   Icon: typeof IconCam
   mode?: AppMode
   action?: 'config' | 'tools'
 }[] = [
   { id: 'clone', label: 'nav.clone', Icon: IconCam, mode: 'clone' },
+  // Live Preview vẫn là page /live-preview, nhưng tạm ẩn khỏi top navigation
+  // để chỉ mở theo ngữ cảnh một project từ Clone/Renders/Export.
+  // { id: 'live-preview', label: 'nav.livePreview', Icon: IconVideo, mode: 'live-preview' },
   { id: 'renders', label: 'nav.renders', Icon: IconVideo, mode: 'renders' },
   // ponytail: Film/Batch chỉ ẩn khỏi nav; giữ page để bật lại khi hai luồng hoàn thiện.
   // { id: 'film', label: 'Clone Phim', Icon: IconFilm, mode: 'film' },
@@ -144,7 +147,7 @@ export default function Header({
                   type="button"
                   className={mode === 'cleaner' || mode === 'srt-image' || mode === 'srt-export'
                     ? 'active'
-                    : mode === 'download' ? 'compact-active' : undefined}
+                    : undefined}
                   aria-haspopup="menu"
                   aria-expanded={toolsOpen}
                   onClick={() => setToolsOpen((open) => !open)}
@@ -154,18 +157,6 @@ export default function Header({
                 </button>
                 {toolsOpen ? (
                   <div className="nav-tools-menu" role="menu">
-                    <button
-                      type="button"
-                      role="menuitem"
-                      className={`nav-download-menu${mode === 'download' ? ' active' : ''}`}
-                      onClick={() => {
-                        setToolsOpen(false)
-                        onModeChange?.('download')
-                      }}
-                    >
-                      <IconDownload size={16} />
-                      <span>Download Video</span>
-                    </button>
                     <button
                       type="button"
                       role="menuitem"

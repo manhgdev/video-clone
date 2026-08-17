@@ -11,9 +11,9 @@ import os
 import re
 import shutil
 import subprocess
+import uuid
 import sys
 import threading
-import uuid
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from pathlib import Path
 from typing import Any
@@ -254,7 +254,11 @@ def asr_paddleocr_inprocess(
         ) from e
 
     pid = project_id or video.parent.name
-    frames = cache_frames(pid, tag)
+    # A track OCR run must never share its extraction directory with another
+    # in-flight run for the same project. Concurrent requests previously
+    # removed frames while RapidOCR was reading them.
+    frame_tag = tag if reuse_frames else f"{tag}-{uuid.uuid4().hex[:10]}"
+    frames = cache_frames(pid, frame_tag)
     # crop_v4: hardsub đáy (ổn định ~99%) — tiêu đề dọc = pass riêng
     crop_mark = frames / ".crop_v5"
     fps_mark = frames / ".fps"

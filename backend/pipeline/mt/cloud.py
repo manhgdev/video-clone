@@ -185,7 +185,7 @@ def translate_cloud(
     workers: int = 2,
 ) -> list[str]:
     """OpenAI / DeepSeek / OpenRouter (chat) hoặc Gemini generateContent."""
-    from pipeline.core.app_config import provider_credentials
+    from pipeline.core.app_config import provider_credentials, provider_api_keys
 
     pid = (provider or "").lower().strip()
     if pid == "9router":
@@ -193,7 +193,7 @@ def translate_cloud(
     if pid == "xai":
         pid = "grok"
     cred = provider_credentials(pid)
-    api_key, base_url, model = cred["apiKey"], cred["baseUrl"], cred["model"]
+    api_keys, base_url, model = provider_api_keys(pid), cred["baseUrl"], cred["model"]
     out: list[str] = [""] * len(texts)
     if not texts:
         return out
@@ -222,6 +222,7 @@ def translate_cloud(
     done_lock = __import__("threading").Lock()
 
     def _batch(start: int) -> tuple[int, list[str]]:
+        api_key = api_keys[(start // max(1, bs)) % len(api_keys)]
         check_cancel(project_id)
         chunk = texts[start : start + bs]
         if riva_translate:
@@ -340,4 +341,3 @@ def translate_cloud(
                     running=True,
                 )
     return out
-

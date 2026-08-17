@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from api.deps import (
@@ -79,6 +79,32 @@ _validate_segment_editor_fields = validate_segment_editor_fields
 _SEG_PRESERVE = SEG_PRESERVE
 
 
+@router.get("/api/projects/{project_id}/events")
+async def api_project_events(project_id: str, after: int = 0):
+    """Small SSE stream used by chunked ASR/translation and resource installs."""
+    if not load_meta(project_id):
+        raise HTTPException(404)
+
+    async def stream():
+        import asyncio
+
+        cursor = max(0, int(after))
+        # A bounded stream works with proxies and lets the UI reconnect safely.
+        for _ in range(100):
+            meta = load_meta(project_id)
+            events = [event for event in meta.get("jobEvents") or [] if isinstance(event, dict) and int(event.get("id") or 0) > cursor]
+            for event in events:
+                cursor = max(cursor, int(event.get("id") or 0))
+                yield f"id: {cursor}\nevent: {event.get('type', 'STATUS')}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+            status = meta.get("status") or {}
+            if not status.get("running") and not events:
+                yield ": idle\n\n"
+                return
+            await asyncio.sleep(0.3)
+
+    return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
 @router.post("/api/projects/{project_id}/run")
 def api_run(project_id: str, settings: Settings):
     meta = load_meta(project_id)
@@ -108,6 +134,29 @@ def api_run(project_id: str, settings: Settings):
     set_status(project_id, step="asr", progress=1, message=hint, running=True, error=None)
     # Pipeline nhận previewSec = cửa sổ chạy
     _spawn(run_pipeline, project_id, {**dumped, "previewSec": run_sec})
+    return {"ok": True}
+
+
+@router.post("/api/projects/{project_id}/ocr-translate")
+def api_run_ocr_translate(project_id: str, settings: Settings):
+    if not load_meta(project_id):
+        raise HTTPException(404)
+    from pipeline.ocr.translate_track import claim_ocr_translate, run_ocr_translate_track
+    if not claim_ocr_translate(project_id):
+        raise HTTPException(409, "OCR Translator đang chạy cho project này")
+    arm_job(project_id)
+    # Publish a running state before returning. Without this, the editor's
+    # first status poll can read the previous completed job and dismiss the
+    # OCR progress popup while the worker thread is only being spawned.
+    set_status(
+        project_id,
+        step="asr",
+        progress=1,
+        message="Đang khởi tạo OCR Translator…",
+        running=True,
+        error=None,
+    )
+    _spawn(run_ocr_translate_track, project_id, settings.model_dump())
     return {"ok": True}
 
 

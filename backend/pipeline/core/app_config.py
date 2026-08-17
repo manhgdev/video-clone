@@ -53,7 +53,7 @@ PROVIDERS: dict[str, dict[str, str]] = {
 
 def _default_cloud() -> dict[str, dict[str, str]]:
     return {
-        pid: {"apiKey": "", "baseUrl": meta["base"], "model": meta["model"]}
+        pid: {"apiKey": "", "apiKeys": "", "baseUrl": meta["base"], "model": meta["model"]}
         for pid, meta in PROVIDERS.items()
     }
 
@@ -86,12 +86,15 @@ def load_app_config() -> dict[str, Any]:
     for pid, meta in PROVIDERS.items():
         block = saved.get(pid) if isinstance(saved.get(pid), dict) else {}
         env_key = (os.environ.get(meta["env"]) or "").strip()
-        file_key = str(block.get("apiKey") or "").strip()
+        file_keys = str(block.get("apiKeys") or block.get("apiKey") or "").strip()
+        env_keys = (os.environ.get(meta["env"]) or "").strip()
+        keys = file_keys or env_keys
         saved_model = str(block.get("model") or "").strip()
         if pid == "nvidia" and saved_model == "meta/llama-3.1-8b-instruct":
             saved_model = meta["model"]
         cloud[pid] = {
-            "apiKey": file_key or env_key,
+            "apiKey": next((key.strip() for key in keys.split(",") if key.strip()), ""),
+            "apiKeys": keys,
             "baseUrl": str(block.get("baseUrl") or meta["base"]).strip() or meta["base"],
             "model": saved_model or meta["model"],
         }
@@ -115,13 +118,13 @@ def save_app_config(patch: dict[str, Any]) -> dict[str, Any]:
             continue
         b = cloud_in[pid]
         prev = cur["cloud"][pid]
-        key = str(b.get("apiKey") if "apiKey" in b else prev["apiKey"]).strip()
+        key = str(b.get("apiKeys") if "apiKeys" in b else b.get("apiKey") if "apiKey" in b else prev.get("apiKeys") or prev["apiKey"]).strip()
         # UI may send masked "••••xx" — ignore
         if key.startswith("•") or key == "(đã lưu)":
             key = prev["apiKey"]
         base = str(b.get("baseUrl") or prev["baseUrl"]).strip() or prev["baseUrl"]
         model = str(b.get("model") or prev["model"]).strip() or prev["model"]
-        cur["cloud"][pid] = {"apiKey": key, "baseUrl": base, "model": model}
+        cur["cloud"][pid] = {"apiKey": next((x.strip() for x in key.split(",") if x.strip()), ""), "apiKeys": key, "baseUrl": base, "model": model}
 
     tts_in = patch.get("tts") if isinstance(patch.get("tts"), dict) else {}
     el_in = tts_in.get("elevenlabs") if isinstance(tts_in.get("elevenlabs"), dict) else None
@@ -137,6 +140,7 @@ def save_app_config(patch: dict[str, Any]) -> dict[str, Any]:
         "cloud": {
             pid: {
                 "apiKey": cur["cloud"][pid]["apiKey"],
+                "apiKeys": cur["cloud"][pid].get("apiKeys", cur["cloud"][pid]["apiKey"]),
                 "baseUrl": cur["cloud"][pid]["baseUrl"],
                 "model": cur["cloud"][pid]["model"],
             }
@@ -161,9 +165,12 @@ def public_app_config() -> dict[str, Any]:
     for pid, meta in PROVIDERS.items():
         b = cfg["cloud"][pid]
         key = b["apiKey"]
+        parts = [x.strip() for x in str(b.get("apiKeys") or key).split(",") if x.strip()]
         out_cloud[pid] = {
             "apiKey": _mask_key(key),
             "apiKeySet": bool(key),
+            "apiKeys": ", ".join(_mask_key(x) for x in parts),
+            "keyCount": len(parts),
             "baseUrl": b["baseUrl"],
             "model": b["model"],
             "label": meta["label"],
@@ -201,6 +208,12 @@ def provider_credentials(provider: str) -> dict[str, str]:
             f"Mở Cấu hình → API dịch cloud, hoặc set {env} trong backend/.env"
         )
     return dict(b)
+
+
+def provider_api_keys(provider: str) -> list[str]:
+    cred = provider_credentials(provider)
+    keys = [key.strip() for key in str(cred.get("apiKeys") or cred["apiKey"]).split(",") if key.strip()]
+    return keys or [cred["apiKey"]]
 
 
 def elevenlabs_api_keys() -> list[str]:

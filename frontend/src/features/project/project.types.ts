@@ -35,6 +35,10 @@ export type Segment = {
   textColor?: string
   source: string
   translation: string
+  /** Track nguồn độc lập. Legacy projects are migrated from `source`. */
+  sourceSubtitle?: string
+  /** Track phụ đề lồng tiếng/đích. Legacy projects are migrated from `translation`. */
+  dubSubtitle?: string
   voice: string
   /** Nhãn người nói do diarization tạo, ví dụ SPEAKER_00. */
   speaker?: string
@@ -65,7 +69,7 @@ export type SpeakerProfile = {
 export type ProjectMediaAsset = {
   id: string
   name: string
-  kind: 'video' | 'audio' | 'image' | 'srt'
+  kind: 'video' | 'audio' | 'image' | 'srt' | 'lut'
   file: string
   mime: string
   duration?: number
@@ -98,12 +102,18 @@ export type TextOverlay = {
   maskOpacity?: number
   /** A detected static watermark promoted to an editable timeline clip. */
   watermarkSource?: string
+  /** OCR Translator-owned text; never part of speech subtitle tracks. */
+  ocrSource?: string
+  track?: 'ocr'
   logoSource?: 'text' | 'image' | 'icon'
   assetUrl?: string
   iconId?: string
   scope?: 'full' | 'range'
   motion?: 'fixed' | 'random'
   opacity?: number
+  zIndex?: number
+  blendMode?: 'normal' | 'multiply' | 'screen' | 'overlay' | 'darken' | 'lighten'
+  keyframes?: Array<{ at: number; x?: number; y?: number; opacity?: number; scaleX?: number; scaleY?: number; rotation?: number }>
   visibleSec?: number
   hiddenSec?: number
   fadeSec?: number
@@ -113,7 +123,7 @@ export type TextOverlay = {
 }
 
 export type ProjectSettings = {
-  /** whisper = giọng nói; paddleocr = chữ trên khung; subtitle = file SRT */
+  /** whisper = speech ASR; paddleocr = screen OCR; subtitle = SRT */
   engine: 'whisper' | 'paddleocr' | 'subtitle'
   subtitleSource?: string
   sourceLang: string
@@ -187,6 +197,15 @@ export type ProjectSettings = {
   captionBgOpacity?: number
   /** Viền chữ (outline) */
   captionStroke?: boolean
+  /** Two independently managed subtitle tracks. Dub is shown by default. */
+  sourceSubtitleVisible?: boolean
+  dubSubtitleVisible?: boolean
+  /** Which subtitle track is burned/exported when not rendering both. */
+  subtitleExportTrack?: 'source' | 'dub' | 'both'
+  /** Unified preview/export color adjustment values. 0 is neutral except saturation=100. */
+  colorAdjust?: { brightness: number; contrast: number; saturation: number; temperature: number; tint: number }
+  /** Project-local .cube asset id, applied after basic adjustments. */
+  lutAssetId?: string
   /** Bật bộ lọc track âm thanh có sẵn trong video */
   processOriginalAudio: boolean
   /** Chế độ xử lý track âm thanh gốc */
@@ -239,11 +258,25 @@ export type ProjectSettings = {
   >
 }
 
+export type TimelineLayer = {
+  id: string
+  kind: 'video' | 'audio' | 'image' | 'text' | 'logo' | 'effect' | 'ocr'
+  start: number
+  end: number
+  zIndex: number
+  opacity?: number
+  blendMode?: 'normal' | 'multiply' | 'screen' | 'overlay' | 'darken' | 'lighten'
+  transform?: { x: number; y: number; scaleX: number; scaleY: number; rotation: number; crop?: { x: number; y: number; w: number; h: number } }
+  keyframes?: Array<{ at: number; x?: number; y?: number; scaleX?: number; scaleY?: number; rotation?: number; opacity?: number }>
+}
+
 export type CloudProviderId = 'openai' | 'gemini' | 'deepseek' | 'openrouter' | 'grok' | 'nvidia'
 
 export type CloudProviderConfig = {
   apiKey: string
+  apiKeys?: string
   apiKeySet: boolean
+  keyCount?: number
   baseUrl: string
   model: string
   label: string
@@ -344,6 +377,15 @@ export type SystemChecks = {
   optionalMissing: string[]
   summary: string
   fast?: boolean
+}
+
+export type AiResource = {
+  id: string
+  name: string
+  kind: 'asr' | 'diarization' | 'ocr' | string
+  installed: boolean
+  provider: string
+  action: string
 }
 
 export type JobStatus = {

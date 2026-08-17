@@ -390,7 +390,7 @@ function SegmentCard({
               </div>
             )}
             <div className="voice-meta">
-              <em>{chars} ký tự</em>
+              <em>{chars} {t('ký tự', 'characters')}</em>
               <em>{dur < 1 ? `${dur.toFixed(2)}s` : `${dur.toFixed(1)}s`}</em>
             </div>
           </div>
@@ -416,7 +416,7 @@ function SegmentCard({
               ))}
             </select>
             <div className="voice-meta">
-              <em>{chars} ký tự</em>
+              <em>{chars} {t('ký tự', 'characters')}</em>
               <em>{dur.toFixed(1)}s</em>
             </div>
           </label>

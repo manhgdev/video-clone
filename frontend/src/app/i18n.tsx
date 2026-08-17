@@ -35,6 +35,7 @@ export const LocaleContext = createContext<LocaleContextValue>({ locale: 'vi', s
 const MESSAGES = {
   'brand.tagline': { vi: 'Studio Dịch Thuật & Ghép & Lồng Tiếng AI', en: 'AI Translation, Video Cloning & Dubbing Studio' },
   'nav.clone': { vi: 'Clone Video', en: 'Clone Video' },
+  'nav.livePreview': { vi: 'Live Preview', en: 'Live Preview' },
   'nav.renders': { vi: 'Đã render', en: 'Renders' },
   'nav.download': { vi: 'Download Video', en: 'Download Video' },
   'nav.tts': { vi: 'Text to Speech', en: 'Text to Speech' },
@@ -147,4 +148,14 @@ export function LocaleTextSync() {
 
 export function localize(locale: AppLocale, vietnamese: string, english: string): string {
   return locale === 'en' ? english : vietnamese
+}
+
+/** Backend job messages include dynamic counts, so they cannot use the static catalog. */
+export function localizePipelineMessage(locale: AppLocale, message: string): string {
+  if (locale !== 'en') return message
+  return message
+    .replace(/Xong (\d+) đoạn — tiếp theo: Lồng tiếng → Xuất bản/g, 'Completed $1 segments — next: Dubbing → Export')
+    .replace(/Dùng phụ đề SRT: (\d+) đoạn — tiếp theo: Lồng tiếng → Xuất bản/g, 'Using SRT subtitles: $1 segments — next: Dubbing → Export')
+    .replace(/Xong (\d+) đoạn — không dịch, không chèn caption/g, 'Completed $1 segments — no translation or captions added')
+    .replace(/Xong (\d+) đoạn — bấm Xuất bản để che chữ cũ \+ đè bản dịch/g, 'Completed $1 segments — click Export to cover original text and burn in the translation')
 }

@@ -263,11 +263,15 @@ export function EditorPropertiesPanel({
       icon: <TabSvg><path d="M3 14h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a9 9 0 0 1 18 0v7a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3" /></TabSvg>,
     },
     {
-      key: 'mask', label: selectedIsWatermark ? 'Vùng che logo' : 'Vùng che chữ',
+      key: 'mask', label: selectedIsWatermark ? t('Vùng che logo', 'Logo mask') : t('Vùng che chữ', 'Text mask'),
       icon: <TabSvg><rect x="4" y="4" width="16" height="16" rx="1" strokeDasharray="3 3" /></TabSvg>,
     },
     {
-      key: 'overlay', label: logoDraft || (selectedOverlay?.kind === 'logo' && !selectedIsWatermark) ? 'Logo' : 'Text overlay', hidden: !selectedOverlay && !logoDraft,
+      key: 'overlay', label: logoDraft || (selectedOverlay?.kind === 'logo' && !selectedIsWatermark)
+        ? 'Logo'
+        : selectedOverlay?.track === 'ocr'
+          ? 'Caption 2 (OCR)'
+          : t('Lớp chữ', 'Text overlay'), hidden: !selectedOverlay && !logoDraft,
       icon: <TabSvg><path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" /></TabSvg>,
     },
   ]
@@ -1455,8 +1459,8 @@ export function EditorPropertiesPanel({
                         {effectivePropTab === 'mask' && selectedIsWatermark && selectedOverlay && (
                           <section className="space-y-3" aria-label="Watermark bbox">
                             <div className="rounded-md border border-teal-400/40 bg-teal-500/5 p-2 text-[11px] leading-relaxed text-muted-foreground">
-                              <p className="font-medium text-foreground">Vùng che logo</p>
-                              <p>Khung này chỉ áp dụng cho logo/OCR đang chọn. Không làm thay đổi bbox của phụ đề.</p>
+                              <p className="font-medium text-foreground">{t('Vùng che logo', 'Logo mask')}</p>
+                              <p>{t('Khung này chỉ áp dụng cho logo/OCR đang chọn. Không làm thay đổi bbox của phụ đề.', 'This box only applies to the selected logo/OCR. It does not change the caption bounding box.')}</p>
                             </div>
                             <div className="grid grid-cols-2 gap-2">
                               <NumField label="X" value={selectedOverlay.x} disabled={busy} onCommit={(x) => editOverlay({ ...selectedOverlay, x: Math.round(Math.max(0, Math.min(sourceWidth - selectedOverlay.w, x))) })} />
@@ -1469,7 +1473,7 @@ export function EditorPropertiesPanel({
                               <NumField label="Kết thúc" value={selectedOverlay.end} disabled={busy} step={0.1} formatDisplay={formatTimecode} parseDisplay={parseTimecode} onCommit={(end) => editOverlay({ ...selectedOverlay, end: Math.min(timelineDuration, Math.max(selectedOverlay.start + 0.04, end)) })} />
                             </div>
                             <button type="button" className="w-full rounded-md border border-destructive/50 px-3 py-2 text-xs text-destructive hover:bg-destructive/10" disabled={busy} onClick={() => { onOverlayDelete(selectedOverlay.id); setSelectedOverlayId(null) }}>
-                              Xóa vùng che logo
+                              {t('Xóa vùng che logo', 'Delete logo mask')}
                             </button>
                           </section>
                         )}
@@ -1588,6 +1592,13 @@ export function EditorPropertiesPanel({
                                 onCommit={(v) => editOverlay({ ...selectedOverlay, w: Math.round(Math.max(20, Math.min(sourceWidth - selectedOverlay.x, v))) })} />
                               <NumField label="Cao" value={selectedOverlay.h}
                                 onCommit={(v) => editOverlay({ ...selectedOverlay, h: Math.round(Math.max(20, Math.min(sourceHeight - selectedOverlay.y, v))) })} />
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-2 rounded-md border border-border p-2">
+                              <PropLabel label={`Độ mờ: ${selectedOverlay.opacity ?? 100}%`}><input type="range" min={0} max={100} className="w-full accent-primary" value={selectedOverlay.opacity ?? 100} onChange={(e) => editOverlay({ ...selectedOverlay, opacity: Number(e.target.value) })} /></PropLabel>
+                              <PropLabel label="Blend mode"><select className="h-8 w-full rounded border border-border bg-background px-2 text-xs" value={selectedOverlay.blendMode ?? 'normal'} onChange={(e) => editOverlay({ ...selectedOverlay, blendMode: e.target.value as NonNullable<TextOverlay['blendMode']> })}>{['normal', 'multiply', 'screen', 'overlay', 'darken', 'lighten'].map((mode) => <option key={mode} value={mode}>{mode}</option>)}</select></PropLabel>
+                              <NumField label="Layer" value={selectedOverlay.zIndex ?? 0} onCommit={(zIndex) => editOverlay({ ...selectedOverlay, zIndex: Math.round(zIndex) })} />
+                              <button type="button" className="self-end h-8 rounded border border-border text-xs hover:bg-accent" onClick={() => editOverlay({ ...selectedOverlay, keyframes: [...(selectedOverlay.keyframes ?? []), { at: playheadSec, x: selectedOverlay.x, y: selectedOverlay.y, opacity: selectedOverlay.opacity ?? 100 }] })}>+ Keyframe tại playhead</button>
                             </div>
 
                             <PropLabel label={`Cỡ chữ: ${selectedOverlay.fontSize}px`}>

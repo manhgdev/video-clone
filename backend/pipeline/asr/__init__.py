@@ -6,6 +6,7 @@ from .whisper import (  # noqa: F401
     reset_whisper,
     warm_whisper,
 )
+from .hybrid import hybrid_asr  # noqa: F401
 from pipeline.ocr.extract import (  # noqa: F401
     _rapidocr_gpu_kwargs,
     _rapidocr_labels,
@@ -14,6 +15,7 @@ from pipeline.ocr.extract import (  # noqa: F401
 
 __all__ = [
     "asr_whisper",
+    "hybrid_asr",
     "asr_paddleocr",
     "get_whisper",
     "reset_whisper",

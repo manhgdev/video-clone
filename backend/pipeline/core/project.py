@@ -19,6 +19,31 @@ _meta_locks: dict[str, threading.RLock] = {}
 _meta_locks_guard = threading.Lock()
 
 
+def normalize_project_tracks(meta: dict[str, Any]) -> dict[str, Any]:
+    """Upgrade legacy `segments` in-memory without dropping existing projects.
+
+    A cue remains the common timing anchor, while source and dub are explicit
+    independently-renderable fields. Keeping legacy aliases lets old clients
+    and export jobs continue to work during the migration.
+    """
+    for cue in meta.get("segments") or []:
+        if not isinstance(cue, dict):
+            continue
+        cue.setdefault("sourceSubtitle", str(cue.get("source") or ""))
+        cue.setdefault("dubSubtitle", str(cue.get("translation") or ""))
+        cue.setdefault("source", str(cue.get("sourceSubtitle") or ""))
+        cue.setdefault("translation", str(cue.get("dubSubtitle") or ""))
+    settings = meta.setdefault("settings", {})
+    if isinstance(settings, dict):
+        settings.setdefault("sourceSubtitleVisible", False)
+        settings.setdefault("dubSubtitleVisible", True)
+        settings.setdefault("subtitleExportTrack", "dub")
+        settings.setdefault("colorAdjust", {})
+        settings.setdefault("lutAssetId", "")
+    meta.setdefault("trackSchema", 2)
+    return meta
+
+
 def _meta_lock(project_id: str) -> threading.RLock:
     with _meta_locks_guard:
         lock = _meta_locks.get(project_id)
@@ -255,7 +280,7 @@ def load_meta(project_id: str) -> dict[str, Any]:
         if not path.exists():
             return {}
         try:
-            return _read_meta_file(path)
+            return normalize_project_tracks(_read_meta_file(path))
         except json.JSONDecodeError:
             # recovery: ghi lại bản sạch dưới cùng lock
             try:
@@ -264,14 +289,14 @@ def load_meta(project_id: str) -> dict[str, Any]:
                 raise
             if isinstance(obj, dict):
                 _write_meta_file(path, obj)
-                return obj
+                return normalize_project_tracks(obj)
             raise
 
 
 def save_meta(project_id: str, meta: dict[str, Any]) -> None:
     path = project_dir(project_id) / "meta.json"
     with _meta_lock(project_id):
-        _write_meta_file(path, meta)
+        _write_meta_file(path, normalize_project_tracks(meta))
 
 
 def apply_meta_patch(
@@ -299,7 +324,7 @@ def mutate_meta(project_id: str, fn: Callable[[dict[str, Any]], T]) -> T:
     """Read-modify-write atomic — tránh race khi nhiều PUT segment."""
     path = project_dir(project_id) / "meta.json"
     with _meta_lock(project_id):
-        meta: dict[str, Any] = _read_meta_file(path) if path.exists() else {}
+        meta: dict[str, Any] = normalize_project_tracks(_read_meta_file(path)) if path.exists() else {}
         out = fn(meta)
         _write_meta_file(path, meta)
         return out
@@ -355,6 +380,25 @@ def set_status(project_id: str, **kwargs: Any) -> None:
         meta["status"] = status
 
     mutate_meta(project_id, apply)
+
+
+def append_job_event(project_id: str, event_type: str, payload: dict[str, Any]) -> int:
+    """Persist a compact, monotonic job event for polling/SSE clients.
+
+    Keeping the last 500 events makes reconnect idempotent without needing an
+    external broker; job outputs are still the authoritative project metadata.
+    """
+    result: dict[str, int] = {}
+
+    def apply(meta: dict[str, Any]) -> None:
+        events = [item for item in meta.get("jobEvents") or [] if isinstance(item, dict)]
+        next_id = int(events[-1].get("id") or 0) + 1 if events else 1
+        events.append({"id": next_id, "type": event_type, "payload": payload, "at": time.time()})
+        meta["jobEvents"] = events[-500:]
+        result["id"] = next_id
+
+    mutate_meta(project_id, apply)
+    return result["id"]
 
 
 def _rm_path(path: Path, errors: list[str], label: str) -> None:

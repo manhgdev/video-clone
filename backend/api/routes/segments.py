@@ -83,6 +83,7 @@ class RetranscribeRangeIn(BaseModel):
     start: float
     end: float
     sourceLang: str = "auto"
+    engine: str = "whisper"
 
 
 @router.post("/api/projects/{project_id}/segments/retranscribe-range")
@@ -117,11 +118,15 @@ def api_retranscribe_range(project_id: str, body: RetranscribeRangeIn):
             item["start"] = start + max(0.0, float(item.get("start") or 0))
             item["end"] = min(end, start + max(0.05, float(item.get("end") or 0)))
             item["translation"] = ""
+            item["sourceSubtitle"] = str(item.get("source") or "")
+            item["dubSubtitle"] = ""
             item["voice"] = default_voice
 
         result: dict[str, Any] = {}
         def apply(current: dict) -> list[dict]:
             old = list(current.get("segments") or [])
+            # Only source timing/text is replaced. Existing dub/OCR data outside
+            # the range remains untouched; callers may regenerate dub separately.
             kept = [s for s in old if float(s.get("end") or 0) <= start or float(s.get("start") or 0) >= end]
             replaced = len(old) - len(kept)
             merged = sorted([*kept, *fresh], key=lambda s: (float(s.get("start") or 0), float(s.get("end") or 0)))
@@ -134,6 +139,8 @@ def api_retranscribe_range(project_id: str, body: RetranscribeRangeIn):
             return merged
         segments = mutate_meta(project_id, apply)
         set_status(project_id, step="asr", progress=100, message=f"Đã nhận dạng lại {len(fresh)} đoạn", running=False)
+        from pipeline.core.project import append_job_event
+        append_job_event(project_id, "ASR_CHUNK_READY", {"range": [start, end], "segments": fresh})
         return {"segments": segments, **result}
     except Exception as exc:
         set_status(project_id, step="asr", progress=0, message=f"Nhận dạng lại lỗi: {exc}", running=False)

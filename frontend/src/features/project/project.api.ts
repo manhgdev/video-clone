@@ -92,6 +92,15 @@ export const api = {
       40_000,
     ),
 
+  resources: () => fetchJson<{ items: import('./project.types').AiResource[] }>(`${base}/resources`, undefined, 20_000),
+
+  installResource: (resourceId: string) => fetchJson<{ ok: boolean; running: boolean; message?: string }>(`${base}/resources/${encodeURIComponent(resourceId)}/install`, { method: 'POST' }, 30_000),
+
+  runOcrTranslate: (projectId: string, settings: ProjectSettings) => fetchJson<{ ok: boolean }>(`${base}/projects/${projectId}/ocr-translate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings) }, 30_000),
+
+  mediaTimeline: (projectId: string) => fetchJson<{ items: Array<{ id: string; assetId: string; name: string; kind: 'video' | 'audio' | 'image'; start: number; end: number }> }>(`${base}/projects/${projectId}/media-timeline`, undefined, 10_000),
+  replaceMediaTimeline: (projectId: string, items: Array<{ id: string; assetId: string; name: string; kind: 'video' | 'audio' | 'image'; start: number; end: number }>) => fetchJson<{ items: typeof items }>(`${base}/projects/${projectId}/media-timeline`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(items) }, 15_000),
+
   ollamaSignin: () =>
     fetchJson<{ ok: boolean; message: string }>(
       `${base}/system/ollama/signin`,
@@ -426,7 +435,7 @@ export const api = {
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ start, end, sourceLang }),
+        body: JSON.stringify({ start, end, sourceLang, engine: 'whisper' }),
       },
       10 * 60_000,
     ),

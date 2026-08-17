@@ -47,7 +47,7 @@ type CloudTab = CloudProviderId
 
 type CloudDraft = Record<
   CloudProviderId,
-  { apiKey: string; baseUrl: string; model: string; apiKeySet: boolean; label: string }
+  { apiKey: string; apiKeys?: string; keyCount?: number; baseUrl: string; model: string; apiKeySet: boolean; label: string }
 >
 
 type Props = {
@@ -123,11 +123,22 @@ export default function ConfigModal({
 }: Props) {
   const { locale } = useLocale()
   const t = (vietnamese: string, english: string) => localize(locale, vietnamese, english)
+  const systemCheckText = (id: string, value: string | undefined, kind: 'detail' | 'hint' | 'installLabel') => {
+    if (!value) return ''
+    if (id !== 'ollama') return value
+    if (kind === 'detail' && value === 'chưa cài') return t('chưa cài', 'Not installed yet')
+    if (kind === 'hint' && value === 'Dịch local (tuỳ chọn).') return t('Dịch local (tuỳ chọn).', 'Local translation (optional).')
+    if (kind === 'installLabel' && /^Tải Ollama \((.+)\)$/.test(value)) {
+      return value.replace(/^Tải Ollama \((.+)\)$/, (_, os: string) => `Download Ollama (${os})`)
+    }
+    return value
+  }
   const [section, setSection] = useState<Section>(initialSection)
   const [draft, setDraft] = useState<CloudDraft>(emptyCloud)
   /** Mỗi ô 1 key; '' = ô trống mới / placeholder đã lưu */
   const [elSlots, setElSlots] = useState<string[]>([''])
   const [elSavedCount, setElSavedCount] = useState(0)
+  const [cloudKeySlots, setCloudKeySlots] = useState<Record<CloudProviderId, string[]>>(() => Object.fromEntries(PROVIDERS.map((id) => [id, ['']])) as Record<CloudProviderId, string[]>)
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState('')
@@ -202,6 +213,7 @@ export default function ConfigModal({
           if (!c) continue
           next[id] = {
             apiKey: c.apiKey || '',
+            apiKeys: c.apiKeys || '', keyCount: c.keyCount || 0,
             baseUrl: c.baseUrl || next[id].baseUrl,
             model: c.model || next[id].model,
             apiKeySet: !!c.apiKeySet,
@@ -209,6 +221,7 @@ export default function ConfigModal({
           }
         }
         setDraft(next)
+        setCloudKeySlots(Object.fromEntries(PROVIDERS.map((id) => [id, Array.from({ length: Math.max(1, Number(cfg.cloud?.[id]?.keyCount || 0) || (cfg.cloud?.[id]?.apiKeySet ? 1 : 0)) }, () => '')])) as Record<CloudProviderId, string[]>)
         const el = cfg.tts?.elevenlabs
         const n = Math.max(1, Number(el?.keyCount || 0) || (el?.apiKeySet ? 1 : 0))
         setElSavedCount(el?.apiKeySet ? n : 0)
@@ -387,14 +400,14 @@ export default function ConfigModal({
     setSaving(true)
     setMsg('')
     try {
-      const cloud: Record<string, { apiKey?: string; baseUrl?: string; model?: string }> =
+      const cloud: Record<string, { apiKeys?: string; baseUrl?: string; model?: string }> =
         {}
       for (const id of PROVIDERS) {
         const d = draft[id]
         cloud[id] = {
           baseUrl: d.baseUrl,
           model: d.model,
-          ...(d.apiKey.trim() ? { apiKey: d.apiKey.trim() } : {}),
+          ...(cloudKeySlots[id].some((key) => key.trim()) ? { apiKeys: cloudKeySlots[id].map((key) => key.trim()).filter(Boolean).join(',') } : {}),
         }
       }
       const body: {
@@ -611,15 +624,17 @@ export default function ConfigModal({
                     </span>
                     <div className="cfg-check-main">
                       <div className="cfg-check-name">
-                        {it.name}
+                        {it.id === 'ai_runtime_diarization'
+                          ? t('Sherpa-ONNX (Tách người nói)', 'Sherpa-ONNX (Speaker diarization)')
+                          : it.name}
                         {it.required ? (
-                          <em className="cfg-req">bắt buộc</em>
+                          <em className="cfg-req">{t('bắt buộc', 'required')}</em>
                         ) : (
-                          <em className="cfg-opt">tuỳ chọn</em>
+                          <em className="cfg-opt">{t('tuỳ chọn', 'optional')}</em>
                         )}
                       </div>
-                      <div className="cfg-check-detail">{it.detail}</div>
-                      {!it.ok ? <div className="cfg-check-hint">{it.hint}</div> : null}
+                      <div className="cfg-check-detail">{systemCheckText(it.id, it.detail, 'detail')}</div>
+                      {!it.ok ? <div className="cfg-check-hint">{systemCheckText(it.id, it.hint, 'hint')}</div> : null}
                     </div>
                     {it.ok ? (
                       ['ai_runtime', 'ai_runtime_ocr', 'ai_runtime_vieneu', 'ocr_cuda', 'demucs_cuda', 'nvm'].includes(it.install) ? (
@@ -655,9 +670,9 @@ export default function ConfigModal({
                           href={it.install}
                           target="_blank"
                           rel="noreferrer"
-                          title={it.installLabel || it.install}
+                          title={systemCheckText(it.id, it.installLabel, 'installLabel') || it.install}
                         >
-                          {it.installLabel || 'Tải'}
+                          {systemCheckText(it.id, it.installLabel, 'installLabel') || t('Tải', 'Download')}
                         </a>
                       ) : (
                         <code className="cfg-check-cmd" title={it.installLabel || 'Chạy trong terminal'}>
@@ -678,21 +693,7 @@ export default function ConfigModal({
           </div>
         ) : section === 'cloud' ? (
           <div className="cfg-body cfg-body-grid">
-            <label>
-              <span>API key {cur.apiKeySet ? '(đã lưu — nhập để thay)' : ''}</span>
-              <input
-                type="password"
-                autoComplete="off"
-                placeholder={cur.apiKeySet ? '••••••••' : 'sk-…'}
-                value={cur.apiKey}
-                onChange={(e) =>
-                  setDraft((d) => ({
-                    ...d,
-                    [tab]: { ...d[tab], apiKey: e.target.value },
-                  }))
-                }
-              />
-            </label>
+            <div className="cfg-el-keys"><span>API keys {cur.apiKeySet ? '(saved — enter to replace/add)' : ''}</span>{cloudKeySlots[tab].map((value, index) => <div className="cfg-el-key-row" key={`${tab}-${index}`}><input type="password" autoComplete="off" placeholder={index < (cur.keyCount || 0) ? '••••••••' : 'sk-…'} value={value} onChange={(e) => setCloudKeySlots((all) => ({ ...all, [tab]: all[tab].map((key, i) => i === index ? e.target.value : key) }))} /><button type="button" className="cfg-el-remove" disabled={cloudKeySlots[tab].length <= 1} onClick={() => setCloudKeySlots((all) => ({ ...all, [tab]: all[tab].filter((_, i) => i !== index) }))}>×</button></div>)}<button type="button" className="cfg-el-add" onClick={() => setCloudKeySlots((all) => ({ ...all, [tab]: [...all[tab], ''] }))}>+ {t('Thêm key', 'Add key')}</button><p className="cfg-hint">{t('Nhiều key sẽ được luân phiên theo từng batch dịch.', 'Multiple keys are rotated across translation batches.')}</p></div>
             <label>
               <span>Base URL</span>
               <input

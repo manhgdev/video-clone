@@ -8,7 +8,7 @@ export type EditorSnap = {
   bookmarks: number[]
   selectedId: string | null
   selectedOverlayId: string | null
-  trackFocus: 'video' | 'caption' | 'dub' | 'bg' | 'watermark' | 'text'
+  trackFocus: 'video' | 'caption' | 'dub' | 'bg' | 'watermark' | 'ocr' | 'text'
   videoClips: MediaClip[]
   bgClips: MediaClip[]
   selectedMediaId: string | null

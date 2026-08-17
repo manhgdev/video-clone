@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { cn } from '@/lib/cn'
+import { localize, useLocale } from '@/app/i18n'
 
 export type ProgressPopupProps = {
   /** Job đang chạy hoặc vừa lỗi cần hiện UI */
@@ -86,6 +87,8 @@ export default function ProgressPopup({
   onCancel,
   className,
 }: ProgressPopupProps) {
+  const { locale } = useLocale()
+  const t = (vi: string, en: string) => localize(locale, vi, en)
   const [elapsed, setElapsed] = useState(0)
   const [copied, setCopied] = useState(false)
   const logRef = useRef<HTMLPreElement>(null)
@@ -127,7 +130,7 @@ export default function ProgressPopup({
   const base = sanitizeJobMessage(rawBase)
   const compactLine =
     running && !failed
-      ? ` · đã chạy ${fmtElapsed(elapsed)} · vẫn đang xử lý`
+      ? locale === 'en' ? ` · ran ${fmtElapsed(elapsed)} · still processing` : ` · đã chạy ${fmtElapsed(elapsed)} · vẫn đang xử lý`
       : ''
   const line = base
 
@@ -154,7 +157,7 @@ export default function ProgressPopup({
           className,
         )}
         onClick={onRestore}
-        title="Mở lại tiến độ"
+        title={t('Mở lại tiến độ', 'Restore progress')}
       >
         <span
           className={cn(
@@ -189,8 +192,8 @@ export default function ProgressPopup({
           <button
             type="button"
             className="shrink-0 rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
-            title={onCancel ? 'Hủy' : 'Đóng'}
-            aria-label={onCancel ? 'Hủy' : 'Đóng'}
+            title={onCancel ? t('Hủy', 'Cancel') : t('Đóng', 'Close')}
+            aria-label={onCancel ? t('Hủy', 'Cancel') : t('Đóng', 'Close')}
             onClick={onCancel ?? onMinimize}
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
@@ -202,7 +205,7 @@ export default function ProgressPopup({
         <div className="px-4 py-4 space-y-2">
           <div className="flex items-baseline justify-between gap-2">
             <span className="text-xs text-muted-foreground">
-              {running && !failed ? `Đã chạy ${fmtElapsed(elapsed)}` : 'Tiến độ'}
+              {running && !failed ? (locale === 'en' ? `Ran ${fmtElapsed(elapsed)}` : `Đã chạy ${fmtElapsed(elapsed)}`) : t('Tiến độ', 'Progress')}
             </span>
             <span className="text-sm font-semibold tabular-nums text-foreground">{pct}%</span>
           </div>
@@ -232,7 +235,7 @@ export default function ProgressPopup({
                 className="rounded-md border border-border px-3 py-1.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
                 onClick={() => void copyError()}
               >
-                {copied ? 'Đã chép' : 'Copy'}
+                {copied ? t('Đã chép', 'Copied') : 'Copy'}
               </button>
               <button
                 type="button"
@@ -249,16 +252,16 @@ export default function ProgressPopup({
                 className="rounded-md border border-border bg-accent/40 px-3 py-1.5 text-xs hover:bg-accent"
                 onClick={onMinimize}
               >
-                Chạy nền
+                {t('Chạy nền', 'Run in background')}
               </button>
               {onCancel ? (
                 <button
                   type="button"
                   className="rounded-md border border-destructive/50 bg-destructive/15 px-3 py-1.5 text-xs font-medium text-destructive hover:bg-destructive/25"
                   onClick={onCancel}
-                  title="Dừng job — kill ffmpeg/TTS/OCR"
+                  title={t('Dừng job — kill ffmpeg/TTS/OCR', 'Stop job — stop ffmpeg/TTS/OCR')}
                 >
-                  Huỷ
+                  {t('Huỷ', 'Cancel')}
                 </button>
               ) : null}
             </>

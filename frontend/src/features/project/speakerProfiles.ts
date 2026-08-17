@@ -5,7 +5,7 @@ export const SPEAKER_COLORS = ['#0ea5a8', '#8b5cf6', '#e58a2b', '#3b82f6', '#ec4
 
 const ROLE_NAMES = {
   vi: ['Nam chính', 'Nữ chính', 'Nam phụ', 'Nữ phụ', 'Người dẫn chuyện', 'Khách mời 1', 'Khách mời 2', 'Nhân vật phụ'],
-  en: ['Lead male', 'Lead female', 'Supporting male', 'Supporting female', 'Narrator', 'Guest 1', 'Guest 2', 'Supporting character'],
+  en: ['Male lead', 'Female lead', 'Supporting male', 'Supporting female', 'Narrator', 'Guest 1', 'Guest 2', 'Supporting character'],
 } as const
 
 export function speakerRoleOptions(locale: AppLocale): readonly string[] {
@@ -17,7 +17,10 @@ export function defaultSpeakerRole(index: number, locale: AppLocale): string {
 }
 
 function isGeneratedSpeakerName(name: string | undefined): boolean {
-  return !name || /^Người nói \d+$/.test(name) || /^Speaker \d+$/.test(name)
+  if (!name || /^Người nói \d+$/.test(name) || /^Speaker \d+$/.test(name)) return true
+  // Vai mặc định đã được lưu ở project cũ cũng là tên hệ thống, không phải
+  // tên riêng của người dùng. Nhờ vậy đổi VI ↔ EN vẫn dịch đúng “Nam chính”.
+  return Object.values(ROLE_NAMES).some((roles) => (roles as readonly string[]).includes(name))
 }
 
 export function resolvedSpeakerProfiles(
