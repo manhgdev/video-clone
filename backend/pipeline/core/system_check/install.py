@@ -469,15 +469,35 @@ def install_ai_runtime() -> dict[str, Any]:
         if not uv:
             raise RuntimeError("Bản ứng dụng thiếu uv để cài gói AI")
         py = _ensure_frozen_runtime_venv(uv, venv)
+
+        # Windows: cv2.pyd bị lock khi đã preload → không thể xoá/thay thế.
+        # Bỏ opencv khỏi danh sách cài nếu cv2 đã load trong process hiện tại.
+        _cv2_locked = sys.platform == "win32" and "cv2" in sys.modules
+        if _cv2_locked:
+            _install_log_fn and _install_log_fn(
+                "cv2 đã load — bỏ qua opencv (sẽ cập nhật khi khởi động lại)\n"
+            )
+
         # opencv-python + headless cùng lúc → đụng cv2; chỉ giữ headless.
-        opencv_remove = ["opencv-python"] + ([] if cv2_ok else ["opencv-python-headless"])
-        subprocess.run(
-            [uv, "pip", "uninstall", "--python", str(py), "-y", *opencv_remove],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        base_cmd = [uv, "pip", "install", "--python", str(py), "--upgrade", *_AI_RUNTIME_PACKAGES]
+        if not _cv2_locked:
+            opencv_remove = ["opencv-python"] + ([] if cv2_ok else ["opencv-python-headless"])
+            try:
+                subprocess.run(
+                    [uv, "pip", "uninstall", "--python", str(py), "-y", *opencv_remove],
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+            except (OSError, subprocess.SubprocessError):
+                pass  # bỏ qua nếu file bị lock
+
+        # Lọc bỏ opencv nếu cv2.pyd đang bị lock
+        packages = [
+            p for p in _AI_RUNTIME_PACKAGES
+            if not (_cv2_locked and p.startswith(("opencv-python", "pillow")))
+        ] if _cv2_locked else list(_AI_RUNTIME_PACKAGES)
+
+        base_cmd = [uv, "pip", "install", "--python", str(py), "--upgrade", *packages]
         ort_accel = _runtime_ort_accel()
         if ort_accel == "cuda":
             base_cmd.append(_ORT_GPU_PKG)
