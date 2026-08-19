@@ -46,3 +46,22 @@ def prefer_torch_cudnn() -> None:
     except Exception:
         # ponytail: best-effort — missing CUDA still falls back later
         pass
+
+
+def cudnn_healthy() -> bool:
+    """True if the loaded cudnn64_9.dll exposes cudnnGetLibConfig (torch's copy).
+
+    ctranslate2's bundled DLL lacks this symbol; using CUDA with that DLL
+    causes a hard native crash (0xC0000409) that Python cannot catch.
+    """
+    if sys.platform != "win32":
+        return True
+    try:
+        import ctypes
+        import ctypes.util
+
+        dll = ctypes.WinDLL("cudnn64_9.dll", mode=0)
+        _ = dll.cudnnGetLibConfig
+        return True
+    except (OSError, AttributeError):
+        return False

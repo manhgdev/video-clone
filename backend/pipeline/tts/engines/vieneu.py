@@ -342,6 +342,22 @@ def get_client() -> Any:
             from vieneu import Vieneu
 
             backend, device = _resolve_backend()
+            # ponytail: cuDNN DLL conflict with ctranslate2 causes uncatchable
+            # native crash on Windows.  Fall back to ONNX/CPU when the wrong
+            # DLL is loaded (missing cudnnGetLibConfig symbol).
+            if backend == "pytorch" and device == "cuda":
+                try:
+                    from ...core.cuda_dll import cudnn_healthy
+
+                    if not cudnn_healthy():
+                        print(
+                            "[vieneu] cuDNN DLL thiếu cudnnGetLibConfig — "
+                            "chuyển ONNX/CPU để tránh crash",
+                            flush=True,
+                        )
+                        backend, device = "onnx", "cpu"
+                except Exception:
+                    pass
             _prepare_cuda_weight_load(backend, device)
             kwargs: dict[str, Any] = {
                 "mode": "v3turbo",

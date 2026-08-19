@@ -121,6 +121,7 @@ def _pkg_distributions() -> dict[str, list[str]]:
 _RUNTIME_FAST_DIST = (
     "faster-whisper",
     "rapidocr-onnxruntime",
+    "sherpa-onnx",
     "transformers",
     "vieneu",
     "torch",
