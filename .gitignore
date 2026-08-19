@@ -19,7 +19,7 @@ __pycache__/
 .DS_Store
 .env
 capcut_device.json
-*.wav
+# *.wav
 !backend/resources/voice-ref/ngoc-huyen.wav
 !backend/resources/voice-ref/adam-low-tone.wav
 *.mp3
