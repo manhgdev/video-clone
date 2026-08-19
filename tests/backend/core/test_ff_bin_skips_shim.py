@@ -11,14 +11,19 @@ from pipeline.core import media
 def test_is_real_ff_bin_rejects_shim_size(tmp_path: Path) -> None:
     shim = tmp_path / "ffmpeg.exe"
     shim.write_bytes(b"MZ" + b"\0" * 400)
-    assert media._is_real_ff_bin(shim) is False
     real = tmp_path / "ffmpeg-real.exe"
     real.write_bytes(b"MZ" + b"\0" * media._FF_MIN_BYTES)
+    if sys.platform == "win32":
+        assert media._is_real_ff_bin(shim) is False
+    else:
+        assert media._is_real_ff_bin(shim) is True
     assert media._is_real_ff_bin(real) is True
 
 
 def test_ff_bin_skips_tiny_bundled_shim(tmp_path: Path, monkeypatch) -> None:
-    ext = ".exe" if sys.platform == "win32" else ""
+    if sys.platform != "win32":
+        return
+    ext = ".exe"
     bundle = tmp_path / "bundle"
     real_dir = tmp_path / "real"
     bundle.mkdir()

@@ -142,7 +142,8 @@ function resolveMediaTool(tool, { nextTo } = {}) {
     if (!c || !existsSync(c)) continue
     let target = c
     try {
-      if (statSync(c).size < FF_MIN_BYTES) {
+      // Chỉ Windows: ShimGen ~400KB. Homebrew ffmpeg trên macOS cũng nhỏ (dylibs rời) — không bỏ.
+      if (isWin && statSync(c).size < FF_MIN_BYTES) {
         const dirs = [
           path.resolve(path.dirname(c), '..', 'lib', tool, 'tools'),
           path.resolve(path.dirname(c), '..', 'lib', 'ffmpeg', 'tools'),
@@ -155,7 +156,7 @@ function resolveMediaTool(tool, { nextTo } = {}) {
         if (!hit) continue
         target = hit
       }
-      if (statSync(target).size >= FF_MIN_BYTES) resolved.push(target)
+      if (!isWin || statSync(target).size >= FF_MIN_BYTES) resolved.push(target)
     } catch {
       continue
     }

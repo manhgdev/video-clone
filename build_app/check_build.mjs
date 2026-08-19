@@ -70,7 +70,7 @@ function checkTool(label, bin, expect) {
   check(`${label} bundled`, exists, size(bin))
   if (!exists) return
   const bytes = statSync(bin).size
-  check(`${label} not a shim`, bytes >= 2_000_000, size(bin))
+  if (isWin) check(`${label} not a shim`, bytes >= 2_000_000, size(bin))
   const r = spawnSync(bin, ['-version'], { encoding: 'utf8', timeout: 8000 })
   const out = `${r.stdout || ''}${r.stderr || ''}`
   const line = out.split(/\r?\n/).find(Boolean) || `exit ${r.status}`

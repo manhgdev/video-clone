@@ -31,14 +31,20 @@ jobs:
           python -m venv backend/.venv
           backend/.venv/bin/python -m pip install --upgrade pip
           backend/.venv/bin/python -m pip install -r backend/requirements-app.txt pyinstaller pywebview uv
+          echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
+          echo "/usr/local/bin" >> "$GITHUB_PATH"
           brew list ffmpeg >/dev/null 2>&1 || brew install ffmpeg
+          which ffmpeg
+          ffmpeg -version | head -n 1
 
       - name: Build macOS app
         env:
           ONEFILE: '1'
           CLEAN: '1'
           SKIP_ARCHIVE: '1'
-        run: npm run build:app
+        run: |
+          export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+          npm run build:app
 
       - name: Create APP and PKG packages
         id: package

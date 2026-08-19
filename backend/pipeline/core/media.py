@@ -24,7 +24,12 @@ _FF_MIN_BYTES = 2_000_000
 
 def _is_real_ff_bin(path: Path) -> bool:
     try:
-        return path.is_file() and path.stat().st_size >= _FF_MIN_BYTES
+        if not path.is_file():
+            return False
+        # Homebrew ffmpeg trên macOS nhỏ (codec ở dylib) — chỉ chặn ShimGen trên Windows.
+        if sys.platform != "win32":
+            return True
+        return path.stat().st_size >= _FF_MIN_BYTES
     except OSError:
         return False
 
