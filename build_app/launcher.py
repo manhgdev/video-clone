@@ -10,8 +10,6 @@ import threading
 import time
 import traceback
 import urllib.request
-from importlib.machinery import PathFinder
-from importlib.util import module_from_spec
 from pathlib import Path
 
 
@@ -57,6 +55,120 @@ os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "threads;1")
 if sys.platform == "win32":
     os.environ.setdefault("OPENCV_VIDEOIO_PRIORITY_MSMF", "0")
     os.environ.setdefault("OPENCV_VIDEOIO_PRIORITY_FFMPEG", "100")
+
+# Process giám sát: nạp CUDA/cv2 chỉ trong process con. Native crash (0xC0000409)
+# giết con — cha hiện popup + log để copy, không im lặng tắt.
+_SUPERVISOR_ENV = "VIDEO_CLONE_SUPERVISOR_CHILD"
+
+
+def _unsigned_exit(code: int) -> int:
+    return code & 0xFFFFFFFF if code < 0 else int(code)
+
+
+def _crash_report(exit_code: int) -> str:
+    u = _unsigned_exit(exit_code)
+    lines: list[str] = [
+        f"VideoClone đã thoát bất thường.",
+        f"Mã: {exit_code} (0x{u:08X})",
+        f"Log: {home / 'app.log'}",
+        "",
+    ]
+    log = home / "app.log"
+    try:
+        if log.is_file():
+            tail = log.read_text(encoding="utf-8", errors="replace").splitlines()[-80:]
+            lines.extend(tail if tail else ["(app.log trống)"])
+        else:
+            lines.append("(chưa có app.log)")
+    except OSError as e:
+        lines.append(f"(không đọc được app.log: {e})")
+    return "\n".join(lines)
+
+
+def show_copyable_crash(exit_code: int) -> None:
+    """Popup lỗi copy được — không để APP tắt im lặng sau native crash."""
+    body = _crash_report(exit_code)
+    crash_file = home / "last_crash.txt"
+    try:
+        crash_file.write_text(body, encoding="utf-8")
+    except OSError:
+        crash_file = None
+    try:
+        import tkinter as tk
+        from tkinter.scrolledtext import ScrolledText
+
+        root = tk.Tk()
+        root.title("VideoClone — lỗi (copy gửi để sửa)")
+        root.geometry("720x480")
+        root.attributes("-topmost", True)
+        hint = tk.Label(
+            root,
+            text="APP đã thoát bất thường. Copy toàn bộ nội dung dưới gửi để sửa.",
+            wraplength=680,
+            justify="left",
+        )
+        hint.pack(fill="x", padx=10, pady=(10, 4))
+        box = ScrolledText(root, wrap="word", font=("Consolas", 10))
+        box.pack(fill="both", expand=True, padx=10, pady=4)
+        box.insert("1.0", body)
+        box.focus_set()
+        box.tag_add("sel", "1.0", "end")
+
+        def copy_all() -> None:
+            text = box.get("1.0", "end-1c")
+            root.clipboard_clear()
+            root.clipboard_append(text)
+            btn.configure(text="Đã chép")
+
+        bar = tk.Frame(root)
+        bar.pack(fill="x", padx=10, pady=(0, 10))
+        btn = tk.Button(bar, text="Chép lỗi", command=copy_all)
+        btn.pack(side="left")
+        tk.Button(bar, text="Đóng", command=root.destroy).pack(side="right")
+        root.mainloop()
+        return
+    except Exception:
+        pass
+    if sys.platform == "win32" and crash_file is not None:
+        try:
+            import subprocess as _sp
+
+            _sp.Popen(["notepad.exe", str(crash_file)])
+            import ctypes
+
+            ctypes.windll.user32.MessageBoxW(
+                0,
+                f"APP đã thoát bất thường (0x{_unsigned_exit(exit_code):08X}).\n"
+                f"Notepad đang mở log để copy:\n{crash_file}",
+                "VideoClone — lỗi",
+                0x10 | 0x40000,
+            )
+            return
+        except Exception:
+            pass
+
+
+def _supervise_child() -> int:
+    import subprocess
+
+    env = os.environ.copy()
+    env[_SUPERVISOR_ENV] = "1"
+    proc = subprocess.Popen([sys.executable, *sys.argv[1:]], env=env)
+    return int(proc.wait())
+
+
+if __name__ == "__main__" and os.environ.get(_SUPERVISOR_ENV) != "1":
+    multiprocessing.freeze_support()
+    rc = 1
+    try:
+        rc = _supervise_child()
+    except Exception:
+        traceback.print_exc()
+        rc = 1
+    if rc != 0:
+        show_copyable_crash(rc)
+    raise SystemExit(rc)
+
 try:
     from pipeline.core.accel import apply_gpu_process_env
 
@@ -79,36 +191,17 @@ if getattr(sys, "frozen", False) and sys.stdout is None:
 
 if runtime_site.is_dir():
     sys.path.insert(0, str(runtime_site))
-    # CUDA DLL từ .venv-runtime/nvidia/*/bin — cần cho torch GPU (cudnn_cnn64_9.dll, v.v.)
-    _rt_nvidia = runtime_site / "nvidia"
-    _rt_cuda_bins: list[str] = []
-    if _rt_nvidia.is_dir():
-        _rt_cuda_bins.extend([str(p) for p in _rt_nvidia.glob("*/bin") if p.is_dir()])
-    _tlib = runtime_site / "torch" / "lib"
-    if _tlib.is_dir():
-        _rt_cuda_bins.append(str(_tlib))
-    if _rt_cuda_bins:
-        os.environ["PATH"] = os.pathsep.join(_rt_cuda_bins + [os.environ.get("PATH", "")])
-        _add_dll = getattr(os, "add_dll_directory", None)
-        if _add_dll and sys.platform == "win32":
-            for _b in _rt_cuda_bins:
-                try:
-                    _add_dll(_b)
-                except OSError:
-                    pass
+    # Không nhét nvidia/torch CUDA vào PATH của VideoClone.exe (WebView2).
+    # GPU chạy trong worker .venv-runtime — python.exe đó tự load CUDA DLL.
     if getattr(sys, "frozen", False):
         try:
             from pipeline.core.runtime_site import (
                 install_runtime_meta_path,
                 prepare_cv2_import_path,
-                preload_cv2,
             )
 
-            install_runtime_meta_path(runtime_site)
+            install_runtime_meta_path(runtime_site, gpu_in_process=False)
             prepare_cv2_import_path(runtime_site)
-            # Phải import cv2 khi path[0] = runtime site-packages.
-            # Gắn .venv-ocr / .../cv2 trước → OpenCV recursion → app tắt khi Dịch.
-            preload_cv2()
         except Exception:
             traceback.print_exc()
 
@@ -119,21 +212,7 @@ ocr_site = (
     else ocr_venv / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
 )
 if ocr_site.is_dir():
-    # KHÔNG sys.path.insert(.venv-ocr) — path[0] ≠ runtime → OpenCV recursion crash khi Dịch.
-    # Chỉ nạp CUDA DLL + onnxruntime GPU module (không đưa ocr site vào sys.path).
-    nvidia_root = ocr_site / "nvidia"
-    if nvidia_root.is_dir():
-        cuda_bins = [str(p) for p in nvidia_root.glob("*/bin") if p.is_dir()]
-        if cuda_bins:
-            os.environ["PATH"] = os.pathsep.join(cuda_bins + [os.environ.get("PATH", "")])
-            add_dir = getattr(os, "add_dll_directory", None)
-            if add_dir and sys.platform == "win32":
-                for b in cuda_bins:
-                    try:
-                        add_dir(b)
-                    except OSError:
-                        pass
-    # Gỡ mọi entry .venv-ocr + .../cv2 đã lọt vào path (bản cũ / plugin)
+    # Không nạp CUDA/ORT vào process cửa sổ. GPU OCR/TTS/Whisper = worker .venv-runtime.
     def _path_ok(p: str) -> bool:
         n = p.replace("\\", "/").rstrip("/").lower()
         if n.endswith("/cv2"):
@@ -143,18 +222,6 @@ if ocr_site.is_dir():
         return True
 
     sys.path[:] = [p for p in sys.path if _path_ok(p)]
-    if "onnxruntime" not in sys.modules:
-        # Load ORT by file path only — never leave ocr site on sys.path
-        ocr_spec = PathFinder.find_spec("onnxruntime", [str(ocr_site)])
-        if ocr_spec and ocr_spec.loader:
-            ocr_module = module_from_spec(ocr_spec)
-            sys.modules["onnxruntime"] = ocr_module
-            try:
-                ocr_spec.loader.exec_module(ocr_module)
-            except Exception:
-                traceback.print_exc()
-                sys.modules.pop("onnxruntime", None)
-    # Runtime luôn path[0] sau bước ocr
     if runtime_site.is_dir():
         try:
             from pipeline.core.runtime_site import prepare_cv2_import_path

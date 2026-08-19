@@ -4,7 +4,7 @@ import sys
 from unittest.mock import MagicMock
 
 
-def test_nvidia_hardware_does_not_fake_torch_cuda(monkeypatch) -> None:
+def test_nvidia_hardware_prefers_cuda_even_if_torch_probe_fails(monkeypatch) -> None:
     from pipeline.core import accel
 
     fake_torch = MagicMock()
@@ -14,7 +14,7 @@ def test_nvidia_hardware_does_not_fake_torch_cuda(monkeypatch) -> None:
     monkeypatch.setattr(accel, "_nvidia_smi", lambda: True)
     accel._cache.clear()
 
-    assert accel.preferred_torch_device(refresh=True) == "cpu"
+    assert accel.preferred_torch_device(refresh=True) == "cuda"
 
 
 def test_ocr_prefers_directml_when_cuda_is_unavailable(monkeypatch) -> None:

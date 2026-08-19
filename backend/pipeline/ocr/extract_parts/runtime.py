@@ -242,6 +242,10 @@ def prepare_cuda_dlls() -> None:
             if capi.is_dir() and str(capi) not in seen_bins:
                 seen_bins.add(str(capi))
                 bins.append(capi)
+            sherpa_lib = sp / "sherpa_onnx" / "lib"
+            if sherpa_lib.is_dir() and str(sherpa_lib) not in seen_bins:
+                seen_bins.add(str(sherpa_lib))
+                bins.append(sherpa_lib)
             # cv2.pyd phụ thuộc vào opencv_world4xx.dll nằm trong cv2/ package dir.
             # Windows 10+ không tự tìm DLL trong thư mục .pyd mà không có add_dll_directory.
             cv2_dir = sp / "cv2"

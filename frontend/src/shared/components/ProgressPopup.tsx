@@ -186,7 +186,10 @@ export default function ProgressPopup({
           <div className="min-w-0 flex-1">
             <h3 className="text-sm font-semibold text-foreground">{title}</h3>
             {line ? (
-              <p className="mt-0.5 text-xs text-muted-foreground leading-snug break-words">{line}</p>
+              <p className="mt-0.5 text-xs text-muted-foreground leading-snug break-words select-text">{line}</p>
+            ) : null}
+            {failed && rawBase && rawBase !== line ? (
+              <pre className="mt-2 max-h-36 overflow-y-auto rounded bg-muted/60 p-2 text-[10px] leading-relaxed font-mono whitespace-pre-wrap break-all select-text">{rawBase}</pre>
             ) : null}
           </div>
           <button
@@ -235,7 +238,7 @@ export default function ProgressPopup({
                 className="rounded-md border border-border px-3 py-1.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
                 onClick={() => void copyError()}
               >
-                {copied ? t('Đã chép', 'Copied') : 'Copy'}
+                {copied ? t('Đã chép', 'Copied') : t('Chép lỗi', 'Copy error')}
               </button>
               <button
                 type="button"

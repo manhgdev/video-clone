@@ -1107,12 +1107,18 @@ export default function LivePreviewEditor({
     Boolean(overlay.watermarkSource) || overlay.id === 'auto-watermark-ai-generated' || overlay.id === 'auto-watermark-static-logo'
   const editableWatermarks = overlays.filter(isWatermarkOverlay)
   const hasEditableWatermark = editableWatermarks.length > 0
-  const activeWatermarkMasks = (settings.coverLogo && !trackHidden.watermark && !hasEditableWatermark
+  const activeWatermarkMasks = (settings.coverLogo && !trackHidden.watermark
     ? (logoDetection?.tracks || []).filter((track) => {
         const label = (track.text || '').trim()
         const excluded = settings.hiddenLogoTexts || []
+        const taken = editableWatermarks.some((overlay) => {
+          const src = `${overlay.watermarkSource || ''} ${overlay.text || ''}`
+          if (src.includes('生成') && label.includes('生成')) return true
+          return Boolean(label) && src.includes(label)
+        })
         return Boolean(track.bbox)
           && !label.startsWith('@')
+          && !taken
           && !excluded.includes(label)
           && !(label.includes('生成') && excluded.some((text) => text.includes('生成')))
           && time >= Number(track.start || 0) - 0.04

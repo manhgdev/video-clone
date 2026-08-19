@@ -2,24 +2,41 @@
 from __future__ import annotations
 
 import math
+import re
 from pathlib import Path
 from statistics import median
 from typing import Any
 
 from pipeline.core.jobs import check_cancel
 
-_LOGO_DETECTION_VERSION = 1
+_LOGO_DETECTION_VERSION = 2
+
+
+# OCR often garbles 哔哩哔哩 → 叽咕 / 吡哩; UID watermarks are CJK + digits.
+_PLATFORM_MARKS = (
+    "生成",
+    "哔哩",
+    "bilibili",
+    "b站",
+    "抖音",
+    "douyin",
+    "tiktok",
+    "西瓜",
+    "快手",
+)
+_UID_WATERMARK = re.compile(r"[\u4e00-\u9fff]{2,}.{0,12}\d{3,}")
 
 
 def _branding_text(text: str) -> bool:
-    """Only promote explicit watermark-like text to a moving logo track.
-
-    A normal subtitle can sit at the edge too.  The static detector below is
-    still useful for graphical logos, while this deliberately conservative
-    path handles the common ``@account`` / ``AI generated`` watermarks.
-    """
+    """@handle, AI生成, Bilibili/Douyin corner marks, CJK+UID."""
     compact = "".join(str(text or "").split()).casefold()
-    return compact.startswith("@") or "生成" in compact
+    if not compact:
+        return False
+    if compact.startswith("@"):
+        return True
+    if any(mark in compact for mark in _PLATFORM_MARKS):
+        return True
+    return bool(_UID_WATERMARK.search(compact))
 
 
 def _padded_normalized_box(
@@ -54,9 +71,16 @@ def _moving_branding_tracks(
 
     def key(item: dict[str, Any]) -> str:
         text = str(item.get("text") or "").strip()
-        # A handle may have one OCR-misread glyph as it moves; it is still the
-        # same platform watermark for tracking purposes.
-        return "@handle" if text.startswith("@") else "generated"
+        compact = "".join(text.split()).casefold()
+        if text.startswith("@"):
+            return "@handle"
+        if "生成" in compact:
+            return "generated"
+        if "哔哩" in compact or "bilibili" in compact or "b站" in compact:
+            return "bilibili"
+        if "抖音" in compact or "douyin" in compact:
+            return "douyin"
+        return compact[:16] or "brand"
 
     grouped: dict[str, list[tuple[int, dict[str, Any]]]] = {}
     for detection in detections:
@@ -73,8 +97,10 @@ def _moving_branding_tracks(
             else:
                 runs[-1].append(item)
         for run in runs:
-            # A one-frame OCR false-positive must not create a logo mask.
-            if len(run) < 2:
+            text0 = str(run[0][1].get("text") or "")
+            # 生成/AI watermark: one OCR hit is enough. @handle still needs 2
+            # to avoid a one-frame misread becoming a mask.
+            if len(run) < 2 and not _branding_text(text0):
                 continue
             for index, (sample_index, item) in enumerate(run):
                 prev_index = run[index - 1][0] if index else sample_index
@@ -109,21 +135,61 @@ def _moving_branding_tracks(
     return tracks
 
 
-def _logo_candidates(
-    frame_bgr: Any,
-    ocr: Any,
-    sample: int,
-    exclude_texts: set[str] | None = None,
+def _full_clip_branding_tracks(
+    samples: list[list[dict[str, Any]]],
+    fw: int,
+    fh: int,
+    duration: float,
 ) -> list[dict[str, Any]]:
-    h, w = frame_bgr.shape[:2]
-    result, _ = ocr(frame_bgr)
+    """Watermark nằm im một góc → một track 0…hết clip, không cắt vụn theo probe."""
+    hits = [
+        item
+        for dets in samples
+        for item in dets
+        if _branding_text(str(item.get("text") or ""))
+    ]
+    if not hits:
+        return []
+    box0 = hits[0]["box"]
+    if any(not _same_logo_box(box0, item["box"], fw, fh) for item in hits[1:]):
+        return []
+    boxes = [item["box"] for item in hits]
+    x0 = int(median(box[0] for box in boxes))
+    y0 = int(median(box[1] for box in boxes))
+    x1 = int(median(box[2] for box in boxes))
+    y1 = int(median(box[3] for box in boxes))
+    texts = [str(item.get("text") or "") for item in hits]
+    text = max(texts, key=lambda value: (texts.count(value), len(value)))
+    conf = sum(float(item.get("confidence") or 0) for item in hits) / len(hits)
+    return [
+        {
+            "start": 0.0,
+            "end": round(max(float(duration), 0.04), 3),
+            "bbox": _padded_normalized_box((x0, y0, x1, y1), fw, fh),
+            "text": text,
+            "confidence": round(conf, 4),
+        }
+    ]
+
+
+def _parse_logo_rows(
+    result: Any,
+    sample: int,
+    exclude_texts: set[str] | None,
+    fw: int,
+    fh: int,
+    ox: float = 0.0,
+    oy: float = 0.0,
+    scale: float = 1.0,
+) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
+    inv = 1.0 / max(scale, 1e-6)
     for row in result or []:
         try:
             poly, text = row[0], str(row[1] or "").strip()
             confidence = float(row[2]) if len(row) > 2 else 0.5
-            xs = [float(point[0]) for point in poly]
-            ys = [float(point[1]) for point in poly]
+            xs = [ox + float(point[0]) * inv for point in poly]
+            ys = [oy + float(point[1]) * inv for point in poly]
         except (IndexError, TypeError, ValueError):
             continue
         if not text:
@@ -143,10 +209,14 @@ def _logo_candidates(
         bw, bh = x1 - x0, y1 - y0
         if bw < 4 or bh < 4:
             continue
-        area = bw * bh / max(1.0, float(w * h))
-        cx, cy = (x0 + x1) * 0.5 / w, (y0 + y1) * 0.5 / h
+        area = bw * bh / max(1.0, float(fw * fh))
+        cx, cy = (x0 + x1) * 0.5 / fw, (y0 + y1) * 0.5 / fh
         edge = cx <= 0.28 or cx >= 0.72 or cy <= 0.20 or cy >= 0.80
-        if not edge or area < 0.00008 or area > 0.08 or bw > w * 0.45 or bh > h * 0.30:
+        branding = _branding_text(text)
+        if branding:
+            if area < 0.00008 or area > 0.12:
+                continue
+        elif not edge or area < 0.00008 or area > 0.08 or bw > fw * 0.45 or bh > fh * 0.30:
             continue
         out.append(
             {
@@ -156,6 +226,47 @@ def _logo_candidates(
                 "sample": sample,
             }
         )
+    return out
+
+
+def _logo_candidates(
+    frame_bgr: Any,
+    ocr: Any,
+    sample: int,
+    exclude_texts: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    h, w = frame_bgr.shape[:2]
+    result, _ = ocr(frame_bgr)
+    return _parse_logo_rows(result, sample, exclude_texts, w, h)
+
+
+def _logo_candidates_corners(
+    frame_bgr: Any,
+    ocr: Any,
+    sample: int,
+    exclude_texts: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Upscale four corners — static Bilibili/UID marks are too small for full-frame OCR."""
+    from pipeline.core.runtime_site import ensure_cv2
+
+    cv2 = ensure_cv2()
+    h, w = frame_bgr.shape[:2]
+    mh, mw = max(64, h * 18 // 100), max(96, w * 42 // 100)
+    corners = (
+        (0, 0, min(mw, w), min(mh, h)),
+        (max(0, w - mw), 0, w, min(mh, h)),
+        (0, max(0, h - mh), min(mw, w), h),
+        (max(0, w - mw), max(0, h - mh), w, h),
+    )
+    out: list[dict[str, Any]] = []
+    for ox, oy, x1, y1 in corners:
+        crop = frame_bgr[oy:y1, ox:x1]
+        if crop.size == 0:
+            continue
+        rh, rw = crop.shape[:2]
+        big = cv2.resize(crop, (rw * 2, rh * 2), interpolation=cv2.INTER_LINEAR)
+        result, _ = ocr(big)
+        out.extend(_parse_logo_rows(result, sample, exclude_texts, w, h, ox, oy, 2.0))
     return out
 
 
@@ -201,7 +312,15 @@ def pick_logo_detection(
                 match.append(item)
 
     required = max(2, math.ceil(len(samples) * 0.60))
-    eligible = [cluster for cluster in clusters if len(cluster) >= required]
+    eligible = [
+        cluster
+        for cluster in clusters
+        if len(cluster) >= (
+            1
+            if any(_branding_text(str(item.get("text") or "")) for item in cluster)
+            else required
+        )
+    ]
     if not eligible:
         return None
 
@@ -229,6 +348,15 @@ def pick_logo_detection(
     }
 
 
+def _logo_probe_times(duration: float) -> list[float]:
+    """Start / mid / end — logo nằm im không cần dense probe."""
+    if duration <= 0:
+        return [0.0]
+    a = min(0.4, max(0.05, duration * 0.04))
+    c = max(a, duration - min(0.8, duration * 0.04))
+    return sorted({round(t, 3) for t in (a, duration * 0.5, c)})
+
+
 def detect_logo_bbox_inprocess(
     video: Path | str,
     *,
@@ -254,29 +382,7 @@ def detect_logo_bbox_inprocess(
     if fw <= 0 or fh <= 0 or frames <= 0:
         return None
     duration = frames / fps
-    # More probes are needed for platform watermarks which deliberately move
-    # around the frame.  Keep long videos bounded to avoid slowing export.
-    # Short clips are the common preview/export case.  Probe them densely so a
-    # bouncing platform watermark cannot move to an uncovered position.
-    probe_count = min(81, max(12, int(math.ceil(duration / 0.25)) + 1)) if duration <= 30 else (12 if duration <= 90 else (5 if duration < 600 else 7))
-    edge = min(0.5, duration * 0.025)
-    if probe_count == 1:
-        times = [duration * 0.5]
-    else:
-        times = [edge + (duration - edge * 2) * index / (probe_count - 1) for index in range(probe_count)]
-        
-        # Always sample the first 3 seconds densely to catch early watermarks (e.g. AI generated)
-        # which might disappear later in the video.
-        for t in [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]:
-            if t < duration and not any(abs(t - existing) < 0.2 for existing in times):
-                times.append(t)
-        times.sort()
-    try:
-        from pipeline.core.media import nvdec_available
-
-        use_cuda = bool(nvdec_available(path))
-    except Exception:
-        use_cuda = False
+    times = _logo_probe_times(duration)
     ocr = rapidocr_labels()
     exclude_texts = {
         "".join(str(segment.get("source") or "").lower().split())
@@ -287,17 +393,19 @@ def detect_logo_bbox_inprocess(
     time_by_frame = {frame_index: time for frame_index, time in zip(requested, times)}
     sample_by_frame: dict[int, list[dict[str, Any]]] = {}
     for frame_index, frame in (
-        _decode_frames_batch(path, times, fps, fw, fh, use_cuda=use_cuda)
+        _decode_frames_batch(path, times, fps, fw, fh, use_cuda=False)
     ):
         check_cancel(project_id)
-        sample_by_frame[frame_index] = _logo_candidates(
-            frame, ocr, frame_index, exclude_texts
-        )
+        hits = _logo_candidates(frame, ocr, frame_index, exclude_texts)
+        hits.extend(_logo_candidates_corners(frame, ocr, frame_index, exclude_texts))
+        sample_by_frame[frame_index] = hits
     ordered_frames = sorted(time_by_frame)
     times = [time_by_frame[frame_index] for frame_index in ordered_frames]
     samples = [sample_by_frame.get(frame_index, []) for frame_index in ordered_frames]
     static = pick_logo_detection(samples, fw, fh)
-    tracks = _moving_branding_tracks(samples, times, fw, fh)
+    tracks = _full_clip_branding_tracks(samples, fw, fh, duration)
+    if not tracks:
+        tracks = _moving_branding_tracks(samples, times, fw, fh)
     if not static and not tracks:
         return None
     result: dict[str, Any] = static or {
@@ -310,6 +418,10 @@ def detect_logo_bbox_inprocess(
     }
     if tracks:
         result["tracks"] = tracks
+        if not result.get("bbox"):
+            result["bbox"] = tracks[0].get("bbox")
+            result["text"] = str(tracks[0].get("text") or result.get("text") or "")
+    result["version"] = _LOGO_DETECTION_VERSION
     return result
 
 

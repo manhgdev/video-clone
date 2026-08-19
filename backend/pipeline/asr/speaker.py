@@ -199,6 +199,18 @@ def diarize_audio(
     provider_out: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     try:
+        from pipeline.core.cuda_dll import prefer_torch_cudnn
+
+        prefer_torch_cudnn()
+    except Exception:
+        pass
+    try:
+        from pipeline.ocr.extract_parts.runtime import prepare_cuda_dlls
+
+        prepare_cuda_dlls()
+    except Exception:
+        pass
+    try:
         import numpy as np
         import sherpa_onnx
         import soundfile as sf

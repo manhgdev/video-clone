@@ -114,5 +114,35 @@ def test_translate_parent_does_not_probe_cv2_or_ort():
     src = Path(asr_translate.__file__).read_text(encoding="utf-8")
     assert "ensure_cv2" not in src
     assert "_rapidocr_gpu_kwargs" not in src
-    assert "generate_inpaint_preview" in src
-    assert "getattr(sys, \"frozen\", False)" in src
+    assert "generate_inpaint_preview" not in src
+
+
+def test_job_python_frozen_is_not_the_exe(monkeypatch, tmp_path) -> None:
+    import importlib.util
+
+    path = Path("backend/api/job_spawn.py")
+    spec = importlib.util.spec_from_file_location("vc_job_spawn", path)
+    assert spec and spec.loader
+    js = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(js)
+
+    runtime = tmp_path / "python.exe"
+    runtime.write_text("", encoding="utf-8")
+    monkeypatch.setattr(js.sys, "frozen", True, raising=False)
+    monkeypatch.setattr("pipeline.core.accel._runtime_python", lambda: str(runtime))
+    assert js._job_python() == str(runtime)
+
+
+def test_win_jobs_stay_out_of_uvicorn() -> None:
+    spawn = Path("backend/api/job_spawn.py").read_text(encoding="utf-8")
+    assert "_run_in_subprocess" in spawn
+    locate = Path("backend/pipeline/ocr/locate.py").read_text(encoding="utf-8")
+    assert "không chạy OCR trong process API" in locate
+
+
+def test_desktop_supervisor_shows_copyable_crash() -> None:
+    src = Path("build_app/launcher.py").read_text(encoding="utf-8")
+    assert "VIDEO_CLONE_SUPERVISOR_CHILD" in src
+    assert "show_copyable_crash" in src
+    assert "Chép lỗi" in src
+    assert "last_crash.txt" in src

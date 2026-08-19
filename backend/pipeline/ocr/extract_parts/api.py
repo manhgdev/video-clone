@@ -195,7 +195,7 @@ def asr_paddleocr(
     stable: bool = False,
 ) -> list[dict[str, Any]]:
     """OCR hardsubs on screen (RapidOCR). Nhiều khung song song theo `workers`."""
-    if getattr(sys, "frozen", False):
+    if getattr(sys, "frozen", False) or sys.platform == "win32":
         res = _asr_paddleocr_via_runtime_subprocess(
             video,
             project_id,
@@ -208,12 +208,7 @@ def asr_paddleocr(
         )
         if res is not None:
             return res
-        try:
-            from pipeline.core.app_log import append_log
-
-            append_log("[ocr-paddle] subprocess returned None -> fallback to in-process OCR")
-        except Exception:
-            pass
+        raise RuntimeError("OCR CUDA worker không chạy được — API không OCR in-process")
     return asr_paddleocr_inprocess(
         video,
         project_id,

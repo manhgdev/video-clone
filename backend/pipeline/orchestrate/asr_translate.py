@@ -552,13 +552,12 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                     running=True,
                 )
 
-        if (
-            bool(settings.get("coverLogo", False))
-            and not (
-                isinstance(meta.get("logoDetection"), dict)
-                and isinstance(meta["logoDetection"].get("bbox"), dict)
-            )
-        ):
+        prev_logo = meta.get("logoDetection")
+        logo_stale = (
+            not isinstance(prev_logo, dict)
+            or int(prev_logo.get("version") or 0) < 2
+        )
+        if logo_stale:
             try:
                 from pipeline.ocr.locate_worker import _detect_logo_via_runtime_subprocess
 
@@ -571,24 +570,12 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                 )
                 # Dùng video gốc 1× — logo detection không cần 0.7× và
                 # timestamps sẽ khớp timeline cuối (1×) mà không cần remap.
+                # Không chờ bật «Che Logo»: video có AI生成+ phải hiện trong danh sách.
                 logo_detection = _detect_logo_via_runtime_subprocess(
                     video_1x, project_id=project_id, segments=segments
                 )
                 if logo_detection:
                     meta["logoDetection"] = logo_detection
-                    # Generate inpaint preview patch so the editor can show
-                    # the same quality as the export (cv2.inpaint).
-                    # Frozen: inpaint dùng cv2 in-process → crash sau dịch. Editor có CSS fallback.
-                    if not getattr(sys, "frozen", False):
-                        try:
-                            from pipeline.ocr.logo import generate_inpaint_preview
-                            patch_rel = generate_inpaint_preview(
-                                video_1x, logo_detection, project_id
-                            )
-                            if patch_rel:
-                                meta["logoDetection"]["inpaintPreview"] = patch_rel
-                        except Exception:
-                            pass
                 else:
                     meta.pop("logoDetection", None)
             except Cancelled:

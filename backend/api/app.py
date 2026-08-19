@@ -93,6 +93,9 @@ def create_app() -> FastAPI:
                 apply_gpu_process_env()
             except Exception:
                 pass
+            # Windows: CUDA trong worker, không trong uvicorn (heap/stack overrun giết API).
+            if sys.platform == "win32":
+                return
             try:
                 from pipeline.ocr.extract_parts.runtime import prepare_cuda_dlls
                 prepare_cuda_dlls()

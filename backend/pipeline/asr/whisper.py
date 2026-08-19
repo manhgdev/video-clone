@@ -1,6 +1,11 @@
 """Whisper ASR. RapidOCR sống ở pipeline.ocr.extract — re-export để tương thích."""
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
+import tempfile
 import threading
 import uuid
 from pathlib import Path
@@ -21,6 +26,14 @@ from ..ocr.extract import (  # noqa: F401 — public re-exports for run.py / bur
 _whisper = None
 _whisper_threads: int | None = None
 _whisper_lock = threading.Lock()
+
+
+def _win_ntstatus(code: int) -> str:
+    hints = {
+        3221226356: " STATUS_HEAP_CORRUPTION (CUDA/cuDNN)",
+        3221226505: " STATUS_STACK_BUFFER_OVERRUN (CUDA/cuDNN)",
+    }
+    return hints.get(int(code), "")
 
 # Siết biên segment theo word timestamps — KHÔNG tách text (tránh 1 câu → nhiều mảnh).
 _WORD_PAD_START = 0.08
@@ -47,39 +60,48 @@ def get_whisper(workers: int = 2):
         if _whisper is not None:
             return _whisper
 
+        cpu_only = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip() == "-1"
         device = "cpu"
         compute = "int8"
         try:
-            _prepare_cuda_dlls()
-            import ctranslate2
+            from pipeline.core.app_log import append_log
 
-            if ctranslate2.get_cuda_device_count() > 0:
-                device, compute = "cuda", "float16"
-        except (ImportError, RuntimeError, OSError):
+            append_log("[whisper] loading model…")
+        except Exception:
             pass
-        # Fallback: torch CUDA sẵn nhưng ctranslate2 chưa thấy GPU
-        if device == "cpu":
+        if not cpu_only:
+            try:
+                from pipeline.core.cuda_dll import prefer_torch_cudnn
+
+                prefer_torch_cudnn()
+            except Exception:
+                pass
             try:
                 from pipeline.core.accel import preferred_torch_device
 
                 if preferred_torch_device() == "cuda":
-                    try:
-                        import ctranslate2 as _ct2
-
-                        if _ct2.get_cuda_device_count() > 0:
-                            device, compute = "cuda", "float16"
-                    except Exception:
-                        pass
+                    device, compute = "cuda", "float16"
             except Exception:
                 pass
+            if device != "cuda":
+                try:
+                    _prepare_cuda_dlls()
+                    import ctranslate2
+
+                    if ctranslate2.get_cuda_device_count() > 0:
+                        device, compute = "cuda", "float16"
+                except (ImportError, RuntimeError, OSError):
+                    pass
 
         try:
             from faster_whisper import WhisperModel
         except OSError:
-            # torch không load được CUDA DLL (cudnn v.v.) — ép CPU mode
-            import os as _osenv
-            _osenv.environ["CUDA_VISIBLE_DEVICES"] = "-1"
-            device, compute = "cpu", "int8"
+            try:
+                from pipeline.core.cuda_dll import prefer_torch_cudnn
+
+                prefer_torch_cudnn()
+            except Exception:
+                pass
             from faster_whisper import WhisperModel  # noqa: F811
 
         from pipeline.core.config import sanitize_httpx_no_proxy
@@ -95,8 +117,10 @@ def get_whisper(workers: int = 2):
         else:
             import os as _os
 
-            cpu_threads = thr if thr > 0 else max(1, (_os.cpu_count() or 4) // 2)
-            cpu_threads = max(1, min(cpu_threads, max(1, int((_os.cpu_count() or 4) * 0.85))))
+            cpu_threads = thr if thr > 0 else max(1, (os.cpu_count() or 4) // 2)
+            cpu_threads = max(1, min(cpu_threads, max(1, int((os.cpu_count() or 4) * 0.85))))
+            if os.environ.get("CUDA_VISIBLE_DEVICES", "").strip() == "-1":
+                cpu_threads = min(4, cpu_threads)
             num_workers = 1
         _whisper = WhisperModel(
             "base",
@@ -113,6 +137,15 @@ def get_whisper(workers: int = 2):
         except Exception:
             pass
         _whisper_threads = thr
+        try:
+            from pipeline.core.app_log import append_log
+
+            append_log(
+                f"[whisper] loaded device={device} compute={compute} "
+                f"cpu_threads={cpu_threads} workers={num_workers}"
+            )
+        except Exception:
+            pass
         return _whisper
 
 
@@ -269,6 +302,147 @@ def asr_whisper(
     workers: int = 2,
     project_id: str | None = None,
 ) -> list[dict[str, Any]]:
+    """Whisper CUDA. Windows/frozen: subprocess — native crash không tắt API."""
+    inproc = os.environ.get("VIDEO_CLONE_WHISPER_INPROCESS", "").strip() == "1"
+    if not inproc and (getattr(sys, "frozen", False) or sys.platform == "win32"):
+        return _asr_via_runtime_subprocess(wav, source_lang, workers=workers, project_id=project_id)
+    return asr_whisper_inprocess(wav, source_lang, workers=workers, project_id=project_id)
+
+
+def _runtime_whisper_python() -> str | None:
+    try:
+        from pipeline.core.accel import _runtime_python
+
+        return _runtime_python()
+    except Exception:
+        return None
+
+
+def _asr_via_runtime_subprocess(
+    wav: Path,
+    source_lang: str,
+    *,
+    workers: int,
+    project_id: str | None,
+) -> list[dict[str, Any]]:
+    """Chạy Whisper CUDA trong .venv-runtime. Native crash chỉ giết worker."""
+    py = _runtime_whisper_python()
+    if not py:
+        raise RuntimeError("Thiếu .venv-runtime — không chạy Whisper CUDA")
+    meipass = getattr(sys, "_MEIPASS", None)
+    exe_dir = Path(sys.executable).parent if getattr(sys, "frozen", False) else None
+    pipeline_root: Path | None = None
+    for cand in [
+        Path(meipass) if meipass else None,
+        exe_dir / "_internal" if exe_dir else None,
+        exe_dir if exe_dir else None,
+        Path(__file__).resolve().parents[2],
+    ]:
+        if cand and (cand / "pipeline" / "asr" / "whisper.py").is_file():
+            pipeline_root = cand
+            break
+    if pipeline_root is None:
+        raise RuntimeError("Không tìm thấy pipeline cho Whisper CUDA worker")
+    worker_src = """# vc-whisper-worker
+import json, os, sys
+from pathlib import Path
+os.environ.setdefault("TQDM_DISABLE", "1")
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root))
+data = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8-sig"))
+from pipeline.asr.whisper import asr_whisper_inprocess
+rows = asr_whisper_inprocess(
+    Path(data["wav"]),
+    data.get("source_lang") or "auto",
+    workers=int(data.get("workers") or 2),
+    project_id=data.get("project_id"),
+)
+Path(sys.argv[3]).write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+"""
+    from pipeline.core.config import DATA, PUBLIC_DATA, SERVER_ROOT
+    from pipeline.core.jobs import (
+        is_cancelled,
+        kill_process_tree,
+        register_process,
+        unregister_process,
+    )
+
+    def _run() -> list[dict[str, Any]]:
+        with tempfile.TemporaryDirectory(prefix="vc-whisper-") as td:
+            tdir = Path(td)
+            pin, pout, wpy = tdir / "in.json", tdir / "out.json", tdir / "worker.py"
+            payload = {
+                "wav": str(Path(wav).resolve()),
+                "source_lang": source_lang,
+                "workers": workers,
+                "project_id": project_id,
+            }
+            pin.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            wpy.write_text(worker_src, encoding="utf-8")
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(pipeline_root) + os.pathsep + env.get("PYTHONPATH", "")
+            env["VIDEO_CLONE_HOME"] = str(SERVER_ROOT)
+            env["VIDEO_CLONE_DATA"] = str(DATA)
+            env["VIDEO_CLONE_PUBLIC_DATA"] = str(PUBLIC_DATA)
+            env.pop("VIDEO_CLONE_DESKTOP", None)
+            env["VIDEO_CLONE_WHISPER_INPROCESS"] = "1"
+            if meipass:
+                env["VIDEO_CLONE_MEIPASS"] = str(meipass)
+            kw: dict[str, Any] = {
+                "cwd": str(pipeline_root),
+                "env": env,
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.PIPE,
+            }
+            if sys.platform == "win32":
+                kw["creationflags"] = int(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
+            cmd = [py, str(wpy), str(pipeline_root), str(pin), str(pout)]
+            try:
+                from pipeline.core.app_log import append_log
+
+                append_log(f"[whisper] worker CUDA {py}")
+            except Exception:
+                pass
+            proc = subprocess.Popen(cmd, **kw)
+            register_process(project_id, proc)
+            try:
+                _out_b, err_b = proc.communicate(timeout=900)
+            except subprocess.TimeoutExpired:
+                kill_process_tree(proc)
+                raise RuntimeError("Whisper CUDA worker timeout")
+            finally:
+                unregister_process(project_id, proc)
+            if project_id and is_cancelled(project_id):
+                raise Cancelled("whisper cancelled")
+            err = (err_b or b"").decode("utf-8", "replace")[-2000:]
+            if proc.returncode:
+                try:
+                    from pipeline.core.app_log import append_log
+
+                    append_log(f"[whisper] worker fail code={proc.returncode}\n{err}")
+                except Exception:
+                    pass
+                raise RuntimeError(
+                    f"Whisper CUDA worker exit {proc.returncode}"
+                    f"{_win_ntstatus(proc.returncode)}\n{err}"
+                )
+            if not pout.is_file():
+                raise RuntimeError("Whisper CUDA worker không ghi kết quả")
+            rows = json.loads(pout.read_text(encoding="utf-8"))
+            if not isinstance(rows, list):
+                raise RuntimeError("Whisper CUDA worker trả dữ liệu lỗi")
+            return rows
+
+    return _run()
+
+
+def asr_whisper_inprocess(
+    wav: Path,
+    source_lang: str,
+    *,
+    workers: int = 2,
+    project_id: str | None = None,
+) -> list[dict[str, Any]]:
     """Whisper 1 lần cả file; siết start/end theo word timestamps."""
     import time
 
@@ -305,6 +479,12 @@ def asr_whisper(
             running=True,
         )
     lang = None if source_lang in ("", "auto") else source_lang
+    try:
+        from pipeline.core.app_log import append_log
+
+        append_log("[whisper] transcribe start")
+    except Exception:
+        pass
     # Chặn decoder lặp một token (đặc biệt tiếng Trung: "嗚嗚嗚…") rồi nuốt
     # trọn cửa sổ 30 giây.  Penalty nhẹ giữ được tiếng đệm thật, còn n-gram=3
     # buộc decoder thoát khỏi vòng lặp trước khi lời thoại phía sau bị mất.

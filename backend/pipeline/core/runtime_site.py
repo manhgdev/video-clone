@@ -232,29 +232,31 @@ def preload_cv2() -> None:
             pass
 
 
-def install_runtime_meta_path(site: Path | None = None) -> None:
-    """Hook meta-path so runtime venv wins over PyInstaller exclude stubs (frozen only)."""
+def install_runtime_meta_path(site: Path | None = None, *, gpu_in_process: bool = True) -> None:
+    """Hook meta-path so runtime venv wins over PyInstaller exclude stubs (frozen only).
+
+    gpu_in_process=False: process UI/API — không nạp CUDA/cv2. GPU ở worker .venv-runtime.
+    """
     if not getattr(sys, "frozen", False):
         return
     root = site or runtime_site_packages()
     if not root or not root.is_dir():
         return
     prepare_cv2_import_path(root)
-    prepare_runtime_torch_dlls(root)
-    # CUDA DLL paths phải được đăng ký TRƯỚC khi onnxruntime/rapidocr được import qua meta-path.
-    # Reset để re-scan sau khi prepare_cv2_import_path đã thêm .venv-runtime vào sys.path[0].
-    try:
-        from pipeline.ocr.extract_parts.runtime import _reset_cuda_dlls, prepare_cuda_dlls
-        _reset_cuda_dlls()  # force re-scan — sys.path vừa có .venv-runtime
-        prepare_cuda_dlls()
-    except Exception:
-        pass
+    if gpu_in_process:
+        prepare_runtime_torch_dlls(root)
+        try:
+            from pipeline.ocr.extract_parts.runtime import _reset_cuda_dlls, prepare_cuda_dlls
+            _reset_cuda_dlls()
+            prepare_cuda_dlls()
+        except Exception:
+            pass
     _purge_external_modules(root)
     site_s = str(root)
     if not any(isinstance(f, _RuntimeSiteFinder) for f in sys.meta_path):
         sys.meta_path.insert(0, _RuntimeSiteFinder(site_s))
-    # Sau khi purge, preload cv2 ngay từ .venv-runtime — tránh recursion khi rapidocr import cv2
-    preload_cv2()
+    if gpu_in_process:
+        preload_cv2()
 
 
 def _load_from_site(name: str, site: Path) -> None:

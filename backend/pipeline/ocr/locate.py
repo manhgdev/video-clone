@@ -919,13 +919,16 @@ def attach_speech_hardsub_boxes(
             raise Cancelled("locate cancelled")
     if n is not None and n >= 0:
         return n
-    if getattr(sys, "frozen", False):
-        # subprocess không chạy được — skip an toàn thay vì crash
+    # Windows: OCR in uvicorn = 0xC0000374 heap corruption, API chết.
+    if getattr(sys, "frozen", False) or sys.platform == "win32":
         try:
             from pipeline.core.app_log import append_log
-            append_log("[locate] no runtime subprocess — skip OCR boxes (keep translation)")
+
+            append_log(f"[locate] worker failed n={n} — skip in-process OCR")
         except Exception:
             pass
+        if n is not None and n < 0:
+            raise RuntimeError("OCR CUDA worker lỗi — không chạy OCR trong process API")
         return 0
     return attach_speech_hardsub_boxes_inprocess(
         video,

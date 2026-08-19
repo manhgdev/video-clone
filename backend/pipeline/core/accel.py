@@ -1,6 +1,7 @@
-"""GPU preference for all local AI (VieNeu / Whisper / Demucs / OCR).
+"""GPU-first for all local AI (VieNeu / Whisper / Demucs / OCR).
 
-Priority: CUDA (NVIDIA) → MPS (Apple Silicon) → CPU.
+Priority: CUDA (NVIDIA) → MPS (Apple Silicon). CPU only when there is no GPU.
+NVIDIA present → report CUDA even if torch probe fails — repair CUDA, do not switch CPU.
 Frozen desktop app probes torch inside .venv-runtime (PyInstaller cannot import torch).
 """
 from __future__ import annotations
@@ -122,6 +123,10 @@ def preferred_torch_device(*, refresh: bool = False) -> TorchDevice:
         except Exception:
             pass
 
+    # Physical NVIDIA → CUDA. Broken torch/DLL is a GPU bug, not a CPU path.
+    if device != "mps" and _nvidia_smi():
+        device = "cuda"
+
     with _lock:
         _cache["torch_device"] = device
     return device
@@ -150,7 +155,7 @@ def local_ai_runtime_profile(*, refresh: bool = False) -> dict[str, object]:
 
 
 def preferred_vieneu_backend() -> tuple[VieNeuBackend, str]:
-    """(backend, device) for VieNeu — GPU when possible, else ONNX/CPU."""
+    """(backend, device) for VieNeu — CUDA/MPS when the machine has a GPU."""
     env = (os.environ.get("VIENEU_BACKEND") or "auto").strip().lower()
     if env in ("onnx", "cpu"):
         return "onnx", "cpu"
@@ -236,7 +241,13 @@ def tts_local_workers(requested: int | None, *, tasks: int | None = None) -> int
 
 
 def apply_gpu_process_env() -> None:
-    """Call early in frozen/dev backend so child procs see GPU preference."""
+    """Call early so child procs see GPU preference. Avoid importing torch in the API."""
+    if sys.platform == "win32" and _nvidia_smi():
+        os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+        os.environ.setdefault("VIENEU_BACKEND", "auto")
+        os.environ.setdefault("OMP_NUM_THREADS", "2")
+        os.environ.setdefault("MKL_NUM_THREADS", "2")
+        return
     d = preferred_torch_device()
     if d == "cuda":
         os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
