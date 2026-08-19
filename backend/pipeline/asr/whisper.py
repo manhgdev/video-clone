@@ -82,6 +82,9 @@ def get_whisper(workers: int = 2):
             device, compute = "cpu", "int8"
             from faster_whisper import WhisperModel  # noqa: F811
 
+        from pipeline.core.config import sanitize_httpx_no_proxy
+
+        sanitize_httpx_no_proxy()
         # CUDA: ít CPU thread + num_workers>1 (batch decode). CPU: thr theo auto.
         if device == "cuda":
             import os as _os

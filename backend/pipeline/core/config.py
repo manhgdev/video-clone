@@ -23,6 +23,20 @@ def ensure_data_dirs() -> None:
     PUBLIC_DATA.mkdir(parents=True, exist_ok=True)
 
 
+def sanitize_httpx_no_proxy(env: dict | None = None) -> None:
+    """httpx parse IPv6 trần ``::1`` trong NO_PROXY thành port ``:1`` → Whisper/HF chết."""
+    target = os.environ if env is None else env
+    broken = {"::1", "::1/128", "[::1]", "[::1]/128"}
+    for name in ("NO_PROXY", "no_proxy"):
+        raw = target.get(name)
+        if not raw:
+            continue
+        cleaned = ",".join(
+            part.strip() for part in str(raw).split(",") if part.strip() not in broken
+        )
+        target[name] = cleaned
+
+
 def safe_child(base: Path, name: str) -> Path | None:
     """Path con hợp lệ trong base — chặn traversal (.., /, \\, tên tuyệt đối).
 

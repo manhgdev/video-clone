@@ -38,6 +38,12 @@ def _allowed_origins() -> list[str]:
 def create_app() -> FastAPI:
     # ponytail: do NOT import torch/GPU stuff here — blocks main thread 2–10s on Windows.
     # apply_gpu_process_env runs in warm-models thread below.
+    try:
+        from pipeline.core.config import sanitize_httpx_no_proxy
+
+        sanitize_httpx_no_proxy()
+    except Exception:
+        pass
     # Windows: hide subprocess console windows (cheap, 1ms)
     try:
         from pipeline.core.winproc import apply_subprocess_no_window

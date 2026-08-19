@@ -33,6 +33,14 @@ os.environ.setdefault("VIDEO_CLONE_DATA", str(home / "data"))
 os.environ.setdefault("VIDEO_CLONE_PUBLIC_DATA", str(home / "public_data"))
 os.environ.setdefault("CAPCUT_DEVICE_JSON", str(home / "capcut_device.json"))
 os.environ.setdefault("UV_PYTHON_INSTALL_DIR", str(home / ".python-runtime"))
+# httpx parse NO_PROXY IPv6 trần ``::1`` thành port ``:1`` → Whisper/HF crash.
+_broken_np = {"::1", "::1/128", "[::1]", "[::1]/128"}
+for _np in ("NO_PROXY", "no_proxy"):
+    _raw = os.environ.get(_np)
+    if _raw:
+        os.environ[_np] = ",".join(
+            p.strip() for p in _raw.split(",") if p.strip() not in _broken_np
+        )
 # Ưu tiên GPU (CUDA/MPS); giới hạn thread CPU phụ — tránh đơ máy
 os.environ.setdefault("VIENEU_BACKEND", "auto")
 os.environ.setdefault("OMP_NUM_THREADS", "2")
