@@ -198,10 +198,37 @@ if sys.platform == "win32":
         _no_win = int(getattr(_sp, "CREATE_NO_WINDOW", 0x08000000))
         _OrigPopen = _sp.Popen
 
+        # Resolve ffmpeg/ffprobe → absolute path trong bundle để tránh
+        # trailing-space PATH trên Windows ('ffprobe ' → exit 4294967295).
+        _BUNDLED_BINS: dict[str, str] = {}
+        _meipass = getattr(sys, "_MEIPASS", None)
+        if _meipass:
+            for _name in ("ffmpeg", "ffprobe", "uv"):
+                _cand = os.path.join(_meipass, f"{_name}.exe")
+                if os.path.isfile(_cand):
+                    _BUNDLED_BINS[_name] = _cand
+                    _BUNDLED_BINS[f"{_name}.exe"] = _cand
+
         class _PopenNoWindow(_OrigPopen):  # type: ignore[misc, valid-type]
             def __init__(self, *a, **kw):
                 if kw.get("creationflags") is None and not kw.get("shell"):
                     kw["creationflags"] = _no_win
+                # Fix trailing-space executables & resolve bundled binaries
+                args = a[0] if a else kw.get("args")
+                if args is not None and isinstance(args, (list, tuple)) and args:
+                    exe = str(args[0]).strip()
+                    # Nếu chỉ là bare name (không có path separator), resolve từ bundle
+                    if os.sep not in exe and "/" not in exe:
+                        resolved = _BUNDLED_BINS.get(exe) or _BUNDLED_BINS.get(exe.lower())
+                        if resolved:
+                            exe = resolved
+                    if exe != args[0]:
+                        args = list(args)
+                        args[0] = exe
+                        if a:
+                            a = (args, *a[1:])
+                        else:
+                            kw["args"] = args
                 super().__init__(*a, **kw)
 
         _sp.Popen = _PopenNoWindow  # type: ignore[misc, assignment]
