@@ -3,15 +3,91 @@ from __future__ import annotations
 
 import os
 import shutil
-import tarfile
-import tempfile
-import urllib.request
 from pathlib import Path
 from typing import Any
+
 
 SEGMENTATION_URL = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2"
 EMBEDDING_URL = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"
 EMBEDDING_NAME = "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"
+
+
+
+_DOWNLOAD_TIMEOUT = 600  # 10 phút tối đa mỗi file model (~100MB qua mạng chậm)
+_DOWNLOAD_RETRIES = 2
+
+
+def _download_file(url: str, dest: Path, log=None) -> None:
+    """Download url → dest (atomic), với timeout và retry."""
+    import time
+
+    def report(msg: str) -> None:
+        if log:
+            log(msg + "\n")
+
+    partial = dest.with_suffix(dest.suffix + f".part-{os.getpid()}")
+    partial.unlink(missing_ok=True)
+    last_err: Exception | None = None
+    for attempt in range(1, _DOWNLOAD_RETRIES + 2):
+        try:
+            report(f"{'Thử lại — ' if attempt > 1 else ''}Đang tải: {url.split('/')[-1]}")
+            try:
+                import httpx
+                with httpx.Client(timeout=_DOWNLOAD_TIMEOUT, follow_redirects=True) as client:
+                    with client.stream("GET", url) as resp:
+                        resp.raise_for_status()
+                        total = int(resp.headers.get("content-length", 0))
+                        downloaded = 0
+                        with partial.open("wb") as fh:
+                            for chunk in resp.iter_bytes(chunk_size=1 << 20):  # 1 MB
+                                fh.write(chunk)
+                                downloaded += len(chunk)
+                                if total:
+                                    pct = int(downloaded * 100 / total)
+                                    if pct % 10 == 0:
+                                        report(f"  {pct}% ({downloaded // (1 << 20)} / {total // (1 << 20)} MB)")
+            except ImportError:
+                # fallback: urllib (no progress, but works everywhere)
+                import socket
+                import urllib.request as _ur
+
+                report("  (dùng urllib, không có progress bar)")
+                old_timeout = socket.getdefaulttimeout()
+                socket.setdefaulttimeout(_DOWNLOAD_TIMEOUT)
+                try:
+                    _ur.urlretrieve(url, partial)
+                finally:
+                    socket.setdefaulttimeout(old_timeout)
+
+            # Validate size
+            size = partial.stat().st_size
+            if size < 1024:
+                partial.unlink(missing_ok=True)
+                raise RuntimeError(f"File tải về quá nhỏ ({size} bytes) — có thể lỗi mạng")
+
+            # Atomic replace — Windows safe
+            try:
+                partial.replace(dest)
+            except OSError:
+                # WinError 32: file bị lock → copy thay vì rename
+                import shutil as _shutil
+                _shutil.copy2(partial, dest)
+                partial.unlink(missing_ok=True)
+
+            report(f"  ✓ Xong — {dest.stat().st_size // (1 << 20)} MB")
+            return
+
+        except Exception as e:
+            last_err = e
+            partial.unlink(missing_ok=True)
+            if attempt <= _DOWNLOAD_RETRIES:
+                wait = 3 * attempt
+                report(f"  Lỗi: {e} — thử lại sau {wait}s…")
+                time.sleep(wait)
+
+    raise RuntimeError(
+        f"Không tải được {url.split('/')[-1]} sau {_DOWNLOAD_RETRIES + 1} lần: {last_err}"
+    )
 
 
 def ensure_diarization_models(model_dir: Path, log=None) -> tuple[Path, Path]:
@@ -26,30 +102,52 @@ def ensure_diarization_models(model_dir: Path, log=None) -> tuple[Path, Path]:
         if log:
             log(message + "\n")
 
-    with tempfile.TemporaryDirectory(prefix="videoclone-diarization-") as tmp_raw:
-        tmp = Path(tmp_raw)
-        if not segmentation.is_file():
-            report("Đang tải model phân đoạn người nói…")
-            archive = tmp / "segmentation.tar.bz2"
-            urllib.request.urlretrieve(SEGMENTATION_URL, archive)
-            with tarfile.open(archive, "r:bz2") as bundle:
-                member = next((m for m in bundle.getmembers() if Path(m.name).name == "model.int8.onnx" and m.isfile()), None)
-                if member is None:
-                    raise RuntimeError("Gói model diarization không chứa model.int8.onnx")
-                source = bundle.extractfile(member)
-                if source is None:
-                    raise RuntimeError("Không đọc được model phân đoạn người nói")
-                partial = model_dir / "model.int8.onnx.part"
-                with source, partial.open("wb") as target:
-                    shutil.copyfileobj(source, target)
-                partial.replace(segmentation)
-        if not embedding.is_file():
-            report("Đang tải model nhận dạng giọng người nói…")
-            partial = model_dir / f"{EMBEDDING_NAME}.part"
-            urllib.request.urlretrieve(EMBEDDING_URL, partial)
-            partial.replace(embedding)
-    report("Đã cài model tách người nói.")
+    if not segmentation.is_file():
+        report("Đang tải model phân đoạn người nói (segmentation)…")
+        try:
+            # Tải trực tiếp nếu URL là file .onnx đơn giản
+            # Nếu URL là tar.bz2 thì cần extract
+            import tempfile
+            with tempfile.TemporaryDirectory(prefix="videoclone-diarization-") as tmp_raw:
+                tmp = Path(tmp_raw)
+                archive = tmp / "segmentation.tar.bz2"
+                _download_file(SEGMENTATION_URL, archive, log)
+                report("Đang giải nén model phân đoạn…")
+                import tarfile
+                with tarfile.open(archive, "r:bz2") as bundle:
+                    member = next(
+                        (m for m in bundle.getmembers()
+                         if Path(m.name).name == "model.int8.onnx" and m.isfile()),
+                        None,
+                    )
+                    if member is None:
+                        raise RuntimeError("Gói model diarization không chứa model.int8.onnx")
+                    source = bundle.extractfile(member)
+                    if source is None:
+                        raise RuntimeError("Không đọc được model phân đoạn người nói")
+                    partial = model_dir / "model.int8.onnx.part"
+                    with source, partial.open("wb") as target:
+                        shutil.copyfileobj(source, target)
+                    try:
+                        partial.replace(segmentation)
+                    except OSError:
+                        shutil.copy2(partial, segmentation)
+                        partial.unlink(missing_ok=True)
+        except Exception as e:
+            segmentation.unlink(missing_ok=True)
+            raise RuntimeError(f"Không tải được model phân đoạn: {e}") from e
+
+    if not embedding.is_file():
+        report("Đang tải model nhận dạng giọng người nói (embedding)…")
+        try:
+            _download_file(EMBEDDING_URL, embedding, log)
+        except Exception as e:
+            embedding.unlink(missing_ok=True)
+            raise RuntimeError(f"Không tải được model embedding: {e}") from e
+
+    report("✓ Đã cài model tách người nói thành công.")
     return segmentation, embedding
+
 
 
 def assign_speakers(segments: list[dict[str, Any]], turns: list[dict[str, Any]]) -> None:

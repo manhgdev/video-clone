@@ -360,22 +360,29 @@ def api_install_ai_runtime():
     if getattr(sys, "frozen", False):
         ok, detail = _runtime_venv_fast()
         if ok:
-            with _install_lock:
-                _install_state.update(
-                    running=False,
-                    kind="",
-                    error="",
-                    message="Gói AI đã sẵn sàng",
-                    needsRestart=False,
-                    result={"ok": True, "message": "Gói AI đã sẵn sàng", "detail": detail},
-                )
-            return {
-                "ok": True,
-                "running": False,
-                "message": "Gói AI đã sẵn sàng",
-                "detail": detail,
-            }
+            # Kiểm tra thêm: model diarization đã download chưa?
+            from pipeline.core.config import DATA
+            diarization_dir = Path(DATA) / "models" / "pyannote"
+            models_ok = (diarization_dir / "model.int8.onnx").is_file()
+            if models_ok:
+                with _install_lock:
+                    _install_state.update(
+                        running=False,
+                        kind="",
+                        error="",
+                        message="Gói AI đã sẵn sàng",
+                        needsRestart=False,
+                        result={"ok": True, "message": "Gói AI đã sẵn sàng", "detail": detail},
+                    )
+                return {
+                    "ok": True,
+                    "running": False,
+                    "message": "Gói AI đã sẵn sàng",
+                    "detail": detail,
+                }
+            # Packages ok nhưng thiếu model → chạy job thực để tải model
     return _start_install_job("ai_runtime", install_ai_runtime)
+
 
 
 @router.post("/api/system/install/ocr_cuda")

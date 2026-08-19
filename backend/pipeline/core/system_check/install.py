@@ -194,7 +194,34 @@ _MODULE_TO_PACKAGE: dict[str, str] = {
 }
 
 
+def _find_uv() -> str | None:
+    """Tìm 'uv' trên PATH và các vị trí cài đặt phổ biến (Windows / macOS / Linux)."""
+    found = shutil.which("uv")
+    if found:
+        return found
+    home = Path.home()
+    if sys.platform == "win32":
+        localappdata = Path(os.environ.get("LOCALAPPDATA", home / "AppData" / "Local"))
+        candidates = [
+            localappdata / "uv" / "bin" / "uv.exe",       # uv installer mặc định Windows
+            localappdata / "Programs" / "uv" / "uv.exe",   # winget/scoop variant
+            home / ".cargo" / "bin" / "uv.exe",            # cargo install uv
+        ]
+    else:
+        candidates = [
+            home / ".cargo" / "bin" / "uv",
+            home / ".local" / "bin" / "uv",
+            Path("/usr/local/bin/uv"),
+            Path("/opt/homebrew/bin/uv"),
+        ]
+    for c in candidates:
+        if c.is_file():
+            return str(c)
+    return None
+
+
 def _ensure_frozen_runtime_venv(uv: str, venv: Path) -> Path:
+
     """Provision APP-owned Python; the destination machine needs no system Python."""
     py = venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
     if py.is_file():
@@ -223,9 +250,14 @@ def _runtime_pip_cmd(*extra: str) -> list[str]:
         home = _video_clone_home()
         venv = home / ".venv-runtime"
         py = venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
-        uv = shutil.which("uv")
+        uv = _find_uv()
         if not uv:
-            raise RuntimeError("Bản ứng dụng thiếu uv hoặc venv runtime — vào Thiết lập → Cài gói AI")
+            hint = (
+                "Mở PowerShell và chạy: winget install --id astral-sh.uv -e"
+                if sys.platform == "win32" else
+                "Chạy: curl -LsSf https://astral.sh/uv/install.sh | sh"
+            )
+            raise RuntimeError(f"Không tìm thấy uv để cài gói AI. {hint}")
         py = _ensure_frozen_runtime_venv(uv, venv)
         return [uv, "pip", "install", "--python", str(py), *extra]
     return [sys.executable, "-m", "pip", "install", *extra]
@@ -236,9 +268,13 @@ def _runtime_pip_uninstall_cmd(*packages: str) -> list[str]:
         home = _video_clone_home()
         venv = home / ".venv-runtime"
         py = venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
-        uv = shutil.which("uv")
+        uv = _find_uv()
         if not uv:
-            raise RuntimeError("Bản ứng dụng thiếu uv hoặc venv runtime — vào Thiết lập → Cài gói AI")
+            raise RuntimeError(
+                "Không tìm thấy uv để cài gói AI. "
+                + ("Mở PowerShell và chạy: winget install --id astral-sh.uv -e" if sys.platform == "win32"
+                   else "Chạy: curl -LsSf https://astral.sh/uv/install.sh | sh")
+            )
         py = _ensure_frozen_runtime_venv(uv, venv)
         return [uv, "pip", "uninstall", "--python", str(py), "-y", *packages]
     return [sys.executable, "-m", "pip", "uninstall", "-y", *packages]
@@ -429,7 +465,7 @@ def install_ai_runtime() -> dict[str, Any]:
         home = _video_clone_home()
         venv = home / ".venv-runtime"
         py = venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
-        uv = shutil.which("uv")
+        uv = _find_uv()
         if not uv:
             raise RuntimeError("Bản ứng dụng thiếu uv để cài gói AI")
         py = _ensure_frozen_runtime_venv(uv, venv)
@@ -633,7 +669,7 @@ def install_ocr_cuda() -> dict[str, Any]:
         home = Path(os.environ.get("VIDEO_CLONE_HOME") or "")
         venv = home / ".venv-runtime"
         py = venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
-        uv = shutil.which("uv")
+        uv = _find_uv()
         if not uv:
             raise RuntimeError("Bản ứng dụng thiếu uv để cài OCR GPU")
         py = _ensure_frozen_runtime_venv(uv, venv)
