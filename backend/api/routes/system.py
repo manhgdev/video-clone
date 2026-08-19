@@ -99,7 +99,9 @@ def _start_checks_warm() -> None:
         global _checks_warming
         try:
             from pipeline.core.system_check import system_checks
+            from pipeline.core.system_check.checks import _invalidate_checks_cache
 
+            _invalidate_checks_cache()  # Xoá cache cũ để re-check thấy trạng thái mới
             system_checks(fast=True)
         finally:
             with _checks_warm_lock:
@@ -274,10 +276,24 @@ def api_resources():
 
     diarization = Path(DATA) / "models" / "pyannote"
     runtime = local_ai_runtime_profile()
+
+    # Frozen app: sherpa_onnx nằm trong .venv-runtime → find_spec() không thấy.
+    # Dùng _runtime_mod_ok (subprocess import) hoặc kiểm tra dist-info trực tiếp.
+    if getattr(sys, "frozen", False):
+        from pipeline.core.system_check.probe import _runtime_mod_ok, _mod_ok_fast
+        sherpa_ok = _mod_ok_fast("sherpa_onnx")[0] or _runtime_mod_ok("sherpa_onnx")[0]
+        whisper_ok = _mod_ok_fast("faster_whisper")[0] or _runtime_mod_ok("faster_whisper")[0]
+        ocr_ok = _mod_ok_fast("rapidocr_onnxruntime")[0] or _runtime_mod_ok("rapidocr_onnxruntime")[0]
+    else:
+        sherpa_ok = find_spec("sherpa_onnx") is not None
+        whisper_ok = find_spec("faster_whisper") is not None
+        ocr_ok = find_spec("rapidocr_onnxruntime") is not None
+
+    diarization_installed = sherpa_ok and (diarization / "model.int8.onnx").is_file()
     resources = [
-        {"id": "whisper", "name": "Whisper", "kind": "asr", "installed": find_spec("faster_whisper") is not None, "provider": runtime["label"], "action": "ai_runtime"},
-        {"id": "diarization", "name": "Sherpa-ONNX (Tách người nói)", "kind": "diarization", "installed": find_spec("sherpa_onnx") is not None and (diarization / "model.int8.onnx").is_file(), "provider": runtime["label"], "action": "ai_runtime"},
-        {"id": "ocr", "name": "RapidOCR", "kind": "ocr", "installed": find_spec("rapidocr_onnxruntime") is not None, "provider": runtime["label"], "action": "ai_runtime"},
+        {"id": "whisper", "name": "Whisper", "kind": "asr", "installed": whisper_ok, "provider": runtime["label"], "action": "ai_runtime"},
+        {"id": "diarization", "name": "Sherpa-ONNX (Tách người nói)", "kind": "diarization", "installed": diarization_installed, "provider": runtime["label"], "action": "ai_runtime"},
+        {"id": "ocr", "name": "RapidOCR", "kind": "ocr", "installed": ocr_ok, "provider": runtime["label"], "action": "ai_runtime"},
     ]
     return {"items": resources}
 
