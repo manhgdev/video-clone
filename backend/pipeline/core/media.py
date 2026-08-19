@@ -16,6 +16,31 @@ from typing import Any
 from .jobs import run_cmd
 
 
+def _ff_bin(name: str) -> str:
+    """Trả binary name (hoặc full path) cho ffmpeg/ffprobe.
+
+    Trên Windows frozen app (_MEIPASS): tìm trong bundle trước.
+    Luôn .strip() để loại bỏ trailing space/CR từ PATH entries bị lỗi
+    (Windows PATH với trailing space → shutil.which → 'ffprobe ' → exit 4294967295).
+    """
+    # Frozen app: ffmpeg/ffprobe được bundle trong _MEIPASS
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        ext = ".exe" if sys.platform == "win32" else ""
+        candidate = Path(meipass) / f"{name}{ext}"
+        if candidate.is_file():
+            return str(candidate)
+    # Dev mode hoặc system install: tìm trên PATH
+    found = shutil.which(name)
+    if found:
+        return found.strip()
+    # Fallback: trả tên gốc — subprocess sẽ báo FileNotFoundError rõ ràng
+    return name
+
+
+
+
+
 def _gpu_kind_from_name(name: str) -> str:
     value = name.casefold()
     if any(token in value for token in ("nvidia", "geforce", "quadro", "tesla", "titan")):
@@ -182,7 +207,7 @@ def nvenc_available() -> bool:
     try:
         return subprocess.run(
             [
-                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                _ff_bin("ffmpeg"), "-hide_banner", "-loglevel", "error",
                 "-f", "lavfi", "-i", "color=size=256x256:rate=1",
                 "-frames:v", "1", "-c:v", "h264_nvenc", "-f", "null", "-",
             ],
@@ -200,7 +225,7 @@ def _h264_encoder_available(codec: str) -> bool:
     try:
         return subprocess.run(
             [
-                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                _ff_bin("ffmpeg"), "-hide_banner", "-loglevel", "error",
                 "-f", "lavfi", "-i", "color=size=256x256:rate=1",
                 "-frames:v", "1", "-c:v", codec, "-f", "null", "-",
             ],
@@ -242,7 +267,7 @@ def nvdec_available(path: Path) -> bool:
     try:
         return subprocess.run(
             [
-                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                _ff_bin("ffmpeg"), "-hide_banner", "-loglevel", "error",
                 "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
                 "-i", str(path), "-frames:v", "1",
                 "-vf", "hwdownload,format=nv12",
@@ -633,7 +658,7 @@ def ffprobe_duration(path: Path) -> float:
     try:
         out = subprocess.check_output(
             [
-                "ffprobe",
+                _ff_bin("ffprobe"),
                 "-v",
                 "error",
                 "-show_entries",
@@ -657,7 +682,7 @@ def _has_audio_stream(path: Path) -> bool:
     try:
         out = subprocess.check_output(
             [
-                "ffprobe",
+                _ff_bin("ffprobe"),
                 "-v",
                 "error",
                 "-select_streams",
@@ -776,7 +801,7 @@ def _video_keyframes(video: Path) -> list[float]:
     """PTS keyframe — đọc packet header, không decode (nhanh cả video dài)."""
     try:
         outp = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+            [_ff_bin("ffprobe"), "-v", "error", "-select_streams", "v:0",
              "-show_entries", "packet=pts_time,flags", "-of", "csv=p=0", str(video)],
             capture_output=True, text=True, timeout=600,
             creationflags=(
@@ -868,7 +893,7 @@ def _retime_segmented(
     # fps → nửa khung: cắt segment muxer NGAY TRƯỚC keyframe = packet-chính-xác
     try:
         rate = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+            [_ff_bin("ffprobe"), "-v", "error", "-select_streams", "v:0",
              "-show_entries", "stream=r_frame_rate", "-of", "csv=p=0", str(video)],
             capture_output=True, text=True, timeout=60,
             creationflags=(
@@ -899,7 +924,7 @@ def _retime_segmented(
         cuts = ",".join(f"{p[0] - eps:.6f}" for p in pieces[1:])
         run_cmd(
             project_id,
-            ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(video),
+            [_ff_bin("ffmpeg"), "-y", "-hide_banner", "-loglevel", "error", "-i", str(video),
              "-map", "0:v", "-an", "-c", "copy", "-f", "segment",
              "-segment_times", cuts, "-reset_timestamps", "1",
              str(tdir / "p_%d.mp4")],
@@ -942,7 +967,7 @@ def _retime_segmented(
                 enc_args = h264_encoder_args(fast=True)
                 if hw_args:
                     enc_args = _strip_pix_fmt(enc_args)
-                return ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                return [_ff_bin("ffmpeg"), "-y", "-hide_banner", "-loglevel", "error",
                         *hw_args, "-i", str(files[i]),
                         "-filter_complex_script", str(fc), "-map", "[vout]",
                         *enc_args, "-an", str(enc)]
@@ -976,14 +1001,14 @@ def _retime_segmented(
             aud = tdir / "aud.m4a"
             run_cmd(
                 project_id,
-                ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                [_ff_bin("ffmpeg"), "-y", "-hide_banner", "-loglevel", "error",
                  "-i", str(video), "-filter_complex_script", str(afc),
                  "-map", "[aout]", "-c:a", "aac", "-b:a", "128k", str(aud)],
             )
             # Nối + ghép audio một lệnh — video chỉ ghi đĩa một lượt
             run_cmd(
                 project_id,
-                ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                [_ff_bin("ffmpeg"), "-y", "-hide_banner", "-loglevel", "error",
                  "-f", "concat", "-safe", "0", "-i", str(lst), "-i", str(aud),
                  "-map", "0:v", "-map", "1:a", "-c", "copy",
                  "-map_metadata", "-1", "-map_chapters", "-1", str(tmp_out)],
@@ -991,7 +1016,7 @@ def _retime_segmented(
         else:
             run_cmd(
                 project_id,
-                ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                [_ff_bin("ffmpeg"), "-y", "-hide_banner", "-loglevel", "error",
                  "-f", "concat", "-safe", "0", "-i", str(lst),
                  "-c", "copy", "-an", str(tmp_out)],
             )
@@ -1130,7 +1155,7 @@ def retime_video_segments(
         try:
             hw_args = _hw_decode_args()  # trim/setpts không đụng pixel → NVDEC được
             cmd = [
-                "ffmpeg",
+                _ff_bin("ffmpeg"), 
                 "-y",
                 "-hide_banner",
                 "-loglevel",
@@ -1247,7 +1272,7 @@ def retime_audio_track(
         run_cmd(
             project_id,
             [
-                "ffmpeg",
+                _ff_bin("ffmpeg"), 
                 "-y",
                 "-hide_banner",
                 "-loglevel",
@@ -1294,7 +1319,7 @@ def ensure_preview_clip(
         run_cmd(
             project_id,
             [
-                "ffmpeg",
+                _ff_bin("ffmpeg"), 
                 "-y",
                 "-ss",
                 str(start),
@@ -1311,7 +1336,7 @@ def ensure_preview_clip(
         run_cmd(
             project_id,
             [
-                "ffmpeg",
+                _ff_bin("ffmpeg"), 
                 "-y",
                 "-ss",
                 str(start),
@@ -1395,7 +1420,7 @@ def ensure_playback_speed(
             "0",
         ]
     cmd = [
-        "ffmpeg",
+        _ff_bin("ffmpeg"), 
         "-y",
         "-hide_banner",
         "-loglevel",
@@ -1453,7 +1478,7 @@ def extract_audio(video: Path, wav: Path, project_id: str | None = None) -> None
     run_cmd(
         project_id,
         [
-            "ffmpeg",
+            _ff_bin("ffmpeg"), 
             "-y",
             "-i",
             str(video),
@@ -1471,7 +1496,7 @@ def extract_audio(video: Path, wav: Path, project_id: str | None = None) -> None
 def video_size(path: Path) -> tuple[int, int]:
     out = subprocess.check_output(
         [
-            "ffprobe",
+            _ff_bin("ffprobe"), 
             "-v",
             "error",
             "-select_streams",
@@ -1491,7 +1516,7 @@ def video_size(path: Path) -> tuple[int, int]:
 def video_codec(path: Path) -> str:
     return subprocess.check_output(
         [
-            "ffprobe",
+            _ff_bin("ffprobe"), 
             "-v",
             "error",
             "-select_streams",
@@ -1546,7 +1571,7 @@ def encode_export_1080(
     run_cmd(
         project_id,
         [
-            "ffmpeg",
+            _ff_bin("ffmpeg"), 
             "-y",
             "-i",
             str(src),
@@ -1706,7 +1731,7 @@ def crop_export_aspect(
     run_cmd(
         project_id,
         [
-            "ffmpeg",
+            _ff_bin("ffmpeg"), 
             "-y",
             "-i",
             str(src),

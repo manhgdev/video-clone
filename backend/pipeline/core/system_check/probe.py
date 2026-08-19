@@ -15,7 +15,11 @@ from pathlib import Path
 
 
 def _which(name: str) -> str | None:
-    return shutil.which(name)
+    result = shutil.which(name)
+    # Windows PATH entries đôi khi có trailing space/CR → strip để tránh
+    # lỗi 'ffprobe ' (có space) → exit 4294967295 (ERROR_INVALID_FUNCTION).
+    return result.strip() if result else None
+
 
 
 def _run_ver(cmd: list[str], *, timeout: float = 4.0) -> str:
