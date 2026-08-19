@@ -3,6 +3,7 @@
  * Chạy: node build_app/check_build.mjs [version]
  */
 import { existsSync, readdirSync, statSync, readFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -64,13 +65,21 @@ check(
   existsSync(path.join(internalDir, 'dist', 'fonts', 'NotoSans-Bold.ttf')),
 )
 
-// 4. ffmpeg
-const ffmpeg = path.join(internalDir, isWin ? 'ffmpeg.exe' : 'ffmpeg')
-check('ffmpeg bundled', existsSync(ffmpeg), size(ffmpeg))
+function checkTool(label, bin, expect) {
+  const exists = existsSync(bin)
+  check(`${label} bundled`, exists, size(bin))
+  if (!exists) return
+  const bytes = statSync(bin).size
+  check(`${label} not a shim`, bytes >= 2_000_000, size(bin))
+  const r = spawnSync(bin, ['-version'], { encoding: 'utf8', timeout: 8000 })
+  const out = `${r.stdout || ''}${r.stderr || ''}`
+  const line = out.split(/\r?\n/).find(Boolean) || `exit ${r.status}`
+  check(`${label} -version`, r.status === 0 && out.toLowerCase().includes(expect), line.slice(0, 90))
+}
 
-// 5. ffprobe
-const ffprobe = path.join(internalDir, isWin ? 'ffprobe.exe' : 'ffprobe')
-check('ffprobe bundled', existsSync(ffprobe), size(ffprobe))
+// 4. ffmpeg / 5. ffprobe — phải là binary thật, không phải Chocolatey ShimGen
+checkTool('ffmpeg', path.join(internalDir, isWin ? 'ffmpeg.exe' : 'ffmpeg'), 'ffmpeg')
+checkTool('ffprobe', path.join(internalDir, isWin ? 'ffprobe.exe' : 'ffprobe'), 'ffprobe')
 
 // 6. uv
 const uv = path.join(internalDir, isWin ? 'uv.exe' : 'uv')

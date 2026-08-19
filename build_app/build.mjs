@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { createWriteStream, existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { createWriteStream, existsSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 
@@ -108,6 +108,54 @@ for (const [input, expected] of [
   }
 }
 
+const FF_MIN_BYTES = 2_000_000 // Chocolatey ShimGen ~400KB; Gyan/full là chục–trăm MB.
+
+function findRealToolFile(dir, filename, depth = 0) {
+  if (depth > 3 || !existsSync(dir)) return ''
+  try {
+    const direct = path.join(dir, filename)
+    if (existsSync(direct) && statSync(direct).size >= FF_MIN_BYTES) return direct
+    for (const ent of readdirSync(dir, { withFileTypes: true })) {
+      if (!ent.isDirectory()) continue
+      const hit = findRealToolFile(path.join(dir, ent.name), filename, depth + 1)
+      if (hit) return hit
+    }
+  } catch {
+    return ''
+  }
+  return ''
+}
+
+function resolveMediaTool(tool) {
+  const exe = isWin ? `${tool}.exe` : tool
+  const found = spawnSync(isWin ? 'where.exe' : 'which', [tool], { encoding: 'utf8', shell: false })
+  const candidates = found.status === 0
+    ? [...new Set(found.stdout.split(/\r?\n/).map((s) => s.trim()).filter(Boolean))]
+    : []
+  const resolved = []
+  for (const c of candidates) {
+    if (!c || !existsSync(c)) continue
+    let target = c
+    try {
+      if (statSync(c).size < FF_MIN_BYTES) {
+        const hit = findRealToolFile(path.resolve(path.dirname(c), '..', 'lib', tool, 'tools'), exe)
+        if (!hit) continue
+        target = hit
+      }
+      if (statSync(target).size >= FF_MIN_BYTES) resolved.push(target)
+    } catch {
+      continue
+    }
+  }
+  resolved.sort((a, b) => statSync(b).size - statSync(a).size)
+  return resolved[0] || ''
+}
+
+if (findRealToolFile(path.join(root, '__no_such_ffmpeg_tools__'), isWin ? 'ffmpeg.exe' : 'ffmpeg') !== '') {
+  console.error('findRealToolFile false positive')
+  process.exit(1)
+}
+
 if (!existsSync(python)) {
   console.error('Thiếu backend/.venv. Chạy npm run setup trước.')
   process.exit(1)
@@ -135,9 +183,9 @@ if (!existsSync(distIndex)) {
   process.exit(1)
 }
 
-const ffmpegCheck = spawnSync(isWin ? 'where.exe' : 'which', ['ffmpeg'], { encoding: 'utf8', shell: false })
-if (ffmpegCheck.status !== 0) {
-  console.warn('Cảnh báo: ffmpeg không tìm thấy trên PATH — bản EXE thiếu ffmpeg.')
+const ffmpegCheck = resolveMediaTool('ffmpeg')
+if (!ffmpegCheck) {
+  console.warn('Cảnh báo: ffmpeg thật không tìm thấy trên PATH (bỏ qua Chocolatey shim).')
 }
 
 // Chỉ cài khi thiếu — không reinstall mỗi lần
@@ -255,12 +303,18 @@ if (!existsSync(uv)) {
   process.exit(1)
 }
 args.push('--add-binary', `${uv}${dataSep}.`)
+args.push('--upx-exclude', isWin ? 'ffmpeg.exe' : 'ffmpeg')
+args.push('--upx-exclude', isWin ? 'ffprobe.exe' : 'ffprobe')
 
 for (const tool of ['ffmpeg', 'ffprobe']) {
-  const found = spawnSync(isWin ? 'where.exe' : 'which', [tool], { encoding: 'utf8', shell: false })
-  const binary = found.status === 0 ? found.stdout.trim().split(/\r?\n/)[0] : ''
-  if (binary) args.push('--add-binary', `${binary}${dataSep}.`)
-  else console.warn(`Cảnh báo: không tìm thấy ${tool} trên PATH.`)
+  const binary = resolveMediaTool(tool)
+  if (binary) {
+    console.log(`[bundle] ${tool}: ${binary} (${(statSync(binary).size / 1024 / 1024).toFixed(1)} MB)`)
+    args.push('--add-binary', `${binary}${dataSep}.`)
+  } else {
+    console.error(`Không tìm thấy ${tool} thật trên PATH (bỏ qua Chocolatey ShimGen ~400KB).`)
+    process.exit(1)
+  }
 }
 
 args.push(path.join(root, 'build_app', 'launcher.py'))

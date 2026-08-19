@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import json
 import shutil
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -485,23 +486,12 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
             and (bool(settings.get("burnSubs", True)) or bool(settings.get("coverHardsubs", True)))
             and segments
         ):
-            # Định vị: ưu tiên GPU (RapidOCR) khi có CUDA — không kẹp kind=cpu → 2 luồng
-            try:
-                from pipeline.ocr.extract import _rapidocr_gpu_kwargs
-                from pipeline.core.resources import pack_gpu_workers
-
-                _loc_cuda = bool(_rapidocr_gpu_kwargs().get("det_use_cuda"))
-            except Exception:
-                _loc_cuda = False
-            if _loc_cuda:
-                _loc_cap = pack_gpu_workers(per_job_mb=450, reserve_mb=350, hard_max=16)
-                locate_w = adaptive_workers(
-                    int(settings.get("workers") or 0), kind="gpu", cap=_loc_cap
-                )
-            else:
-                locate_w = adaptive_workers(
-                    int(settings.get("workers") or 0), kind="cpu", cap=14
-                )
+            # Worker count chỉ để hiện % — GPU thật nằm trong subprocess OCR.
+            # Không import onnxruntime/cv2 ở đây: Whisper đã nạp ctranslate2 CUDA;
+            # nạp ORT/OpenCV cùng process → native crash, app tắt sau khi dịch xong.
+            locate_w = adaptive_workers(
+                int(settings.get("workers") or 0), kind="cpu", cap=14
+            )
             set_status(
                 project_id,
                 step="translate",
@@ -512,72 +502,45 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
             n_box = 0
             locate_ok = False
             locate_layout_version = 3
-            # Frozen: probe cv2 TRƯỚC — nếu path hỏng thì bỏ locate (vẫn giữ bản dịch).
-            # Tránh native crash OpenCV recursion kéo tắt cả app sau khi dịch xong.
-            cv2_ok = True
+            srt_locator = engine == "subtitle"
+            if srt_locator:
+                for seg in segments:
+                    seg["_locatorProbeEarly"] = True
             try:
-                import sys as _sys
-
-                if getattr(_sys, "frozen", False):
-                    from pipeline.core.runtime_site import ensure_cv2, prepare_cv2_import_path
-
-                    prepare_cv2_import_path()
-                    ensure_cv2()
-            except Exception as cv2_e:
-                cv2_ok = False
+                n_box = attach_speech_hardsub_boxes(
+                    video,
+                    segments,
+                    only_missing=int(meta.get("bboxLocateVersion") or 0) >= locate_layout_version,
+                    project_id=project_id,
+                    stable=bool(settings.get("stableCaptionLocate", False)),
+                    analysis_region=settings.get("analysisRegion"),
+                    status_workers=locate_w,
+                )
+                locate_ok = True
+            except Cancelled:
+                # Huỷ là ý người dùng — phải nổi lên để job dừng hẳn,
+                # không biến thành "Bỏ định vị OCR" rồi chạy tiếp.
+                raise
+            except BaseException as ocr_e:
+                # BaseException: bắt cả lỗi lạ; không để kill thread/app
+                n_box = 0
                 try:
                     from pipeline.core.app_log import append_exception
 
-                    append_exception("[translate] skip OCR locate (cv2)", cv2_e)
+                    append_exception("[translate] OCR locate failed", ocr_e)  # type: ignore[arg-type]
                 except Exception:
                     pass
                 set_status(
                     project_id,
                     step="translate",
                     progress=96,
-                    message="Bỏ định vị OCR (OpenCV) — vẫn giữ bản dịch",
+                    message=f"Bỏ định vị OCR ({type(ocr_e).__name__}) — vẫn giữ bản dịch",
                     running=True,
                 )
-            if cv2_ok:
-                srt_locator = engine == "subtitle"
+            finally:
                 if srt_locator:
                     for seg in segments:
-                        seg["_locatorProbeEarly"] = True
-                try:
-                    n_box = attach_speech_hardsub_boxes(
-                        video,
-                        segments,
-                        only_missing=int(meta.get("bboxLocateVersion") or 0) >= locate_layout_version,
-                        project_id=project_id,
-                        stable=bool(settings.get("stableCaptionLocate", False)),
-                        analysis_region=settings.get("analysisRegion"),
-                        status_workers=locate_w,
-                    )
-                    locate_ok = True
-                except Cancelled:
-                    # Huỷ là ý người dùng — phải nổi lên để job dừng hẳn,
-                    # không biến thành "Bỏ định vị OCR" rồi chạy tiếp.
-                    raise
-                except BaseException as ocr_e:
-                    # BaseException: bắt cả lỗi lạ; không để kill thread/app
-                    n_box = 0
-                    try:
-                        from pipeline.core.app_log import append_exception
-
-                        append_exception("[translate] OCR locate failed", ocr_e)  # type: ignore[arg-type]
-                    except Exception:
-                        pass
-                    set_status(
-                        project_id,
-                        step="translate",
-                        progress=96,
-                        message=f"Bỏ định vị OCR ({type(ocr_e).__name__}) — vẫn giữ bản dịch",
-                        running=True,
-                    )
-                finally:
-                    if srt_locator:
-                        for seg in segments:
-                            seg.pop("_locatorProbeEarly", None)
+                        seg.pop("_locatorProbeEarly", None)
             if locate_ok:
                 meta["bboxLocateVersion"] = locate_layout_version
             if n_box:
@@ -615,15 +578,17 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                     meta["logoDetection"] = logo_detection
                     # Generate inpaint preview patch so the editor can show
                     # the same quality as the export (cv2.inpaint).
-                    try:
-                        from pipeline.ocr.logo import generate_inpaint_preview
-                        patch_rel = generate_inpaint_preview(
-                            video_1x, logo_detection, project_id
-                        )
-                        if patch_rel:
-                            meta["logoDetection"]["inpaintPreview"] = patch_rel
-                    except Exception:
-                        pass  # non-critical — CSS fallback still works
+                    # Frozen: inpaint dùng cv2 in-process → crash sau dịch. Editor có CSS fallback.
+                    if not getattr(sys, "frozen", False):
+                        try:
+                            from pipeline.ocr.logo import generate_inpaint_preview
+                            patch_rel = generate_inpaint_preview(
+                                video_1x, logo_detection, project_id
+                            )
+                            if patch_rel:
+                                meta["logoDetection"]["inpaintPreview"] = patch_rel
+                        except Exception:
+                            pass
                 else:
                     meta.pop("logoDetection", None)
             except Cancelled:

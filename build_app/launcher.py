@@ -162,6 +162,34 @@ if ocr_site.is_dir():
 bundle = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
 os.environ["PATH"] = os.pathsep.join((str(bundle), os.environ.get("PATH", "")))
 
+# Chocolatey ShimGen copy vào _internal trỏ `..\lib\ffmpeg\...` → exit 4294967295.
+# Đưa thư mục ffmpeg thật (ngoài bundle) lên trước để bare `ffmpeg` không dính shim.
+if sys.platform == "win32":
+    _ff_bundled = bundle / "ffmpeg.exe"
+    _ff_ok = False
+    try:
+        _ff_ok = _ff_bundled.is_file() and _ff_bundled.stat().st_size >= 2_000_000
+    except OSError:
+        pass
+    if not _ff_ok:
+        try:
+            _bundle_res = bundle.resolve()
+        except OSError:
+            _bundle_res = bundle
+        for _d in os.environ.get("PATH", "").split(os.pathsep):
+            if not _d:
+                continue
+            _p = Path(_d)
+            try:
+                if _p.resolve() == _bundle_res:
+                    continue
+            except OSError:
+                pass
+            _cand = _p / "ffmpeg.exe"
+            if _cand.is_file():
+                os.environ["PATH"] = os.pathsep.join((str(_cand.parent), os.environ["PATH"]))
+                break
+
 # Seed giọng zmAI đi kèm; không ghi đè giọng hoặc metadata người dùng đã sửa.
 # ponytail: kiểm tra mtime — không copy nếu target mới hơn source (tránh chậm startup mỗi lần).
 bundled_voice_refs = bundle / "resources" / "voice-ref"
@@ -205,9 +233,17 @@ if sys.platform == "win32":
         if _meipass:
             for _name in ("ffmpeg", "ffprobe", "uv"):
                 _cand = os.path.join(_meipass, f"{_name}.exe")
-                if os.path.isfile(_cand):
-                    _BUNDLED_BINS[_name] = _cand
-                    _BUNDLED_BINS[f"{_name}.exe"] = _cand
+                if not os.path.isfile(_cand):
+                    continue
+                # Bỏ Chocolatey shim (~400KB) — copy vào _internal thì gãy.
+                if _name in ("ffmpeg", "ffprobe"):
+                    try:
+                        if os.path.getsize(_cand) < 2_000_000:
+                            continue
+                    except OSError:
+                        continue
+                _BUNDLED_BINS[_name] = _cand
+                _BUNDLED_BINS[f"{_name}.exe"] = _cand
 
         class _PopenNoWindow(_OrigPopen):  # type: ignore[misc, valid-type]
             def __init__(self, *a, **kw):

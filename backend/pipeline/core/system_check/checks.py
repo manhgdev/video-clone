@@ -158,7 +158,7 @@ def system_checks(*, refresh: bool = False, fast: bool = True) -> dict[str, Any]
 
 def _system_checks_uncached(*, fast: bool = True) -> dict[str, Any]:
     """fast=True: chỉ PATH/venv/dist-info (~vài giây). fast=False: import probe nặng."""
-    from ..media import detect_device
+    from ..media import detect_device, _ff_bin
 
     items: list[dict[str, Any]] = []
     system = platform.system()
@@ -167,8 +167,10 @@ def _system_checks_uncached(*, fast: bool = True) -> dict[str, Any]:
     # ponytail: detect_device (nvidia-smi) + _run_ver subprocesses chạy song song để tránh
     # tổng ~15-20s tuần tự → timeout 15s của frontend. detect_device đã @lru_cache nên
     # submit thừa cũng nhanh từ lần 2 trở đi.
-    ff = _which("ffmpeg")
-    fp = _which("ffprobe")
+    ff_cmd = _ff_bin("ffmpeg")
+    fp_cmd = _ff_bin("ffprobe")
+    ff = ff_cmd if Path(ff_cmd).is_file() else None
+    fp = fp_cmd if Path(fp_cmd).is_file() else None
     ol = _ollama_executable()
     node = _node_executable()
     with ThreadPoolExecutor(max_workers=6) as _pool:
@@ -211,7 +213,7 @@ def _system_checks_uncached(*, fast: bool = True) -> dict[str, Any]:
         _item(
             id="ffmpeg",
             name="ffmpeg",
-            ok=bool(ff),
+            ok=bool(ff) and not str(ff_ver).startswith("error"),
             required=True,
             detail=ff_ver,
             hint=ff_hint or "Bắt buộc để cắt audio, cover/burn, mux xuất video.",
@@ -224,7 +226,7 @@ def _system_checks_uncached(*, fast: bool = True) -> dict[str, Any]:
         _item(
             id="ffprobe",
             name="ffprobe",
-            ok=bool(fp),
+            ok=bool(fp) and not str(fp_ver).startswith("error"),
             required=True,
             detail=fp_ver,
             hint=fp_hint or "Thường đi kèm ffmpeg (cùng package).",

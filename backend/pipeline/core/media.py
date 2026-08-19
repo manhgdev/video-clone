@@ -16,25 +16,69 @@ from typing import Any
 from .jobs import run_cmd
 
 
+# Chocolatey ShimGen ~400KB. Copy vào _internal thì relative `..\lib\ffmpeg\...`
+# gãy (exit 4294967295). Shim ở đúng chỗ gốc (chocolatey\bin) vẫn chạy được.
+# ponytail: size heuristic chỉ cho bản bundle. Ceiling = binary UPX < 2MB. Upgrade: parse ShimGen PE.
+_FF_MIN_BYTES = 2_000_000
+
+
+def _is_real_ff_bin(path: Path) -> bool:
+    try:
+        return path.is_file() and path.stat().st_size >= _FF_MIN_BYTES
+    except OSError:
+        return False
+
+
 def _ff_bin(name: str) -> str:
     """Trả binary name (hoặc full path) cho ffmpeg/ffprobe.
 
-    Trên Windows frozen app (_MEIPASS): tìm trong bundle trước.
-    Luôn .strip() để loại bỏ trailing space/CR từ PATH entries bị lỗi
-    (Windows PATH với trailing space → shutil.which → 'ffprobe ' → exit 4294967295).
+    Frozen: ưu tiên file thật trong _MEIPASS; bỏ shim đã copy (gãy).
+    PATH: nhận cả shim gốc — chỉ skip thư mục bundle.
     """
-    # Frozen app: ffmpeg/ffprobe được bundle trong _MEIPASS
+    ext = ".exe" if sys.platform == "win32" else ""
     meipass = getattr(sys, "_MEIPASS", None)
+    meipass_res: Path | None = None
     if meipass:
-        ext = ".exe" if sys.platform == "win32" else ""
-        candidate = Path(meipass) / f"{name}{ext}"
+        try:
+            meipass_res = Path(meipass).resolve()
+        except OSError:
+            meipass_res = Path(meipass)
+        bundled = meipass_res / f"{name}{ext}"
+        if _is_real_ff_bin(bundled):
+            return str(bundled)
+
+    seen: set[str] = set()
+    for folder in os.environ.get("PATH", "").split(os.pathsep):
+        if not folder:
+            continue
+        try:
+            folder_res = Path(folder).resolve()
+        except OSError:
+            continue
+        if meipass_res is not None and folder_res == meipass_res:
+            continue
+        candidate = folder_res / f"{name}{ext}"
+        try:
+            key = str(candidate.resolve())
+        except OSError:
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
         if candidate.is_file():
             return str(candidate)
-    # Dev mode hoặc system install: tìm trên PATH
+
     found = shutil.which(name)
     if found:
-        return found.strip()
-    # Fallback: trả tên gốc — subprocess sẽ báo FileNotFoundError rõ ràng
+        found = found.strip()
+        if meipass_res is not None:
+            try:
+                if Path(found).resolve().is_relative_to(meipass_res):
+                    found = ""
+            except (OSError, ValueError):
+                pass
+        if found:
+            return found
     return name
 
 

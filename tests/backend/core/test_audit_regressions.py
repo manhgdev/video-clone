@@ -105,3 +105,14 @@ def test_fit_tts_audio_compresses_to_slot(tmp_path):
     assert n == 1
     # Tổng tăng tốc tự động bị chặn 1.25×: wav 4s không được ép ngắn quá ~3.2s.
     assert 3.1 < segs[0]["audioDuration"] < 3.4
+
+
+def test_translate_parent_does_not_probe_cv2_or_ort():
+    """Sau ASR/dịch, parent không import OpenCV/ORT — native crash tắt app."""
+    import pipeline.orchestrate.asr_translate as asr_translate
+
+    src = Path(asr_translate.__file__).read_text(encoding="utf-8")
+    assert "ensure_cv2" not in src
+    assert "_rapidocr_gpu_kwargs" not in src
+    assert "generate_inpaint_preview" in src
+    assert "getattr(sys, \"frozen\", False)" in src
