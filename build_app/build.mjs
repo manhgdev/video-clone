@@ -126,19 +126,32 @@ function findRealToolFile(dir, filename, depth = 0) {
   return ''
 }
 
-function resolveMediaTool(tool) {
+function resolveMediaTool(tool, { nextTo } = {}) {
   const exe = isWin ? `${tool}.exe` : tool
   const found = spawnSync(isWin ? 'where.exe' : 'which', [tool], { encoding: 'utf8', shell: false })
   const candidates = found.status === 0
     ? [...new Set(found.stdout.split(/\r?\n/).map((s) => s.trim()).filter(Boolean))]
     : []
+  // Chocolatey: ffprobe.exe nằm cạnh ffmpeg.exe trong gói `ffmpeg`, không có gói `ffprobe`.
+  if (nextTo) {
+    const sibling = path.join(path.dirname(nextTo), exe)
+    if (existsSync(sibling)) candidates.unshift(sibling)
+  }
   const resolved = []
   for (const c of candidates) {
     if (!c || !existsSync(c)) continue
     let target = c
     try {
       if (statSync(c).size < FF_MIN_BYTES) {
-        const hit = findRealToolFile(path.resolve(path.dirname(c), '..', 'lib', tool, 'tools'), exe)
+        const dirs = [
+          path.resolve(path.dirname(c), '..', 'lib', tool, 'tools'),
+          path.resolve(path.dirname(c), '..', 'lib', 'ffmpeg', 'tools'),
+        ]
+        let hit = ''
+        for (const dir of dirs) {
+          hit = findRealToolFile(dir, exe)
+          if (hit) break
+        }
         if (!hit) continue
         target = hit
       }
@@ -306,8 +319,10 @@ args.push('--add-binary', `${uv}${dataSep}.`)
 args.push('--upx-exclude', isWin ? 'ffmpeg.exe' : 'ffmpeg')
 args.push('--upx-exclude', isWin ? 'ffprobe.exe' : 'ffprobe')
 
+let bundledFfmpeg = ''
 for (const tool of ['ffmpeg', 'ffprobe']) {
-  const binary = resolveMediaTool(tool)
+  const binary = resolveMediaTool(tool, { nextTo: bundledFfmpeg })
+  if (binary && tool === 'ffmpeg') bundledFfmpeg = binary
   if (binary) {
     console.log(`[bundle] ${tool}: ${binary} (${(statSync(binary).size / 1024 / 1024).toFixed(1)} MB)`)
     args.push('--add-binary', `${binary}${dataSep}.`)
