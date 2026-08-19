@@ -809,23 +809,29 @@ def clone_voice(
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
+    # Frozen desktop uses a short-lived runtime subprocess for each synthesis.
+    # It deliberately returns no in-process VieNeu client; the subprocess
+    # receives this reference at synthesis time and calls add_voice itself.
+    # Calling add_voice here used to dereference None and made cloning fail
+    # even when the configured PyTorch GPU runtime was healthy.
     client = get_client()
-    try:
-        client.add_voice(safe, str(dest), denoise=bool(denoise), save=False)
-    except Exception as e1:
+    if client is not None:
         try:
-            client.add_voice(safe, str(dest), denoise=False, save=False)
-        except Exception as e2:
-            raise RuntimeError(
-                "Clone giọng cần engine PyTorch (GPU). "
-                "Built-in voices vẫn dùng ONNX/CPU. "
-                f"Chi tiết: {e2 or e1}"
-            ) from e2
-    # Không ghi SDK presets vào voices.json — sẽ xóa hết danh sách clone.
-    try:
-        client.save_voices(str(voice_store.SDK_VOICES_JSON))
-    except Exception:
-        pass
+            client.add_voice(safe, str(dest), denoise=bool(denoise), save=False)
+        except Exception as e1:
+            try:
+                client.add_voice(safe, str(dest), denoise=False, save=False)
+            except Exception as e2:
+                backend, device = _resolve_backend()
+                raise RuntimeError(
+                    "Không thể đăng ký giọng clone với VieNeu "
+                    f"({backend}/{device}). Chi tiết: {e2 or e1}"
+                ) from e2
+        # Không ghi SDK presets vào voices.json — sẽ xóa hết danh sách clone.
+        try:
+            client.save_voices(str(voice_store.SDK_VOICES_JSON))
+        except Exception:
+            pass
     clean_tags = voice_store.normalize_voice_tags(tags, strict=True)
     stat = dest.stat()
     _clone_cache[safe] = (stat.st_mtime_ns, stat.st_size)

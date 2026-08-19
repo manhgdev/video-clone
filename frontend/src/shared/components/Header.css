@@ -16,6 +16,29 @@
   padding: 8px 0;
 }
 
+.brand-home {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 10px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.brand-home:hover .brand-text strong {
+  color: var(--primary);
+}
+
+.brand-home:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 3px;
+}
+
 .brand .icon-logo {
   flex-shrink: 0;
   border-radius: 8px;

@@ -130,13 +130,21 @@ export default function Header({
             <IconMenu size={22} />
           </button>
         )}
-        <span className="header-logo-wrap" aria-hidden={showTtsMenu ? undefined : undefined}>
-          <IconLogo />
-        </span>
-        <div className="brand-text">
-          <strong>ZM TOOL</strong>
-          <span>{t('brand.tagline')}</span>
-        </div>
+        <button
+          type="button"
+          className="brand-home"
+          onClick={() => onModeChange?.('clone')}
+          title={t('nav.clone')}
+          aria-label={t('nav.clone')}
+        >
+          <span className="header-logo-wrap" aria-hidden="true">
+            <IconLogo />
+          </span>
+          <span className="brand-text">
+            <strong>ZM TOOL</strong>
+            <span>{t('brand.tagline')}</span>
+          </span>
+        </button>
       </div>
       <nav className="nav" aria-label="Chính">
         {NAV.map((item) => {
