@@ -292,10 +292,14 @@ export default function ConfigModal({
           : kind === 'demucs_cuda'
             ? await api.installDemucsCuda(onLog)
             : await api.installNvm(onLog)
-      setMsg(result.detail || result.message)
+      const doneMsg = result.detail || result.message || 'Hoàn thành'
+      setInstallLog((prev) => prev ? `${prev}\n\n✓ ${doneMsg}` : `✓ ${doneMsg}`)
+      setMsg(doneMsg)
       if (result.needsRestart) setPendingRestart(true)
       loadChecks(true, false)
       autoSetupLock.current = false
+      // Giữ popup hiện tối thiểu 1.5s để user thấy kết quả
+      await new Promise((r) => window.setTimeout(r, 1500))
     } catch (e) {
       const message = e instanceof Error
           ? e.message
@@ -314,6 +318,7 @@ export default function ConfigModal({
       setInstalling(null)
     }
   }, [loadChecks])
+
 
   const restartApp = useCallback(async () => {
     if (restartRequested.current) return

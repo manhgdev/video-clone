@@ -285,8 +285,18 @@ def api_resources():
 @router.post("/api/resources/{resource_id}/install")
 def api_install_resource(resource_id: str):
     if resource_id in {"whisper", "diarization", "ocr"}:
+        if resource_id == "diarization":
+            # Kiểm tra nếu models chưa có thì phải force cài thực sự
+            # (không bị frozen fast-path bỏ qua bước download model)
+            from pipeline.core.config import DATA
+            diarization_dir = Path(DATA) / "models" / "pyannote"
+            models_ok = (diarization_dir / "model.int8.onnx").is_file()
+            if not models_ok:
+                from pipeline.core.system_check import install_ai_runtime
+                return _start_install_job("ai_runtime", install_ai_runtime)
         return api_install_ai_runtime()
     raise HTTPException(404, "Resource không tồn tại")
+
 
 
 @router.post("/api/system/ollama/signin")
