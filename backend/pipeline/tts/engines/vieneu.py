@@ -14,6 +14,7 @@ import hashlib
 import importlib.metadata
 import logging
 import os
+import subprocess
 import sys
 import threading
 import warnings
@@ -30,6 +31,47 @@ _reference_lock = threading.Lock()
 _reference_cache: dict[str, tuple[int, int, dict[str, Any]]] = {}
 _clone_lock = threading.Lock()
 _clone_cache: dict[str, tuple[int, int]] = {}
+
+
+def _normalize_clone_reference(source: Path, destination: Path) -> None:
+    """Convert an uploaded reference to the exact WAV format VieNeu expects.
+
+    Use a sibling temporary file so a failed/terminated FFmpeg process never
+    leaves a partial clone registered as a valid voice.  Capturing stderr is
+    essential on Windows: exit 0xFFFFFFFF alone does not identify whether the
+    MP3 is invalid, a codec is missing, or FFmpeg itself was interrupted.
+    """
+    if not source.is_file() or source.stat().st_size <= 0:
+        raise RuntimeError("File mẫu giọng trống hoặc không tồn tại")
+    temporary = destination.with_name(f".{destination.stem}.convert-{os.getpid()}.wav")
+    temporary.unlink(missing_ok=True)
+    cmd = [
+        "ffmpeg", "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
+        "-i", str(source), "-map", "0:a:0?", "-vn",
+        "-ac", "1", "-ar", "48000", "-c:a", "pcm_s16le", "-f", "wav", str(temporary),
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("Không tìm thấy FFmpeg để đọc file mẫu giọng") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("FFmpeg xử lý file mẫu quá lâu; hãy thử file ngắn hơn 30 giây") from exc
+    if result.returncode != 0 or not temporary.is_file() or temporary.stat().st_size < 1024:
+        detail = (result.stderr or result.stdout or "không có thông tin từ FFmpeg").strip()
+        detail = detail[-1200:]
+        temporary.unlink(missing_ok=True)
+        raise RuntimeError(
+            "Không chuyển được file mẫu thành WAV 48 kHz. "
+            f"FFmpeg exit {result.returncode}: {detail}"
+        )
+    temporary.replace(destination)
 
 
 def _sanitize_no_proxy(env: Any = os.environ) -> None:
@@ -804,11 +846,7 @@ def clone_voice(
         if ref_path.suffix.lower() == ".wav":
             shutil.copy2(ref_path, dest)
         else:
-            subprocess.check_call(
-                ["ffmpeg", "-y", "-i", str(ref_path), "-ac", "1", "-ar", "48000", str(dest)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            _normalize_clone_reference(ref_path, dest)
     # Frozen desktop uses a short-lived runtime subprocess for each synthesis.
     # It deliberately returns no in-process VieNeu client; the subprocess
     # receives this reference at synthesis time and calls add_voice itself.

@@ -94,7 +94,8 @@ export const api = {
 
   resources: () => fetchJson<{ items: import('./project.types').AiResource[] }>(`${base}/resources`, undefined, 20_000),
 
-  installResource: (resourceId: string) => fetchJson<{ ok: boolean; running: boolean; message?: string }>(`${base}/resources/${encodeURIComponent(resourceId)}/install`, { method: 'POST' }, 30_000),
+  installResource: (resourceId: string, onLog?: (log: string) => void) =>
+    pollInstall(`${base}/resources/${encodeURIComponent(resourceId)}/install`, onLog),
 
   runOcrTranslate: (projectId: string, settings: ProjectSettings) => fetchJson<{ ok: boolean }>(`${base}/projects/${projectId}/ocr-translate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings) }, 30_000),
 

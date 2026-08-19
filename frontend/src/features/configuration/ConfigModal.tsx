@@ -158,6 +158,9 @@ export default function ConfigModal({
   const [logErr, setLogErr] = useState('')
   const [logCopied, setLogCopied] = useState(false)
   const autoSetupLock = useRef(false)
+  /** Install kinds already auto-attempted — prevents infinite retry when install
+   *  succeeds but the underlying check item remains !ok (e.g. native lib missing). */
+  const autoAttempted = useRef<Set<string>>(new Set())
   const restartRequested = useRef(false)
 
   const loadLogs = useCallback(() => {
@@ -343,6 +346,10 @@ export default function ConfigModal({
       }
       const next = nextAutoInstall(checks)
       if (next) {
+        // Skip if this kind was already auto-attempted — avoids infinite loop
+        // when install succeeds but the check item remains !ok.
+        if (autoAttempted.current.has(next)) return
+        autoAttempted.current.add(next)
         autoSetupLock.current = true
         await installAction(next)
         return
@@ -586,6 +593,7 @@ export default function ConfigModal({
                           disabled={!!installing}
                           onClick={() => {
                             autoSetupLock.current = false
+                            autoAttempted.current.clear()
                             void installAction(a.id as 'ocr_cuda' | 'demucs_cuda')
                           }}
                         >
@@ -598,7 +606,7 @@ export default function ConfigModal({
                   type="button"
                   className="cfg-secondary cfg-setup-refresh"
                   disabled={checksLoading || !!installing}
-                  onClick={() => loadChecks(true, false)}
+                  onClick={() => { autoAttempted.current.clear(); loadChecks(true, false) }}
                 >
                   {checksLoading ? '…' : t('Kiểm tra lại', 'Check again')}
                 </button>
@@ -647,6 +655,7 @@ export default function ConfigModal({
                         disabled={!!installing}
                         onClick={() => {
                           autoSetupLock.current = false
+                          autoAttempted.current.clear()
                           // ai_runtime_ocr / ai_runtime_vieneu → cùng endpoint ai_runtime
                           const kind = it.install.startsWith('ai_runtime')
                             ? 'ai_runtime'
