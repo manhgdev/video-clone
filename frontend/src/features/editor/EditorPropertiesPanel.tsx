@@ -564,9 +564,9 @@ export function EditorPropertiesPanel({
                                     applyCaptionModeAll(mode)
                                   }}
                                 >
-                                  <option value="cover">Che chữ cũ + chèn dịch</option>
-                                  <option value="below">Chèn dịch phía dưới</option>
-                                  <option value="above">Chèn dịch phía trên</option>
+                                  <option value="cover">{settings.targetLang === 'none' ? 'Che chữ cũ + chèn chữ gốc' : 'Che chữ cũ + chèn dịch'}</option>
+                                  <option value="below">{settings.targetLang === 'none' ? 'Chèn chữ gốc phía dưới' : 'Chèn dịch phía dưới'}</option>
+                                  <option value="above">{settings.targetLang === 'none' ? 'Chèn chữ gốc phía trên' : 'Chèn dịch phía trên'}</option>
                                   <option value="none">Không chèn chữ</option>
                                 </select>
                               </PropLabel>
@@ -600,9 +600,9 @@ export function EditorPropertiesPanel({
                                   applyCaptionModeAll(e.target.value as 'cover' | 'below' | 'above' | 'none')
                                 }}
                               >
-                                <option value="cover">Che chữ cũ + chèn dịch</option>
-                                <option value="below">Chèn dịch phía dưới</option>
-                                <option value="above">Chèn dịch phía trên</option>
+                                <option value="cover">{settings.targetLang === 'none' ? 'Che chữ cũ + chèn chữ gốc' : 'Che chữ cũ + chèn dịch'}</option>
+                                <option value="below">{settings.targetLang === 'none' ? 'Chèn chữ gốc phía dưới' : 'Chèn dịch phía dưới'}</option>
+                                <option value="above">{settings.targetLang === 'none' ? 'Chèn chữ gốc phía trên' : 'Chèn dịch phía trên'}</option>
                                 <option value="none">Không chèn chữ</option>
                               </select>
                             </PropLabel>

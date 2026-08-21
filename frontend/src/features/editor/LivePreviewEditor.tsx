@@ -1441,7 +1441,7 @@ export default function LivePreviewEditor({
       : undefined
   // Che mask: cover mode = mọi hardsub; below/above = chỉ watermark dọc/nhãn (không che mid)
   const maskBoxes =
-    settings.burnSubs
+    settings.burnSubs && !trackHidden.caption
       ? coverSegs
           .filter((s) => {
             if (overCoverMode) {
@@ -3753,7 +3753,7 @@ export default function LivePreviewEditor({
   const placement = captionPlacement(settings)
   // below/above: mid + horizontal — cỡ = bbox che, neo trên/dưới dải OCR
   const activeCaptionMeta = (() => {
-    if (!overlayBurnOn || !timelineSeg?.translation.trim() || placement === 'over') {
+    if (!overlayBurnOn || trackHidden.caption || !timelineSeg?.translation.trim() || placement === 'over') {
       return null as null | { box: PixelBox; fontPx: number; lines: string[] }
     }
     if (timelineSeg.layout === 'vertical' || timelineSeg.layout === 'label') return null
@@ -3778,7 +3778,7 @@ export default function LivePreviewEditor({
     activeCaptionMeta?.fontPx
     ?? overlayLaidFont
     ?? resolveCaptionFontSize(focusCaptionSeg ?? undefined, settings, sourceWidth, sourceHeight)
-  const showCoverBlur = settings.burnSubs && maskBoxes.length > 0
+  const showCoverBlur = settings.burnSubs && !trackHidden.caption && maskBoxes.length > 0
   const coverMaskStyle = settings.coverMaskStyle ?? 'blur'
   const coverMaskColor = settings.coverMaskColor ?? '#4c1d95'
   const coverMaskOpacity = settings.coverMaskOpacity ?? 40
@@ -5014,7 +5014,7 @@ export default function LivePreviewEditor({
                         )
                       })}
                       {/* below/above: soft shadow như bản đẹp — không nền, không stroke dày */}
-                      {activeCaptionBox && timelineSeg?.translation.trim() && (
+                      {activeCaptionBox && !trackHidden.caption && timelineSeg?.translation.trim() && (
                         <div
                           className={cn(
                             '@container [container-type:size] absolute z-[22] pointer-events-none flex items-center justify-center',

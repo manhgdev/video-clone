@@ -69,8 +69,69 @@ export function EditorProjectPanel({ projectId, tab, segments, settings, voices,
         <PropLabel label={t('Công cụ dịch', 'Translator')}><select className="h-8 w-full rounded-md border border-border bg-background px-2 text-xs" value={settings.translator} disabled={busy} onChange={(e) => onSettings({ ...settings, translator: e.target.value as ProjectSettings['translator'] })}>{(['google', 'mymemory', 'tiktok', 'ollama', 'openai', 'gemini', 'deepseek', 'openrouter', 'grok', 'nvidia'] as const).map((id) => <option key={id} value={id}>{id}</option>)}</select></PropLabel>
         <PropLabel label={t('Ngôn ngữ gốc', 'Source language')}><select className="h-8 w-full rounded-md border border-border bg-background px-2 text-xs" value={settings.sourceLang} disabled={busy} onChange={(e) => onSettings({ ...settings, sourceLang: e.target.value })}><option value="auto">{t('Tự động', 'Auto')}</option><option value="zh">中文</option><option value="en">English</option><option value="ja">日本語</option><option value="ko">한국어</option><option value="vi">Tiếng Việt</option></select></PropLabel>
         <PropLabel label={t('Dịch sang', 'Translate to')}><select className="h-8 w-full rounded-md border border-border bg-background px-2 text-xs" value={settings.targetLang} disabled={busy} onChange={(e) => onSettings({ ...settings, targetLang: e.target.value })}><option value="vi">Tiếng Việt</option><option value="en">English</option><option value="zh">中文</option><option value="ja">日本語</option><option value="ko">한국어</option><option value="none">{t('Không dịch', 'No translation')}</option></select></PropLabel>
+        <PropLabel label={t('Phụ đề', 'Subtitles')}>
+          <select
+            className="h-8 w-full rounded-md border border-border bg-background px-2 text-xs"
+            value={
+              !settings.burnSubs
+                ? 'none'
+                : settings.coverHardsubs
+                  ? 'cover'
+                  : settings.captionPlacement === 'above'
+                    ? 'above'
+                    : 'below'
+            }
+            disabled={busy}
+            onChange={(e) => {
+              const v = e.target.value
+              if (v === 'cover') {
+                onSettings({ ...settings, coverHardsubs: true, burnSubs: true })
+              } else if (v === 'below') {
+                onSettings({ ...settings, coverHardsubs: false, burnSubs: true, captionPlacement: 'below' })
+              } else if (v === 'above') {
+                onSettings({ ...settings, coverHardsubs: false, burnSubs: true, captionPlacement: 'above' })
+              } else {
+                onSettings({ ...settings, burnSubs: false })
+              }
+            }}
+          >
+            <option value="cover">{settings.targetLang === 'none' ? t('Che chữ cũ + chèn chữ gốc', 'Cover + show source') : t('Che chữ cũ + chèn bản dịch', 'Cover + show translation')}</option>
+            <option value="below">{settings.targetLang === 'none' ? t('Chèn chữ gốc phía dưới', 'Show source below') : t('Chèn bản dịch phía dưới', 'Show translation below')}</option>
+            <option value="above">{settings.targetLang === 'none' ? t('Chèn chữ gốc phía trên', 'Show source above') : t('Chèn bản dịch phía trên', 'Show translation above')}</option>
+            <option value="none">{t('Không chèn chữ', 'No caption')}</option>
+          </select>
+        </PropLabel>
+        <PropLabel label={t('Cỡ chữ', 'Font size')}>
+          <select
+            className="h-8 w-full rounded-md border border-border bg-background px-2 text-xs"
+            value={String(settings.subtitleFontSize ?? 0)}
+            disabled={busy || !settings.burnSubs}
+            onChange={(e) => onSettings({ ...settings, subtitleFontSize: Number(e.target.value) })}
+          >
+            <option value="0">{t('Tự động', 'Auto')}</option>
+            {[16, 18, 20, 22, 24, 28, 32, 36, 40, 48, 56, 64].map((px) => (
+              <option key={px} value={px}>{px} px</option>
+            ))}
+          </select>
+        </PropLabel>
       </div>
       <label className="flex cursor-pointer items-center justify-between gap-2 rounded-md border border-border px-2 py-2 text-xs"><span><b className="block text-foreground">{t('Tách người nói', 'Separate speakers')}</b><span className="text-[10px] text-muted-foreground">{t('Phân vai và dùng giọng riêng.', 'Assign roles and individual voices.')}</span></span><input type="checkbox" className="size-4 accent-primary" checked={Boolean(settings.speakerDiarization)} disabled={busy || settings.engine !== 'whisper'} onChange={(e) => onSettings({ ...settings, speakerDiarization: e.target.checked })} /></label>
+      {settings.speakerDiarization && settings.engine === 'whisper' && (
+        <div className="flex items-center justify-between gap-2 rounded-md border border-border px-2 py-1.5 text-xs">
+          <span>{t('Số người nói', 'Speaker count')}</span>
+          <select
+            value={settings.speakerCount || 0}
+            disabled={busy}
+            className="h-7 rounded border border-border bg-background px-2 text-xs"
+            onChange={(e) => onSettings({ ...settings, speakerCount: Number(e.target.value) })}
+          >
+            <option value={0}>{t('Tự phát hiện', 'Auto-detect')}</option>
+            {[2, 3, 4, 5, 6, 7, 8].map((count) => (
+              <option key={count} value={count}>{locale === 'en' ? `${count} speakers` : `${count} người`}</option>
+            ))}
+          </select>
+        </div>
+      )}
       <button type="button" disabled={busy || ocrJob.running || !projectId} className="w-full rounded-md border border-violet-400/50 bg-violet-500/10 px-2 py-2 text-xs font-medium text-violet-700 hover:bg-violet-500/20 disabled:opacity-50" onClick={() => { if (!projectId || ocrRequestLock.current) return; ocrRequestLock.current = true; setOcrMinimized(false); setOcrJob({ running: true, polling: false, progress: 1, message: t('Đang khởi tạo OCR Translator…', 'Starting OCR Translator…') }); void api.runOcrTranslate(projectId, settings).then(() => setOcrJob((job) => ({ ...job, polling: true }))).catch(async (error) => { const detail = error instanceof Error ? error.message : 'OCR failed'; if (/OCR Translator.*đang chạy|OCR Translator.*running/i.test(detail)) { try { const status = await api.status(projectId); setOcrJob({ running: Boolean(status.running), polling: Boolean(status.running), progress: Number(status.progress || 1), message: status.message || t('OCR Translator đang chạy…', 'OCR Translator is running…'), error: status.running ? undefined : detail }); return } catch { /* show original error below */ } } setOcrMinimized(false); setOcrJob({ running: false, polling: false, progress: 0, message: '', error: detail }) }).finally(() => { window.setTimeout(() => { ocrRequestLock.current = false }, 500) }) }}>{t('OCR Translator → track riêng', 'OCR Translator → separate track')}</button>
       <div className="rounded-md border border-border p-2"><div className="mb-1 text-xs font-medium">{t('Track phụ đề xuất', 'Export subtitle track')}</div><select className="h-8 w-full rounded border border-border bg-background px-2 text-xs" value={settings.subtitleExportTrack ?? 'dub'} disabled={busy} onChange={(e) => onSettings({ ...settings, subtitleExportTrack: e.target.value as 'source' | 'dub' | 'both' })}><option value="dub">{t('Phụ đề lồng tiếng', 'Dub subtitle')}</option><option value="source">{t('Phụ đề gốc', 'Source subtitle')}</option><option value="both">{t('Cả hai track', 'Both tracks')}</option></select></div>
       <div className="rounded-md border border-border p-2"><div className="flex items-center justify-between gap-2"><b className="text-xs">{t('Preview', 'Preview')}</b><input type="number" min={5} max={3600} value={previewSec} disabled={busy} className="h-7 w-16 rounded border border-border bg-background px-1.5 text-right text-xs" aria-label={t('Số giây preview', 'Preview seconds')} onChange={(e) => setPreviewSec(Math.max(5, Math.min(3600, Number(e.target.value) || 5)))} /></div><div className="mt-2 grid grid-cols-2 gap-1.5"><button type="button" disabled={busy || !onRunPipeline} className="rounded-md border border-border px-2 py-2 text-xs font-medium hover:bg-accent disabled:opacity-50" onClick={() => { const next = { ...settings, previewSec }; onSettings(next); void onRunPipeline?.(previewSec, next) }}>{t('Chạy preview', 'Run preview')}</button><button type="button" disabled={busy || !onRunPipeline} className="rounded-md bg-primary px-2 py-2 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50" onClick={() => void onRunPipeline?.(0, settings)}>{t('Chạy toàn video', 'Run full video')}</button></div>{busy && <div className="mt-2 flex justify-between gap-2 text-[11px] text-muted-foreground"><span className="truncate">{jobStep || t('Đang xử lý', 'Processing')} · {Math.round(jobProgress || 0)}%</span>{onCancel && <button type="button" className="font-medium text-destructive hover:underline" onClick={onCancel}>{t('Hủy', 'Cancel')}</button>}</div>}</div>

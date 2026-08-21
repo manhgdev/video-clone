@@ -676,10 +676,10 @@ export default function Sidebar({
               }
             }}
           >
-            <option value="cover">Che chữ cũ + chèn bản dịch</option>
-            <option value="below">Chèn bản dịch phía dưới</option>
-            <option value="above">Chèn bản dịch phía trên</option>
-            <option value="none">Không chèn chữ dịch</option>
+            <option value="cover">{settings.targetLang === 'none' ? t('Che chữ cũ + chèn chữ gốc', 'Cover + show source') : t('Che chữ cũ + chèn bản dịch', 'Cover + show translation')}</option>
+            <option value="below">{settings.targetLang === 'none' ? t('Chèn chữ gốc phía dưới', 'Show source below') : t('Chèn bản dịch phía dưới', 'Show translation below')}</option>
+            <option value="above">{settings.targetLang === 'none' ? t('Chèn chữ gốc phía trên', 'Show source above') : t('Chèn bản dịch phía trên', 'Show translation above')}</option>
+            <option value="none">{t('Không chèn chữ', 'No caption')}</option>
           </select>
         </Field>
         <Field label="Cỡ chữ" icon={<IconType size={14} />}>

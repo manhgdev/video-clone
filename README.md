@@ -10,6 +10,7 @@
 [![FFmpeg](https://img.shields.io/badge/ffmpeg-nvenc%20%7C%20cpu-orange.svg)](https://ffmpeg.org/)
 [![Hardware Acceleration](https://img.shields.io/badge/hardware-CUDA%20%7C%20MPS%20%7C%20CPU-purple.svg)]()
 [![i18n](https://img.shields.io/badge/i18n-Vietnamese%20%7C%20English-success.svg)]()
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 Ứng dụng hỗ trợ cả **Desktop App (Windows/macOS/Linux)** và **Web App**. Triết lý thiết kế ưu tiên **Local AI an toàn & bảo mật** (chạy Whisper, OCR, VieNeu TTS trên máy nội bộ); chỉ gửi dữ liệu ra ngoài khi người dùng cấu hình sử dụng các API Cloud (OpenAI, Gemini, ElevenLabs, DeepSeek,...).
 
@@ -144,8 +145,8 @@ Quản lý toàn diện các kết nối và tài nguyên hệ thống:
 
 ```bash
 # 1. Clone repository
-git clone https://github.com/manhgdev/video-clone.git
-cd video-clone
+git clone https://github.com/manhgdev/zm_aio_tools.git
+cd zm_aio_tools
 
 # 2. Khởi tạo môi trường tự động (cài dependencies frontend & backend)
 npm run setup
@@ -296,5 +297,5 @@ video-clone/
 
 ## 📄 License & Bản quyền
 
-Dự án phát triển bởi **manhgdev**. Mọi quyền được bảo lưu.
-Phục vụ mục đích nghiên cứu, sáng tạo nội dung và phát triển công cụ tự động hóa video.
+Dự án được phân phối theo giấy phép [Apache License 2.0](LICENSE).  
+Bản quyền © 2026 **manhgdev**. Mọi quyền được bảo lưu.
