@@ -32,7 +32,7 @@ from pipeline.core.jobs import (
     unregister_process,
 )
 from pipeline.core.project import set_status
-from pipeline.core.media import export_transform_filters, ffprobe_duration, h264_encoder_args
+from pipeline.core.media import export_transform_filters, ffprobe_duration, filter_complex_args, h264_encoder_args
 from pipeline.export.cover_mask import (
     _blur_css_radius,
     _blur_tint_alpha,
@@ -197,6 +197,7 @@ def _collect_ops(
                 "kind": "mask", "t0": float(cue[0]), "t1": float(cue[1]),
                 "box": fit, "style": st_cue, "color": col_cue, "opacity": op_cue,
             })
+    ops = _merge_adjacent_masks(ops)
     if burn:
         for bi, cue in enumerate(cues):
             ov = cue_overlays[bi] if bi < len(cue_overlays) else None
@@ -232,6 +233,28 @@ def _collect_ops(
                 op["fade_out"] = (fout, s1 - fout)
             ops.append(op)
     return ops
+
+
+def _merge_adjacent_masks(ops: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse identical contiguous masks; text overlays remain per cue."""
+    merged: list[dict[str, Any]] = []
+    for op in ops:
+        if op.get("kind") != "mask":
+            merged.append(op)
+            continue
+        key = (op.get("box"), op.get("style"), op.get("color"), op.get("opacity"))
+        previous = merged[-1] if merged else None
+        previous_key = (
+            previous.get("box"),
+            previous.get("style"),
+            previous.get("color"),
+            previous.get("opacity"),
+        ) if previous and previous.get("kind") == "mask" else None
+        if previous_key == key and float(op["t0"]) <= float(previous["t1"]) + 0.05:
+            previous["t1"] = max(float(previous["t1"]), float(op["t1"]))
+        else:
+            merged.append(dict(op))
+    return merged
 
 
 def _post_chain(
@@ -449,7 +472,13 @@ def _keyframe_times(video: Path) -> list[float]:
 _SEG_MIN_SAVED = 5.0
 _SEG_MAX_OPS = 6
 _SEG_MAX_ACTIVE = 500
-_SEG_PARALLEL = 3  # GTX consumer ≥3 phiên NVENC (driver mới 5-8); lỗi phiên → fallback full graph
+
+
+def _segment_parallelism() -> int:
+    """Apple VideoToolbox benefits from more independent, short encode spans."""
+    if sys.platform == "darwin":
+        return min(6, max(3, (os.cpu_count() or 6) // 2))
+    return 3  # GTX consumer ≥3 phiên NVENC; lỗi phiên → fallback full graph
 
 
 def _chunk_window(
@@ -541,6 +570,7 @@ def _render_segmented(
     project_id: str | None,
     tmpdir: Path,
     post: list[str] | None = None,
+    audio_source: Path | None = None,
 ) -> bool:
     """Cắt theo keyframe (segment muxer, packet-chính-xác), encode CHỈ đoạn
     active, concat, mux audio gốc một lần cuối. Đã kiểm chứng: 902/902 frame,
@@ -595,7 +625,7 @@ def _render_segmented(
             script.write_text(";\n".join(lines) + "\n", encoding="utf-8")
             cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
                    "-i", str(seg_files[i]), *_loop_inputs(extra),
-                   "-filter_complex_script", str(script),
+                   *filter_complex_args(script.read_text(encoding="utf-8")),
                    "-map", "[vout]", "-an",
                    *h264_encoder_args(throughput=True), str(enc)]
         final_parts.append(None)
@@ -629,7 +659,7 @@ def _render_segmented(
 
         try:
             with ThreadPoolExecutor(
-                max_workers=_SEG_PARALLEL, thread_name_prefix="ffseg"
+                max_workers=_segment_parallelism(), thread_name_prefix="ffseg"
             ) as pool:
                 for idx, enc in pool.map(_encode_job, jobs):
                     final_parts[idx] = enc
@@ -649,7 +679,7 @@ def _render_segmented(
     # (trước đây concat→vcat rồi vcat→out là hai lượt ghi).
     rc = _run_ffmpeg(
         ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-         "-f", "concat", "-safe", "0", "-i", str(lst), "-i", str(video),
+         "-f", "concat", "-safe", "0", "-i", str(lst), "-i", str(audio_source or video),
          "-map", "0:v", "-map", "1:a?",
          "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
          "-map_metadata", "-1", "-map_chapters", "-1", str(out)],
@@ -698,14 +728,6 @@ def try_render_ffmpeg(
             cues, cue_need_mask, cue_fits, cue_overlays, cue_segment_ids,
             segments_by_id, mask_style, mask_color, mask_opacity, burn,
         )
-        # A browser backdrop-filter has compositing semantics that FFmpeg's
-        # graph cannot reproduce pixel-for-pixel (especially across animated
-        # source subtitles).  The frame compositor uses the same expanded-ROI
-        # glass algorithm as the preview contract, so prefer it for blur masks
-        # instead of trading visual fidelity for segmented-filter throughput.
-        if any(op.get("kind") == "mask" and op.get("style") == "blur" for op in ops):
-            _log("[ffgraph] fallback legacy: blur mask needs WYSIWYG compositor")
-            return False
         if not ops:
             import shutil
 
@@ -730,12 +752,55 @@ def try_render_ffmpeg(
         post = _post_chain(
             w, h, post_crop, post_height, video_scale_x, video_scale_y
         )
+        render_video = video
+        mask_ops = [op for op in ops if op["kind"] == "mask"]
+        # Core Image's Metal-backed path is deliberately mask-only. Caption
+        # overlays stay in the combined FFmpeg graph to avoid encoding the
+        # whole Review twice (Metal blur pass, then text-overlay pass).
+        if (
+            sys.platform == "darwin"
+            and mask_ops
+            and not any(op["kind"] == "overlay" for op in ops)
+            and all(str(op["style"]).lower() == "blur" for op in mask_ops)
+        ):
+            from .apple_ci import try_render_blur_masks
+
+            prepared = tmpdir / "coreimage_blur.mp4"
+            if project_id:
+                set_status(
+                    project_id, step="export", progress=18,
+                    message="Làm mờ mask bằng Apple GPU…", running=True,
+                )
+            if try_render_blur_masks(video, prepared, mask_ops, w, h, project_id):
+                render_video = prepared
+                ops = [op for op in ops if op["kind"] != "mask"]
+                _log(f"[ffgraph] Core Image Metal blur: {len(mask_ops)} mask")
+            else:
+                _log("[ffgraph] Core Image Metal unavailable → FFmpeg blur")
+
+        # Core Image may leave only text overlays (or no FFmpeg operations).
+        # Mux original audio explicitly: the helper is video-only by contract.
+        if not ops:
+            cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                   "-i", str(render_video), "-i", str(video), "-map", "0:v", "-map", "1:a?"]
+            if post:
+                cmd += ["-vf", ",".join(post), *h264_encoder_args(throughput=True)]
+            else:
+                cmd += ["-c:v", "copy"]
+            cmd += ["-c:a", "aac", "-b:a", "192k", "-map_metadata", "-1",
+                    "-map_chapters", "-1", str(out)]
+            if _run_ffmpeg(cmd, project_id) != 0 or not _validate():
+                out.unlink(missing_ok=True)
+                return False
+            if post and render_info is not None:
+                render_info["post_applied"] = True
+            return True
 
         # P2 + chia lô: đoạn trống copy (hoặc crop/scale tối giản khi có post),
         # đoạn có cue encode theo lô ≤ _SEG_MAX_OPS op — graph nhỏ thì NVENC
         # mới là nút cổ chai, không phải chuỗi filter CPU.
-        fps = _probe_fps(video)
-        spans = _plan_segments(ops, src_dur, _keyframe_times(video))
+        fps = _probe_fps(render_video)
+        spans = _plan_segments(ops, src_dur, _keyframe_times(render_video))
         if spans is not None:
             n_active = sum(1 for _a, _b, act in spans if act)
             act_t = sum(b - a for a, b, act in spans if act)
@@ -745,7 +810,8 @@ def try_render_ffmpeg(
                 + (", +crop/scale" if post else "") + ")"
             )
             if _render_segmented(
-                video, out, ops, spans, w, h, fps, project_id, tmpdir, post=post or None
+                render_video, out, ops, spans, w, h, fps, project_id, tmpdir,
+                post=post or None, audio_source=video,
             ) and _validate():
                 if post and render_info is not None:
                     render_info["post_applied"] = True
@@ -770,9 +836,9 @@ def try_render_ffmpeg(
         # Không -hwaccel: filter chạy CPU nên hwaccel chỉ thêm chuyến GPU→CPU
         rc = _run_ffmpeg(
             ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-             "-i", str(video), *_loop_inputs(extra),
-             "-filter_complex_script", str(script),
-             "-map", "[vout]", "-map", "0:a?",
+             "-i", str(render_video), *_loop_inputs(extra), "-i", str(video),
+             *filter_complex_args(script.read_text(encoding="utf-8")),
+             "-map", "[vout]", "-map", f"{len(extra) + 1}:a?",
              *h264_encoder_args(throughput=True),
              "-c:a", "aac", "-b:a", "192k",
              "-map_metadata", "-1", "-map_chapters", "-1",

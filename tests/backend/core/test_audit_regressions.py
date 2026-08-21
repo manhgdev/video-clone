@@ -146,3 +146,6 @@ def test_desktop_supervisor_shows_copyable_crash() -> None:
     assert "show_copyable_crash" in src
     assert "Chép lỗi" in src
     assert "last_crash.txt" in src
+    assert "Zone.Identifier" in src
+    assert "Python.Runtime.dll" in src
+    assert "prepare_pythonnet" in src

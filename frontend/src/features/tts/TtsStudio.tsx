@@ -3,6 +3,7 @@ import { localize, useLocale } from '@/app/i18n'
 import { api } from '@/features/project/project.api'
 import ProgressPopup from '@/shared/components/ProgressPopup'
 import { IconHeadphones, IconHeart, IconMic, IconSpeaker } from '@/shared/components/Icons'
+import { BackTitle } from '@/shared/components/BackTitle'
 import {
   type TtsEngine,
   type TtsOutputFormat,
@@ -45,6 +46,7 @@ const FAVORITE_LS_KEY = 'video-clone:tts-voice-favorites'
 
 type Props = {
   voices: Voice[]
+  onBack: () => void
   onRefreshVoices?: (lang?: string) => void
   /** Mobile drawer — controlled từ Header ☰ */
   sideOpen?: boolean
@@ -124,6 +126,7 @@ const SECTION_LABELS: Record<string, string> = {
 
 export default function TtsStudio({
   voices,
+  onBack,
   onRefreshVoices,
   sideOpen: sideOpenProp,
   onSideOpenChange,
@@ -1207,7 +1210,7 @@ export default function TtsStudio({
       <div className="tts-main">
         <div className="tts-page-head">
           <div>
-            <h1>Text to Speech (TTS)</h1>
+            <BackTitle onBack={onBack}>Text to Speech (TTS)</BackTitle>
             <p>Nhập văn bản, chọn giọng và tạo giọng nói AI tự nhiên</p>
           </div>
           <div className="tts-page-actions">

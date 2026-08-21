@@ -21,7 +21,8 @@ PROVIDERS: dict[str, dict[str, str]] = {
     "gemini": {
         "env": "GEMINI_API_KEY",
         "base": "https://generativelanguage.googleapis.com/v1beta",
-        "model": "gemini-2.0-flash",
+        "model": "gemini-3.1-flash-lite",
+        "review_model": "gemini-2.5-flash",
         "label": "Gemini",
     },
     "deepseek": {
@@ -33,7 +34,7 @@ PROVIDERS: dict[str, dict[str, str]] = {
     "openrouter": {
         "env": "OPENROUTER_API_KEY",
         "base": "https://openrouter.ai/api/v1",
-        "model": "google/gemini-2.0-flash-001",
+        "model": "google/gemini-2.5-flash",
         "label": "OpenRouter",
     },
     "grok": {
@@ -53,7 +54,10 @@ PROVIDERS: dict[str, dict[str, str]] = {
 
 def _default_cloud() -> dict[str, dict[str, str]]:
     return {
-        pid: {"apiKey": "", "apiKeys": "", "baseUrl": meta["base"], "model": meta["model"]}
+        pid: {
+            "apiKey": "", "apiKeys": "", "baseUrl": meta["base"], "model": meta["model"],
+            "reviewBaseUrl": meta["base"], "reviewModel": meta.get("review_model", meta["model"]),
+        }
         for pid, meta in PROVIDERS.items()
     }
 
@@ -71,7 +75,16 @@ def _default_tts() -> dict[str, Any]:
 def _mask_key(key: str) -> str:
     if not key:
         return ""
-    return ("•" * max(0, min(12, len(key) - 4))) + key[-4:]
+    if len(key) <= 10:
+        return ("•" * max(4, len(key) - 4)) + key[-4:]
+    return f"{key[:6]}••••••••{key[-4:]}"
+
+
+def _clean_keys(value: Any) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    return "" if text.lower() in {"none", "null", "undefined"} else text
 
 
 def load_app_config() -> dict[str, Any]:
@@ -85,18 +98,24 @@ def load_app_config() -> dict[str, Any]:
     saved = raw.get("cloud") if isinstance(raw.get("cloud"), dict) else {}
     for pid, meta in PROVIDERS.items():
         block = saved.get(pid) if isinstance(saved.get(pid), dict) else {}
-        env_key = (os.environ.get(meta["env"]) or "").strip()
-        file_keys = str(block.get("apiKeys") or block.get("apiKey") or "").strip()
-        env_keys = (os.environ.get(meta["env"]) or "").strip()
+        file_keys = _clean_keys(block.get("apiKeys") or block.get("apiKey"))
+        env_keys = _clean_keys(os.environ.get(meta["env"]))
         keys = file_keys or env_keys
         saved_model = str(block.get("model") or "").strip()
+        saved_review_model = str(block.get("reviewModel") or "").strip()
         if pid == "nvidia" and saved_model == "meta/llama-3.1-8b-instruct":
             saved_model = meta["model"]
+        if saved_model in {"gemini-2.0-flash", "google/gemini-2.0-flash-001"}:
+            saved_model = meta["model"]
+        if saved_review_model in {"gemini-2.0-flash", "google/gemini-2.0-flash-001"}:
+            saved_review_model = meta.get("review_model", meta["model"])
         cloud[pid] = {
             "apiKey": next((key.strip() for key in keys.split(",") if key.strip()), ""),
             "apiKeys": keys,
             "baseUrl": str(block.get("baseUrl") or meta["base"]).strip() or meta["base"],
             "model": saved_model or meta["model"],
+            "reviewBaseUrl": str(block.get("reviewBaseUrl") or meta["base"]).strip() or meta["base"],
+            "reviewModel": saved_review_model or meta.get("review_model", meta["model"]),
         }
 
     tts = _default_tts()
@@ -118,13 +137,20 @@ def save_app_config(patch: dict[str, Any]) -> dict[str, Any]:
             continue
         b = cloud_in[pid]
         prev = cur["cloud"][pid]
-        key = str(b.get("apiKeys") if "apiKeys" in b else b.get("apiKey") if "apiKey" in b else prev.get("apiKeys") or prev["apiKey"]).strip()
+        if b.get("apiKeys") is not None:
+            key = _clean_keys(b["apiKeys"])
+        elif b.get("apiKey") is not None:
+            key = _clean_keys(b["apiKey"])
+        else:
+            key = _clean_keys(prev.get("apiKeys") or prev["apiKey"])
         # UI may send masked "••••xx" — ignore
         if key.startswith("•") or key == "(đã lưu)":
             key = prev["apiKey"]
         base = str(b.get("baseUrl") or prev["baseUrl"]).strip() or prev["baseUrl"]
         model = str(b.get("model") or prev["model"]).strip() or prev["model"]
-        cur["cloud"][pid] = {"apiKey": next((x.strip() for x in key.split(",") if x.strip()), ""), "apiKeys": key, "baseUrl": base, "model": model}
+        review_base = str(b.get("reviewBaseUrl") or prev["reviewBaseUrl"]).strip() or prev["reviewBaseUrl"]
+        review_model = str(b.get("reviewModel") or prev["reviewModel"]).strip() or prev["reviewModel"]
+        cur["cloud"][pid] = {"apiKey": next((x.strip() for x in key.split(",") if x.strip()), ""), "apiKeys": key, "baseUrl": base, "model": model, "reviewBaseUrl": review_base, "reviewModel": review_model}
 
     tts_in = patch.get("tts") if isinstance(patch.get("tts"), dict) else {}
     el_in = tts_in.get("elevenlabs") if isinstance(tts_in.get("elevenlabs"), dict) else None
@@ -143,6 +169,8 @@ def save_app_config(patch: dict[str, Any]) -> dict[str, Any]:
                 "apiKeys": cur["cloud"][pid].get("apiKeys", cur["cloud"][pid]["apiKey"]),
                 "baseUrl": cur["cloud"][pid]["baseUrl"],
                 "model": cur["cloud"][pid]["model"],
+                "reviewBaseUrl": cur["cloud"][pid]["reviewBaseUrl"],
+                "reviewModel": cur["cloud"][pid]["reviewModel"],
             }
             for pid in PROVIDERS
         },
@@ -173,6 +201,8 @@ def public_app_config() -> dict[str, Any]:
             "keyCount": len(parts),
             "baseUrl": b["baseUrl"],
             "model": b["model"],
+            "reviewBaseUrl": b["reviewBaseUrl"],
+            "reviewModel": b["reviewModel"],
             "label": meta["label"],
             "env": meta["env"],
         }

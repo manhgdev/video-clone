@@ -21,6 +21,23 @@ _cache_at = 0.0
 _cache: dict[str, Any] | None = None
 
 
+def _preload_cache_from_disk() -> None:
+    """Đọc last_valid từ disk ngay khi module load — tránh flap window lúc startup."""
+    global _cache, _cache_at
+    try:
+        data = json.loads((DATA / "license.json").read_text(encoding="utf-8"))
+        lv = data.get("last_valid")
+        if isinstance(lv, dict) and lv.get("valid"):
+            _cache = dict(lv)
+            # TTL ngắn hơn (15 phút) để sớm verify lại với server
+            _cache_at = time.monotonic() - _CACHE_SECONDS / 2
+    except Exception:
+        pass
+
+
+_preload_cache_from_disk()
+
+
 def _masked(key: str) -> str:
     if len(key) <= 6:
         return "•" * len(key)
@@ -35,14 +52,37 @@ def _read_key() -> str:
         return ""
 
 
-def _save_key(key: str) -> None:
+def _read_last_valid() -> dict[str, Any] | None:
+    """Return last known-valid status from disk (used when API server is down)."""
+    try:
+        data = json.loads(LICENSE_FILE.read_text(encoding="utf-8"))
+        lv = data.get("last_valid")
+        if isinstance(lv, dict) and lv.get("valid"):
+            return lv
+    except (OSError, ValueError, TypeError):
+        pass
+    return None
+
+
+def _save_key(key: str, last_valid: dict[str, Any] | None = None) -> None:
     ensure_data_dirs()
+    payload: dict[str, Any] = {"key": key}
+    if last_valid:
+        payload["last_valid"] = last_valid
+    else:
+        # Preserve existing last_valid if already saved
+        try:
+            existing = json.loads(LICENSE_FILE.read_text(encoding="utf-8"))
+            if existing.get("last_valid"):
+                payload["last_valid"] = existing["last_valid"]
+        except (OSError, ValueError, TypeError):
+            pass
     tmp = Path(f"{LICENSE_FILE}.tmp")
-    tmp.write_text(json.dumps({"key": key}, ensure_ascii=False), encoding="utf-8")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     tmp.replace(LICENSE_FILE)
 
 
-def _request(action: str, key: str) -> dict[str, Any]:
+def _request(action: str, key: str, retries: int = 3) -> dict[str, Any]:
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ZM-Tool/1.0",
         "Origin": "https://zm.io.vn",
@@ -50,16 +90,28 @@ def _request(action: str, key: str) -> dict[str, Any]:
     }
     # httpx có thể parse NO_PROXY chứa IPv6 trần ``::1`` thành port ``:1``.
     # License API là HTTPS cố định nên kết nối trực tiếp, không phụ thuộc proxy máy.
-    with httpx.Client(trust_env=False, timeout=30.0) as client:
-        response = client.post(f"{API_BASE}/{action}", json={"key": key}, headers=headers)
-    response.raise_for_status()
-    payload = response.json()
-    if payload.get("error"):
-        detail = payload.get("data") or payload.get("message") or "Key không hợp lệ"
-        raise RuntimeError(str(detail))
-    if isinstance(payload.get("data"), dict) and payload["data"].get("apps") is not None:
-        return payload["data"]
-    return payload
+    last_exc: Exception | None = None
+    for attempt in range(max(1, retries)):
+        try:
+            with httpx.Client(trust_env=False, timeout=15.0) as client:
+                response = client.post(
+                    f"{API_BASE}/{action}", json={"key": key}, headers=headers
+                )
+            response.raise_for_status()
+            payload = response.json()
+            if payload.get("error"):
+                detail = payload.get("data") or payload.get("message") or "Key không hợp lệ"
+                raise RuntimeError(str(detail))
+            if isinstance(payload.get("data"), dict) and payload["data"].get("apps") is not None:
+                return payload["data"]
+            return payload
+        except RuntimeError:
+            raise  # lỗi logic (key sai) — không retry
+        except Exception as exc:
+            last_exc = exc
+            if attempt < retries - 1:
+                time.sleep(1.0)
+    raise last_exc  # type: ignore[misc]
 
 
 def status_from_payload(payload: dict[str, Any], key: str = "") -> dict[str, Any]:
@@ -117,7 +169,24 @@ def license_status(*, force: bool = False) -> dict[str, Any]:
                 return dict(_cache)
         try:
             result = status_from_payload(_request("checkkey", key), key)
+            # Lưu trạng thái valid vào disk — dùng lại khi server tạm lỗi lần sau
+            if result.get("valid"):
+                _save_key(key, result)
         except Exception as exc:
+            # Server đang tạm lỗi (MongoDB timeout, etc.) — nếu cache RAM còn valid thì giữ
+            with _cache_lock:
+                if _cache and _cache.get("valid"):
+                    _cache_at = time.monotonic()
+                    return dict(_cache)
+            # Không có cache RAM — thử lấy last_valid từ disk
+            disk_valid = _read_last_valid()
+            if disk_valid:
+                disk_valid = dict(disk_valid)
+                disk_valid["message"] = disk_valid.get("message", "") + " (offline cache)"
+                with _cache_lock:
+                    _cache = disk_valid
+                    _cache_at = time.monotonic()
+                return disk_valid
             result = {
                 "valid": False,
                 "configured": True,
@@ -152,7 +221,7 @@ def activate_license(key: str) -> dict[str, Any]:
     activated = status_from_payload(_request("activate", key), key)
     if not activated["valid"]:
         raise ValueError(activated["message"])
-    _save_key(key)
+    _save_key(key, activated)
     with _cache_lock:
         _cache = dict(activated)
         _cache_at = time.monotonic()

@@ -1,9 +1,10 @@
 import { useCallback, useRef, useState, useEffect, type DragEvent } from 'react'
 import { localize, useLocale } from '@/app/i18n'
+import { BackTitle } from '@/shared/components/BackTitle'
 import './VideoCleanerPage.css'
 
 // Types
-export type CleanMethod = 'metadata' | 'reencode' | 'optimize'
+export type CleanMethod = 'metadata' | 'reencode' | 'optimize' | 'logo'
 export type JobStatus = 'queued' | 'processing' | 'done' | 'error' | 'cancelled'
 export type ResultTab = 'all' | 'processing' | 'done' | 'error'
 
@@ -69,10 +70,11 @@ function formatBytes(bytes: number) {
   return `${(bytes / 1024 / 1024).toFixed(bytes < 10 * 1024 * 1024 ? 1 : 0)} MB`
 }
 
-const METHOD_LABELS: Record<CleanMethod, string> = {
-  metadata: 'Xóa metadata',
-  reencode: 'Tái mã hóa',
-  optimize: 'Tối ưu',
+function methodLabel(method: CleanMethod, t: (vi: string, en: string) => string) {
+  if (method === 'metadata') return t('Xóa metadata', 'Remove metadata')
+  if (method === 'reencode') return t('Tái mã hóa', 'Re-encode')
+  if (method === 'optimize') return t('Tối ưu', 'Optimize')
+  return t('Xóa logo / watermark', 'Remove logo / watermark')
 }
 const STATUS_LABELS: Record<JobStatus, string> = {
   queued: 'Chờ xử lý',
@@ -133,7 +135,7 @@ function loadJobs(): CleanJob[] {
 
 function loadMethod(): CleanMethod {
   const m = localStorage.getItem(LS_VC_METHOD) as CleanMethod
-  return ['metadata', 'reencode', 'optimize'].includes(m) ? m : 'metadata'
+  return ['metadata', 'reencode', 'optimize', 'logo'].includes(m) ? m : 'metadata'
 }
 
 function loadOpts(): AdvancedOptions {
@@ -148,7 +150,7 @@ function loadOpts(): AdvancedOptions {
 
 import { cleanerApi } from '@/features/cleaner/cleaner.api'
 
-export default function VideoCleanerPage() {
+export default function VideoCleanerPage({ onBack }: { onBack: () => void }) {
   const { locale } = useLocale()
   const t = (vi: string, en: string) => localize(locale, vi, en)
   const [selectedFiles, setSelectedFiles] = useState<FileInfo[]>([])
@@ -245,7 +247,7 @@ export default function VideoCleanerPage() {
         return Array.from(map.values())
       })
       
-      setLogs(prev => [...prev, `[${new Date().toLocaleTimeString()}] Đã gửi ${files.length} file xử lý · phương pháp: ${METHOD_LABELS[method]}`])
+      setLogs(prev => [...prev, `[${new Date().toLocaleTimeString()}] ${t('Đã gửi', 'Submitted')} ${files.length} ${t('file xử lý', 'files for processing')} · ${t('phương pháp', 'method')}: ${methodLabel(method, t)}`])
       setActiveTab('all')
       setSelectedFiles([]) // Clear input after submission
     } catch (e: any) {
@@ -271,7 +273,7 @@ export default function VideoCleanerPage() {
   return (
     <div className="vc-page">
       <div className="vc-head">
-          <h1>Làm sạch video</h1>
+          <BackTitle onBack={onBack}>Làm sạch video</BackTitle>
           <p>Xóa metadata không cần thiết và tái mã hóa video để bảo vệ quyền riêng tư.</p>
         </div>
 
@@ -328,25 +330,33 @@ export default function VideoCleanerPage() {
             {/* Card 2 — Phương pháp */}
             <div className="vc-card">
               <div className="vc-card-title">
-                <h2><span className="vc-num">2</span>Phương pháp xử lý</h2>
+                <h2><span className="vc-num">2</span>{t('Phương pháp xử lý', 'Processing method')}</h2>
               </div>
               <div className="vc-methods">
                 {([
-                  { key: 'metadata' as const, title: 'Xóa metadata nhanh', badge: 'Khuyên dùng', badgeCls: 'green',
-                    desc: 'Stream copy · nhanh · không cần GPU' },
-                  { key: 'reencode' as const, title: 'Tái mã hóa', badge: 'Chất lượng cao', badgeCls: 'blue',
-                    desc: 'H.264/H.265 · chuẩn hóa pixel format' },
-                  { key: 'optimize' as const, title: 'Tối ưu dung lượng', badge: 'Tiết kiệm', badgeCls: 'amber',
-                    desc: 'CRF nén · giảm kích thước file' },
+                  { key: 'metadata' as const, title: t('Xóa metadata nhanh', 'Quick metadata cleanup'), badge: t('Khuyên dùng', 'Recommended'), badgeCls: 'green',
+                    desc: t('Stream copy · nhanh · không cần GPU', 'Stream copy · fast · no GPU') },
+                  { key: 'reencode' as const, title: t('Tái mã hóa', 'Re-encode'), badge: t('Chất lượng cao', 'High quality'), badgeCls: 'blue',
+                    desc: t('H.264/H.265 · chuẩn hóa pixel format', 'H.264/H.265 · normalize pixel format') },
+                  { key: 'optimize' as const, title: t('Tối ưu dung lượng', 'Optimize file size'), badge: t('Tiết kiệm', 'Smaller file'), badgeCls: 'amber',
+                    desc: t('CRF nén · giảm kích thước file', 'CRF compression · smaller file') },
+                  { key: 'logo' as const, title: t('Xóa logo / watermark', 'Remove logo / watermark'), badge: t('OCR tự nhận diện', 'OCR detection'), badgeCls: 'blue',
+                    desc: t('Quét watermark chữ ở góc: Veo, Grok, Kling, TikTok, UID…', 'Scans text corner marks: Veo, Grok, Kling, TikTok, UID…') },
                 ]).map(m => (
-                  <div key={m.key} className={`vc-method${method === m.key ? ' is-active' : ''}`} onClick={() => setMethod(m.key)}>
+                  <button type="button" key={m.key} className={`vc-method${method === m.key ? ' is-active' : ''}`} onClick={() => setMethod(m.key)}>
                     <div className="vc-check"><SvgCheck /></div>
                     <div className={`vc-badge ${m.badgeCls}`}>{m.badge}</div>
                     <div className="vc-method-title">{m.title}</div>
                     <div className="vc-method-desc">{m.desc}</div>
-                  </div>
+                  </button>
                 ))}
               </div>
+              {method === 'logo' ? (
+                <div className="vc-logo-targets">
+                  <strong>{t('Tự nhận diện logo/watermark chữ', 'Automatic text-logo detection')}</strong>
+                  <span>{t('Quét mọi nhãn chữ ổn định ở góc video. Veo, Grok và Kling chỉ là ví dụ; logo thuần hình không có chữ cần xử lý thủ công.', 'Scans any stable text label at video edges. Veo, Grok, and Kling are examples; image-only logos need manual treatment.')}</span>
+                </div>
+              ) : null}
             </div>
 
             {/* Card 3 — Tùy chọn nâng cao */}
@@ -482,7 +492,7 @@ export default function VideoCleanerPage() {
                         <tr key={job.id}>
                           <td>{idx + 1}</td>
                           <td title={job.filename} style={{ maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{job.filename}</td>
-                          <td>{METHOD_LABELS[job.method]}</td>
+                          <td>{methodLabel(job.method, t)}</td>
                           <td>
                             <span className={`vc-status ${job.status}`}>{STATUS_LABELS[job.status]}</span>
                             {job.status === 'processing' && (

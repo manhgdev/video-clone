@@ -18,8 +18,15 @@ export async function fetchJson<T>(
     const { signal: _ignore, ...rest } = init || {}
     const res = await fetch(url, { ...rest, signal: ac.signal })
     if (!res.ok) {
-      const err = await res.text()
-      throw new Error(err || res.statusText)
+      const body = await res.text()
+      let message = body
+      try {
+        const parsed = JSON.parse(body) as { detail?: unknown }
+        if (typeof parsed.detail === 'string') message = parsed.detail
+      } catch {
+        // Non-JSON errors already contain the most useful server message.
+      }
+      throw new Error(message || res.statusText)
     }
     return res.json() as Promise<T>
   } catch (e) {

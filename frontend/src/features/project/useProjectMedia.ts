@@ -31,13 +31,14 @@ export function useProjectMedia({
   const videoRevisionRef = useRef(0)
 
   const freshVideoUrl = (url: string) => {
-    videoRevisionRef.current += 1
+    const rev = Date.now()
+    videoRevisionRef.current = rev
     const base = url.split('?')[0]
     if (base.includes('/video')) {
       const projBase = base.split('/video')[0]
-      return `${projBase}/video/${videoRevisionRef.current}`
+      return `${projBase}/video/${rev}`
     }
-    return `${base}?v=${videoRevisionRef.current}`
+    return `${base}?v=${rev}`
   }
 
   function onPreviewRebaked(res: {

@@ -220,8 +220,9 @@ if (!py) {
         ? {
             ...process.env,
             VIDEO_CLONE_SUPERVISED: '1',
-            PYTHONOPTIMIZE: '1',      // bỏ docstring/assert bytecode → startup ~10% nhanh hơn
-            PYTHONUNBUFFERED: '1',    // log realtime
+            PYTHONOPTIMIZE: '1',
+            PYTHONUNBUFFERED: '1',
+            OLLAMA_NUM_PARALLEL: '2',  // cho phép 2 inference đồng thời — M5 Pro 48GB RAM đủ
           }
         : process.env,
       // Windows: tách khỏi job object của terminal khi có thể

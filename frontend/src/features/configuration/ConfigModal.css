@@ -214,6 +214,31 @@
   grid-column: 1 / -1;
 }
 
+.cfg-cloud-panels {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.cfg-cloud-panel {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line, #d7dbe6);
+  border-radius: 10px;
+  background: var(--panel, rgba(127, 127, 127, .04));
+}
+
+.cfg-cloud-panel h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.cfg-cloud-panel label:first-of-type {
+  grid-column: auto;
+}
+
 .cfg-el-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
@@ -230,6 +255,10 @@
   }
 
   .cfg-check-list {
+    grid-template-columns: 1fr;
+  }
+
+  .cfg-cloud-panels {
     grid-template-columns: 1fr;
   }
 }

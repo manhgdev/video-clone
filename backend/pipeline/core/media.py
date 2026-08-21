@@ -750,6 +750,11 @@ def _has_audio_stream(path: Path) -> bool:
         return False
 
 
+def filter_complex_args(graph: str) -> list[str]:
+    """Inline filter graph. Homebrew ffmpeg has no -filter_complex_script (exit 8)."""
+    return ["-filter_complex", graph]
+
+
 def _retime_spans(
     duration: float,
     ordered: list[dict[str, Any]],
@@ -1018,7 +1023,7 @@ def _retime_segmented(
                     enc_args = _strip_pix_fmt(enc_args)
                 return [_ff_bin("ffmpeg"), "-y", "-hide_banner", "-loglevel", "error",
                         *hw_args, "-i", str(files[i]),
-                        "-filter_complex_script", str(fc), "-map", "[vout]",
+                        *filter_complex_args(fc.read_text(encoding="utf-8")), "-map", "[vout]",
                         *enc_args, "-an", str(enc)]
 
             try:
@@ -1051,7 +1056,7 @@ def _retime_segmented(
             run_cmd(
                 project_id,
                 [_ff_bin("ffmpeg"), "-y", "-hide_banner", "-loglevel", "error",
-                 "-i", str(video), "-filter_complex_script", str(afc),
+                 "-i", str(video), *filter_complex_args(afc.read_text(encoding="utf-8")),
                  "-map", "[aout]", "-c:a", "aac", "-b:a", "128k", str(aud)],
             )
             # Nối + ghép audio một lệnh — video chỉ ghi đĩa một lượt
@@ -1212,8 +1217,7 @@ def retime_video_segments(
                 *hw_args,
                 "-i",
                 str(video),
-                "-filter_complex_script",
-                str(fc_path),
+                *filter_complex_args(fc_path.read_text(encoding="utf-8")),
                 "-map",
                 "[vout]",
             ]
@@ -1328,8 +1332,7 @@ def retime_audio_track(
                 "error",
                 "-i",
                 str(audio),
-                "-filter_complex_script",
-                str(fc_path),
+                *filter_complex_args(fc_path.read_text(encoding="utf-8")),
                 "-map",
                 "[aout]",
                 "-c:a",
@@ -1354,6 +1357,8 @@ def ensure_preview_clip(
     Ghi *.tmp.mp4 rồi rename — tránh Range vào file đang ghi (416).
     Không dùng .mp4.tmp: ffmpeg/nvenc không nhận extension → exit -22.
     """
+    if not source.is_file() or source.stat().st_size < 64:
+        raise RuntimeError(f"SOURCE_ERROR: không đọc được video {source}")
     if dest.exists() and dest.stat().st_mtime >= source.stat().st_mtime:
         return dest
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -1363,42 +1368,58 @@ def ensure_preview_clip(
             tmp.unlink()
     except OSError:
         pass
-    # ponytail: -c copy nhanh; lỗi codec thì re-encode
+    has_a = _has_audio_stream(source)
+    maps = ["-map", "0:v:0"] + (["-map", "0:a:0"] if has_a else [])
+    audio_args = ["-c:a", "aac", "-ac", "2", "-ar", "44100"] if has_a else ["-an"]
+    copy_cmd = [
+        _ff_bin("ffmpeg"), "-y",
+        "-ss", str(start), "-t", str(sec), "-i", str(source),
+        *maps,
+        *(["-an"] if not has_a else []),
+        "-c", "copy", "-avoid_negative_ts", "make_zero", str(tmp),
+    ]
     try:
-        run_cmd(
-            project_id,
-            [
-                _ff_bin("ffmpeg"), 
-                "-y",
-                "-ss",
-                str(start),
-                "-t",
-                str(sec),
-                "-i",
-                str(source),
-                "-c",
-                "copy",
-                str(tmp),
-            ],
-        )
+        run_cmd(project_id, copy_cmd)
     except Exception:
-        run_cmd(
-            project_id,
-            [
-                _ff_bin("ffmpeg"), 
-                "-y",
-                "-ss",
-                str(start),
-                "-t",
-                str(sec),
-                "-i",
-                str(source),
-                *h264_encoder_args(fast=True),
-                "-c:a",
-                "aac",
-                str(tmp),
-            ],
-        )
+        try:
+            run_cmd(
+                project_id,
+                [
+                    _ff_bin("ffmpeg"), "-y",
+                    "-ss", str(start), "-t", str(sec), "-i", str(source),
+                    *maps,
+                    *h264_encoder_args(fast=True),
+                    *audio_args,
+                    str(tmp),
+                ],
+            )
+        except Exception:
+            try:
+                # videotoolbox can exit 254 on silent/odd review compiles
+                run_cmd(
+                    project_id,
+                    [
+                        _ff_bin("ffmpeg"), "-y",
+                        "-ss", str(start), "-t", str(sec), "-i", str(source),
+                        *maps,
+                        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                        "-pix_fmt", "yuv420p",
+                        *audio_args,
+                        str(tmp),
+                    ],
+                )
+            except Exception:
+                run_cmd(
+                    project_id,
+                    [
+                        _ff_bin("ffmpeg"), "-y",
+                        "-ss", str(start), "-t", str(sec), "-i", str(source),
+                        "-map", "0:v:0", "-an",
+                        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                        "-pix_fmt", "yuv420p",
+                        str(tmp),
+                    ],
+                )
     _atomic_replace(tmp, dest)
     return dest
 

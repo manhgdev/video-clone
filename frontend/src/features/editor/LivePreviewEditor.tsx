@@ -565,6 +565,12 @@ export default function LivePreviewEditor({
     setHistTick((n) => n + 1)
   }, [projectId])
 
+  // Phụ đề tắt → bỏ làm mờ caption (icon mắt cũng ẩn khi burnSubs=false)
+  useEffect(() => {
+    if (settings.burnSubs) return
+    setTrackHidden((prev) => (prev.caption ? { ...prev, caption: false } : prev))
+  }, [settings.burnSubs])
+
   useEffect(() => {
     persistBookmarks(projectId, bookmarks)
   }, [projectId, bookmarks])
@@ -1335,12 +1341,18 @@ export default function LivePreviewEditor({
   const timelineNavLocked = busy && jobStep !== 'dub' && jobStep !== ''
   const timelineEditLocked = busy && jobStep !== 'dub'
   // Preview/export: bung compound → chữ/mask/TTS y như chưa ghép
+  const noTranslate = (settings.targetLang === 'none' || settings.targetLang === 'source' || !settings.targetLang)
   const layoutSegs = useMemo(
     () =>
-      expandSegmentsForPlayback(segments).map((s) =>
-        videoFrameReady ? withInferredLayout(s, sourceHeight, sourceWidth) : s,
-      ),
-    [segments, sourceHeight, sourceWidth, videoFrameReady],
+      expandSegmentsForPlayback(segments).map((s) => {
+        // Khi không dịch: fallback translation về source để caption hiện đúng
+        const normalized = noTranslate && !(s.translation || '').trim() && (s.source || '').trim()
+          ? { ...s, translation: s.source }
+          : s
+        return videoFrameReady ? withInferredLayout(normalized, sourceHeight, sourceWidth) : normalized
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [segments, sourceHeight, sourceWidth, videoFrameReady, noTranslate],
   )
   // selected có thể là shell compound (rỗng chữ) — không dùng cho caption layout
   const selectedIsShell = Boolean(selected?.isCompound)
@@ -3982,7 +3994,9 @@ export default function LivePreviewEditor({
         ...segments.map((seg) => seg.fontFamily || settings.subtitleFontFamily || 'system'),
       ])].map((family) => loadCaptionFont(family)))
       layoutCacheRef.current = {}
-      const payload = buildExportSegments(segments, settings, sourceWidth, sourceHeight)
+      // Fast preview: tôn trọng trạng thái ẩn caption track (icon mắt)
+      const fastSettings = trackHidden.caption ? { ...settings, burnSubs: false } : settings
+      const payload = buildExportSegments(segments, fastSettings, sourceWidth, sourceHeight)
       const start = Math.max(0, Math.min(time, Math.max(0, timelineDuration - 0.15)))
       const end = Math.min(timelineDuration, start + Math.max(1, Math.min(120, fastPreviewSec || 5)))
       await Promise.resolve(onExport(payload, end, start, `fast-preview-${start.toFixed(1)}s`, {
@@ -4014,8 +4028,27 @@ export default function LivePreviewEditor({
       exportGif: options.exportGif,
       exportGifRes: options.exportGifRes,
       exportOutputDir: options.exportOutputDir,
+      // Caption track ẩn (icon mắt) → không burn subtitle vào export
+      // Phải đặt SAU ...settings để override settings.burnSubs
+      // Caption track ẩn (icon mắt) → không burn subtitle vào export
+      // Phải đặt SAU ...settings để override settings.burnSubs
+      ...(trackHidden.caption ? { burnSubs: false } : {}),
     }
-    onSettings(updatedSettings)
+    // Chỉ lưu settings thật (không lưu burnSubs:false tạm từ trackHidden)
+    const persistedSettings: ProjectSettings = {
+      ...settings,
+      exportResolution: options.exportResolution as ProjectSettings['exportResolution'],
+      exportVideo: options.exportVideo,
+      exportVideoFormat: options.exportVideoFormat,
+      exportAudio: options.exportAudio,
+      exportAudioFormat: options.exportAudioFormat,
+      exportSrt: options.exportSrt,
+      exportSrtFormat: options.exportSrtFormat,
+      exportGif: options.exportGif,
+      exportGifRes: options.exportGifRes,
+      exportOutputDir: options.exportOutputDir,
+    }
+    onSettings(persistedSettings)
     await Promise.all([
       ...new Set([
         updatedSettings.subtitleFontFamily || 'system',
@@ -5840,9 +5873,9 @@ export default function LivePreviewEditor({
                             )}
                           </TrackCtrl>
                         )}
-                        {row.hide && (
+                        {row.hide && (row.id !== 'caption' || settings.burnSubs) && (
                           <TrackCtrl
-                            title={trackHidden[row.id] ? 'Bỏ làm mờ track' : 'Làm mờ track'}
+                            title={trackHidden[row.id] ? t('Bỏ làm mờ track', 'Undim track') : t('Làm mờ track', 'Dim track')}
                             active={trackHidden[row.id]}
                             onClick={() => toggleTrackFlag(setTrackHidden, row.id)}
                           >
@@ -7034,14 +7067,16 @@ export default function LivePreviewEditor({
                     {muted ? 'Bật tiếng' : 'Tắt tiếng'}
                   </CtxItem>
                 )}
-                <CtxItem
-                  onClick={() => {
-                    toggleTrackFlag(setTrackHidden, tid)
-                    setCtxMenu(null)
-                  }}
-                >
-                  {trackHidden[tid] ? 'Bỏ làm mờ track' : 'Làm mờ track'}
-                </CtxItem>
+                {(tid !== 'caption' || settings.burnSubs) && (
+                  <CtxItem
+                    onClick={() => {
+                      toggleTrackFlag(setTrackHidden, tid)
+                      setCtxMenu(null)
+                    }}
+                  >
+                    {trackHidden[tid] ? t('Bỏ làm mờ track', 'Undim track') : t('Làm mờ track', 'Dim track')}
+                  </CtxItem>
+                )}
                 {tid !== 'bg' && (
                   <CtxItem
                     onClick={() => {

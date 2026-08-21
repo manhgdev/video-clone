@@ -6,7 +6,7 @@ from pathlib import Path
 
 import sys
 
-from pipeline.core.media import ffprobe_duration, h264_encoder_args, h264_hardware_encoder
+from pipeline.core.media import ffprobe_duration, h264_encoder_args, h264_hardware_encoder, video_size
 from pipeline.cleaner.cleaner_jobs import (
     update_job,
     register_proc,
@@ -15,6 +15,27 @@ from pipeline.cleaner.cleaner_jobs import (
 )
 
 CREATE_NO_WINDOW = int(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)) if sys.platform == "win32" else 0
+
+
+def _logo_filter(input_path: str) -> str:
+    """Return an FFmpeg delogo filter from the shared OCR watermark detector."""
+    from pipeline.ocr.logo import detect_logo_bbox_inprocess
+
+    detection = detect_logo_bbox_inprocess(input_path)
+    bbox = (detection or {}).get("bbox")
+    if not isinstance(bbox, dict):
+        raise RuntimeError("Không phát hiện được logo/watermark để xoá")
+    width, height = video_size(Path(input_path))
+    if width < 1 or height < 1:
+        raise RuntimeError("Không đọc được kích thước video để xoá logo")
+    x = max(0, min(width - 2, round(float(bbox.get("x") or 0) * width)))
+    y = max(0, min(height - 2, round(float(bbox.get("y") or 0) * height)))
+    w = max(2, min(width - x, round(float(bbox.get("w") or 0) * width)))
+    h = max(2, min(height - y, round(float(bbox.get("h") or 0) * height)))
+    # FFmpeg's delogo is a conservative blur/reconstruction filter for a
+    # static detected mark; moving marks require the editor's tracked masks.
+    return f"delogo=x={x}:y={y}:w={w}:h={h}:show=0"
+
 
 def run_cleaner_job_sync(job_id: str) -> None:
     job = get_job(job_id)
@@ -68,6 +89,14 @@ def run_cleaner_job_sync(job_id: str) -> None:
             else:
                 cmd.extend(["-c:v", "libx264", "-preset", "faster", "-crf", "26"])
             cmd.extend(["-movflags", "+faststart", "-c:a", "aac"])
+
+        elif method == "logo":
+            cmd.extend(["-vf", _logo_filter(input_path)])
+            if h264_hardware_encoder():
+                cmd.extend(h264_encoder_args(quality=20))
+            else:
+                cmd.extend(["-c:v", "libx264", "-preset", "medium", "-crf", "20"])
+            cmd.extend(["-c:a", "copy", "-map_metadata", "-1", "-movflags", "+faststart"])
             
         cmd.append(output_path)
         

@@ -15,6 +15,9 @@ _LOGO_DETECTION_VERSION = 2
 # OCR often garbles 哔哩哔哩 → 叽咕 / 吡哩; UID watermarks are CJK + digits.
 _PLATFORM_MARKS = (
     "生成",
+    "veo",
+    "grok",
+    "kling",
     "哔哩",
     "bilibili",
     "b站",

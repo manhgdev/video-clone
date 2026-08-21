@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import './SrtImagePage.css'
 import { localize, useLocale } from '../app/i18n'
+import { BackTitle } from '../shared/components/BackTitle'
 import { CAPTION_FONT_PRESETS, captionChromeStyle, captionFontCss } from '../features/editor/lib/previewStyles'
 
 type Job = {
@@ -50,7 +51,7 @@ function cachedSettings(): Record<string, unknown> {
   }
 }
 
-export default function SrtImagePage() {
+export default function SrtImagePage({ onBack }: { onBack: () => void }) {
   const { locale } = useLocale()
   const t = (vietnamese: string, english: string) => localize(locale, vietnamese, english)
   const cached = useRef(cachedSettings()).current
@@ -346,7 +347,7 @@ export default function SrtImagePage() {
     <main className="siv-page">
       <header>
         <div>
-          <h1>Ghép ảnh/video SRT</h1>
+          <BackTitle onBack={onBack}>Ghép ảnh/video SRT</BackTitle>
           <p>Ghép ảnh hoặc clip theo timeline, kèm audio narration và phụ đề SRT.</p>
         </div>
       </header>

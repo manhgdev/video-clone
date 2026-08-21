@@ -279,6 +279,8 @@ export type CloudProviderConfig = {
   keyCount?: number
   baseUrl: string
   model: string
+  reviewBaseUrl: string
+  reviewModel: string
   label: string
   env: string
 }
@@ -306,6 +308,11 @@ export type HardwareInfo = {
   os?: string
   gpuKind?: string
   gpuName?: string
+}
+
+export type HardwareUsage = {
+  cpuPercent: number | null
+  gpuPercent: number | null
 }
 
 export type DeviceInfo = {

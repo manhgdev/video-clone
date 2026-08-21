@@ -7,6 +7,7 @@ import type {
   JobFilter,
 } from './download.types'
 import { downloadApi } from './download.api'
+import { BackTitle } from '@/shared/components/BackTitle'
 import './DownloadStudio.css'
 
 const ACTIVE = new Set(['queued', 'running'])
@@ -201,10 +202,11 @@ function EmptyArt() {
 }
 
 type Props = {
+  onBack: () => void
   onUseInClone?: (projectId: string, meta: { videoUrl: string; duration: number; segments?: unknown[]; settings?: Record<string, unknown> }) => void
 }
 
-export default function DownloadStudio({ onUseInClone }: Props = {}) {
+export default function DownloadStudio({ onBack, onUseInClone }: Props) {
   const [text, setText] = useState(() => {
     try {
       return localStorage.getItem(LS_LINKS) || ''
@@ -494,7 +496,7 @@ export default function DownloadStudio({ onUseInClone }: Props = {}) {
     <div className="dl-studio">
       <div className="dl-shell">
         <div className="dl-head">
-          <h1>Download Video</h1>
+          <BackTitle onBack={onBack}>Download Video</BackTitle>
           <p>
             Dán link YouTube, TikTok, Douyin, Bilibili…
           </p>

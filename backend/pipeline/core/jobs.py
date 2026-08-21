@@ -14,6 +14,7 @@ _cancel_flags: dict[str, threading.Event] = {}
 _job_procs: dict[str, list[subprocess.Popen]] = {}
 _job_pids: dict[str, set[int]] = {}  # bare PIDs (frozen TTS worker, etc.)
 _job_gen: dict[str, int] = {}
+_cancel_aliases: dict[str, set[str]] = {}
 _lock = threading.Lock()
 # thread-local: project_id của worker TTS/export — subprocess tự gắn
 _tls = threading.local()
@@ -169,16 +170,28 @@ def kill_job_processes(project_id: str) -> None:
         kill_pid_tree(op)
 
 
+def share_cancel(src: str, dest: str) -> None:
+    """Queue job id and project id cancel together even if begin_job replaces Events."""
+    if not src or not dest or src == dest:
+        return
+    with _lock:
+        _cancel_aliases.setdefault(src, set()).add(dest)
+        _cancel_aliases.setdefault(dest, set()).add(src)
+
+
 def request_cancel(project_id: str) -> bool:
     """Đánh dấu huỷ + kill ngay mọi subprocess (ffmpeg/TTS/OCR/Demucs)."""
     with _lock:
-        ev = _cancel_flags.get(project_id)
-        if not ev:
-            ev = threading.Event()
-            _cancel_flags[project_id] = ev
-            _job_gen.setdefault(project_id, 0)
-        ev.set()
-    kill_job_processes(project_id)
+        ids = {project_id, *(_cancel_aliases.get(project_id) or set())}
+        for pid in ids:
+            ev = _cancel_flags.get(pid)
+            if not ev:
+                ev = threading.Event()
+                _cancel_flags[pid] = ev
+                _job_gen.setdefault(pid, 0)
+            ev.set()
+    for pid in ids:
+        kill_job_processes(pid)
     # TTS Studio (job_id riêng) — chỉ set flag, không đệ quy request_cancel
     try:
         from pipeline.tts.studio import mark_cancel as _studio_mark

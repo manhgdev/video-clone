@@ -485,7 +485,7 @@ export default function Sidebar({
         >
           <select
             value={settings.translator}
-            disabled={busy || settings.targetLang === 'none'}
+            disabled={busy}
             onChange={(e) =>
               set('translator', e.target.value as ProjectSettings['translator'])
             }
@@ -640,7 +640,7 @@ export default function Sidebar({
         <Field label="Phụ đề" icon={<IconLayers size={14} />}>
           <select
             value={
-              settings.targetLang === 'none' || !settings.burnSubs
+              !settings.burnSubs
                 ? 'none'
                 : settings.coverHardsubs
                   ? 'cover'
@@ -685,7 +685,7 @@ export default function Sidebar({
         <Field label="Cỡ chữ" icon={<IconType size={14} />}>
           <select
             value={String(settings.subtitleFontSize)}
-            disabled={busy || !settings.burnSubs || settings.targetLang === 'none'}
+            disabled={busy || !settings.burnSubs}
             onChange={(e) => set('subtitleFontSize', Number(e.target.value))}
             title="Tự động sẽ chọn cỡ lớn nhất vừa từng nhãn, chữ dọc và câu ngang"
           >

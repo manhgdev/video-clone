@@ -60,7 +60,7 @@ from pipeline import (
     video_fingerprint,
 )
 from pipeline.core.jobs import arm_job
-from pipeline.core.media import meta_baked_speed, meta_has_user_bake, video_size
+from pipeline.core.media import filter_complex_args, meta_baked_speed, meta_has_user_bake, video_size
 from pipeline.export.mux import (
     export_project_audio,
     find_cached_no_vocals,
@@ -352,7 +352,7 @@ def api_create_compound(project_id: str, body: CompoundClipIn):
                 [
                     "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
                     *inputs,
-                    "-filter_complex_script", str(fc.resolve()),
+                    *filter_complex_args(fc.read_text(encoding="utf-8")),
                     "-map", "[aout]", "-c:a", "pcm_s16le", str(mixed_path),
                 ],
             )

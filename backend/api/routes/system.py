@@ -200,6 +200,56 @@ def api_hardware():
     return hardware()
 
 
+def _clamp_percent(value: object) -> int | None:
+    try:
+        return max(0, min(100, round(float(value))))
+    except (TypeError, ValueError):
+        return None
+
+
+def _apple_gpu_percent(raw: str) -> int | None:
+    match = re.search(r'"Device Utilization %"\s*=\s*(\d+)', raw)
+    return _clamp_percent(match.group(1)) if match else None
+
+
+def _gpu_percent() -> int | None:
+    if sys.platform == "darwin":
+        try:
+            raw = subprocess.check_output(
+                ["ioreg", "-r", "-d1", "-c", "IOAccelerator"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+                timeout=1.5,
+            )
+            return _apple_gpu_percent(raw)
+        except (OSError, subprocess.SubprocessError):
+            return None
+    try:
+        raw = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=1.5,
+        )
+        return _clamp_percent(raw.splitlines()[0].strip())
+    except (OSError, subprocess.SubprocessError, IndexError):
+        return None
+
+
+@router.get("/api/hardware/usage")
+def api_hardware_usage():
+    try:
+        import psutil  # type: ignore
+
+        cpu = _clamp_percent(psutil.cpu_percent(interval=0.05))
+    except Exception:
+        try:
+            cpu = _clamp_percent((os.getloadavg()[0] / max(1, os.cpu_count() or 1)) * 100)
+        except (AttributeError, OSError):
+            cpu = None
+    return {"cpuPercent": cpu, "gpuPercent": _gpu_percent()}
+
+
 @router.get("/api/config")
 def api_get_config():
     from pipeline.core.app_config import public_app_config
@@ -214,12 +264,17 @@ def api_save_config(body: AppConfigIn):
     patch: dict = {"cloud": {}}
     if body.cloud:
         for k, v in body.cloud.items():
-            patch["cloud"][k] = {
-                "apiKey": v.apiKey if v.apiKey is not None else "",
-                "apiKeys": v.apiKeys if v.apiKeys is not None else None,
+            block = {
                 "baseUrl": v.baseUrl or "",
                 "model": v.model or "",
+                "reviewBaseUrl": v.reviewBaseUrl or "",
+                "reviewModel": v.reviewModel or "",
             }
+            if v.apiKeys is not None:
+                block["apiKeys"] = v.apiKeys
+            elif v.apiKey is not None:
+                block["apiKey"] = v.apiKey
+            patch["cloud"][k] = block
     if body.tts and body.tts.elevenlabs is not None:
         patch["tts"] = {
             "elevenlabs": {
@@ -593,6 +648,62 @@ def api_pick_srt_image_file(kind: str):
         return {"ok": bool(selected), "path": str(Path(selected).resolve()) if selected else ""}
     except Exception as exc:
         raise HTTPException(500, f"Không mở được hộp thoại chọn file: {exc}") from exc
+
+
+@router.post("/api/system/pick-videos")
+def api_pick_videos():
+    """Chọn một hoặc nhiều file video (Clone/Review batch)."""
+    title = "Chọn video"
+    filt = "Video|*.mp4;*.mov;*.mkv;*.webm;*.avi;*.m4v|Tất cả tệp|*.*"
+    try:
+        if os.name == "nt":
+            raw = _windows_native_dialog(
+                """
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+Add-Type -AssemblyName System.Windows.Forms
+$owner = New-Object System.Windows.Forms.Form
+$owner.TopMost = $true
+$owner.ShowInTaskbar = $false
+$owner.Width = 1
+$owner.Height = 1
+$owner.Show()
+$dialog = New-Object System.Windows.Forms.OpenFileDialog
+$dialog.Title = $env:VIDEOCLONE_DIALOG_TITLE
+$dialog.Filter = $env:VIDEOCLONE_FILE_FILTER
+$dialog.Multiselect = $true
+if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) {
+    [Console]::Write(($dialog.FileNames -join [Environment]::NewLine))
+}
+$owner.Close()
+""",
+                {"VIDEOCLONE_DIALOG_TITLE": title, "VIDEOCLONE_FILE_FILTER": filt},
+            )
+        elif sys.platform == "darwin":
+            raw = _macos_native_dialog(
+                "set theFiles to choose file with prompt "
+                f"{_apple_script_string(title)} "
+                "of type {\"public.movie\", \"public.mpeg-4\"} with multiple selections allowed\n"
+                "set out to \"\"\n"
+                "repeat with f in theFiles\n"
+                "set out to out & (POSIX path of f) & linefeed\n"
+                "end repeat\n"
+                "return out"
+            )
+        else:
+            import tkinter as tk
+            from tkinter import filedialog
+            root = tk.Tk()
+            try:
+                root.withdraw()
+                root.attributes("-topmost", True)
+                picked = filedialog.askopenfilenames(title=title)
+                raw = "\n".join(picked)
+            finally:
+                root.destroy()
+        paths = [str(Path(p.strip()).resolve()) for p in (raw or "").splitlines() if p.strip()]
+        return {"ok": bool(paths), "paths": paths}
+    except Exception as exc:
+        raise HTTPException(500, f"Không mở được hộp thoại chọn video: {exc}") from exc
 
 
 @router.post("/api/system/pick-folder")

@@ -47,7 +47,7 @@ type CloudTab = CloudProviderId
 
 type CloudDraft = Record<
   CloudProviderId,
-  { apiKey: string; apiKeys?: string; keyCount?: number; baseUrl: string; model: string; apiKeySet: boolean; label: string }
+  { apiKey: string; apiKeys?: string; keyCount?: number; baseUrl: string; model: string; reviewBaseUrl?: string; reviewModel?: string; apiKeySet: boolean; label: string }
 >
 
 type Props = {
@@ -76,7 +76,8 @@ function emptyCloud(): CloudDraft {
     gemini: {
       apiKey: '',
       baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
-      model: 'gemini-2.0-flash',
+      model: 'gemini-3.1-flash-lite',
+      reviewModel: 'gemini-2.5-flash',
       apiKeySet: false,
       label: 'Gemini',
     },
@@ -90,7 +91,7 @@ function emptyCloud(): CloudDraft {
     openrouter: {
       apiKey: '',
       baseUrl: 'https://openrouter.ai/api/v1',
-      model: 'google/gemini-2.0-flash-001',
+      model: 'google/gemini-2.5-flash',
       apiKeySet: false,
       label: 'OpenRouter',
     },
@@ -109,6 +110,11 @@ function emptyCloud(): CloudDraft {
       label: 'NVIDIA NIM',
     },
   }
+}
+
+function savedKeyPlaceholder(config: CloudDraft[CloudProviderId], index: number): string {
+  const masked = (config.apiKeys || '').split(',')[index]?.trim()
+  return masked || (index < (config.keyCount || 0) ? '••••••••' : 'sk-…')
 }
 
 export default function ConfigModal({
@@ -219,6 +225,8 @@ export default function ConfigModal({
             apiKeys: c.apiKeys || '', keyCount: c.keyCount || 0,
             baseUrl: c.baseUrl || next[id].baseUrl,
             model: c.model || next[id].model,
+            reviewBaseUrl: c.reviewBaseUrl || c.baseUrl || next[id].baseUrl,
+            reviewModel: c.reviewModel || c.model || next[id].model,
             apiKeySet: !!c.apiKeySet,
             label: c.label || next[id].label,
           }
@@ -412,13 +420,15 @@ export default function ConfigModal({
     setSaving(true)
     setMsg('')
     try {
-      const cloud: Record<string, { apiKeys?: string; baseUrl?: string; model?: string }> =
+      const cloud: Record<string, { apiKeys?: string; baseUrl?: string; model?: string; reviewBaseUrl?: string; reviewModel?: string }> =
         {}
       for (const id of PROVIDERS) {
         const d = draft[id]
         cloud[id] = {
           baseUrl: d.baseUrl,
           model: d.model,
+          reviewBaseUrl: d.reviewBaseUrl || d.baseUrl,
+          reviewModel: d.reviewModel || d.model,
           ...(cloudKeySlots[id].some((key) => key.trim()) ? { apiKeys: cloudKeySlots[id].map((key) => key.trim()).filter(Boolean).join(',') } : {}),
         }
       }
@@ -438,8 +448,12 @@ export default function ConfigModal({
         if (!c) continue
         next[id] = {
           apiKey: c.apiKey || '',
+          apiKeys: c.apiKeys || '',
+          keyCount: c.keyCount || 0,
           baseUrl: c.baseUrl || next[id].baseUrl,
           model: c.model || next[id].model,
+          reviewBaseUrl: c.reviewBaseUrl || c.baseUrl || next[id].baseUrl,
+          reviewModel: c.reviewModel || c.model || next[id].model,
           apiKeySet: !!c.apiKeySet,
           label: c.label || next[id].label,
         }
@@ -480,7 +494,7 @@ export default function ConfigModal({
                 ? `Đang cài ${installLabel(installing)}…`
                 : forceSetup && !checks?.ok
                   ? 'Cài đủ thành phần bắt buộc để bắt đầu'
-                  : t('Thiết lập hệ thống · API dịch · ElevenLabs', 'System settings · Translation API · ElevenLabs')}
+                  : t('Thiết lập hệ thống · Cloud AI · ElevenLabs', 'System settings · Cloud AI · ElevenLabs')}
             </p>
           </div>
           {canClose ? (
@@ -510,7 +524,7 @@ export default function ConfigModal({
                 className={section === 'cloud' ? 'active' : undefined}
                 onClick={() => setSection('cloud')}
               >
-                API dịch
+                {t('Cloud AI', 'Cloud AI')}
               </button>
               <button
                 type="button"
@@ -707,35 +721,33 @@ export default function ConfigModal({
           </div>
         ) : section === 'cloud' ? (
           <div className="cfg-body cfg-body-grid">
-            <div className="cfg-el-keys"><span>API keys {cur.apiKeySet ? '(saved — enter to replace/add)' : ''}</span>{cloudKeySlots[tab].map((value, index) => <div className="cfg-el-key-row" key={`${tab}-${index}`}><input type="password" autoComplete="off" placeholder={index < (cur.keyCount || 0) ? '••••••••' : 'sk-…'} value={value} onChange={(e) => setCloudKeySlots((all) => ({ ...all, [tab]: all[tab].map((key, i) => i === index ? e.target.value : key) }))} /><button type="button" className="cfg-el-remove" disabled={cloudKeySlots[tab].length <= 1} onClick={() => setCloudKeySlots((all) => ({ ...all, [tab]: all[tab].filter((_, i) => i !== index) }))}>×</button></div>)}<button type="button" className="cfg-el-add" onClick={() => setCloudKeySlots((all) => ({ ...all, [tab]: [...all[tab], ''] }))}>+ {t('Thêm key', 'Add key')}</button><p className="cfg-hint">{t('Nhiều key sẽ được luân phiên theo từng batch dịch.', 'Multiple keys are rotated across translation batches.')}</p></div>
-            <label>
-              <span>Base URL</span>
-              <input
-                type="text"
-                value={cur.baseUrl}
-                onChange={(e) =>
-                  setDraft((d) => ({
-                    ...d,
-                    [tab]: { ...d[tab], baseUrl: e.target.value },
-                  }))
-                }
-              />
-            </label>
-            <label>
-              <span>Model</span>
-              <input
-                type="text"
-                value={cur.model}
-                onChange={(e) =>
-                  setDraft((d) => ({
-                    ...d,
-                    [tab]: { ...d[tab], model: e.target.value },
-                  }))
-                }
-              />
-            </label>
+            <div className="cfg-el-keys"><span>API keys {cur.apiKeySet ? '(saved — enter to replace/add)' : ''}</span>{cloudKeySlots[tab].map((value, index) => <div className="cfg-el-key-row" key={`${tab}-${index}`}><input type="text" autoComplete="off" placeholder={savedKeyPlaceholder(cur, index)} value={value} onChange={(e) => setCloudKeySlots((all) => ({ ...all, [tab]: all[tab].map((key, i) => i === index ? e.target.value : key) }))} /><button type="button" className="cfg-el-remove" disabled={cloudKeySlots[tab].length <= 1} onClick={() => setCloudKeySlots((all) => ({ ...all, [tab]: all[tab].filter((_, i) => i !== index) }))}>×</button></div>)}<button type="button" className="cfg-el-add" onClick={() => setCloudKeySlots((all) => ({ ...all, [tab]: [...all[tab], ''] }))}>+ {t('Thêm key', 'Add key')}</button><p className="cfg-hint">{t('Nhiều key được luân phiên cho batch dịch; Review Phim dùng key đang hoạt động.', 'Multiple keys rotate for translation batches; Movie Review uses the active key.')}</p></div>
+            <div className="cfg-cloud-panels">
+              <section className="cfg-cloud-panel">
+                <h3>{t('API Dịch', 'Translation API')}</h3>
+                <label>
+                  <span>{t('Base URL', 'Base URL')}</span>
+                  <input type="text" value={cur.baseUrl} onChange={(e) => setDraft((d) => ({ ...d, [tab]: { ...d[tab], baseUrl: e.target.value } }))} />
+                </label>
+                <label>
+                  <span>Model</span>
+                  <input type="text" value={cur.model} onChange={(e) => setDraft((d) => ({ ...d, [tab]: { ...d[tab], model: e.target.value } }))} />
+                </label>
+              </section>
+              <section className="cfg-cloud-panel">
+                <h3>{t('AI phân tích Review', 'Review analysis AI')}</h3>
+                <label>
+                  <span>{t('Base URL', 'Base URL')}</span>
+                  <input type="text" value={cur.reviewBaseUrl || cur.baseUrl} onChange={(e) => setDraft((d) => ({ ...d, [tab]: { ...d[tab], reviewBaseUrl: e.target.value } }))} />
+                </label>
+                <label>
+                  <span>Model</span>
+                  <input type="text" value={cur.reviewModel || cur.model} onChange={(e) => setDraft((d) => ({ ...d, [tab]: { ...d[tab], reviewModel: e.target.value } }))} />
+                </label>
+              </section>
+            </div>
             <p className="cfg-hint">
-              {t('Chọn provider ở sidebar → Công cụ dịch. Key lưu ', 'Select a provider in the sidebar → Translation tools. Keys are stored in ')}
+              {t('API Dịch và AI Review có Base URL/Model riêng, nhưng dùng chung API key của provider. Key lưu ', 'Translation API and Review AI use separate base URLs/models, but share the provider API key. Keys are stored in ')}
               <code>backend/data/app_config.json</code>.
             </p>
           </div>

@@ -409,7 +409,7 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
 
             translations: list[str] = []
             if need_idx:
-                texts = [segments[i]["source"] for i in need_idx]
+                texts = [segments[i].get("source") or "" for i in need_idx]
                 target = settings.get("targetLang", "vi")
                 source = settings.get("sourceLang", "auto")
                 check_cancel(project_id)
@@ -638,7 +638,9 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
         hint = f"Preview {preview_sec}s — " if preview_sec > 0 else ""
         no_tr = str(settings.get("targetLang") or "") in ("none", "off", "source", "")
         if no_tr:
-            next_msg = f"{hint}Xong {len(segments)} đoạn — không dịch, không chèn caption"
+            burn_subs = bool(settings.get("burnSubs", True))
+            caption_hint = "chèn chữ gốc" if burn_subs else "không chèn caption"
+            next_msg = f"{hint}Xong {len(segments)} đoạn — không dịch, {caption_hint}"
         elif engine in ("paddleocr", "screen"):
             next_msg = f"{hint}Xong {len(segments)} đoạn — bấm Xuất bản để che chữ cũ + đè bản dịch"
         elif engine == "subtitle":

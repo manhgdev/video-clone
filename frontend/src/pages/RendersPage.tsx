@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api } from '@/features/project/project.api'
 import type { RenderedVideo } from '@/features/project/project.types'
+import { BackTitle } from '@/shared/components/BackTitle'
 import { IconDownload, IconFilm, IconRefresh } from '@/shared/components/Icons'
 import './RendersPage.css'
 
@@ -25,7 +26,7 @@ function renderName(item: RenderedVideo) {
   return item.name?.trim() || `Render ${item.projectId}`
 }
 
-export default function RendersPage({ onEdit }: { onEdit: (projectId: string) => Promise<void> }) {
+export default function RendersPage({ onBack, onEdit }: { onBack: () => void; onEdit: (projectId: string) => Promise<void> }) {
   const [items, setItems] = useState<RenderedVideo[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -111,7 +112,7 @@ export default function RendersPage({ onEdit }: { onEdit: (projectId: string) =>
     <main className="renders-page">
       <header className="renders-head">
         <div>
-          <h1>Video đã render</h1>
+          <BackTitle onBack={onBack}>Video đã render</BackTitle>
           <p>{items.length ? `${items.length} video · mới nhất trước` : 'Các video xuất hoàn tất sẽ xuất hiện tại đây.'}</p>
         </div>
         <button type="button" className="renders-refresh" onClick={() => void load()} disabled={loading}>

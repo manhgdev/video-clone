@@ -5,6 +5,8 @@ import {
   IconBook,
   IconCam,
   IconDownload,
+  IconFilm,
+  IconBatch,
   IconGear,
   IconLogo,
   IconMic,
@@ -33,27 +35,19 @@ function IconMoon({ size = 16 }: { size?: number }) {
 }
 
 const NAV: {
-  id: AppMode | 'tools' | 'config'
-  label: 'nav.clone' | 'nav.livePreview' | 'nav.renders' | 'nav.download' | 'nav.tts' | 'nav.tools' | 'nav.settings'
+  id: AppMode | 'tools' | 'config' | 'clone-menu'
+  label: 'nav.clone' | 'nav.batch' | 'nav.livePreview' | 'nav.renders' | 'nav.tts' | 'nav.tools' | 'nav.settings'
   Icon: typeof IconCam
   mode?: AppMode
-  action?: 'config' | 'tools'
+  action?: 'config' | 'tools' | 'clone-menu'
 }[] = [
-  { id: 'clone', label: 'nav.clone', Icon: IconCam, mode: 'clone' },
-  // Live Preview vẫn là page /live-preview, nhưng tạm ẩn khỏi top navigation
-  // để chỉ mở theo ngữ cảnh một project từ Clone/Renders/Export.
-  // { id: 'live-preview', label: 'nav.livePreview', Icon: IconVideo, mode: 'live-preview' },
+  { id: 'clone-menu', label: 'nav.clone', Icon: IconCam, action: 'clone-menu' },
+  { id: 'batch', label: 'nav.batch', Icon: IconBatch, mode: 'batch' },
   { id: 'renders', label: 'nav.renders', Icon: IconVideo, mode: 'renders' },
-  // ponytail: Film/Batch chỉ ẩn khỏi nav; giữ page để bật lại khi hai luồng hoàn thiện.
-  // { id: 'film', label: 'Clone Phim', Icon: IconFilm, mode: 'film' },
-  // { id: 'batch', label: 'Clone Hàng loạt', Icon: IconBatch, mode: 'batch' },
-  { id: 'download', label: 'nav.download', Icon: IconDownload, mode: 'download' },
   { id: 'tts', label: 'nav.tts', Icon: IconMic, mode: 'tts' },
   { id: 'tools', label: 'nav.tools', Icon: IconWand, action: 'tools' },
   { id: 'config', label: 'nav.settings', Icon: IconGear, action: 'config' },
 ]
-
-const SHORT: Record<string, string> = { cpu: 'CPU', cuda: 'GPU', metal: 'GPU' }
 
 function IconMenu({ size = 22 }: { size?: number }) {
   return (
@@ -94,18 +88,20 @@ export default function Header({
   onOpenLicense,
 }: Props) {
   const t = (key: Parameters<typeof translate>[1], values?: Record<string, string | number>) => translate(locale, key, values)
-  const display = SHORT[hardware.accel] ?? hardware.accel.toUpperCase()
   const showTtsMenu = mode === 'tts' && typeof onMenuClick === 'function'
-  const [toolsOpen, setToolsOpen] = useState(false)
+  const [openMenu, setOpenMenu] = useState<null | 'clone' | 'tools'>(null)
+  const cloneRef = useRef<HTMLDivElement>(null)
   const toolsRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    if (!toolsOpen) return
+    if (!openMenu) return
     const close = (event: MouseEvent) => {
-      if (!toolsRef.current?.contains(event.target as Node)) setToolsOpen(false)
+      const node = event.target as Node
+      if (cloneRef.current?.contains(node) || toolsRef.current?.contains(node)) return
+      setOpenMenu(null)
     }
     const escape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setToolsOpen(false)
+      if (event.key === 'Escape') setOpenMenu(null)
     }
     document.addEventListener('mousedown', close)
     document.addEventListener('keydown', escape)
@@ -113,7 +109,7 @@ export default function Header({
       document.removeEventListener('mousedown', close)
       document.removeEventListener('keydown', escape)
     }
-  }, [toolsOpen])
+  }, [openMenu])
 
   return (
     <header className={`header${showTtsMenu ? ' header--tts' : ''}`}>
@@ -148,29 +144,85 @@ export default function Header({
       </div>
       <nav className="nav" aria-label="Chính">
         {NAV.map((item) => {
+          if (item.action === 'clone-menu') {
+            return (
+              <div key={item.id} className="nav-tools" ref={cloneRef}>
+                <button
+                  type="button"
+                  className={mode === 'clone' || mode === 'film' ? 'active' : undefined}
+                  aria-haspopup="menu"
+                  aria-expanded={openMenu === 'clone'}
+                  onClick={() => setOpenMenu((cur) => (cur === 'clone' ? null : 'clone'))}
+                >
+                  <item.Icon size={16} />
+                  <span>{t(item.label)}</span>
+                </button>
+                {openMenu === 'clone' ? (
+                  <div className="nav-tools-menu" role="menu">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className={mode === 'clone' ? 'active' : undefined}
+                      onClick={() => {
+                        setOpenMenu(null)
+                        onModeChange?.('clone')
+                      }}
+                    >
+                      <IconCam size={16} />
+                      <span>{t('nav.cloneVideo')}</span>
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className={mode === 'film' ? 'active' : undefined}
+                      onClick={() => {
+                        setOpenMenu(null)
+                        onModeChange?.('film')
+                      }}
+                    >
+                      <IconFilm size={16} />
+                      <span>{t('nav.review')}</span>
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            )
+          }
           if (item.action === 'tools') {
             return (
               <div key={item.id} className="nav-tools" ref={toolsRef}>
                 <button
                   type="button"
-                  className={mode === 'cleaner' || mode === 'srt-image' || mode === 'srt-export'
+                  className={mode === 'download' || mode === 'cleaner' || mode === 'srt-image' || mode === 'srt-export'
                     ? 'active'
                     : undefined}
                   aria-haspopup="menu"
-                  aria-expanded={toolsOpen}
-                  onClick={() => setToolsOpen((open) => !open)}
+                  aria-expanded={openMenu === 'tools'}
+                  onClick={() => setOpenMenu((cur) => (cur === 'tools' ? null : 'tools'))}
                 >
                   <item.Icon size={16} />
                   <span>{t(item.label)}</span>
                 </button>
-                {toolsOpen ? (
+                {openMenu === 'tools' ? (
                   <div className="nav-tools-menu" role="menu">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className={mode === 'download' ? 'active' : undefined}
+                      onClick={() => {
+                        setOpenMenu(null)
+                        onModeChange?.('download')
+                      }}
+                    >
+                      <IconDownload size={16} />
+                      <span>{t('tools.downloadVideo')}</span>
+                    </button>
                     <button
                       type="button"
                       role="menuitem"
                       className={mode === 'cleaner' ? 'active' : undefined}
                       onClick={() => {
-                        setToolsOpen(false)
+                        setOpenMenu(null)
                         onModeChange?.('cleaner')
                       }}
                     >
@@ -182,7 +234,7 @@ export default function Header({
                       role="menuitem"
                       className={mode === 'srt-image' ? 'active' : undefined}
                       onClick={() => {
-                        setToolsOpen(false)
+                        setOpenMenu(null)
                         onModeChange?.('srt-image')
                       }}
                     >
@@ -194,7 +246,7 @@ export default function Header({
                       role="menuitem"
                       className={mode === 'srt-export' ? 'active' : undefined}
                       onClick={() => {
-                        setToolsOpen(false)
+                        setOpenMenu(null)
                         onModeChange?.('srt-export')
                       }}
                     >
@@ -216,7 +268,7 @@ export default function Header({
             <button
               key={item.id}
               type="button"
-              className={`${active ? 'active ' : ''}${item.id === 'download' ? 'nav-download' : ''}`.trim() || undefined}
+              className={active ? 'active' : undefined}
               onClick={() => {
                 if (item.action === 'config') {
                   onOpenConfig?.()
@@ -246,8 +298,6 @@ export default function Header({
             {licenseStatus.remainingDay === -1 ? t('header.unlimited') : t('header.daysLeft', { count: licenseStatus.remainingDay })}
           </button>
         )}
-        <span className="dot" />
-        {display}
         <button
           type="button"
           className="theme-toggle"

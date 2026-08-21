@@ -13,6 +13,67 @@ import urllib.request
 from pathlib import Path
 
 
+def _unblock_zone_identifier(path: Path) -> bool:
+    """Xóa MOTW (Zone.Identifier). Zip tải từ internet làm netfx không LoadLibrary DLL."""
+    if sys.platform != "win32":
+        return False
+    ads = str(path) + ":Zone.Identifier"
+    try:
+        os.remove(ads)
+        return True
+    except OSError:
+        pass
+    try:
+        import ctypes
+
+        if ctypes.windll.kernel32.DeleteFileW(ads):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def unblock_windows_motw(root: Path) -> int:
+    """Gỡ MOTW trên pythonnet/clr_loader — thiếu bước này thì webview.start crash exit 1."""
+    if sys.platform != "win32" or not root.is_dir():
+        return 0
+    n = 0
+    for sub in (root / "pythonnet", root / "clr_loader"):
+        if not sub.is_dir():
+            continue
+        for dll in sub.rglob("*.dll"):
+            if _unblock_zone_identifier(dll):
+                n += 1
+    runtime = root / "pythonnet" / "runtime" / "Python.Runtime.dll"
+    if runtime.is_file() and _unblock_zone_identifier(runtime):
+        n += 1
+    for name in ("python312.dll", "python3.dll"):
+        p = root / name
+        if p.is_file() and _unblock_zone_identifier(p):
+            n += 1
+    return n
+
+
+def prepare_pythonnet(root: Path) -> None:
+    """Load CLR sau khi gỡ MOTW; PYTHONNET_PYDLL trỏ python312.dll trong bundle."""
+    if sys.platform != "win32":
+        return
+    unblock_windows_motw(root)
+    py_dll = next((p for p in (root / "python312.dll", root / "python3.dll") if p.is_file()), None)
+    if py_dll is not None:
+        os.environ.setdefault("PYTHONNET_PYDLL", str(py_dll))
+    os.environ.setdefault("PYTHONNET_RUNTIME", "netfx")
+    try:
+        import pythonnet
+
+        try:
+            pythonnet.load("netfx")
+        except Exception:
+            pythonnet.load("coreclr")
+    except Exception:
+        pass
+
+
 def app_home() -> Path:
     if sys.platform == "win32":
         base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
@@ -236,6 +297,8 @@ if ocr_site.is_dir():
 
 bundle = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
 os.environ["PATH"] = os.pathsep.join((str(bundle), os.environ.get("PATH", "")))
+if sys.platform == "win32":
+    unblock_windows_motw(bundle)
 
 # Chocolatey ShimGen copy vào _internal trỏ `..\lib\ffmpeg\...` → exit 4294967295.
 # Đưa thư mục ffmpeg thật (ngoài bundle) lên trước để bare `ffmpeg` không dính shim.
@@ -542,6 +605,7 @@ def acquire_single_instance() -> bool:
 def run_desktop() -> int:
     if not acquire_single_instance():
         return 0
+    prepare_pythonnet(bundle)
     try:
         from pipeline.core.app_log import append_log, install_process_hooks
 
@@ -619,7 +683,18 @@ def run_desktop() -> int:
                 webview.start(debug=False)
             except Exception:
                 traceback.print_exc()
-                print("[desktop] webview.start failed — xem app.log", flush=True)
+                msg = (
+                    "webview.start failed: Python.Runtime.dll bị Windows chặn (MOTW) "
+                    "hoặc thiếu .NET/WebView2. Copy thư mục app ra ngoài Downloads, "
+                    "hoặc Properties → Unblock trên Python.Runtime.dll."
+                )
+                print(f"[desktop] {msg}", flush=True)
+                try:
+                    from pipeline.core.app_log import append_log
+
+                    append_log(f"[desktop] {msg}")
+                except Exception:
+                    pass
                 return 1
         return 0
     finally:

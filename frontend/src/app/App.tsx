@@ -6,6 +6,7 @@ import {
   useState,
   type MouseEvent as ReactMouseEvent,
 } from 'react'
+import { Toaster, toast } from 'sonner'
 import Header, { type AppMode } from '@/shared/components/Header'
 import { IconVideo } from '@/shared/components/Icons'
 import ProgressPopup from '@/shared/components/ProgressPopup'
@@ -81,6 +82,7 @@ export default function App() {
   const [locale, setLocale] = useState<AppLocale>(loadLocale)
   const [dark, setDark] = useState(loadTheme)
   const [appMode, setAppMode] = useState<AppMode>(loadAppMode)
+  const tabPrev = useRef<AppMode[]>([])
   const [hw, setHw] = useState<HardwareInfo>({ label: 'CPU', accel: 'cpu' })
   const [voices, setVoices] = useState<{ id: string; name: string; previewUrl?: string }[]>([
     { id: 'el:pNInz6obpgDQGcFmaJgB', name: 'ElevenLabs · Adam' },
@@ -108,7 +110,6 @@ export default function App() {
   const [progressMinimized, setProgressMinimized] = useState(false)
   const [ttsSideOpen, setTtsSideOpen] = useState(false)
   const [clearingCache, setClearingCache] = useState(false)
-  const [cacheToast, setCacheToast] = useState<string | null>(null)
   /** Guards project/video switches from late restore, upload, and poll responses. */
   const projectSwitchRef = useRef(0)
   const activeProjectRef = useRef<string | null>(null)
@@ -257,13 +258,25 @@ export default function App() {
     return () => window.removeEventListener('popstate', onPopState)
   }, [])
 
-  const navigateToMode = (mode: AppMode) => {
+  const navigateToMode = (mode: AppMode, fromBack = false) => {
+    if (mode !== appMode && !fromBack) tabPrev.current.push(appMode)
     const destination = appModePath(mode)
-    if (window.location.pathname !== destination) {
+    if (fromBack) {
+      window.history.replaceState({ appMode: mode }, '', destination)
+    } else if (window.location.pathname !== destination) {
       window.history.pushState({ appMode: mode }, '', destination)
     }
     setAppMode(mode)
     setTtsSideOpen(false)
+  }
+
+  const goBackTab = () => {
+    const prev = tabPrev.current.pop()
+    if (prev && prev !== appMode) {
+      navigateToMode(prev, true)
+      return
+    }
+    if (appMode !== 'clone') navigateToMode('clone', true)
   }
 
   useEffect(() => {
@@ -470,7 +483,7 @@ export default function App() {
   async function onClearCache(parts: string[]) {
     if (!projectId || clearingCache || !parts.length) return
     setClearingCache(true)
-    setCacheToast(null)
+    toast.dismiss('cache')
     try {
       if (status.running) {
         try {
@@ -540,19 +553,13 @@ export default function App() {
         running: false,
         error: undefined,
       })
-      setCacheToast(
-        res.ok
-          ? res.message?.startsWith('Đã xóa toàn bộ')
-            ? '✅ Đã xóa toàn bộ cache.'
-            : `✅ ${res.message || 'Đã xóa cache đã chọn.'}`
-          : 'Một số cache chưa được xóa.',
-      )
-      window.setTimeout(() => setCacheToast(null), 4200)
+      const message = res.message?.startsWith('Đã xóa toàn bộ')
+        ? 'Đã xóa toàn bộ cache.'
+        : res.message || 'Đã xóa cache đã chọn.'
+      if (res.ok) toast.success(message, { id: 'cache' })
+      else toast.warning('Một số cache chưa được xóa.', { id: 'cache' })
     } catch (e) {
-      setCacheToast(
-        e instanceof Error ? e.message : 'Một số cache chưa được xóa.',
-      )
-      window.setTimeout(() => setCacheToast(null), 5200)
+      toast.error(e instanceof Error ? e.message : 'Một số cache chưa được xóa.', { id: 'cache' })
     } finally {
       setClearingCache(false)
     }
@@ -781,7 +788,7 @@ export default function App() {
     setExportUrl(!st.running && st.outputRel && (st.progress || 0) >= 100 ? `/api/projects/${id}/output` : null)
     setExportPath(!st.running && st.outputRel && (st.progress || 0) >= 100 ? st.outputRel : null)
     setViewExportSrc(null)
-    setAppMode('live-preview')
+    navigateToMode('live-preview')
   }
 
   // Chỉ sau Bắt đầu / đã lưu cổng — tránh Header+Modal+workspace cùng chiếm CSS grid → trắng.
@@ -860,6 +867,7 @@ export default function App() {
         <TtsPage
           voices={voices}
           sideOpen={ttsSideOpen}
+          onBack={goBackTab}
           onSideOpenChange={setTtsSideOpen}
           onRefreshVoices={(lang) => {
             const l = lang || (settings.targetLang === 'none' ? 'vi' : settings.targetLang)
@@ -870,6 +878,7 @@ export default function App() {
         <LicensePage status={licenseStatus || EMPTY_LICENSE} onStatusChange={setLicenseStatus} />
       ) : appMode === 'download' ? (
         <DownloadPage
+          onBack={goBackTab}
           onUseInClone={(pid, meta) => {
             const switchVersion = ++projectSwitchRef.current
             activeProjectRef.current = pid
@@ -906,17 +915,21 @@ export default function App() {
           }}
         />
       ) : appMode === 'film' ? (
-        <FilmPage />
+        <FilmPage onBack={goBackTab} onOpenEditor={editRenderedProject} />
       ) : appMode === 'batch' ? (
-        <BatchPage />
+        <BatchPage
+          onBack={goBackTab}
+          onOpenEditor={editRenderedProject}
+          onOpenReviewProjects={() => navigateToMode('film')}
+        />
       ) : appMode === 'cleaner' ? (
-        <VideoCleanerPage />
+        <VideoCleanerPage onBack={goBackTab} />
       ) : appMode === 'srt-image' ? (
-        <SrtImagePage />
+        <SrtImagePage onBack={goBackTab} />
       ) : appMode === 'srt-export' ? (
-        <SrtExportPage />
+        <SrtExportPage onBack={goBackTab} />
       ) : appMode === 'renders' ? (
-        <RendersPage onEdit={editRenderedProject} />
+        <RendersPage onBack={goBackTab} onEdit={editRenderedProject} />
       ) : editorOpen ? (
         <LivePreviewEditor
           key={projectId}
@@ -938,7 +951,7 @@ export default function App() {
           onDub={onDub}
           onRunPipeline={onTranslateAll}
           onCancel={onCancel}
-          onBack={() => navigateToMode('clone')}
+          onBack={goBackTab}
           onChange={onSegmentChange}
           onSegmentsReplace={onSegmentsReplace}
           onPreviewRebaked={onPreviewRebaked}
@@ -1109,11 +1122,7 @@ export default function App() {
       )
       ) : null}
       </Suspense>
-      {cacheToast && (
-        <div className="cache-toast" role="status">
-          {cacheToast}
-        </div>
-      )}
+      <Toaster position="bottom-center" theme={dark ? 'dark' : 'light'} richColors closeButton />
       <ExportSuccessModal
         isOpen={exportSuccessOpen}
         onClose={() => setExportSuccessOpen(false)}

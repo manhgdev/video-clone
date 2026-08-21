@@ -24,8 +24,93 @@ from ..ocr.extract import (  # noqa: F401 — public re-exports for run.py / bur
 
 # 1 model / process; reload khi đổi cpu_threads (Luồng).
 _whisper = None
-_whisper_threads: int | None = None
-_whisper_lock = threading.Lock()
+_whisper_lock = __import__("threading").Lock()
+_whisper_threads: int = 0
+_MLX_MODEL: str | None = None  # mlx-whisper model name khi dùng GPU Metal
+
+
+def _mlx_model_name() -> str:
+    """MLX Community — large-v3-turbo: nhanh nhất trên Apple Silicon Metal."""
+    return "mlx-community/whisper-large-v3-turbo"
+
+
+def _mlx_transcribe(
+    wav: "Path",
+    source_lang: str,
+) -> "list[dict] | None":
+    """Transcribe bằng mlx-whisper trên Metal GPU. Trả None nếu không khả dụng."""
+    try:
+        import mlx_whisper  # type: ignore[import]
+    except ImportError:
+        return None
+    import sys
+    if sys.platform != "darwin":
+        return None
+    lang = None if source_lang in ("", "auto") else source_lang
+    model_repo = _mlx_model_name()
+
+    def _do_transcribe(local_only: bool) -> "list[dict] | None":
+        import os as _os
+        # Sanitize broken macOS proxy env (NO_PROXY=::1 → httpx crash "Invalid port: ':1'")
+        for _k in ("NO_PROXY", "no_proxy", "ALL_PROXY", "all_proxy", "HTTP_PROXY",
+                   "http_proxy", "HTTPS_PROXY", "https_proxy"):
+            _v = _os.environ.get(_k, "")
+            if _v and any(tok.strip().startswith(":") for tok in _v.split(",")):
+                _os.environ.pop(_k, None)
+        if local_only:
+            _os.environ["HF_HUB_OFFLINE"] = "1"
+        else:
+            _os.environ.pop("HF_HUB_OFFLINE", None)
+        kw: dict = dict(
+            path_or_hf_repo=model_repo,
+            language=lang,
+            word_timestamps=True,
+            verbose=False,
+        )
+        result = mlx_whisper.transcribe(str(wav), **kw)
+        rows: list[dict] = []
+        for idx, seg in enumerate(result.get("segments") or []):
+            text = str(seg.get("text") or "").strip()
+            if not text:
+                continue
+            words = [
+                {"word": w.get("word", ""), "start": float(w.get("start", 0)), "end": float(w.get("end", 0))}
+                for w in (seg.get("words") or [])
+            ]
+            rows.append({
+                "id": str(uuid.uuid4()),
+                "index": idx,
+                "start": float(seg.get("start", 0)),
+                "end": float(seg.get("end", 0)),
+                "source": text,
+                "translation": "",
+                "voice": "",
+                "words": words,
+            })
+        return rows if rows else None
+
+    try:
+        from pipeline.core.app_log import append_log
+        append_log(f"[whisper] mlx-whisper transcribe ({model_repo}) Metal GPU")
+    except Exception:
+        pass
+
+    # Thử cache local trước (tránh network); rồi cho phép download nếu chưa có.
+    try:
+        rows = _do_transcribe(local_only=True)
+        if rows is not None:
+            return rows
+    except Exception:
+        pass
+    try:
+        return _do_transcribe(local_only=False)
+    except Exception as exc:
+        try:
+            from pipeline.core.app_log import append_log
+            append_log(f"[whisper] mlx-whisper failed ({exc!r}) — fallback CPU")
+        except Exception:
+            pass
+        return None  # fallback → faster-whisper CPU
 
 
 def _win_ntstatus(code: int) -> str:
@@ -488,6 +573,18 @@ def asr_whisper_inprocess(
     # Chặn decoder lặp một token (đặc biệt tiếng Trung: "嗚嗚嗚…") rồi nuốt
     # trọn cửa sổ 30 giây.  Penalty nhẹ giữ được tiếng đệm thật, còn n-gram=3
     # buộc decoder thoát khỏi vòng lặp trước khi lời thoại phía sau bị mất.
+    # --- Apple Silicon: thử mlx-whisper trên Metal GPU trước ---
+    import sys as _sys
+    if _sys.platform == "darwin":
+        mlx_rows = _mlx_transcribe(wav, source_lang or "auto")
+        if mlx_rows is not None:
+            try:
+                from pipeline.core.app_log import append_log
+                append_log(f"[whisper] mlx done: {len(mlx_rows)} segments (Metal GPU)")
+            except Exception:
+                pass
+            return mlx_rows
+    # --- Fallback: faster-whisper CPU ---
     segments, _info = model.transcribe(
         str(wav),
         language=lang,

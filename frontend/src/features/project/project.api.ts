@@ -84,6 +84,7 @@ export const api = {
     fetchJson<{ ok: boolean }>(`${base}/renders/${renderId}`, { method: 'DELETE' }),
 
   hardware: () => fetchJson<HardwareInfo>(`${base}/hardware`, undefined, 40_000),
+  hardwareUsage: () => fetchJson<import('./project.types').HardwareUsage>(`${base}/hardware/usage`, undefined, 5_000),
 
   systemChecks: (refresh = false, _deep = false) =>
     fetchJson<SystemChecks>(
@@ -161,7 +162,7 @@ export const api = {
   saveConfig: (body: {
     cloud?: Record<
       string,
-      { apiKey?: string; baseUrl?: string; model?: string }
+      { apiKey?: string; baseUrl?: string; model?: string; reviewBaseUrl?: string; reviewModel?: string }
     >
     tts?: {
       elevenlabs?: { apiKeys?: string }

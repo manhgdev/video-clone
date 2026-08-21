@@ -198,7 +198,10 @@ def _tts_clip_plan(
             slot0 = max(0.15, ad + 0.15 if ad > 0.05 else end - start + 0.12)
         # Lồng tiếng: manual × (bake / ttsBake) — khớp frontend dubPlaybackSpeed.
         # TTS tự nhiên trên clock đã fit; chỉ scale khi đổi tốc độ SAU khi dub.
-        manual = max(0.75, min(1.5, _num(seg.get("ttsSpeed"), 1)))
+        # Review may need a stronger fit to honor the selected total duration.
+        # Normal UI values remain in the old range; generated part metadata can
+        # request up to 4× and the atempo chain below preserves the full wav.
+        manual = max(0.75, min(4.0, _num(seg.get("ttsSpeed"), 1)))
         manual = max(0.5, min(2.0, manual * _tts_bake_ratio(bake, seg.get("ttsBake"))))
         raw.append(
             (
@@ -397,8 +400,10 @@ def mux_dub(
     allow_video_slowdown: bool = True,
     match: str = "preferVideo",
     bake_speed: float = 1.0,
+    destination: Path | None = None,
+    namespace: str = "",
 ) -> Path:
-    """Đặt TTS theo timeline; atempo TTS theo bake_speed (wav 1×)."""
+    """Đặt TTS theo timeline; optional output names isolate parallel exports."""
     root = ensure_layout(project_id)
     duration = ffprobe_duration(video)
     _clips, video_factor = _tts_clip_plan(
@@ -510,12 +515,16 @@ def mux_dub(
         map_video = "0:v"
         vcodec = ["-c:v", "copy"]
 
-    out = out_final(project_id)
+    out = Path(destination) if destination is not None else out_final(project_id)
+    out.parent.mkdir(parents=True, exist_ok=True)
     # Keep a debug copy, but pass the graph inline.  The FFmpeg bundled with
     # this macOS runtime does not expose -filter_complex_script (exit 8), while
     # this final mux graph is small enough to stay well below argv limits.
     fc_body = ";\n".join(filters) + "\n"
-    fc_dbg = root / "cache" / "mux_fc_last.txt"
+    safe_namespace = re.sub(r"[^A-Za-z0-9_.-]+", "_", namespace).strip("._")
+    fc_dbg = root / "cache" / (
+        f"mux_fc_{safe_namespace}.txt" if safe_namespace else "mux_fc_last.txt"
+    )
     try:
         fc_dbg.write_text(fc_body, encoding="utf-8")
     except OSError:

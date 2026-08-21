@@ -558,7 +558,7 @@ export function EditorPropertiesPanel({
                                       : !settings.burnSubs ? 'none'
                                       : settings.captionPlacement === 'above' ? 'above' : 'below'
                                   }
-                                  disabled={busy || settings.targetLang === 'none'}
+                                  disabled={busy}
                                   onChange={(e) => {
                                     const mode = e.target.value as 'cover' | 'below' | 'above' | 'none'
                                     applyCaptionModeAll(mode)
@@ -595,7 +595,7 @@ export function EditorPropertiesPanel({
                                     : !settings.burnSubs ? 'none'
                                     : settings.captionPlacement === 'above' ? 'above' : 'below'
                                 }
-                                disabled={busy || settings.targetLang === 'none'}
+                                disabled={busy}
                                 onChange={(e) => {
                                   applyCaptionModeAll(e.target.value as 'cover' | 'below' | 'above' | 'none')
                                 }}

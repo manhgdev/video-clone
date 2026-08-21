@@ -34,13 +34,17 @@ export const LocaleContext = createContext<LocaleContextValue>({ locale: 'vi', s
 
 const MESSAGES = {
   'brand.tagline': { vi: 'Studio Dịch Thuật & Ghép & Lồng Tiếng AI', en: 'AI Translation, Video Cloning & Dubbing Studio' },
-  'nav.clone': { vi: 'Clone Video', en: 'Clone Video' },
+  'nav.clone': { vi: 'Clone / Review', en: 'Clone / Review' },
+  'nav.cloneVideo': { vi: 'Clone Video', en: 'Clone Video' },
+  'nav.review': { vi: 'Review Phim', en: 'Movie Review' },
+  'nav.batch': { vi: 'Hàng loạt', en: 'Batch' },
   'nav.livePreview': { vi: 'Live Preview', en: 'Live Preview' },
   'nav.renders': { vi: 'Đã render', en: 'Renders' },
   'nav.download': { vi: 'Download Video', en: 'Download Video' },
   'nav.tts': { vi: 'Text to Speech', en: 'Text to Speech' },
   'nav.tools': { vi: 'Tools', en: 'Tools' },
   'nav.settings': { vi: 'Cấu hình', en: 'Settings' },
+  'tools.downloadVideo': { vi: 'Download Video', en: 'Download Video' },
   'tools.cleanVideo': { vi: 'Làm sạch video', en: 'Clean video' },
   'tools.srtImage': { vi: 'Ghép ảnh/video SRT', en: 'Create SRT image/video' },
   'tools.exportSubtitles': { vi: 'Xuất phụ đề', en: 'Export subtitles' },
@@ -52,6 +56,7 @@ const MESSAGES = {
   'header.expires': { vi: 'Hết hạn: {date}', en: 'Expires: {date}' },
   'header.switchLight': { vi: 'Chuyển sang giao diện sáng', en: 'Switch to light mode' },
   'header.switchDark': { vi: 'Chuyển sang giao diện tối', en: 'Switch to dark mode' },
+  'header.back': { vi: 'Quay lại', en: 'Back' },
 } as const
 
 export type MessageKey = keyof typeof MESSAGES

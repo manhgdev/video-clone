@@ -155,6 +155,11 @@
   padding: 0 4px;
 }
 
+.hw-usage {
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
 .hw .dot {
   width: 8px;
   height: 8px;

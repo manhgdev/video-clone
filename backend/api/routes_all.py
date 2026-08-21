@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
+from api.routes import queue
+from api.routes import review
 from api.routes import audio
 from api.routes import download
 from api.routes import jobs
@@ -20,6 +22,8 @@ from api.routes import tts_studio
 from api.routes import tts_voices
 
 router = APIRouter()
+router.include_router(queue.router)
+router.include_router(review.router)
 router.include_router(license.router)
 router.include_router(audio.router)
 router.include_router(download.router)

@@ -959,7 +959,9 @@ export function estimateCaptionBox(
   const wrapW = Math.max(24, Math.round(frameW * 0.92))
   const textBox = tightCaptionTextBox(text, fs, frameW, frameH, wrapW, Math.max(1, fitted.lines.length))
   const gap = Math.max(3, Math.round(fs * 0.18))
-  const cx = ocr.x + ocr.w / 2
+  // below/above: căn giữa theo bề rộng video, không theo tâm bbox OCR
+  // (bbox OCR có thể ngắn/lệch → caption bị lệch so với chữ gốc)
+  const cx = frameW / 2
   let y0: number
   if (placement === 'below') {
     y0 = Math.min(frameH - textBox.h, ocr.y + ocr.h + gap)

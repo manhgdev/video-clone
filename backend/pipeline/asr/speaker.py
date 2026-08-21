@@ -247,7 +247,10 @@ def diarize_audio(
             embedding.provider = provider
             embedding.num_threads = threads
             clustering = sherpa_onnx.FastClusteringConfig(
-                num_clusters=num_speakers if num_speakers >= 2 else -1, threshold=0.9,
+                # threshold: distance-based — cao hơn = merge nhiều hơn = ít speaker.
+                # Sweep thực tế: 0.9→40sp, 0.95→31sp, 0.98→26sp, 0.99→24sp.
+                # Khi speakerCount được đặt, num_clusters override threshold.
+                num_clusters=num_speakers if num_speakers >= 2 else -1, threshold=0.98,
             )
             config = sherpa_onnx.OfflineSpeakerDiarizationConfig(
                 segmentation=segmentation, embedding=embedding, clustering=clustering,

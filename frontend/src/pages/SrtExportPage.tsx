@@ -4,6 +4,7 @@ import { SRT_STYLE_OPTIONS } from '@/features/tts/lib/srt'
 import { IconDownload } from '@/shared/components/Icons'
 import { loadSettings } from '@/app/appSettings'
 import { localize, useLocale } from '@/app/i18n'
+import { BackTitle } from '@/shared/components/BackTitle'
 import './SrtExportPage.css'
 
 type SourceKind = 'media' | 'caption' | 'manual' | 'url'
@@ -16,7 +17,7 @@ function loadKind(): SourceKind {
   try { const value = localStorage.getItem(CACHE_KEY); return value === 'caption' || value === 'manual' || value === 'url' ? value : 'media' } catch { return 'media' }
 }
 
-export default function SrtExportPage() {
+export default function SrtExportPage({ onBack }: { onBack: () => void }) {
   const { locale } = useLocale()
   const t = (vi: string, en: string) => localize(locale, vi, en)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -79,7 +80,7 @@ export default function SrtExportPage() {
 
   return <main className="srt-export-page">
     <header className="srt-export-head">
-      <h1>{t('Xuất Phụ Đề', 'Export subtitles')}</h1>
+      <BackTitle onBack={onBack}>{t('Xuất Phụ Đề', 'Export subtitles')}</BackTitle>
       <p>{t('Tạo phụ đề từ audio/video hoặc định dạng lại caption có sẵn để dùng trong CapCut, YouTube và các trình dựng video.', 'Create subtitles from audio/video or reformat existing captions for CapCut, YouTube, and video editors.')}</p>
     </header>
     <section className="srt-export-card">

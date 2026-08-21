@@ -326,10 +326,14 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
     # giữ mốc nguồn ở đây sẽ làm bbox/caption/TTS lệch khi exportStartSec > 0.
     vid_dur = ffprobe_duration(video) or 1e9
     segments = [dict(s) for s in (meta.get("segments") or [])]
+    no_translate = str(settings.get("targetLang") or "") in ("none", "off", "source", "")
     subtitle_track = str(settings.get("subtitleExportTrack") or "dub")
     for cue in segments:
         source_text = str(cue.get("sourceSubtitle") if cue.get("sourceSubtitle") is not None else cue.get("source") or "")
         dub_text = str(cue.get("dubSubtitle") if cue.get("dubSubtitle") is not None else cue.get("translation") or "")
+        # Không dịch: luôn dùng chữ nguồn làm caption (bất kể có bản dịch cũ hay không)
+        if no_translate:
+            dub_text = source_text
         cue["sourceSubtitle"] = source_text
         cue["dubSubtitle"] = dub_text
         # Renderer still consumes `translation`; adapt only its render view so
@@ -390,10 +394,8 @@ def run_export(project_id: str, *, nested: bool = False) -> Path:
     if do_video:
         text_overlays.extend(_logo_mask_cues(meta, video, vid_dur, project_id))
 
-    # cover / burn độc lập; "Không dịch" → không chèn caption
-    no_translate = str(settings.get("targetLang") or "") in ("none", "off", "source", "")
     cover = bool(settings.get("coverHardsubs", True))
-    burn = bool(settings.get("burnSubs", True)) and not no_translate
+    burn = bool(settings.get("burnSubs", True))
 
     # ── Fast path: chỉ xuất SRT (không cần render video) ──
     if do_srt and not do_video and not do_audio and not do_gif:

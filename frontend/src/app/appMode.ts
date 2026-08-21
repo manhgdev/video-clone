@@ -2,7 +2,7 @@ import type { AppMode } from '@/shared/components/Header'
 
 export const APP_MODE_LS = 'videoclone.appMode'
 
-export const APP_MODES = ['clone', 'live-preview', 'renders', 'cleaner', 'srt-image', 'srt-export', 'download', 'tts'] as const satisfies readonly AppMode[]
+export const APP_MODES = ['clone', 'live-preview', 'renders', 'film', 'batch', 'cleaner', 'srt-image', 'srt-export', 'download', 'tts'] as const satisfies readonly AppMode[]
 
 /**
  * Mỗi màn cấp ứng dụng có một URL ổn định.  Trước đây Download chỉ sống trong

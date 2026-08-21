@@ -31,6 +31,8 @@ async def api_cleaner_start(
     method: str = Form(...),
     options: str = Form(...)
 ):
+    if method not in {"metadata", "reencode", "optimize", "logo"}:
+        raise HTTPException(400, "Phương pháp làm sạch không hợp lệ")
     try:
         opts_dict = json.loads(options)
     except Exception:

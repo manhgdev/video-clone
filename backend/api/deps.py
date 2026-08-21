@@ -170,6 +170,8 @@ class CloudBlock(BaseModel):
     apiKeys: str | None = None
     baseUrl: str | None = None
     model: str | None = None
+    reviewBaseUrl: str | None = None
+    reviewModel: str | None = None
 
 
 class ElevenLabsBlock(BaseModel):

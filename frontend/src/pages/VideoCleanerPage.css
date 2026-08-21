@@ -102,6 +102,7 @@
 .vc-method {
   flex: 1; border: 1px solid var(--border, #e8eef5); border-radius: 11px; padding: 14px;
   cursor: pointer; position: relative; transition: border-color .15s, background .15s; background: var(--card, #fff);
+  color: inherit; font: inherit; text-align: left;
 }
 .vc-method:hover { border-color: var(--primary, #3b82f6); }
 .vc-method.is-active { border-color: var(--primary, #3b82f6); background: color-mix(in srgb, var(--primary) 4%, var(--card, #fff)); }
@@ -113,6 +114,32 @@
 .vc-method-desc { font-size: .74rem; color: var(--muted-foreground, #64748b); line-height: 1.4; margin-bottom: 8px; }
 .vc-method-details { font-size: .72rem; color: var(--muted-foreground); line-height: 1.5; }
 .vc-method-details li { margin-bottom: 2px; }
+.vc-logo-targets {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--primary) 25%, var(--border));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--primary) 5%, var(--card));
+}
+.vc-logo-targets strong { font-size: .8rem; }
+.vc-logo-targets > span { color: var(--muted-foreground); font-size: .74rem; line-height: 1.4; }
+.vc-logo-targets > div { display: flex; flex-wrap: wrap; gap: 7px; }
+.vc-logo-targets button {
+  min-height: 30px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--card);
+  color: var(--muted-foreground);
+  padding: 0 10px;
+  font: 650 .78rem/1 inherit;
+}
+.vc-logo-targets button.is-active {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: var(--primary-foreground, #fff);
+}
 
 .vc-badge {
   display: inline-block; font-size: .65rem; font-weight: 650; padding: 2px 8px;

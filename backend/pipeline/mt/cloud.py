@@ -4,6 +4,7 @@ from __future__ import annotations
 """MT: Ollama + Google free fallback."""
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import random
 import re
 import threading
 import time
@@ -22,6 +23,56 @@ from .free import translate_google_free
 _NVIDIA_RPM = 40
 _nvidia_rate_lock = threading.Lock()
 _nvidia_next_request_at = 0.0
+_gemini_rate_lock = threading.Lock()
+_gemini_next_request_at = 0.0
+_gemini_rate_limited_until = 0.0
+_KEY_FAILOVER = {401, 403, 429, 500, 502, 503, 504}
+
+
+def _usable_keys(*, api_key: str = "", api_keys: list[str] | None = None) -> list[str]:
+    keys = list(dict.fromkeys(key.strip() for key in (api_keys or [api_key]) if str(key).strip()))
+    if not keys:
+        raise RuntimeError("API key is required")
+    random.SystemRandom().shuffle(keys)
+    return keys
+
+
+def _wait_for_gemini_request() -> None:
+    """Temporarily pace all Gemini callers after the API reports 429."""
+    global _gemini_next_request_at
+    with _gemini_rate_lock:
+        now = time.monotonic()
+        interval = 6.0 if now < _gemini_rate_limited_until else 0.0
+        wait_s = max(0.0, _gemini_next_request_at - now) if interval else 0.0
+        _gemini_next_request_at = max(now, _gemini_next_request_at) + interval
+    if wait_s:
+        time.sleep(wait_s)
+
+
+def _gemini_retry_delay(response: httpx.Response, attempt: int) -> float:
+    try:
+        header = float(response.headers.get("retry-after") or 0)
+    except ValueError:
+        header = 0.0
+    if header > 0:
+        return header
+    try:
+        details = ((response.json().get("error") or {}).get("details")) or []
+        for detail in details:
+            match = re.fullmatch(r"([\d.]+)s", str(detail.get("retryDelay") or ""))
+            if match:
+                return float(match.group(1))
+    except (AttributeError, TypeError, ValueError):
+        pass
+    return min(60.0, 10.0 * (2 ** attempt))
+
+
+def _cool_down_gemini(retry_s: float) -> None:
+    global _gemini_next_request_at, _gemini_rate_limited_until
+    with _gemini_rate_lock:
+        now = time.monotonic()
+        _gemini_next_request_at = max(_gemini_next_request_at, now + retry_s)
+        _gemini_rate_limited_until = max(_gemini_rate_limited_until, now + 300.0)
 
 
 def _wait_for_nvidia_request() -> None:
@@ -63,10 +114,16 @@ def _estimate_tokens(text: str) -> int:
     return cjk + latin // 3 + 1
 
 
+def _short_429_pause(response: httpx.Response, attempt: int) -> float:
+    """Local wait (seconds) after every key returns 429 — no shared cooldown."""
+    return max(3.0, min(8.0, _gemini_retry_delay(response, attempt)))
+
+
 def _openai_compatible_chat(
     *,
     base_url: str,
-    api_key: str,
+    api_key: str = "",
+    api_keys: list[str] | None = None,
     model: str,
     prompt: str,
     timeout: float = 120.0,
@@ -82,16 +139,25 @@ def _openai_compatible_chat(
             f"Prompt ~{in_est} tokens + output {max_output_tokens} > "
             f"limit {max_input_tokens}. Retry with smaller batch."
         )
+    keys = _usable_keys(api_key=api_key, api_keys=api_keys)
+    multi = len(keys) > 1
     url = base_url.rstrip("/") + "/chat/completions"
     with httpx.Client(timeout=timeout, trust_env=False) as client:
         is_nvidia = "integrate.api.nvidia.com" in url.lower()
-        for attempt in range(3):
-            if is_nvidia:
+        key_index = 0
+        failed_keys = 0
+        nvidia_attempt = 0
+        rate_attempt = 0
+        first_429: int | None = None
+        while True:
+            # ponytail: multi-key skips shared NVIDIA pacing so a 429 on one key
+            # does not stall the others; single-key keeps the 40 RPM slot.
+            if is_nvidia and not multi:
                 _wait_for_nvidia_request()
             r = client.post(
                 url,
                 headers={
-                    "Authorization": f"Bearer {api_key}",
+                    "Authorization": f"Bearer {keys[key_index]}",
                     "Content-Type": "application/json",
                     "HTTP-Referer": "https://localhost/videoclone",
                     "X-Title": "VideoClone",
@@ -109,13 +175,36 @@ def _openai_compatible_chat(
                     ],
                 },
             )
-            if r.status_code != 429 or not is_nvidia or attempt == 2:
+            if r.status_code == 429:
+                if first_429 is None:
+                    first_429 = key_index
+                if multi and failed_keys < len(keys) - 1:
+                    key_index = (key_index + 1) % len(keys)
+                    failed_keys += 1
+                    continue
+                if multi and rate_attempt < 3:
+                    # All keys 429 → pause briefly, resume on the oldest (first) key.
+                    time.sleep(_short_429_pause(r, rate_attempt))
+                    key_index = first_429
+                    failed_keys = 0
+                    first_429 = None
+                    rate_attempt += 1
+                    continue
+                if not multi and is_nvidia and nvidia_attempt < 2:
+                    try:
+                        retry_s = float(r.headers.get("retry-after") or 0)
+                    except ValueError:
+                        retry_s = 0.0
+                    _cool_down_nvidia(max(5.0, retry_s))
+                    nvidia_attempt += 1
+                    continue
                 break
-            try:
-                retry_s = float(r.headers.get("retry-after") or 0)
-            except ValueError:
-                retry_s = 0.0
-            _cool_down_nvidia(max(5.0, retry_s))
+            if r.status_code in _KEY_FAILOVER and failed_keys < len(keys) - 1:
+                first_429 = None
+                key_index = (key_index + 1) % len(keys)
+                failed_keys += 1
+                continue
+            break
         r.raise_for_status()
         data = r.json()
         return (
@@ -145,7 +234,8 @@ def _nvidia_riva_language_pair(source_lang: str, target_lang: str, text: str) ->
 def _gemini_generate(
     *,
     base_url: str,
-    api_key: str,
+    api_key: str = "",
+    api_keys: list[str] | None = None,
     model: str,
     prompt: str,
     timeout: float = 120.0,
@@ -155,16 +245,58 @@ def _gemini_generate(
     if not root.endswith("v1beta") and "/models" not in root:
         root = root + "/v1beta"
     url = f"{root}/models/{model}:generateContent"
+    keys = _usable_keys(api_key=api_key, api_keys=api_keys)
+    multi = len(keys) > 1
     with httpx.Client(timeout=timeout, trust_env=False) as client:
-        r = client.post(
-            url,
-            params={"key": api_key},
-            headers={"Content-Type": "application/json"},
-            json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"temperature": 0, "maxOutputTokens": 2048},
-            },
-        )
+        rate_attempt = 0
+        transient_attempt = 0
+        key_index = 0
+        failed_keys = 0
+        first_429: int | None = None
+        while True:
+            # Multi-key: never share the Gemini cooldown — a 429 on one key must
+            # not stall the others. Single-key keeps the previous wait behavior.
+            if not multi:
+                _wait_for_gemini_request()
+            r = client.post(
+                url,
+                params={"key": keys[key_index]},
+                headers={"Content-Type": "application/json"},
+                json={
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {"temperature": 0, "maxOutputTokens": 2048},
+                },
+            )
+            if r.status_code == 429:
+                if first_429 is None:
+                    first_429 = key_index
+                if multi and failed_keys < len(keys) - 1:
+                    key_index = (key_index + 1) % len(keys)
+                    failed_keys += 1
+                    continue
+                if multi and rate_attempt < 3:
+                    # All keys 429 → wait a few seconds, then retry the oldest key.
+                    time.sleep(_short_429_pause(r, rate_attempt))
+                    key_index = first_429
+                    failed_keys = 0
+                    first_429 = None
+                    rate_attempt += 1
+                    continue
+                if not multi and rate_attempt < 7:
+                    _cool_down_gemini(_gemini_retry_delay(r, rate_attempt))
+                    rate_attempt += 1
+                    continue
+                break
+            if r.status_code in _KEY_FAILOVER and failed_keys < len(keys) - 1:
+                first_429 = None
+                key_index = (key_index + 1) % len(keys)
+                failed_keys += 1
+                continue
+            if r.status_code in {500, 502, 503, 504} and transient_attempt < 3:
+                time.sleep(2 ** (transient_attempt + 1))
+                transient_attempt += 1
+                continue
+            break
         r.raise_for_status()
         data = r.json()
         cands = data.get("candidates") or []
@@ -222,7 +354,6 @@ def translate_cloud(
     done_lock = __import__("threading").Lock()
 
     def _batch(start: int) -> tuple[int, list[str]]:
-        api_key = api_keys[(start // max(1, bs)) % len(api_keys)]
         check_cancel(project_id)
         chunk = texts[start : start + bs]
         if riva_translate:
@@ -242,7 +373,7 @@ def translate_cloud(
                 riva_pair = f"en-{target_code}"
             raw = _openai_compatible_chat(
                 base_url=base_url,
-                api_key=api_key,
+                api_keys=api_keys,
                 model=model,
                 prompt=riva_input,
                 system_msg=riva_pair,
@@ -254,11 +385,11 @@ def translate_cloud(
         try:
             if pid == "gemini":
                 raw = _gemini_generate(
-                    base_url=base_url, api_key=api_key, model=model, prompt=prompt
+                    base_url=base_url, api_keys=api_keys, model=model, prompt=prompt
                 )
             else:
                 raw = _openai_compatible_chat(
-                    base_url=base_url, api_key=api_key, model=model, prompt=prompt
+                    base_url=base_url, api_keys=api_keys, model=model, prompt=prompt
                 )
         except ValueError:
             # Input too large for context window — send 1-by-1 instead
@@ -275,12 +406,12 @@ def translate_cloud(
                 )
                 if pid == "gemini":
                     line = _gemini_generate(
-                        base_url=base_url, api_key=api_key, model=model, prompt=one
+                        base_url=base_url, api_keys=api_keys, model=model, prompt=one
                     )
                 else:
                     line = _openai_compatible_chat(
                         base_url=base_url,
-                        api_key=api_key,
+                        api_keys=api_keys,
                         model=model,
                         prompt=one,
                         max_output_tokens=256,
@@ -302,14 +433,14 @@ def translate_cloud(
                     if pid == "gemini":
                         line = _gemini_generate(
                             base_url=base_url,
-                            api_key=api_key,
+                            api_keys=api_keys,
                             model=model,
                             prompt=one,
                         )
                     else:
                         line = _openai_compatible_chat(
                             base_url=base_url,
-                            api_key=api_key,
+                            api_keys=api_keys,
                             model=model,
                             prompt=one,
                             max_output_tokens=256,
