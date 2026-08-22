@@ -27,6 +27,8 @@
 5. Chỉnh caption, BBox, TTS, âm gốc, logo/watermark và timeline trong Live Preview.
 6. Xuất video, audio, SRT hoặc GIF.
 
+![Clone Video](previews/clone-video.png)
+
 ### Nhận dạng và dịch
 
 - **Whisper**: nhận dạng lời nói cục bộ.
@@ -44,6 +46,12 @@
 - Preview nhanh dùng cùng pipeline render với export cho đoạn thời gian đã chọn.
 
 ![Live Preview Editor](previews/live-previews.png)
+
+### Tạo kiểu caption
+
+Font, màu, nền, viền và bố cục caption được chỉnh trong Inspector; preview và export sử dụng cùng dữ liệu bố cục.
+
+![Caption Styling](previews/caption.png)
 
 ## Review Phim
 
@@ -67,6 +75,30 @@ Tiến trình hiển thị theo stage và số mục hoàn thành. Các tác v�
 - FFmpeg dùng encoder phần cứng khi máy và bản FFmpeg hỗ trợ.
 
 Vào **Cấu hình → Thiết lập/Tài nguyên** để xem trạng thái runtime và cài model theo nhu cầu.
+
+![Text to Speech](previews/text-to-speed.png)
+
+![Cấu hình cloud và phần cứng](previews/cloud-support.png)
+
+## Tải video và công cụ media
+
+Tải video từ URL, đưa thẳng video vào Clone/Review, hoặc dùng các công cụ độc lập để dọn watermark và ghép media với audio/SRT.
+
+![Tải video](previews/dowwowwnload-video.png)
+
+### Video Cleaner
+
+Cleaner xử lý logo, watermark và vùng chữ theo thời gian; chọn blur, nền màu hoặc phương án inpaint khi runtime hỗ trợ.
+
+![Video Cleaner](previews/clean-video.png)
+
+### Ghép media, audio và SRT
+
+Ghép ảnh/video với audio và phụ đề, phù hợp để tạo video theo kịch bản hoặc audio có sẵn.
+
+![Ghép video/ảnh + audio + SRT](previews/meger-video-img-audio-srt.png)
+
+![Thiết lập ghép media](previews/meger-video-img-audio-srt-setting.png)
 
 ## Chạy từ mã nguồn
 
