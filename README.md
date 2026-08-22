@@ -1,301 +1,160 @@
-# 🎬 VideoClone (ZM TOOL)
+# ZM TOOL — Video Clone & Film Review Studio
 
-> **Bộ công cụ toàn diện: Tải video, bóc tách phụ đề/giọng nói, dịch thuật AI đa ngữ, nhân bản & lồng tiếng AI, chỉnh sửa timeline trực quan, làm sạch watermark và xuất video chất lượng cao.**
+Ứng dụng desktop/web để dịch, lồng tiếng, biên tập timeline và tạo video review phim. ZM TOOL ưu tiên xử lý cục bộ; dịch vụ cloud chỉ được dùng khi bạn chủ động chọn và cấu hình chúng.
 
-[![Version](https://img.shields.io/badge/version-3.3.5-blue.svg)](package.json)
-[![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)](https://www.python.org/)
-[![Node](https://img.shields.io/badge/node-%3E%3D18.0.0-green.svg)](https://nodejs.org/)
-[![React](https://img.shields.io/badge/react-19.1.0-61dafb.svg)](https://react.dev/)
-[![FastAPI](https://img.shields.io/badge/fastapi-0.115+-009688.svg)](https://fastapi.tiangolo.com/)
-[![FFmpeg](https://img.shields.io/badge/ffmpeg-nvenc%20%7C%20cpu-orange.svg)](https://ffmpeg.org/)
-[![Hardware Acceleration](https://img.shields.io/badge/hardware-CUDA%20%7C%20MPS%20%7C%20CPU-purple.svg)]()
-[![i18n](https://img.shields.io/badge/i18n-Vietnamese%20%7C%20English-success.svg)]()
+[![Version](https://img.shields.io/badge/version-3.3.7-blue.svg)](package.json)
+[![Node](https://img.shields.io/badge/node-20%2B-green.svg)](https://nodejs.org/)
+[![Python](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-Ứng dụng hỗ trợ cả **Desktop App (Windows/macOS/Linux)** và **Web App**. Triết lý thiết kế ưu tiên **Local AI an toàn & bảo mật** (chạy Whisper, OCR, VieNeu TTS trên máy nội bộ); chỉ gửi dữ liệu ra ngoài khi người dùng cấu hình sử dụng các API Cloud (OpenAI, Gemini, ElevenLabs, DeepSeek,...).
+## Tính năng
 
----
+| Khu vực | Dùng để làm gì |
+|---|---|
+| **Clone Video** | Nhận dạng lời thoại/SRT, dịch, TTS, che phụ đề cũ và xuất video. |
+| **Live Preview** | Chỉnh caption, BBox che chữ, âm thanh, tốc độ, overlay, logo và timeline. |
+| **Review Phim** | Phân cảnh, phân tích nội dung, tạo lời bình, ghép TTS và xuất recap. |
+| **Hàng loạt** | Áp dụng cấu hình cho nhiều video trong hàng đợi. |
+| **Text to Speech** | Tổng hợp TTS từ text/SRT; dùng giọng có sẵn hoặc giọng clone. |
+| **Tải video & Tools** | Tải video, Cleaner, ghép video/ảnh + audio + SRT. |
 
-## 📸 Giao diện & Tính năng cốt lõi
+## Clone Video
 
-### 1. 🎬 Clone Video (Quy trình Dịch & Lồng tiếng AI)
-Tự động hóa hoàn toàn luồng xử lý: **Tải video lên → Nhận diện ASR/OCR → Dịch thuật AI → Tinh chỉnh Timeline/Khung che → Lồng tiếng AI → Xuất bản MP4**.
-- Nhận diện giọng nói siêu tốc với **Faster-Whisper** hoặc bóc tách hardsub bằng **RapidOCR**.
-- Tự động phát hiện và che phủ sub gốc (Smart Bounding Box).
-- Tách nhạc nền và giọng gốc bằng **Demucs** để giữ nguyên âm thanh nền sống động.
+1. Tạo project hoặc tải video vào.
+2. Chọn nguồn nhận dạng: **Whisper**, **CapCut cloud**, **OCR chữ trên màn hình** hoặc **SRT**.
+3. Chọn ngôn ngữ, công cụ dịch và tùy chọn tách người nói.
+4. Chạy preview hoặc toàn video.
+5. Chỉnh caption, BBox, TTS, âm gốc, logo/watermark và timeline trong Live Preview.
+6. Xuất video, audio, SRT hoặc GIF.
 
-![Clone Video](previews/clone-video.png)
+### Nhận dạng và dịch
 
----
+- **Whisper**: nhận dạng lời nói cục bộ.
+- **CapCut cloud**: CapCut nhận dạng và dịch trong một tác vụ. Cloud chỉ trả trạng thái, không luôn trả phần trăm chính xác; UI hiển thị trạng thái và thời gian chờ thực tế.
+- **OCR**: tạo track chữ trên màn hình riêng, không ghi đè caption thoại.
+- **SRT**: import vào Media Library rồi áp dụng thành caption project.
+- Dịch hỗ trợ Google, MyMemory, TikTok, Ollama và các provider cloud đã cấu hình.
 
-### 2. 🎛️ Live Preview Editor (Biên tập Trực quan Thời gian thực)
-Trình chỉnh sửa đa năng chuẩn chuyên nghiệp:
-- **Timeline & Waveform**: Xem dạng sóng âm thanh, kéo thả điều chỉnh mốc thời gian từng câu phụ đề.
-- **Bounding Box & Layout**: Tùy biến vùng che chữ (`horizontal`, `mid`, `vertical`, `label`), kéo giãn khung che sub linh hoạt.
-- **Bake Speed**: Thay đổi tốc độ video trực tiếp trên timeline.
+### Live Preview Editor
+
+- Timeline có video gốc, âm gốc, caption, lồng tiếng, watermark/overlay và media import.
+- Caption nguồn và caption dịch là hai track dữ liệu độc lập; mặc định hiển thị track dịch.
+- BBox che chữ tách biệt với watermark/logo, có thể kéo thả hoặc nhập tọa độ.
+- Media Library hỗ trợ video, audio, ảnh, SRT và LUT; asset được lưu theo project.
+- Preview nhanh dùng cùng pipeline render với export cho đoạn thời gian đã chọn.
 
 ![Live Preview Editor](previews/live-previews.png)
 
----
+## Review Phim
 
-### 3. 🎨 Tùy chỉnh Kiểu dáng Phụ đề (Caption Styling)
-Bộ công cụ tạo kiểu chữ phong phú, hỗ trợ phông chữ Việt hóa:
-- Căn chỉnh vị trí, lề, kích thước font chữ, khoảng cách dòng.
-- Đầy đủ hiệu ứng: Màu chữ, viền chữ (Outline/Stroke), đổ bóng (Shadow), nền hộp phụ đề (Box Background).
-- Xuất video chuẩn WYSIWYG (nhìn thấy thế nào xuất ra đúng như vậy).
+Review Phim dùng pipeline riêng, không thay đổi project Clone Video:
 
-![Caption Styling](previews/caption.png)
+1. Phát hiện cảnh và lấy transcript.
+2. Phân tích hình/cốt truyện theo block cảnh.
+3. Viết lời bình dựa trên bằng chứng của cảnh.
+4. Tạo TTS, ghép cảnh và che phụ đề gốc theo lane đã xác định.
+5. Xuất video hoàn chỉnh hoặc mở project trong editor.
 
----
-
-### 4. 🍿 Chế độ Review Phim (Film Recap Mode)
-Không gian làm việc chuyên biệt dành cho các nhà sáng tạo nội dung **Review Phim / Tóm tắt truyện / Phim tài liệu**:
-- Quản lý kịch bản phân cảnh chi tiết, đồng bộ lời bình với từng trích đoạn phim.
-- Cắt ghép media, gán giọng đọc AI tự động cho từng đoạn kịch bản.
-- Tối ưu hóa tối đa thời gian sản xuất video recap triệu view.
+Tiến trình hiển thị theo stage và số mục hoàn thành. Các tác vụ dài có thể hủy; backend nhận cờ hủy và dừng tiến trình con liên quan.
 
 ![Review Phim](previews/review-phim.png)
 
----
+## TTS và phần cứng
 
-### 5. 🎙️ Text to Speech Studio & Voice Cloning
-Studio chuyển đổi văn bản và phụ đề thành giọng nói AI:
-- Hỗ trợ nhập trực tiếp văn bản hoặc tải lên tệp **SRT**.
-- Tích hợp công nghệ **Voice Cloning** (VieNeu): Nhân bản giọng nói bất kỳ chỉ từ 3–10 giây audio mẫu.
-- Xuất âm thanh đa định dạng: **WAV, MP3, SRT** hoặc tải trọn gói **ZIP**.
+- Giọng hệ thống, zmAI, VieNeu, CapCut và ElevenLabs.
+- Hồ sơ người nói gồm tên vai, màu caption và giọng; đổi giọng sẽ tạo lại TTS của đúng vai đó.
+- NVIDIA dùng CUDA khi runtime tương thích; Apple Silicon dùng Metal/CoreML khi hỗ trợ; nếu không sẽ fallback CPU.
+- FFmpeg dùng encoder phần cứng khi máy và bản FFmpeg hỗ trợ.
 
-![Text to Speech Studio](previews/text-to-speed.png)
+Vào **Cấu hình → Thiết lập/Tài nguyên** để xem trạng thái runtime và cài model theo nhu cầu.
 
----
+## Chạy từ mã nguồn
 
-### 6. 📥 Tải Video Đa Nền Tảng (Video Downloader)
-Tải video nhanh chóng từ hầu hết các mạng xã hội phổ biến:
-- Hỗ trợ **YouTube, TikTok, Facebook, Douyin, Bilibili, Kuaishou, X/Twitter,...**
-- Hỗ trợ hàng đợi tải nhiều video (Batch Queue).
-- Nút bấm 1 chạm đưa video vừa tải sang tab **Clone Video** để xử lý ngay.
+### Yêu cầu
 
-![Download Video](previews/dowwowwnload-video.png)
-
----
-
-### 7. 🧹 Làm Sạch Video (Video Cleaner / Watermark Remover)
-Công cụ dọn dẹp các yếu tố không mong muốn trên khung hình:
-- Tẩy xóa watermark, logo kênh, số điện thoại, icon động hoặc text rác.
-- Đa dạng chế độ xử lý: **AI Inpainting, Blur (làm mờ), Solid Color (che màu đồng nhất)**.
-- Tùy chọn xóa theo mốc thời gian hoặc áp dụng cho toàn bộ video.
-
-![Video Cleaner](previews/clean-video.png)
-
----
-
-### 8. 🎞️ Ghép Video / Ảnh + Audio + SRT (Subtitle & Media Merger)
-Tạo video tự động từ danh sách hình ảnh hoặc video ngắn kết hợp với file lồng tiếng và phụ đề:
-- Tự động căn chỉnh thời lượng hình ảnh/video khớp từng câu trong file SRT.
-- Tùy chỉnh tỉ lệ khung hình (16:9 Youtube, 9:16 TikTok/Reels/Shorts).
-- Cài đặt hiệu ứng chuyển cảnh, zoom hình, màu sắc nền chuyên sâu.
-
-![Merge Media + SRT](previews/meger-video-img-audio-srt.png)
-
-![Merge Settings](previews/meger-video-img-audio-srt-setting.png)
-
----
-
-### 9. ⚡ Cấu hình & Tích hợp Cloud / Local AI (Settings & Cloud Support)
-Quản lý toàn diện các kết nối và tài nguyên hệ thống:
-- **Cloud LLM Translation**: OpenAI GPT, Google Gemini, Anthropic, xAI Grok, DeepSeek, OpenRouter.
-- **Local Translation**: Ollama, Google/TikTok/MyMemory (miễn phí, không cần key).
-- **TTS Engines**: VieNeu (Local GPU/CPU & Clone), zmAI, CapCut, ElevenLabs (hỗ trợ xoay vòng nhiều API key), System TTS.
-- **Hardware Acceleration**: Quản lý thiết bị tính toán (NVIDIA CUDA, Apple Silicon MPS, CPU), cài đặt tự động môi trường AI độc lập.
-
-![Cloud & Hardware Settings](previews/cloud-support.png)
-
----
-
-### 10. 📦 Xử lý hàng loạt (Batch Processing) & Quản lý Video Đã Render
-- **Batch Processing**: Nạp danh sách nhiều video, tự động chạy toàn bộ pipeline ASR → Dịch → Dub → Render mà không cần thao tác từng video.
-- **Đã Render (Renders Manager)**: Quản lý thư viện video xuất ra, xem thumbnail, phát video, đổi tên, tải xuống hoặc mở thư mục trực tiếp trên máy tính.
-
----
-
-## 🧠 Hệ thống AI Engines & Tăng tốc phần cứng
-
-| Thành phần | Engine hỗ trợ | Cơ chế tăng tốc / Ghi chú |
-|---|---|---|
-| **ASR (Nhận diện giọng)** | `faster-whisper` | Tăng tốc **CUDA (ctranslate2)** / Apple **MPS** / CPU đa luồng |
-| **OCR (Bóc chữ trên video)** | `RapidOCR` | Tăng tốc **ONNX Runtime GPU** / CPU |
-| **Dịch thuật (MT)** | • Miễn phí: Google, TikTok, MyMemory<br>• Local: Ollama<br>• Cloud: OpenAI, Gemini, DeepSeek, Grok, OpenRouter | Cơ chế tự động Fallback: Google → TikTok → MyMemory khi không dùng key |
-| **TTS (Lồng tiếng)** | • **VieNeu Local**: Tiếng Việt chuẩn bản xứ, hỗ trợ Clone giọng<br>• **zmAI**: Giọng đọc tối ưu sẵn<br>• **CapCut**: Đa dạng giọng vùng miền/cảm xúc<br>• **ElevenLabs**: Chất lượng studio (hỗ trợ danh sách key `sk_1,sk_2`)<br>• **System**: macOS `say`, Windows SAPI, Linux `espeak-ng` | **VieNeu**: Ưu tiên CUDA → MPS → ONNX CPU.<br>Hỗ trợ tinh chỉnh tốc độ và âm lượng từng câu |
-| **Tách nhạc nền (Stem)** | `Demucs` (Hybrid Transformer) | Tách riêng vocal & nhạc nền bằng **CUDA / Apple MLX / CPU** |
-| **Mã hóa Video (Export)** | `FFmpeg` | Hỗ trợ tăng tốc phần cứng **NVIDIA NVENC** khi có GPU |
-
-> [!TIP]
-> Ứng dụng Desktop **không đóng gói sẵn** các thư viện AI nặng (PyTorch/Whisper) để giảm dung lượng file cài đặt. Lần đầu sử dụng, bạn chỉ cần vào **Cấu hình → Thiết lập** để hệ thống tự động tải và cài đặt vào môi trường runtime an toàn tại `%LOCALAPPDATA%\VideoClone\.venv-runtime`.
-
----
-
-## 🛠️ Hướng dẫn cài đặt & Chạy từ mã nguồn
-
-### Yêu cầu hệ thống
-- **Node.js**: Phiên bản 18+ (khuyên dùng [NVM](https://github.com/nvm-sh/nvm) hoặc [NVM for Windows](https://github.com/coreybutler/nvm-windows))
-- **Python**: Phiên bản 3.10 – 3.12 (khuyên dùng **3.12**; script setup tự động kiểm tra và cài đặt qua Homebrew/winget nếu thiếu)
-- **FFmpeg & FFprobe**: Đã cài đặt và có trong biến môi trường `PATH`
-- **Hệ điều hành**: Windows 10/11, macOS (Intel & Apple Silicon), Linux
+- Node.js 20+ (workflow release dùng Node 24).
+- Python 3.12.
+- FFmpeg và FFprobe trong `PATH`.
+- macOS hoặc Windows được hỗ trợ chính thức bởi workflow build hiện tại.
 
 ### Cài đặt nhanh
 
 ```bash
-# 1. Clone repository
 git clone https://github.com/manhgdev/zm_aio_tools.git
 cd zm_aio_tools
-
-# 2. Khởi tạo môi trường tự động (cài dependencies frontend & backend)
 npm run setup
-
-# 3. Khởi chạy toàn bộ hệ thống (Frontend + Backend API)
 npm run dev:all
 ```
 
-Sau khi khởi chạy:
-- 🌐 **Giao diện Web UI**: `http://127.0.0.1:5173`
-- ⚙️ **Backend API**: `http://127.0.0.1:8787`
-- 📖 **Tài liệu API (Swagger UI)**: `http://127.0.0.1:8787/docs`
+- Web UI: `http://127.0.0.1:5173`
+- API: `http://127.0.0.1:8787`
+- API docs: `http://127.0.0.1:8787/docs`
 
----
+`npm run dev:all` chỉ quản lý hai cổng 5173 và 8787 của project. Dừng lệnh bằng `Ctrl+C` để tắt cả Vite và API.
 
-### Danh mục Lệnh Scripts (npm)
+### Các lệnh thường dùng
 
-| Lệnh | Chức năng |
+| Lệnh | Mục đích |
 |---|---|
-| `npm run dev:all` | Khởi chạy song song cả Vite Frontend và FastAPI Backend |
-| `npm run dev` | Khởi chạy riêng Vite Frontend (`:5173`) |
-| `npm run server` | Khởi chạy riêng FastAPI Backend với live reload (`:8787`) |
-| `npm run build` | Kiểm tra kiểu TypeScript (`tsc`) và đóng gói Frontend bundle |
-| `npm run test:i18n` | Kiểm tra tính nhất quán của hệ thống đa ngôn ngữ (VI/EN) |
-| `npm run build:app` | Đóng gói ứng dụng Desktop chạy độc lập qua PyInstaller |
+| `npm run setup` | Cài dependency và chuẩn bị môi trường. |
+| `npm run dev:all` / `npm start` | Chạy Vite + FastAPI. |
+| `npm run dev` | Chạy riêng Vite. |
+| `npm run build` | Type-check TypeScript và build frontend. |
+| `npm run test:i18n` | Kiểm tra catalog Việt/Anh. |
+| `npm run build:app` | Đóng gói desktop app. |
+| `npm run check:build` | Kiểm tra artifact desktop. |
 
----
+## Cấu hình cloud tùy chọn
 
-### Cấu hình file `.env` (Tùy chọn)
-
-Sao chép `backend/.env.example` thành `backend/.env` để cấu hình sẵn các API Key hoặc tham số nâng cao:
+Nhập key ở **Cấu hình**, hoặc tạo `backend/.env` từ `backend/.env.example`:
 
 ```env
-# Cloud AI API Keys (hoặc nhập trực tiếp tại giao diện Cấu hình)
-OPENAI_API_KEY=sk-...
+OPENAI_API_KEY=...
 GEMINI_API_KEY=...
 DEEPSEEK_API_KEY=...
-GROK_API_KEY=...
 OPENROUTER_API_KEY=...
-ELEVENLABS_API_KEYS=sk_key1,sk_key2,sk_key3
-
-# Cấu hình thiết bị phần cứng & backend VieNeu
-# VIENEU_BACKEND=auto          # auto | pytorch | onnx | cpu
-# VIDEOCLONE_TORCH_DEVICE=     # cuda | mps | cpu
+ELEVENLABS_API_KEYS=key_1,key_2
 ```
 
----
+Không commit file `.env` hoặc API key vào Git.
 
-## 📦 Đóng gói Desktop (Windows Desktop Release)
-
-Dự án tích hợp sẵn quy trình đóng gói ứng dụng Desktop hoàn chỉnh qua `build_app/`:
+## Đóng gói và phát hành
 
 ```bash
 npm run build:app
 ```
 
-- **Thư mục đầu ra**: `build_app/release/VideoClone_v<version>/`
-- **Cách chạy**: Khởi chạy file `VideoClone.exe` **bên trong thư mục xuất ra** (không di chuyển riêng file `.exe` ra ngoài).
-- **Tùy chọn nâng cao**:
-  - `$env:ONEFILE='1'; npm run build:app` : Đóng gói 1 file duy nhất.
-  - `$env:CLEAN='1'; npm run build:app` : Xóa toàn bộ cache build cũ trước khi đóng gói.
+Artifact local được tạo trong `build_app/release/`. GitHub Actions build macOS và Windows khi push tag theo dạng `v*` (ví dụ `v3.3.7`) và đính kèm package vào GitHub Release.
 
-### Quy tắc đánh Version (SemVer)
-VideoClone tuân thủ nghiêm ngặt chuẩn 3 số `major.minor.patch` (từ `0` đến `9`):
-- `3.0.0` → `3.0.1` (Tăng bản vá thông thường).
-- `3.0.9` → `3.1.0` (Cuộn sang minor mới).
-- `2.9.9` → `3.0.0` (Cuộn sang major mới).
-- Script tự động đồng bộ version giữa `package.json`, `build_app/VERSION`, tiêu đề ứng dụng và file nén ZIP phát hành.
+Trước khi tag release:
 
----
-
-## 🗄️ Cấu trúc Lưu trữ Dữ liệu
-
-| Chế độ | Đường dẫn lưu trữ |
-|---|---|
-| **Chạy từ mã nguồn** | `backend/public/<project_id>/` (chứa video gốc, audio tách, kết quả xuất) |
-| **Dữ liệu giọng Clone** | `backend/data/voices/vieneu/` (chứa audio mẫu và embedding giọng) |
-| **Desktop Windows** | `%LOCALAPPDATA%\VideoClone` (chứa dữ liệu projects, renders và gói AI Runtime) |
-
----
-
-## 🔌 Danh mục API Chính (Backend REST Endpoints)
-
-Hệ thống cung cấp hệ thống REST API phong phú tại `http://127.0.0.1:8787`:
-
-| Phương thức | Endpoint | Mô tả |
-|---|---|---|
-| `POST` | `/api/upload` | Tải lên video mới và khởi tạo project |
-| `POST` | `/api/projects/{id}/run` | Chạy tiến trình nhận diện ASR / OCR và dịch thuật |
-| `POST` | `/api/projects/{id}/dub` | Thực hiện lồng tiếng AI cho các câu phụ đề |
-| `POST` | `/api/projects/{id}/export` | Xuất video MP4 (burn sub, che sub cũ, mux âm thanh) |
-| `POST` | `/api/projects/{id}/cancel` | Hủy job đang chạy (kill toàn bộ cây tiến trình FFmpeg/AI) |
-| `GET` | `/api/projects/{id}/status` | Truy vấn trạng thái và tiến độ xử lý thời gian thực |
-| `GET` / `PUT` | `/api/projects/{id}/segments` | Lấy danh sách hoặc cập nhật nội dung/timing phụ đề |
-| `POST` | `/api/projects/{id}/rebake-speed` | Cập nhật lại tốc độ video và remap timeline |
-| `POST` | `/api/tts/studio/synthesize` | Tổng hợp âm thanh từ văn bản / SRT trong TTS Studio |
-| `POST` | `/api/tts/studio/clone` | Tạo mẫu giọng đọc mới từ audio tải lên |
-| `POST` | `/api/cleaner/clean` | Chạy tác vụ tẩy watermark / làm sạch video |
-| `POST` | `/api/srt-image/render` | Ghép hình ảnh / video với âm thanh và file SRT |
-| `GET` | `/api/renders` | Lấy danh sách toàn bộ video đã render thành công |
-| `POST` | `/api/download` | Tạo tác vụ tải video từ URL mạng xã hội |
-| `GET` | `/api/system/hardware` | Lấy thông tin chi tiết CPU, RAM, GPU phần cứng |
-| `GET` | `/api/system/checks` | Kiểm tra tình trạng các module và gói AI trong hệ thống |
-
-> Xem tài liệu schema chi tiết tại: `http://127.0.0.1:8787/docs` khi backend đang chạy.
-
----
-
-## 📂 Sơ đồ Cấu trúc Source Code
-
-```text
-video-clone/
-├── frontend/src/            # Mã nguồn Frontend (React 19 + TypeScript + Vite)
-│   ├── app/                 # Shell, router mode, quản lý session, i18n
-│   ├── pages/               # Các trang giao diện (Clone, Film, Batch, TTS, Cleaner,...)
-│   ├── features/            # Module tính năng (editor, download, cleaner, tts, project,...)
-│   └── shared/              # UI components, layout, icons, api client dùng chung
-├── backend/                 # Mã nguồn Backend (FastAPI + Python)
-│   ├── api/                 # FastAPI router theo domain và middleware
-│   ├── pipeline/            # Pipeline xử lý (ASR, OCR, Translation, TTS, Export, Mux, Demucs)
-│   ├── core/                # Quản lý phần cứng, tiến trình huỷ an toàn, tài nguyên
-│   └── public/              # Thư mục chứa dữ liệu runtime của các dự án
-├── previews/                # Ảnh chụp màn hình giao diện thực tế của ứng dụng
-├── tests/                   # Bộ kiểm thử tự động (backend pytest & frontend i18n tests)
-├── scripts/                 # Scripts tự động hóa khởi tạo và phát triển (setup, dev)
-└── build_app/               # Cấu hình đóng gói ứng dụng Desktop (PyInstaller launcher)
+```bash
+npm run test:i18n
+npm run build
+PYTHONPATH=backend backend/.venv/bin/python -m pytest tests/backend
 ```
 
-> Chi tiết về quy tắc phụ thuộc và phân chia trách nhiệm module được mô tả tại **[STRUCTURE.md](STRUCTURE.md)**.
+## Dữ liệu
 
----
+- Chạy từ source: project media/cache nằm trong `backend/public/<project_id>/`.
+- Desktop app dùng thư mục dữ liệu ứng dụng của hệ điều hành.
+- Xóa project hoặc asset từ UI phải xóa dữ liệu backend tương ứng; asset đang được timeline sử dụng sẽ không được xóa.
+- Video gốc, export và voice clone có thể chiếm nhiều dung lượng; dọn chúng trong quản lý project/cache.
 
-## 🌐 Trải nghiệm Người dùng & Đa ngôn ngữ (i18n)
+## Cấu trúc mã nguồn
 
-- **Hỗ trợ Song ngữ toàn diện**: Chuyển đổi linh hoạt giữa **Tiếng Việt (VI)** và **Tiếng Anh (EN)** trực tiếp trên thanh điều hướng. Mọi thông báo, nhãn, hướng dẫn đều được bản địa hóa.
-- **Chế độ Giao diện**: Hỗ trợ chuyển đổi nhanh giữa giao diện **Tối (Dark Mode)** và **Sáng (Light Mode)**.
-- **Quản lý Tiến trình An toàn**: Nút **Hủy (Đỏ/X)** cho phép dừng tức thì công việc đang chạy và dọn dẹp sạch sẽ tài nguyên phần cứng (kill process tree). Nút **Chạy nền** cho phép thu nhỏ popup để tiếp tục thao tác các tính năng khác trong khi job vẫn đang xử lý.
+```text
+frontend/src/       React + TypeScript + Vite
+backend/api/        FastAPI routes và schema
+backend/pipeline/   ASR, OCR, dịch, TTS, Review, export và media
+build_app/          Desktop launcher/build
+scripts/            setup và dev runner
+tests/              pytest và i18n tests
+previews/           Ảnh minh họa giao diện
+```
 
----
+Xem thêm [STRUCTURE.md](STRUCTURE.md) để biết quy ước module.
 
-## 🛡️ Giới hạn & Khuyến nghị
+## License
 
-1. **Hiệu năng nhận diện (OCR & Whisper)**: Độ chính xác của OCR phụ thuộc vào độ sắc nét và kích thước chữ trên video gốc. Đối với video dài hoặc máy cấu hình vừa phải, khuyến nghị dùng model `small`/`medium` hoặc model `ONNX`.
-2. **Dịch thuật & Lồng tiếng**: Khuyến nghị kiểm tra lại nội dung bản dịch và timing trên Live Preview Editor trước khi bấm xuất bản cuối cùng để đạt chất lượng tốt nhất.
-3. **Các dịch vụ Cloud bên thứ ba**: Google, TikTok, CapCut là các dịch vụ bên ngoài có thể bị giới hạn tần suất (rate-limit). Đối với khối lượng công việc lớn, nên cấu hình sử dụng API Key chuyên dụng (OpenAI, Gemini, ElevenLabs,...).
-
----
-
-## 📄 License & Bản quyền
-
-Dự án được phân phối theo giấy phép [Apache License 2.0](LICENSE).  
-Bản quyền © 2026 **manhgdev**. Mọi quyền được bảo lưu.
+Phân phối theo [Apache License 2.0](LICENSE).
