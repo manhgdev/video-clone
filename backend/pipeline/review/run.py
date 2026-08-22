@@ -6,6 +6,7 @@ import re
 import shutil
 import threading
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -16,12 +17,12 @@ from pipeline.core.media import _ff_bin, ffprobe_duration, video_size
 from pipeline.core.project import ensure_layout, save_meta, set_status
 from pipeline.export.burn import cover_and_burn
 from pipeline.export.mux_audio import mux_dub
-from pipeline.queue.store import mutate
+from pipeline.queue.store import get as get_queue_job, mutate
 from pipeline.review.adapter import (
     _fallback_review_bbox,
     apply_edit_plan,
     caption_export_settings,
-    locate_review_caption_bands,
+    locate_review_caption_band,
 )
 from pipeline.review.cache import INVALIDATE_FROM, STAGES, load_json, movie_root, run_dir, save_json
 from pipeline.review.compose import compose_video, concat_parts
@@ -36,11 +37,14 @@ from pipeline.review.vision import analyze_scenes
 from pipeline.tts import tts_segment
 
 
-REVIEW_PLAN_VERSION = 17
-REVIEW_STORY_VERSION = 6
+REVIEW_PLAN_VERSION = 20
+REVIEW_STORY_VERSION = 7
 REVIEW_FINALIZE_VERSION = 8
 REVIEW_MATCH_VERSION = 4
 WINDOW_SOURCE_VERSION = 1
+
+# Stable protocol consumed and localized by the client. Never display it raw.
+PROGRESS_HEARTBEAT_PREFIX = "__VC_PROGRESS__"
 
 
 import time as _time
@@ -68,6 +72,36 @@ class _timed:
             pass
 
 
+@contextmanager
+def _progress_heartbeat(job_id: str, stage: str, *, interval_sec: float = 8.0, emit: bool = False):
+    """Optionally report an elapsed heartbeat for a blocking stage.
+
+    Review stages now publish their own meaningful counts/progress.  Generic
+    heartbeats are disabled by default because their whole-pipeline percentage
+    was being mistaken for the percentage of Whisper or visual analysis.
+    """
+    if not emit:
+        yield
+        return
+    stop = threading.Event()
+    started_at = _time.monotonic()
+
+    def report() -> None:
+        while not stop.wait(max(0.01, interval_sec)):
+            elapsed = max(1, round(_time.monotonic() - started_at))
+            current = get_queue_job(job_id) or {}
+            progress = max(0, min(100, round(float(current.get("progress") or 0) * 100)))
+            _note(job_id, f"{PROGRESS_HEARTBEAT_PREFIX}|{stage}|{elapsed}|{progress}")
+
+    worker = threading.Thread(target=report, name=f"review-progress-{stage}", daemon=True)
+    worker.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        worker.join(timeout=0.1)
+
+
 def run_review_job(job: dict[str, Any]) -> dict[str, Any]:
     job_id = str(job["id"])
     src = Path(str(job.get("source") or ""))
@@ -86,12 +120,17 @@ def run_review_job(job: dict[str, Any]) -> dict[str, Any]:
         review_provider = "gemini"
     settings["reviewProvider"] = review_provider
     source_lang = str(settings.get("sourceLang") or "auto")
+    recognition_engine = str(settings.get("recognitionEngine") or "whisper").strip().lower()
+    if recognition_engine not in {"whisper", "capcut"}:
+        recognition_engine = "whisper"
+    settings["recognitionEngine"] = recognition_engine
     lang = str(settings.get("language") or "vi")
     voice = str(settings.get("voice") or "system")
     _note(job_id, f"Nguồn: {src}", stage="metadata", progress=0.04)
-    _note(job_id, f"Cài đặt: gốc={source_lang} thoại={lang} mode={mode} voice={voice} caption={settings.get('captionMode') or 'cover'}")
+    _note(job_id, f"Cài đặt: nhận dạng={recognition_engine} gốc={source_lang} thoại={lang} mode={mode} voice={voice} caption={settings.get('captionMode') or 'cover'}")
     check_cancel(job_id)
-    meta = inspect_media(src)
+    with _progress_heartbeat(job_id, "metadata"):
+        meta = inspect_media(src)
     root = movie_root(src)
     save_json(root / "metadata.json", meta)
     duration = float(meta.get("duration") or 0)
@@ -138,22 +177,24 @@ def run_review_job(job: dict[str, Any]) -> dict[str, Any]:
     _note(job_id, f"Cảnh: {len(scenes) if isinstance(scenes, list) else 0} đoạn · {_t_scenes.elapsed:.0f}s")
     with _timed("transcript") as _t_tr:
         transcript = _cached_or(
-            root / f"transcript_{source_lang}.json",
+            root / f"transcript_{recognition_engine}_{source_lang}_{lang}.json",
             lambda: load_transcript(
                 src, root, job_id=job_id, duration=duration,
                 sidecar=str(settings.get("subtitleFile") or ""),
                 source_lang=source_lang,
+                recognition_engine=recognition_engine,
+                target_lang=lang,
             ),
             job_id,
             "transcript",
             0.28,
-            f"Transcript ({source_lang})",
+            f"Transcript ({recognition_engine}:{source_lang})",
         )
     sample = _clip((transcript[0].get("text") if transcript else "") or "")
     _note(job_id, f"Transcript: {len(transcript)} câu · {_t_tr.elapsed:.0f}s" + (f" · ví dụ: {sample}" if sample else ""))
     with _timed("visual_analysis") as _t_vis:
         visuals = _cached_or(
-            root / "visual_analysis" / f"scenes_{review_mode}_{source_lang}.json",
+            root / "visual_analysis" / f"scenes_grounded_v2_{review_mode}_{source_lang}.json",
             lambda: analyze_scenes(
                 src, scenes, transcript, root, job_id=job_id,
                 use_vision=review_mode == "llm",
@@ -172,16 +213,19 @@ def run_review_job(job: dict[str, Any]) -> dict[str, Any]:
 
     def story_progress(stage: str, done: int, total: int, workers: int) -> None:
         label = "Tóm tắt cảnh" if stage == "blocks" else "Tóm tắt chương"
+        stage_progress = 0.42 + 0.10 * (done / max(1, total))
+        task_percent = round(done * 100 / max(1, total))
+        overall_percent = round(stage_progress * 100)
         _note(
             job_id,
-            f"{label}: {done}/{total} · {workers} luồng",
+            f"{label}: {done}/{total} ({task_percent}%) · tiến trình {overall_percent}% · {workers} luồng",
             stage="story_graph",
-            progress=0.42 + 0.09 * (done / max(1, total)),
+            progress=stage_progress,
         )
 
     if review_mode != "translate":
         story_builder = lambda: build_story(
-            visuals, language=lang, model=review_model, on_progress=story_progress, title=src.name,
+            visuals, language=lang, model=review_model, on_progress=story_progress, title=src.name, job_id=job_id,
         )
     else:
         story_builder = lambda: _faithful_story(visuals)
@@ -192,14 +236,14 @@ def run_review_job(job: dict[str, Any]) -> dict[str, Any]:
             story_builder,
             job_id,
             "story_graph",
-            0.52,
+            0.42,
             f"Cốt truyện ({lang})",
         )
     ctx = story.get("movie_context") or {}
     save_json(rd / "movie_context.json", ctx)
     save_json(rd / "chapter_summaries.json", story.get("chapters") or [])
     save_json(rd / "segment_summaries.json", story.get("blocks") or [])
-    _note(job_id, f"Cốt truyện: {len(story.get('chapters') or [])} chương · {len(story.get('blocks') or [])} khối · {_t_story.elapsed:.0f}s · { _clip(ctx.get('logline') or '') }")
+    _note(job_id, f"Cốt truyện: {len(story.get('chapters') or [])} chương · {len(story.get('blocks') or [])} khối · {_t_story.elapsed:.0f}s · { _clip(ctx.get('logline') or '') }", progress=0.52)
 
     start, prev_rd, changed = _resume_point(root, settings)
     reuse_script = _reuse(start, "script")
@@ -383,7 +427,7 @@ def run_review_job(job: dict[str, Any]) -> dict[str, Any]:
                     parts=parts_meta, stage=f"LLM {pi+1}/{nwin}",
                     progress=0.56 + 0.28 * (pi / nwin),
                 )
-            with _timed(f"script_p{pi}") as _t_sc:
+            with _progress_heartbeat(job_id, "script"), _timed(f"script_p{pi}") as _t_sc:
                 script = write_script(
                     story_part,
                     duration_sec=script_dur,
@@ -395,7 +439,7 @@ def run_review_job(job: dict[str, Any]) -> dict[str, Any]:
                     genre=str(settings.get("genre") or ""),
                     visuals=vis,
                     source_transcript=part_transcript,
-                    project_id=project_id,
+                    job_id=job_id,
                     use_llm=review_mode != "translate",
                     llm_model=review_model,
                 )
@@ -414,7 +458,7 @@ def run_review_job(job: dict[str, Any]) -> dict[str, Any]:
                 voiced = _attach_prev_voice(script, prev_voice, pi) or []
                 _note(job_id, f"TTS phần {pi + 1}: cache {len(voiced)} file")
             else:
-                with _timed(f"tts_p{pi}") as _t_tts:
+                with _progress_heartbeat(job_id, "tts"), _timed(f"tts_p{pi}") as _t_tts:
                     voiced = _tts_parallel(
                         segs,
                         voice=voice,
@@ -428,22 +472,23 @@ def run_review_job(job: dict[str, Any]) -> dict[str, Any]:
                 tts_sum = sum(float(v.get("duration") or 0) for v in voiced)
                 _note(job_id, f"TTS xong phần {pi + 1}: {len(voiced)} file · {tts_sum:.1f}s audio · {_t_tts.elapsed:.0f}s real")
             voiced = _cap_voiced_duration(voiced, script_dur)
-            plan = match_voice(
-                voiced,
-                vis,
-                style=str(settings.get("style") or "normal"),
-                spoiler=str(settings.get("spoiler") or "none"),
-                mode=mode,
-                keep_sec=float(settings.get("keepSec") or 4),
-                skip_sec=float(settings.get("skipSec") or 10),
-                pause_pace=str(settings.get("pausePace") or "balanced"),
-            )
+            with _progress_heartbeat(job_id, "matching"):
+                plan = match_voice(
+                    voiced,
+                    vis,
+                    style=str(settings.get("style") or "normal"),
+                    spoiler=str(settings.get("spoiler") or "none"),
+                    mode=mode,
+                    keep_sec=float(settings.get("keepSec") or 4),
+                    skip_sec=float(settings.get("skipSec") or 10),
+                    pause_pace=str(settings.get("pausePace") or "balanced"),
+                )
             clip_count = sum(len(seg.get("clips") or []) for seg in plan.get("segments") or [])
             _note(
                 job_id,
                 f"Ghép hình phần {pi + 1}: {clip_count} clip từ {len(vis)} cảnh",
             )
-            with _timed(f"compose_p{pi}") as _t_comp:
+            with _progress_heartbeat(job_id, "compose"), _timed(f"compose_p{pi}") as _t_comp:
                 compose_video(
                     part_source,
                     plan,
@@ -457,9 +502,24 @@ def run_review_job(job: dict[str, Any]) -> dict[str, Any]:
                 )
             _note(job_id, f"FFmpeg compose phần {pi + 1}: {clip_count} clip · {_t_comp.elapsed:.0f}s")
             check_cancel(job_id)
-            audio_segments = _part_export_segments(plan, raw_part)
+            # The source bbox lives in source pixels (for example 1280×720),
+            # while this part is composed at the export resolution (1920×1080).
+            # Locate after crop/scale so both the blur and replacement caption
+            # use the coordinates actually rendered to the viewer.
+            part_caption_bbox = locate_review_caption_band(raw_part)
+            audio_segments = _part_export_segments(
+                plan, raw_part, caption_bbox=part_caption_bbox,
+            )
             caption_segments = _review_caption_cues(audio_segments)
             caption_flags = caption_export_settings(settings)
+            render_caption_segments = caption_segments
+            if caption_flags["coverHardsubs"]:
+                # Cover mode must hide the old subtitle lane continuously,
+                # including pauses between narration cues.
+                render_caption_segments = [
+                    _review_cover_lane(raw_part, part_caption_bbox),
+                    *caption_segments,
+                ]
             mux_source = raw_part
             if caption_flags["burnSubs"] or caption_flags["coverHardsubs"]:
                 _note(
@@ -469,26 +529,27 @@ def run_review_job(job: dict[str, Any]) -> dict[str, Any]:
                     progress=0.85 + 0.05 * (pi / nwin),
                 )
                 burned = rd / f"burned_part_{pi:02d}.mp4"
-                cover_and_burn(
-                    raw_part,
-                    caption_segments,
-                    burned,
-                    cover=bool(caption_flags["coverHardsubs"]),
-                    burn=bool(caption_flags["burnSubs"]),
-                    subtitle_font_size=int(settings.get("subtitleFontSize") or 0),
-                    subtitle_font_family=str(settings.get("subtitleFontFamily") or "system"),
-                    project_id=project_id,
-                    workers=int(compose_workers or 0),
-                    caption_placement=str(caption_flags["captionPlacement"]),
-                    cover_mask_style=str(settings.get("coverMaskStyle") or "blur"),
-                    cover_mask_color=str(settings.get("coverMaskColor") or "#000000"),
-                    cover_mask_opacity=int(settings.get("coverMaskOpacity", 60)),
-                    caption_text_color=str(settings.get("captionTextColor") or "#ffffff"),
-                    caption_bg_style=str(settings.get("captionBgStyle") or "none"),
-                    caption_bg_color=str(settings.get("captionBgColor") or "#000000"),
-                    caption_bg_opacity=int(settings.get("captionBgOpacity", 55)),
-                    caption_stroke=bool(settings.get("captionStroke", True)),
-                )
+                with _progress_heartbeat(job_id, "captions"):
+                    cover_and_burn(
+                        raw_part,
+                        render_caption_segments,
+                        burned,
+                        cover=bool(caption_flags["coverHardsubs"]),
+                        burn=bool(caption_flags["burnSubs"]),
+                        subtitle_font_size=int(settings.get("subtitleFontSize") or 0),
+                        subtitle_font_family=str(settings.get("subtitleFontFamily") or "system"),
+                        project_id=project_id,
+                        workers=int(compose_workers or 0),
+                        caption_placement=str(caption_flags["captionPlacement"]),
+                        cover_mask_style=str(settings.get("coverMaskStyle") or "blur"),
+                        cover_mask_color=str(settings.get("coverMaskColor") or "#000000"),
+                        cover_mask_opacity=int(settings.get("coverMaskOpacity", 60)),
+                        caption_text_color=str(settings.get("captionTextColor") or "#ffffff"),
+                        caption_bg_style=str(settings.get("captionBgStyle") or "none"),
+                        caption_bg_color=str(settings.get("captionBgColor") or "#000000"),
+                        caption_bg_opacity=int(settings.get("captionBgOpacity", 55)),
+                        caption_stroke=bool(settings.get("captionStroke", True)),
+                    )
                 _note(job_id, f"Hiệu ứng & phụ đề phần {pi + 1}: hoàn thành")
                 mux_source = burned
             check_cancel(job_id)
@@ -498,17 +559,20 @@ def run_review_job(job: dict[str, Any]) -> dict[str, Any]:
                 stage=f"Lồng tiếng {pi + 1}/{nwin}",
                 progress=0.90 + 0.04 * (pi / nwin),
             )
-            mux_dub(
-                project_id,
-                mux_source,
-                audio_segments,
-                original_audio_mode="original" if orig_pct > 0.5 else "mute",
-                original_audio_volume=max(0.0, min(1.0, orig_pct / 100.0)),
-                allow_video_slowdown=False,
-                match="preferAudio" if mode == "stretch" else "preferVideo",
-                destination=part,
-                namespace=f"review_{run_id}_part_{pi:02d}",
-            )
+            with _progress_heartbeat(job_id, "audio_mix"):
+                mux_dub(
+                    project_id,
+                    mux_source,
+                    audio_segments,
+                    original_audio_mode="original" if orig_pct > 0.5 else "mute",
+                    original_audio_volume=max(0.0, min(1.0, orig_pct / 100.0)),
+                    allow_video_slowdown=False,
+                    match="preferAudio" if mode == "stretch" else "preferVideo",
+                    max_tts_speed=4.0,
+                    allow_external_audio=True,
+                    destination=part,
+                    namespace=f"review_{run_id}_part_{pi:02d}",
+                )
             _note(job_id, f"Lồng tiếng phần {pi + 1}: hoàn thành")
             save_json(rd / f"plan_{pi:02d}.json", plan)
             save_json(rd / f"voice_{pi:02d}.json", voiced)
@@ -564,12 +628,21 @@ def run_review_job(job: dict[str, Any]) -> dict[str, Any]:
         shutil.copy2(prev_compiled, compiled)
         _note(job_id, "Timeline: lấy compiled lần trước")
     elif len(raw_part_files) == 1:
-        shutil.copy2(raw_part_files[0], compiled)
+        with _progress_heartbeat(job_id, "timeline"):
+            shutil.copy2(raw_part_files[0], compiled)
     else:
-        concat_parts(raw_part_files, compiled, job_id=job_id)
+        with _progress_heartbeat(job_id, "timeline"):
+            concat_parts(raw_part_files, compiled, job_id=job_id)
     combined["source"] = str(src)
     project_meta = apply_edit_plan(project_id, compiled, combined, settings=settings, voice=voice)
-    _apply_fixed_review_bboxes(project_id, project_meta, compiled, settings)
+    # raw parts preserve the pre-burn subtitle pixels.  Reuse their measured
+    # output-space box for Live Preview instead of the original source-space
+    # box or OCRing the already-burned translated timeline.
+    compiled_caption_bbox = locate_review_caption_band(raw_part_files[0]) if raw_part_files else None
+    _apply_fixed_review_bboxes(
+        project_id, project_meta, compiled, settings,
+        caption_bbox=compiled_caption_bbox,
+    )
     save_json(rd / "project.json", {"projectId": project_id})
 
     # Always finish the deliverable: concat per-part muxed videos (TTS + cuts)
@@ -578,16 +651,19 @@ def run_review_job(job: dict[str, Any]) -> dict[str, Any]:
     final_join = ensure_layout(project_id) / "cache" / "review_final.mp4"
     _note(job_id, "Xuất: nối các phần đã TTS + cắt → video hoàn thiện", stage="render", progress=0.94)
     if len(part_files) == 1:
-        shutil.copy2(part_files[0], final_join)
+        with _progress_heartbeat(job_id, "export"):
+            shutil.copy2(part_files[0], final_join)
     else:
-        concat_parts(
-            part_files,
-            final_join,
-            job_id=job_id,
-            reencode_fallback=False,
-        )
+        with _progress_heartbeat(job_id, "export"):
+            concat_parts(
+                part_files,
+                final_join,
+                job_id=job_id,
+                reencode_fallback=False,
+            )
     check_cancel(job_id)
-    dest = _copy_output(final_join, str(src), settings, job)
+    with _progress_heartbeat(job_id, "export"):
+        dest = _copy_output(final_join, str(src), settings, job)
     _note(job_id, f"Xuất: {dest}")
     artifact_run_id = prev_rd.name if reuse_match and prev_rd else run_id
     cache_refs = {"root": str(root), "run": artifact_run_id}
@@ -639,18 +715,17 @@ def _select_review_model(
     return None
 
 
-def _part_export_segments(plan: dict[str, Any], video: Path) -> list[dict[str, Any]]:
-    """Convert one match plan to timing using sampled source-subtitle boxes."""
-    bands = locate_review_caption_bands(video)
-    duration = max(0.1, float(ffprobe_duration(video) or 0))
+def _part_export_segments(
+    plan: dict[str, Any], video: Path, *, caption_bbox: dict[str, int] | None = None,
+) -> list[dict[str, Any]]:
+    """Convert one match plan to timing with one stable Review subtitle lane."""
+    bbox = dict(caption_bbox or locate_review_caption_band(video))
     out: list[dict[str, Any]] = []
     for index, seg in enumerate(plan.get("segments") or []):
         start = float(seg.get("voice_start") or 0)
         end = float(seg.get("voice_end") or start)
         audio = Path(str(seg.get("audio") or ""))
         text = str(seg.get("text") or "")
-        fraction = max(0.0, min(1.0, (start + end) * 0.5 / duration))
-        bbox = min(bands, key=lambda band: abs(band[0] - fraction))[1]
         out.append({
             "id": str(seg.get("voice_id") or f"voice_{index:03d}"),
             "start": start,
@@ -684,6 +759,20 @@ def _review_caption_cues(
             "dubSubtitle": text,
         })
     return cues
+
+
+def _review_cover_lane(video: Path, bbox: dict[str, int]) -> dict[str, Any]:
+    """A continuous mask-only cue for Review's fixed old-subtitle lane."""
+    duration = max(0.04, float(ffprobe_duration(video) or 0.04))
+    return {
+        "id": "review-cover-lane",
+        "start": 0.0,
+        "end": duration,
+        "maskOnly": True,
+        "bbox": dict(bbox),
+        "bboxInherited": True,
+        "layout": "horizontal",
+    }
 
 
 def _cap_voiced_duration(
@@ -737,16 +826,14 @@ def _apply_fixed_review_bboxes(
     meta: dict[str, Any],
     compiled: Path,
     settings: dict[str, Any],
+    *,
+    caption_bbox: dict[str, int] | None = None,
 ) -> None:
-    """Persist sampled OCR boxes so Editor preview matches the Review export."""
+    """Persist the same fixed subtitle lane used by Review export and preview."""
     if caption_export_settings(settings)["burnSubs"]:
-        bands = locate_review_caption_bands(compiled)
-        duration = max(0.1, float(ffprobe_duration(compiled) or 0))
+        bbox = dict(caption_bbox or locate_review_caption_band(compiled))
         for segment in meta.get("segments") or []:
-            start = float(segment.get("start") or 0)
-            end = max(start, float(segment.get("end") or start))
-            fraction = max(0.0, min(1.0, (start + end) * 0.5 / duration))
-            segment["bbox"] = dict(min(bands, key=lambda band: abs(band[0] - fraction))[1])
+            segment["bbox"] = dict(bbox)
             segment["bboxInherited"] = True
             segment["layout"] = "horizontal"
         meta["bboxLocateVersion"] = 4
@@ -1063,7 +1150,8 @@ def _cached_or(path: Path, fn, job_id: str, stage: str, progress: float, label: 
         _note(job_id, f"{tag}: cache ({_qty(cached)}) — {path.name}", stage=stage, progress=progress)
         return cached
     _note(job_id, f"{tag}: đang chạy…", stage=stage, progress=progress)
-    data = fn()
+    with _progress_heartbeat(job_id, stage):
+        data = fn()
     save_json(path, data)
     _note(job_id, f"{tag}: xong ({_qty(data)})")
     return data

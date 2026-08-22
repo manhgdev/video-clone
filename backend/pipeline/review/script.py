@@ -90,6 +90,7 @@ def write_script(
     visuals: list[dict[str, Any]] | None = None,
     source_transcript: list[dict[str, Any]] | None = None,
     project_id: str | None = None,
+    job_id: str | None = None,
     use_llm: bool = False,
     llm_model: str | None = None,
 ) -> dict[str, Any]:
@@ -121,19 +122,22 @@ def write_script(
         "RULES:\n"
         "1. Write natural narration sentences connecting the story events chronologically.\n"
         "2. Hook the viewer in the first sentence; leave a punchy outro at the end.\n"
-        f"3. All narration MUST be in {name} only.\n"
-        f"4. Output EXACTLY a JSON object with a list of {n} narration sentences:\n"
+        "3. Use ONLY facts explicitly stated in Story Events. Never invent food, props, weapons, places, characters,"
+        " or actions. If an event is vague, narrate it vaguely rather than guessing.\n"
+        f"4. All narration MUST be in {name} only.\n"
+        f"5. Output EXACTLY a JSON object with a list of {n} narration sentences:\n"
         f'{{"script": ["Opening hook narration sentence...", "Next story sentence...", ...]}}\n\n'
         f"Story Events:\n{evidence}"
     )
     min_words = max(30, round(word_budget * 0.35))
 
     def _log(msg: str) -> None:
-        if not project_id:
+        target_id = job_id or project_id
+        if not target_id:
             return
         try:
             from pipeline.review.run import _note as _run_note
-            _run_note(project_id, msg)
+            _run_note(target_id, msg)
         except Exception:
             try:
                 from pipeline.core.app_log import append_log
@@ -142,7 +146,7 @@ def write_script(
                 pass
 
     _log(f"LLM đang viết kịch bản · {n} đoạn · ~{word_budget} từ · {llm_model or 'auto'}…")
-    parsed = generate_json(prompt, model=llm_model)
+    parsed = generate_json(prompt, model=llm_model, job_id=job_id)
     items = _normalize_parsed_script(parsed)
     if len(items) < min_segments:
         _log(f"LLM thử lại ngắn gọn ({llm_model or 'auto'})…")
@@ -151,6 +155,7 @@ def write_script(
             + '\nRETURN JSON only. Do not number or prefix narration lines. '
             + '{"script": ["A concise narration of the selected moment."]}.',
             model=llm_model,
+            job_id=job_id,
         )
         items2 = _normalize_parsed_script(parsed2)
         if len(items2) >= min_segments:
@@ -250,7 +255,7 @@ def _part_evidence(
     event_ids = set()
     scene_ids = set()
     for index, scene in enumerate(rows):
-        text = str(scene.get("description") or scene.get("transcript") or "").strip()
+        text = str(scene.get("transcript") or scene.get("description") or "").strip()
         if not text:
             continue
         start = int(float(scene.get("start") or 0))

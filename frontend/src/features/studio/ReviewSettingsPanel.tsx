@@ -22,6 +22,20 @@ export function ReviewLangFields({ settings, onChange }: { settings: ReviewSetti
   const t = (vi: string, en: string) => localize(locale, vi, en)
   return (
     <>
+      <div className="rv-nest">
+        <h3 className="rv-nest-h">{t('Nhận dạng', 'Recognition')}</h3>
+        <div className="rv-choices">
+          <button type="button" className={`rv-choice${settings.recognitionEngine === 'whisper' ? ' on' : ''}`} onClick={() => onChange({ recognitionEngine: 'whisper' })}>
+            <b>Whisper</b>
+            <small>{t('Chạy trên máy, ưu tiên phụ đề có sẵn rồi mới nhận dạng giọng nói.', 'Runs on this machine; prefers existing subtitles before speech recognition.')}</small>
+          </button>
+          <button type="button" className={`rv-choice${settings.recognitionEngine === 'capcut' ? ' on' : ''}`} onClick={() => onChange({ recognitionEngine: 'capcut' })}>
+            <b>{t('CapCut cloud', 'CapCut cloud')}</b>
+            <small>{t('Gửi video lên CapCut để nhận dạng; không chạy Whisper.', 'Uploads the video to CapCut for recognition; Whisper is not used.')}</small>
+          </button>
+        </div>
+        {settings.recognitionEngine === 'capcut' ? <p className="rv-hint">{t('Cần mạng. Transcript được cache riêng theo CapCut để không lẫn với Whisper.', 'Requires internet. The transcript is cached separately from Whisper.')}</p> : null}
+      </div>
       <div className="rv-two">
         <label className="rv-field rv-lang">
           <span>{t('Ngôn ngữ gốc', 'Original language')}</span>
@@ -46,8 +60,8 @@ export function ReviewLangFields({ settings, onChange }: { settings: ReviewSetti
         </label>
       </div>
       <p className="rv-hint">{t(
-        'Ngôn ngữ gốc là tiếng phim (Whisper / phụ đề nhúng). Ngôn ngữ thoại là lời kể TTS và caption.',
-        'Original language is the film (Whisper / embedded subs). Spoken language is the TTS narration and captions.',
+        'Ngôn ngữ gốc là tiếng phim. Ngôn ngữ thoại là lời kể TTS và caption.',
+        'The source language is the movie language. The spoken language is used for narration TTS and captions.',
       )}</p>
     </>
   )

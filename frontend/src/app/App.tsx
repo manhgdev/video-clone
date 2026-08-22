@@ -33,7 +33,7 @@ import { api } from '@/features/project/project.api'
 import { expandSegmentsForList } from '@/features/project/expandCompound'
 import type { HardwareInfo, JobStatus, ProjectSettings, Step, TextOverlay } from '@/features/project/project.types'
 import { appModeFromPath, appModePath, loadAppMode, persistAppMode } from '@/app/appMode'
-import { LocaleContext, LocaleTextSync, loadLocale, localizePipelineMessage, persistLocale, type AppLocale } from '@/app/i18n'
+import { LocaleContext, LocaleTextSync, loadLocale, localize, localizePipelineMessage, persistLocale, type AppLocale } from '@/app/i18n'
 import {
   applyDefaultVoice,
   asSegmentList,
@@ -610,7 +610,7 @@ export default function App() {
       const snapped = snapshotEngineProfile({ ...prev, engine: prev.engine })
       out = applyEngineProfile(
         { ...snapped, ...next, engine: next.engine, engineProfiles: snapped.engineProfiles },
-        next.engine === 'paddleocr' || next.engine === 'subtitle'
+        next.engine === 'paddleocr' || next.engine === 'subtitle' || next.engine === 'capcut'
           ? next.engine
           : 'whisper',
       )
@@ -638,7 +638,9 @@ export default function App() {
             ? 'Nhận dạng chữ trên màn — chạy Dịch toàn bộ'
             : out.engine === 'subtitle'
               ? 'Dùng file phụ đề SRT — chạy Dịch toàn bộ'
-            : 'Nhận dạng giọng nói — chạy Dịch toàn bộ rồi Lồng tiếng',
+              : out.engine === 'capcut'
+                ? localize(locale, 'CapCut nhận dạng cloud — chạy Dịch toàn bộ', 'CapCut cloud recognition — run Full Translation')
+              : 'Nhận dạng giọng nói — chạy Dịch toàn bộ rồi Lồng tiếng',
         running: false,
       })
       return

@@ -136,6 +136,8 @@ def _tts_clip_plan(
     allow_video_slowdown: bool = True,
     match: str = "preferVideo",
     bake_speed: float = 1.0,
+    max_tts_speed: float = 1.5,
+    allow_external_audio: bool = False,
 ) -> tuple[list[tuple[Path, float, float, float, float]], float]:
     """Trả (clips, video_factor).
 
@@ -178,11 +180,14 @@ def _tts_clip_plan(
         wav = root / "tts" / name
         if not wav.exists():
             wav = root / "tts" / f"{seg['id']}.wav"
-        if not wav.exists() and seg.get("audioPath"):
+        # Review parts may own audio outside the project TTS directory.  A
+        # normal Clone project must never pick a stale arbitrary path when a
+        # TTS file is missing.
+        if allow_external_audio and not wav.exists() and seg.get("audioPath"):
             p = Path(str(seg["audioPath"]))
             if p.exists():
                 wav = p
-        if not wav.exists() and seg.get("audio"):
+        if allow_external_audio and not wav.exists() and seg.get("audio"):
             p = Path(str(seg["audio"]))
             if p.exists():
                 wav = p
@@ -206,11 +211,12 @@ def _tts_clip_plan(
             slot0 = max(0.15, ad + 0.15 if ad > 0.05 else end - start + 0.12)
         # Lồng tiếng: manual × (bake / ttsBake) — khớp frontend dubPlaybackSpeed.
         # TTS tự nhiên trên clock đã fit; chỉ scale khi đổi tốc độ SAU khi dub.
-        # Review may need a stronger fit to honor the selected total duration.
-        # Normal UI values remain in the old range; generated part metadata can
-        # request up to 4× and the atempo chain below preserves the full wav.
-        manual = max(0.75, min(4.0, _num(seg.get("ttsSpeed"), 1)))
-        manual = max(0.5, min(2.0, manual * _tts_bake_ratio(bake, seg.get("ttsBake"))))
+        # Clone Video is intentionally capped at 1.5×.  Review can opt into a
+        # higher limit at its dedicated call site without changing editor
+        # preview/export timing for normal projects.
+        speed_limit = max(0.75, min(4.0, float(max_tts_speed)))
+        manual = max(0.75, min(speed_limit, _num(seg.get("ttsSpeed"), 1)))
+        manual = max(0.5, min(speed_limit, manual * _tts_bake_ratio(bake, seg.get("ttsBake"))))
         raw.append(
             (
                 wav,
@@ -274,6 +280,8 @@ def _mix_tts_track(
     allow_video_slowdown: bool = True,
     match: str = "preferVideo",
     bake_speed: float = 1.0,
+    max_tts_speed: float = 1.5,
+    allow_external_audio: bool = False,
 ) -> Path:
     """Trộn TTS theo timeline đã scale. TTS atempo = manual × bake_speed."""
     ordered_plan, plan_vf = _tts_clip_plan(
@@ -282,6 +290,8 @@ def _mix_tts_track(
         allow_video_slowdown=allow_video_slowdown,
         match=match,
         bake_speed=bake_speed,
+        max_tts_speed=max_tts_speed,
+        allow_external_audio=allow_external_audio,
     )
     # Dùng plan (đã tính factor); video_factor chỉ để cache key khớp mux_dub
     if abs(video_factor - plan_vf) > 0.02 and video_factor > 1.0:
@@ -408,6 +418,8 @@ def mux_dub(
     allow_video_slowdown: bool = True,
     match: str = "preferVideo",
     bake_speed: float = 1.0,
+    max_tts_speed: float = 1.5,
+    allow_external_audio: bool = False,
     destination: Path | None = None,
     namespace: str = "",
 ) -> Path:
@@ -420,6 +432,8 @@ def mux_dub(
         allow_video_slowdown=allow_video_slowdown,
         match=match,
         bake_speed=bake_speed,
+        max_tts_speed=max_tts_speed,
+        allow_external_audio=allow_external_audio,
     )
     voice_track = _mix_tts_track(
         project_id,
@@ -429,6 +443,8 @@ def mux_dub(
         allow_video_slowdown=allow_video_slowdown,
         match=match,
         bake_speed=bake_speed,
+        max_tts_speed=max_tts_speed,
+        allow_external_audio=allow_external_audio,
     )
     out_dur = duration * video_factor
     vol_mul = max(0.0, min(2.0, float(original_audio_volume)))

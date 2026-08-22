@@ -31,37 +31,49 @@ def _download_file(url: str, dest: Path, log=None) -> None:
     for attempt in range(1, _DOWNLOAD_RETRIES + 2):
         try:
             report(f"{'Thử lại — ' if attempt > 1 else ''}Đang tải: {url.split('/')[-1]}")
-            try:
-                import httpx
-                with httpx.Client(timeout=_DOWNLOAD_TIMEOUT, follow_redirects=True) as client:
-                    with client.stream("GET", url) as resp:
-                        resp.raise_for_status()
-                        total = int(resp.headers.get("content-length", 0))
-                        downloaded = 0
-                        with partial.open("wb") as fh:
-                            for chunk in resp.iter_bytes(chunk_size=1 << 20):  # 1 MB
-                                fh.write(chunk)
-                                downloaded += len(chunk)
-                                if total:
-                                    pct = int(downloaded * 100 / total)
-                                    if pct % 10 == 0:
-                                        report(f"  {pct}% ({downloaded // (1 << 20)} / {total // (1 << 20)} MB)")
-            except ImportError:
-                # fallback: urllib (no progress, but works everywhere)
-                import socket
-                import urllib.request as _ur
+            from urllib.parse import unquote, urlparse
 
-                report("  (dùng urllib, không có progress bar)")
-                old_timeout = socket.getdefaulttimeout()
-                socket.setdefaulttimeout(_DOWNLOAD_TIMEOUT)
+            parsed = urlparse(url)
+            if parsed.scheme == "file":
+                # Local files are used by offline tests and must not go through
+                # httpx/proxy parsing at all.
+                shutil.copyfile(Path(unquote(parsed.path)), partial)
+            else:
+                # macOS environment variables commonly include bare IPv6
+                # values (::1) that httpx mistakes for an invalid proxy port.
+                from pipeline.core.config import sanitize_httpx_no_proxy
+                sanitize_httpx_no_proxy()
                 try:
-                    _ur.urlretrieve(url, partial)
-                finally:
-                    socket.setdefaulttimeout(old_timeout)
+                    import httpx
+                    with httpx.Client(timeout=_DOWNLOAD_TIMEOUT, follow_redirects=True) as client:
+                        with client.stream("GET", url) as resp:
+                            resp.raise_for_status()
+                            total = int(resp.headers.get("content-length", 0))
+                            downloaded = 0
+                            with partial.open("wb") as fh:
+                                for chunk in resp.iter_bytes(chunk_size=1 << 20):  # 1 MB
+                                    fh.write(chunk)
+                                    downloaded += len(chunk)
+                                    if total:
+                                        pct = int(downloaded * 100 / total)
+                                        if pct % 10 == 0:
+                                            report(f"  {pct}% ({downloaded // (1 << 20)} / {total // (1 << 20)} MB)")
+                except ImportError:
+                    # fallback: urllib (no progress, but works everywhere)
+                    import socket
+                    import urllib.request as _ur
+
+                    report("  (dùng urllib, không có progress bar)")
+                    old_timeout = socket.getdefaulttimeout()
+                    socket.setdefaulttimeout(_DOWNLOAD_TIMEOUT)
+                    try:
+                        _ur.urlretrieve(url, partial)
+                    finally:
+                        socket.setdefaulttimeout(old_timeout)
 
             # Validate size
             size = partial.stat().st_size
-            if size < 1024:
+            if parsed.scheme != "file" and size < 1024:
                 partial.unlink(missing_ok=True)
                 raise RuntimeError(f"File tải về quá nhỏ ({size} bytes) — có thể lỗi mạng")
 

@@ -380,6 +380,36 @@ html.dark .rv-page {
 .rv-log-h { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .rv-log-h strong { font-size: .84rem; font-weight: 750; }
 .rv-log-tools { display: flex; align-items: center; gap: 6px; }
+.rv-device-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  box-sizing: border-box;
+  padding: 0 9px;
+  border: 1px solid var(--rv-input-line);
+  border-radius: 999px;
+  background: var(--rv-input);
+  color: var(--rv-muted);
+  white-space: nowrap;
+}
+.rv-device-badge > i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #94a3b8;
+}
+.rv-device-badge.is-gpu > i {
+  background: #16a34a;
+  box-shadow: 0 0 0 3px color-mix(in srgb, #16a34a 16%, transparent);
+}
+.rv-device-kind {
+  color: var(--rv-text);
+  font-size: .61rem;
+  font-weight: 800;
+  letter-spacing: .08em;
+}
+.rv-device-name { font-size: .75rem; font-weight: 650; }
 .rv-mini {
   height: 28px;
   border: 1px solid var(--rv-input-line);

@@ -11,9 +11,15 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const isWin = process.platform === 'win32'
 const releaseDir = path.join(root, 'build_app', 'release')
 
-// Đọc version từ arg hoặc package.json
+// `build:app` intentionally advances package.json for the next build after it
+// has produced the current artifact. The bundled VERSION is therefore the
+// source of truth for preflight unless a caller explicitly supplies a version.
 const pkg = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'))
-const version = process.argv[2] || pkg.version.match(/^\d+\.\d+\.\d+/)?.[0] || '0.0.0'
+const bundledVersionPath = path.join(root, 'build_app', 'VERSION')
+const bundledVersion = existsSync(bundledVersionPath)
+  ? readFileSync(bundledVersionPath, 'utf8').trim()
+  : ''
+const version = process.argv[2] || bundledVersion || pkg.version.match(/^\d+\.\d+\.\d+/)?.[0] || '0.0.0'
 const verName = `VideoClone_v${version}`
 const distDir = path.join(releaseDir, verName)
 const exePath = path.join(distDir, isWin ? 'VideoClone.exe' : 'VideoClone')

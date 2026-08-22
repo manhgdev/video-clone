@@ -21,6 +21,7 @@ class ReviewIn(BaseModel):
     reviewMode: Literal["llm", "cloud", "translate"] = "llm"
     reviewModel: str = "auto"
     reviewProvider: Literal["gemini", "grok", "openai"] = "gemini"
+    recognitionEngine: Literal["whisper", "capcut"] = "whisper"
     language: str = "vi"
     voice: str = DEFAULT_REVIEW_VOICE
     spoiler: str = "none"

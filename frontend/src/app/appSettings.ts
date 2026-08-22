@@ -41,6 +41,12 @@ export const ENGINE_DEFAULTS = {
     originalAudioMode: 'original' as const,
     originalAudioVolume: 100,
   },
+  capcut: {
+    matchDuration: 'preferVideo' as const,
+    processOriginalAudio: false,
+    originalAudioMode: 'original' as const,
+    originalAudioVolume: 100,
+  },
   paddleocr: {
     matchDuration: 'none' as const,
     processOriginalAudio: false,
@@ -99,6 +105,7 @@ export const defaultSettings: ProjectSettings = {
   exportResolution: '1080',
   engineProfiles: {
     whisper: { ...ENGINE_DEFAULTS.whisper },
+    capcut: { ...ENGINE_DEFAULTS.capcut },
     paddleocr: { ...ENGINE_DEFAULTS.paddleocr },
     subtitle: { ...ENGINE_DEFAULTS.subtitle },
   },
@@ -145,7 +152,7 @@ export function applyEngineProfile(
 
 /** Ghi profile engine đang active (matchDuration / lọc âm) — không đụng engine kia. */
 export function snapshotEngineProfile(s: ProjectSettings): ProjectSettings {
-  const eng = s.engine === 'paddleocr' || s.engine === 'subtitle' ? s.engine : 'whisper'
+  const eng = s.engine === 'paddleocr' || s.engine === 'subtitle' || s.engine === 'capcut' ? s.engine : 'whisper'
   return {
     ...s,
     engineProfiles: {
@@ -187,6 +194,7 @@ export function loadSettings(): ProjectSettings {
       'google',
       'mymemory',
       'tiktok',
+      'capcut',
       'ollama',
       'openai',
       'gemini',
@@ -260,11 +268,15 @@ export function loadSettings(): ProjectSettings {
       s.matchDuration = 'preferVideo'
     }
     // Migrate projects saved while SenseVoice existed back to Whisper.
-    const eng = s.engine === 'paddleocr' || s.engine === 'subtitle' ? s.engine : 'whisper'
+    const eng = s.engine === 'paddleocr' || s.engine === 'subtitle' || s.engine === 'capcut' ? s.engine : 'whisper'
     const profiles = {
       whisper: {
         ...ENGINE_DEFAULTS.whisper,
         ...s.engineProfiles?.whisper,
+      },
+      capcut: {
+        ...ENGINE_DEFAULTS.capcut,
+        ...s.engineProfiles?.capcut,
       },
       paddleocr: {
         ...ENGINE_DEFAULTS.paddleocr,

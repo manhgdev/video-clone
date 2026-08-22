@@ -605,7 +605,7 @@
   "Nhãn": "Label",
   "Nhãn trên khung": "Label on frame",
   "Nhưng bố mẹ anh ấy đã cố tình làm vậy": "But his parents did it on purpose",
-  "Nhận dạng": "Identification",
+  "Nhận dạng": "Recognition",
   "Nhận dạng chữ trên màn — chạy Dịch toàn bộ": "Recognize text on the screen — run Full Translation",
   "Nhận dạng giọng nói — chạy Dịch toàn bộ rồi Lồng tiếng": "Speech recognition — run Full Translation then Dubbing",
   "Nhập SRT": "Enter SRT",
@@ -1631,5 +1631,16 @@
   "Tên phong cách": "Style name",
   "Quy tắc biên soạn & Giọng thoại": "Writing rules & voice",
   "Lưu thay đổi": "Save changes",
-  "Quay lại": "Back"
+  "Quay lại": "Back",
+  "Nhận dạng & dịch": "Recognition & translation",
+  "CapCut dịch (không dùng Whisper)": "CapCut Translate (no Whisper)",
+  "CapCut nhận dạng và dịch trực tiếp trên cloud, rồi trả SRT có timecode. Không chạy Whisper hoặc API dịch khác.": "CapCut recognizes and translates in the cloud, then returns a timed SRT. Whisper and other translation APIs are not used.",
+  "CapCut dịch & tải SRT": "Translate with CapCut & download SRT",
+  "CapCut cloud": "CapCut cloud",
+  "Gửi video lên CapCut để nhận dạng; không chạy Whisper.": "Uploads the video to CapCut for recognition; Whisper is not used.",
+  "Cần mạng. Transcript được cache riêng theo CapCut để không lẫn với Whisper.": "Requires internet. The transcript is cached separately from Whisper.",
+  "Giọng nói (CapCut cloud)": "Speech (CapCut cloud)",
+  "CapCut cloud (không dùng Whisper)": "CapCut cloud (no Whisper)",
+  "CapCut cloud — không dùng Whisper": "CapCut cloud — no Whisper",
+  "CapCut nhận dạng cloud — chạy Dịch toàn bộ": "CapCut cloud recognition — run Full Translation"
 }

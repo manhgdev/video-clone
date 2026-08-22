@@ -9,7 +9,8 @@ import './SrtExportPage.css'
 
 type SourceKind = 'media' | 'caption' | 'manual' | 'url'
 type OutputMode = 'original' | 'translated' | 'bilingual'
-type Job = { id: string; filename: string; sourceKind: SourceKind | 'platform'; status: 'queued' | 'processing' | 'done' | 'error' | 'cancelled'; progress: number; message: string; error?: string; files: string[]; options?: { outputMode?: OutputMode; targetLang?: string } }
+type RecognitionEngine = 'whisper' | 'capcut'
+type Job = { id: string; filename: string; sourceKind: SourceKind | 'platform'; status: 'queued' | 'processing' | 'done' | 'error' | 'cancelled'; progress: number; message: string; error?: string; files: string[]; options?: { outputMode?: OutputMode; targetLang?: string; recognitionEngine?: RecognitionEngine } }
 const CACHE_KEY = 'videoclone.srt-export.source-kind'
 const LANGUAGE_LABELS: Record<string, string> = { vi: 'Tiếng Việt', en: 'Tiếng Anh', zh: 'Tiếng Trung', ja: 'Tiếng Nhật', ko: 'Tiếng Hàn' }
 
@@ -33,6 +34,8 @@ export default function SrtExportPage({ onBack }: { onBack: () => void }) {
   const [sourceLang, setSourceLang] = useState(saved.sourceLang)
   const [targetLang, setTargetLang] = useState(saved.targetLang === 'none' ? 'vi' : saved.targetLang)
   const [translator, setTranslator] = useState(saved.translator)
+  const [recognitionEngine, setRecognitionEngine] = useState<RecognitionEngine>('whisper')
+  const capcutTranslate = kind === 'media' && recognitionEngine === 'capcut'
 
   useEffect(() => { try { localStorage.setItem(CACHE_KEY, kind) } catch {} }, [kind])
   useEffect(() => {
@@ -54,6 +57,7 @@ export default function SrtExportPage({ onBack }: { onBack: () => void }) {
       form.append('source_lang', sourceLang)
       form.append('target_lang', targetLang)
       form.append('translator', translator)
+      form.append('recognition_engine', recognitionEngine)
       form.append('workers', String(saved.workers))
       form.append('ollama_mode', saved.ollamaMode)
       form.append('ollama_model', saved.ollamaModel)
@@ -78,39 +82,45 @@ export default function SrtExportPage({ onBack }: { onBack: () => void }) {
   const isBilingualResult = job?.options?.outputMode === 'bilingual' || sourceFiles.length > 0
   const targetLabel = LANGUAGE_LABELS[job?.options?.targetLang || targetLang] || (job?.options?.targetLang || targetLang).toUpperCase()
 
+  function selectRecognitionEngine(value: RecognitionEngine) {
+    setRecognitionEngine(value)
+    if (value === 'capcut' && outputMode === 'original') setOutputMode('translated')
+  }
+
   return <main className="srt-export-page">
     <header className="srt-export-head">
       <BackTitle onBack={onBack}>{t('Xuất Phụ Đề', 'Export subtitles')}</BackTitle>
       <p>{t('Tạo phụ đề từ audio/video hoặc định dạng lại caption có sẵn để dùng trong CapCut, YouTube và các trình dựng video.', 'Create subtitles from audio/video or reformat existing captions for CapCut, YouTube, and video editors.')}</p>
     </header>
     <section className="srt-export-card">
-      <div className="srt-export-tabs" role="tablist" aria-label="Nguồn phụ đề">
+      <div className="srt-export-tabs" role="tablist" aria-label={t('Nguồn phụ đề', 'Subtitle source')}>
         <button className={kind === 'media' ? 'active' : undefined} onClick={() => { setKind('media'); setFile(null) }}>{t('Từ audio / video', 'From audio / video')}</button>
         <button className={kind === 'caption' ? 'active' : undefined} onClick={() => { setKind('caption'); setFile(null) }}>{t('Từ SRT / caption / file', 'From SRT / caption / file')}</button>
         <button className={kind === 'manual' ? 'active' : undefined} onClick={() => { setKind('manual'); setFile(null) }}>{t('Nhập bằng tay', 'Enter manually')}</button>
         <button className={kind === 'url' ? 'active' : undefined} onClick={() => { setKind('url'); setFile(null) }}>{t('Từ URL', 'From URL')}</button>
       </div>
       <div className="srt-export-body">
-        <h2>{kind === 'media' ? 'Chọn audio hoặc video' : kind === 'caption' ? 'Chọn file phụ đề có sẵn' : kind === 'manual' ? 'Nhập nội dung caption' : 'Dán URL từ nền tảng hoặc file trực tiếp'}</h2>
-        <p>{kind === 'media' ? 'Whisper tự nhận dạng lời nói và giữ mốc thời gian.' : kind === 'manual' ? 'Mỗi dòng là một caption. Với nội dung có timecode, hãy dùng định dạng SRT.' : kind === 'url' ? 'Ưu tiên subtitle/caption sẵn có trên nền tảng. Khi không có, app mới tải audio và dùng Whisper.' : 'Hỗ trợ SRT, VTT và TXT. SRT/VTT giữ timecode; TXT chia mỗi dòng thành một caption ngắn.'}</p>
-        {kind === 'manual' ? <textarea className="srt-export-textarea" value={manualText} onChange={(event) => setManualText(event.target.value)} placeholder="Nhập từng câu phụ đề, mỗi dòng một caption…" rows={7} /> : kind === 'url' ? <input className="srt-export-url" value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} placeholder="https://www.tiktok.com/... hoặc https://youtube.com/..." /> : <><input ref={inputRef} type="file" accept={accepted} hidden onChange={(event) => setFile(event.target.files?.[0] || null)} /><button className="srt-export-picker" type="button" onClick={() => inputRef.current?.click()}>{file ? file.name : 'Chọn file'}</button>{file && <span className="srt-export-file">{(file.size / 1024 / 1024).toFixed(file.size > 10 * 1024 * 1024 ? 0 : 1)} MB</span>}</>}
+        <h2>{kind === 'media' ? t('Chọn audio hoặc video', 'Choose audio or video') : kind === 'caption' ? t('Chọn file phụ đề có sẵn', 'Choose an existing subtitle file') : kind === 'manual' ? t('Nhập nội dung caption', 'Enter caption content') : t('Dán URL từ nền tảng hoặc file trực tiếp', 'Paste a platform or direct-file URL')}</h2>
+        <p>{kind === 'media' ? capcutTranslate ? t('CapCut nhận dạng và dịch trực tiếp trên cloud, rồi trả SRT có timecode. Không chạy Whisper hoặc API dịch khác.', 'CapCut recognizes and translates in the cloud, then returns a timed SRT. Whisper and other translation APIs are not used.') : t('Whisper tự nhận dạng lời nói và giữ mốc thời gian.', 'Whisper recognizes speech and preserves timestamps.') : kind === 'manual' ? t('Mỗi dòng là một caption. Với nội dung có timecode, hãy dùng định dạng SRT.', 'Each line is one caption. Use SRT when the content has timecodes.') : kind === 'url' ? t('Ưu tiên subtitle/caption sẵn có trên nền tảng. Khi không có, app mới tải audio và dùng Whisper.', 'Prefer subtitles/captions available on the platform. Only when absent will the app download audio and use Whisper.') : t('Hỗ trợ SRT, VTT và TXT. SRT/VTT giữ timecode; TXT chia mỗi dòng thành một caption ngắn.', 'Supports SRT, VTT, and TXT. SRT/VTT preserves timecodes; TXT makes each line a short caption.')}</p>
+        {kind === 'manual' ? <textarea className="srt-export-textarea" value={manualText} onChange={(event) => setManualText(event.target.value)} placeholder={t('Nhập từng câu phụ đề, mỗi dòng một caption…', 'Enter one subtitle sentence per line…')} rows={7} /> : kind === 'url' ? <input className="srt-export-url" value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} placeholder="https://www.tiktok.com/... hoặc https://youtube.com/..." /> : <><input ref={inputRef} type="file" accept={accepted} hidden onChange={(event) => setFile(event.target.files?.[0] || null)} /><button className="srt-export-picker" type="button" onClick={() => inputRef.current?.click()}>{file ? file.name : t('Chọn file', 'Choose file')}</button>{file && <span className="srt-export-file">{(file.size / 1024 / 1024).toFixed(file.size > 10 * 1024 * 1024 ? 0 : 1)} MB</span>}</>}
       </div>
       <div className="srt-export-settings">
-        <label><span>Kiểu phụ đề</span><select value={outputMode} onChange={(event) => setOutputMode(event.target.value as OutputMode)}><option value="original">Bản gốc</option><option value="translated">Bản dịch</option><option value="bilingual">Song ngữ (2 bộ file: gốc và dịch)</option></select></label>
-        <label><span>Ngôn ngữ gốc</span><select value={sourceLang} onChange={(event) => setSourceLang(event.target.value)}><option value="auto">Tự động nhận diện</option><option value="vi">Tiếng Việt</option><option value="en">Tiếng Anh</option><option value="zh">Tiếng Trung</option><option value="ja">Tiếng Nhật</option><option value="ko">Tiếng Hàn</option></select></label>
-        {outputMode !== 'original' && <><label><span>Ngôn ngữ dịch</span><select value={targetLang} onChange={(event) => setTargetLang(event.target.value)}><option value="vi">Tiếng Việt</option><option value="en">Tiếng Anh</option><option value="zh">Tiếng Trung</option><option value="ja">Tiếng Nhật</option><option value="ko">Tiếng Hàn</option></select></label><label><span>Công cụ dịch</span><select value={translator} onChange={(event) => setTranslator(event.target.value as typeof translator)}><option value="google">Google Translate</option><option value="mymemory">MyMemory</option><option value="tiktok">TikTok Translate</option><option value="ollama">Ollama</option><option value="openai">OpenAI</option><option value="gemini">Gemini</option><option value="deepseek">DeepSeek</option><option value="openrouter">OpenRouter</option><option value="grok">Grok (xAI)</option><option value="nvidia">NVIDIA NIM</option></select></label></>}
+        {kind === 'media' && <label><span>{t('Nhận dạng & dịch', 'Recognition & translation')}</span><select value={recognitionEngine} onChange={(event) => selectRecognitionEngine(event.target.value as RecognitionEngine)}><option value="whisper">{t('Whisper + công cụ dịch', 'Whisper + translation provider')}</option><option value="capcut">{t('CapCut dịch (không dùng Whisper)', 'CapCut Translate (no Whisper)')}</option></select></label>}
+        <label><span>{t('Kiểu phụ đề', 'Subtitle output')}</span><select value={outputMode} onChange={(event) => setOutputMode(event.target.value as OutputMode)}>{!capcutTranslate && <option value="original">{t('Bản gốc', 'Original')}</option>}<option value="translated">{t('Bản dịch', 'Translation')}</option><option value="bilingual">{t('Song ngữ (2 bộ file: gốc và dịch)', 'Bilingual (two sets: source and translation)')}</option></select></label>
+        <label><span>{t('Ngôn ngữ gốc', 'Source language')}</span><select value={sourceLang} onChange={(event) => setSourceLang(event.target.value)}><option value="auto">{t('Tự động nhận diện', 'Auto detect')}</option><option value="vi">{t('Tiếng Việt', 'Vietnamese')}</option><option value="en">{t('Tiếng Anh', 'English')}</option><option value="zh">{t('Tiếng Trung', 'Chinese')}</option><option value="ja">{t('Tiếng Nhật', 'Japanese')}</option><option value="ko">{t('Tiếng Hàn', 'Korean')}</option></select></label>
+        {outputMode !== 'original' && <><label><span>{t('Ngôn ngữ dịch', 'Translate to')}</span><select value={targetLang} onChange={(event) => setTargetLang(event.target.value)}><option value="vi">{t('Tiếng Việt', 'Vietnamese')}</option><option value="en">{t('Tiếng Anh', 'English')}</option><option value="zh">{t('Tiếng Trung', 'Chinese')}</option><option value="ja">{t('Tiếng Nhật', 'Japanese')}</option><option value="ko">{t('Tiếng Hàn', 'Korean')}</option></select></label>{!capcutTranslate && <label><span>{t('Công cụ dịch', 'Translation provider')}</span><select value={translator} onChange={(event) => { const value = event.target.value as typeof translator; setTranslator(value); if (value === 'capcut') selectRecognitionEngine('capcut') }}><option value="google">Google Translate</option><option value="mymemory">MyMemory</option><option value="tiktok">TikTok Translate</option><option value="capcut">{t('CapCut cloud', 'CapCut cloud')}</option><option value="ollama">Ollama</option><option value="openai">OpenAI</option><option value="gemini">Gemini</option><option value="deepseek">DeepSeek</option><option value="openrouter">OpenRouter</option><option value="grok">Grok (xAI)</option><option value="nvidia">NVIDIA NIM</option></select></label>}</>}
       </div>
       <div className="srt-export-outputs">
-        <strong>File xuất tự động</strong>
+        <strong>{t('File xuất tự động', 'Automatic output files')}</strong>
         <div className="srt-export-chips">
           {SRT_STYLE_OPTIONS.map((style) => <span key={style.id}>{style.label}</span>)}
-          <span>WebVTT</span><span>TXT</span><span>ZIP (tất cả)</span>
+          <span>WebVTT</span><span>TXT</span><span>{t('ZIP (tất cả)', 'ZIP (all)')}</span>
         </div>
       </div>
       {error && <p className="srt-export-error">{error}</p>}
       <footer className="srt-export-actions">
-        <button className="srt-export-run" disabled={(!file && kind !== 'manual' && kind !== 'url') || (kind === 'manual' && !manualText.trim()) || (kind === 'url' && !sourceUrl.trim()) || busy || job?.status === 'processing'} onClick={submit}>{busy ? 'Đang gửi nguồn…' : kind === 'media' ? 'Tạo phụ đề' : 'Xuất phụ đề'}</button>
-        {job && ['queued', 'processing'].includes(job.status) && <button className="srt-export-cancel" onClick={cancel}>Hủy</button>}
+        <button className="srt-export-run" disabled={(!file && kind !== 'manual' && kind !== 'url') || (kind === 'manual' && !manualText.trim()) || (kind === 'url' && !sourceUrl.trim()) || busy || job?.status === 'processing'} onClick={submit}>{busy ? t('Đang gửi nguồn…', 'Sending source…') : kind === 'media' ? capcutTranslate ? t('CapCut dịch & tải SRT', 'Translate with CapCut & download SRT') : t('Tạo phụ đề', 'Create subtitles') : t('Xuất phụ đề', 'Export subtitles')}</button>
+        {job && ['queued', 'processing'].includes(job.status) && <button className="srt-export-cancel" onClick={cancel}>{t('Hủy', 'Cancel')}</button>}
       </footer>
     </section>
     {job && <section className="srt-export-card srt-export-result">

@@ -53,15 +53,19 @@ function jobTitle(job: QueueJob) {
   return src.split(/[/\\]/).pop() || job.id
 }
 
-function jobLog(job: QueueJob) {
+const PROGRESS_HEARTBEAT = /__VC_PROGRESS__\|/
+
+function jobLog(job: QueueJob, t: (vi: string, en: string) => string) {
   const rows = Array.isArray(job.log) ? job.log.filter(Boolean) : []
   if (!rows.length && job.stage) {
-    rows.push(`[Hệ thống] ${job.stage} — ${Math.round((job.progress || 0) * 100)}%`)
+    rows.push(t(`[Hệ thống] ${job.stage} — ${Math.round((job.progress || 0) * 100)}%`, `[System] ${job.stage} — ${Math.round((job.progress || 0) * 100)}%`))
   }
   if (job.error && !rows.some((line) => line.includes(job.error || ''))) {
     rows.push(job.error)
   }
-  return rows
+  // Old backend workers can still emit coarse whole-pipeline heartbeats. They
+  // are not task progress and duplicate the precise logs below, so hide them.
+  return rows.filter((line) => !PROGRESS_HEARTBEAT.test(line))
 }
 
 function statusLabel(status: string, t: (vi: string, en: string) => string) {
@@ -145,11 +149,8 @@ function deviceBadge(hw: HardwareInfo) {
   const accel = (hw.accel || 'cpu').toLowerCase()
   const gpu = accel === 'cuda' || accel === 'metal' || accel === 'mps'
   const name = (hw.gpuName || hw.label || '').trim()
-  if (gpu) {
-    const show = name && !/^(cpu|gpu)$/i.test(name)
-    return show ? `⚡ GPU · ${name}` : '⚡ GPU'
-  }
-  return '⚡ CPU'
+  const showName = name && !/^(cpu|gpu)$/i.test(name)
+  return { kind: gpu ? 'GPU' : 'CPU', name: showName ? name : '', gpu }
 }
 
 function AutoLog({ className, text }: { className?: string; text: string }) {
@@ -164,13 +165,21 @@ function AutoLog({ className, text }: { className?: string; text: string }) {
 export default function FilmPage({ onBack, onOpenEditor }: Props) {
   const { locale } = useLocale()
   const t = (vi: string, en: string) => localize(locale, vi, en)
-  const [view, setView] = useState<View>('list')
+  // Start on the project form so a first-time user does not land on an empty
+  // project index. The first queue response switches established users back
+  // to their project list; later polling must never interrupt their current UI.
+  const [view, setView] = useState<View>('create')
   const [filter, setFilter] = useState<'all' | 'running' | 'done' | 'failed'>('all')
   const [draft, setDraft] = useState<Draft>(loadDraft)
   const [jobs, setJobs] = useState<QueueJob[]>([])
+  // Removing a running project is asynchronous: the worker must release its
+  // files before the backend can delete them. Keep it out of the project UI
+  // immediately, while polling continues from the unfiltered source list.
+  const [deletingJobIds, setDeletingJobIds] = useState<Set<string>>(() => new Set())
   const [error, setError] = useState('')
   const [note, setNote] = useState('')
   const [busy, setBusy] = useState(false)
+  const [clearingLogs, setClearingLogs] = useState(false)
   const [logOpen, setLogOpen] = useState(true)
   const [partsOpen, setPartsOpen] = useState<Record<string, boolean>>({})
   const [jobLogOpen, setJobLogOpen] = useState<Record<string, boolean>>({})
@@ -196,8 +205,16 @@ export default function FilmPage({ onBack, onOpenEditor }: Props) {
   }, [draft, editingJobId])
 
   const pullRef = useRef<() => void>(() => undefined)
+  const initialQueueLoad = useRef(true)
   useEffect(() => {
-    const pull = () => studioApi.queue().then((snap) => setJobs((snap.jobs || []).filter((j) => j.type === 'review'))).catch(() => undefined)
+    const pull = () => studioApi.queue().then((snap) => {
+      const reviewJobs = (snap.jobs || []).filter((job) => job.type === 'review')
+      setJobs(reviewJobs)
+      if (initialQueueLoad.current) {
+        initialQueueLoad.current = false
+        setView(reviewJobs.length ? 'list' : 'create')
+      }
+    }).catch(() => undefined)
     pullRef.current = pull
     void pull()
     if (!hasActiveJobs) return
@@ -215,6 +232,13 @@ export default function FilmPage({ onBack, onOpenEditor }: Props) {
   }, [])
 
   useEffect(() => {
+    setDeletingJobIds((current) => {
+      const retained = new Set([...current].filter((id) => jobs.some((job) => job.id === id)))
+      return retained.size === current.size ? current : retained
+    })
+  }, [jobs])
+
+  useEffect(() => {
     if (error) {
       toast.error(error)
       setError('')
@@ -224,24 +248,33 @@ export default function FilmPage({ onBack, onOpenEditor }: Props) {
     }
   }, [note, error])
 
-  const counts = useMemo(() => ({
-    all: jobs.length,
-    active: jobs.filter((j) => j.status === 'running' || j.status === 'queued').length,
-    queued: jobs.filter((j) => j.status === 'queued').length,
-    done: jobs.filter((j) => j.status === 'done').length,
-    failed: jobs.filter((j) => j.status === 'failed' || j.status === 'cancelled' || j.status === 'interrupted' || j.status === 'paused').length,
-  }), [jobs])
+  const displayedJobs = useMemo(
+    () => jobs.filter((job) => !deletingJobIds.has(job.id)),
+    [deletingJobIds, jobs],
+  )
 
-  const visible = jobs.filter((j) => {
+  const counts = useMemo(() => ({
+    all: displayedJobs.length,
+    active: displayedJobs.filter((j) => j.status === 'running' || j.status === 'queued').length,
+    queued: displayedJobs.filter((j) => j.status === 'queued').length,
+    done: displayedJobs.filter((j) => j.status === 'done').length,
+    failed: displayedJobs.filter((j) => j.status === 'failed' || j.status === 'cancelled' || j.status === 'interrupted' || j.status === 'paused').length,
+  }), [displayedJobs])
+
+  const visible = displayedJobs.filter((j) => {
     if (filter === 'running') return j.status === 'running' || j.status === 'queued'
     if (filter === 'done') return j.status === 'done'
     if (filter === 'failed') return j.status === 'failed' || j.status === 'cancelled' || j.status === 'interrupted' || j.status === 'paused'
     return true
   })
 
-  const active = jobs.find((j) => j.status === 'running')
-  const logLines = active
-    ? jobLog(active)
+  const active = displayedJobs.find((j) => j.status === 'running')
+  const activeJobs = displayedJobs.filter((j) => j.status === 'running' || j.status === 'queued')
+  const logLines = activeJobs.length
+    ? activeJobs.flatMap((job) => {
+      const lines = jobLog(job, t)
+      return activeJobs.length === 1 ? lines : [`[${jobTitle(job)}]`, ...lines]
+    })
     : [t('[Hệ thống] Khởi động Review. Sẵn sàng...', '[System] Review ready. Waiting to start...')]
 
   function saveDraft() {
@@ -365,11 +398,53 @@ export default function FilmPage({ onBack, onOpenEditor }: Props) {
     navigator.clipboard?.writeText(logLines.join('\n')).catch(() => undefined)
   }
 
+  async function clearJobLogs() {
+    setClearingLogs(true)
+    try {
+      const snapshot = await studioApi.globalAction('clear_logs')
+      setJobs((snapshot.jobs || []).filter((job) => job.type === 'review'))
+      setNote(t('Đã xoá nhật ký tiến trình.', 'Progress logs cleared.'))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setClearingLogs(false)
+    }
+  }
+
   async function removeJob(job: QueueJob) {
     if (!window.confirm(t(`Xoá dự án «${jobTitle(job)}»?`, `Delete project “${jobTitle(job)}”?`))) return
-    const snap = await studioApi.jobAction(job.id, 'remove')
-    setJobs((snap.jobs || []).filter((j) => j.type === 'review'))
+    const wasLastDisplayedJob = displayedJobs.length === 1
+    setError('')
+    setDeletingJobIds((current) => new Set(current).add(job.id))
     if (preview?.jobId === job.id) setPreview(null)
+    if (wasLastDisplayedJob) setView('create')
+    try {
+      const snap = await studioApi.jobAction(job.id, 'remove')
+      setJobs((snap.jobs || []).filter((j) => j.type === 'review'))
+      const activeJob = job.status === 'running' || job.status === 'queued'
+      setNote(activeJob
+        ? t('Đang dừng dự án và dọn file ở nền.', 'Stopping the project and cleaning up files in the background.')
+        : t('Đã xoá dự án và dọn file.', 'Project and its files were deleted.'))
+    } catch (err) {
+      setDeletingJobIds((current) => {
+        const next = new Set(current)
+        next.delete(job.id)
+        return next
+      })
+      if (wasLastDisplayedJob) setView('list')
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  async function cancelJob(job: QueueJob) {
+    setError('')
+    try {
+      const snap = await studioApi.jobAction(job.id, 'cancel')
+      setJobs((snap.jobs || []).filter((row) => row.type === 'review'))
+      setNote(t('Đã gửi lệnh huỷ tới backend.', 'Cancellation request sent to the backend.'))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
   }
 
   async function removePart(job: QueueJob, index: number) {
@@ -432,7 +507,7 @@ export default function FilmPage({ onBack, onOpenEditor }: Props) {
           const doneParts = parts.filter((p) => p.status === 'done').length
           const open = partsOpen[job.id] ?? true
           const logShown = jobLogOpen[job.id] ?? false
-          const lines = jobLog(job)
+          const lines = jobLog(job, t)
           const mode = resolveBuildMode(snap)
           const showParts = mode === 'accumulate' && parts.length > 1
           const canFile = job.status === 'done' || parts.some((p) => p.status === 'done')
@@ -503,12 +578,12 @@ export default function FilmPage({ onBack, onOpenEditor }: Props) {
                 {running ? (
                   <>
                     <button type="button" className="rv-run" onClick={() => void studioApi.jobAction(job.id, 'pause')}>Ⅱ {t('Dừng', 'Pause')}</button>
-                    <button type="button" className="rv-ghost" onClick={() => void studioApi.jobAction(job.id, 'cancel')}>{t('Hủy', 'Cancel')}</button>
+                    <button type="button" className="rv-ghost" onClick={() => void cancelJob(job)}>{t('Hủy', 'Cancel')}</button>
                   </>
                 ) : job.status === 'paused' || job.status === 'interrupted' ? (
                   <>
                     <button type="button" className="rv-run" onClick={() => { void studioApi.jobAction(job.id, 'resume').then(() => pullRef.current()) }}>▶ {t('Tiếp tục', 'Resume')}</button>
-                    <button type="button" className="rv-ghost" onClick={() => void studioApi.jobAction(job.id, 'cancel')}>{t('Hủy', 'Cancel')}</button>
+                    <button type="button" className="rv-ghost" onClick={() => void cancelJob(job)}>{t('Hủy', 'Cancel')}</button>
                   </>
                 ) : job.status === 'failed' || job.status === 'cancelled' ? (
                   <button type="button" className="rv-run" onClick={() => void rerenderJob(job)}>▶ {t('Thử lại', 'Retry')}</button>
@@ -620,9 +695,21 @@ export default function FilmPage({ onBack, onOpenEditor }: Props) {
             <strong>📃 {t('Nhật ký hoạt động (Tiến trình đang chạy)', 'Activity log (running progress)')} {logOpen ? '▲' : '▼'}</strong>
           </button>
           <div className="rv-log-tools">
-            <span className="rv-mini" title={hw.label || hw.gpuName || hw.accel}>{deviceBadge(hw)}</span>
+            {(() => {
+              const device = deviceBadge(hw)
+              const accessibleLabel = device.name
+                ? t(`${device.kind} đang dùng · ${device.name}`, `${device.kind} in use · ${device.name}`)
+                : t(`${device.kind} đang dùng`, `${device.kind} in use`)
+              return (
+                <span className={`rv-device-badge${device.gpu ? ' is-gpu' : ''}`} title={accessibleLabel} aria-label={accessibleLabel}>
+                  <i aria-hidden="true" />
+                  <span className="rv-device-kind">{device.kind}</span>
+                  {device.name ? <span className="rv-device-name">{device.name}</span> : null}
+                </span>
+              )
+            })()}
             <button type="button" className="rv-mini" onClick={copyLog}>{t('Sao chép', 'Copy')}</button>
-            <button type="button" className="rv-mini danger" onClick={() => undefined}>{t('Xoá nhật ký', 'Clear log')}</button>
+            <button type="button" className="rv-mini danger" disabled={clearingLogs} onClick={() => void clearJobLogs()}>{clearingLogs ? t('Đang xoá…', 'Clearing…') : t('Xoá nhật ký', 'Clear log')}</button>
           </div>
         </div>
         {logOpen ? <AutoLog text={logLines.join('\n')} /> : null}

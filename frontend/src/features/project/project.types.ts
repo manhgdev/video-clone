@@ -123,16 +123,17 @@ export type TextOverlay = {
 }
 
 export type ProjectSettings = {
-  /** whisper = speech ASR; paddleocr = screen OCR; subtitle = SRT */
-  engine: 'whisper' | 'paddleocr' | 'subtitle'
+  /** whisper = local speech ASR; capcut = cloud speech ASR; paddleocr = screen OCR; subtitle = SRT */
+  engine: 'whisper' | 'capcut' | 'paddleocr' | 'subtitle'
   subtitleSource?: string
   sourceLang: string
   targetLang: string
-  /** google | mymemory | tiktok | ollama | openai | gemini | deepseek | openrouter | grok | nvidia */
+  /** google | mymemory | tiktok | capcut | ollama | openai | gemini | deepseek | openrouter | grok | nvidia */
   translator:
     | 'google'
     | 'mymemory'
     | 'tiktok'
+    | 'capcut'
     | 'ollama'
     | 'openai'
     | 'gemini'
@@ -247,7 +248,7 @@ export type ProjectSettings = {
    */
   engineProfiles?: Partial<
     Record<
-      'whisper' | 'paddleocr' | 'subtitle',
+      'whisper' | 'capcut' | 'paddleocr' | 'subtitle',
       {
         matchDuration?: ProjectSettings['matchDuration']
         processOriginalAudio?: boolean

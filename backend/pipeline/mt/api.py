@@ -45,6 +45,12 @@ def translate_segments(
         eng = "tiktok"
     if eng in ("mm", "my-memory", "my_memory"):
         eng = "mymemory"
+    if eng == "capcut":
+        # CapCut only exposes translation through its media STT task.  The
+        # video pipeline intercepts this choice before reaching text MT;
+        # reject unsupported text-only callers instead of silently using
+        # Google and misreporting the selected provider.
+        raise RuntimeError("CapCut cloud chỉ dịch khi nhận dạng trực tiếp từ video.")
     w = max(1, min(16, int(workers or 2)))
 
     def _clean_all(raw: list[str]) -> list[str]:
@@ -248,4 +254,3 @@ def _with_google_fallback(
             ):
                 out[i] = texts[i]
     return out
-

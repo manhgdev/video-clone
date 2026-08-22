@@ -25,7 +25,7 @@ from .eleven import (
 from . import capcut as capcut_client
 from .schemas import PREFIX_CAPCUT, PREFIX_ELEVEN, PREFIX_VIENEU, VIENEU_TTS_VER
 
-CC_TTS_VER = "cc4-normalize"
+CC_TTS_VER = "cc6-final-trim-leading-silence"
 _VOICES_JSON = Path(__file__).resolve().parent / "voices_capcut.json"
 _cc_voices_cache: list[dict[str, Any]] | None = None
 
@@ -267,9 +267,15 @@ def tts_segment(
                 out_wav, speed=speed, volume=volume, pitch_semitones=pitch
             )
 
-    return audio_utils.fit_duration(
+    duration = audio_utils.fit_duration(
         out_wav, target_sec, match, force_refit=force_refit
     )
+    # Playback/fit can pass through FFmpeg's atempo filter, which may add
+    # padding again.  Only trim CapCut clips: this preserves intentional
+    # leading room from other providers.
+    if _cc_parse(resolve_voice(voice, lang)):
+        duration = audio_utils.trim_leading_silence(out_wav)
+    return duration
 
 
 def engines_status() -> dict[str, Any]:

@@ -9,6 +9,7 @@ import httpx
 
 from pipeline.mt.ollama import _ollama_model
 from pipeline.core.app_config import load_app_config, provider_api_keys
+from pipeline.core.jobs import check_cancel, current_job_id
 from pipeline.mt.cloud import _gemini_generate, _openai_compatible_chat
 
 
@@ -36,7 +37,21 @@ def pick_llm(models: list[str] | None = None, *, prefer_vision: bool = False) ->
         return names[0]
 
 
-def generate_json(prompt: str, *, model: str | None = None, timeout: float = 180) -> Any:
+def generate_json(
+    prompt: str,
+    *,
+    model: str | None = None,
+    timeout: float = 180,
+    job_id: str | None = None,
+) -> Any:
+    """Generate JSON and promptly abort a local Ollama request when cancelled.
+
+    Ollama's non-streaming endpoint cannot observe cancellation until the model
+    completes its whole response. Streaming lets the queue close the request at
+    the next generated chunk instead.
+    """
+    active_job_id = job_id or current_job_id()
+    check_cancel(active_job_id)
     chosen = model or pick_llm()
     if not chosen:
         return None
@@ -69,15 +84,17 @@ def generate_json(prompt: str, *, model: str | None = None, timeout: float = 180
                 pass
             chosen = pick_llm()
 
+    check_cancel(active_job_id)
     if not text and chosen and not chosen.startswith("cloud:"):
         try:
             with httpx.Client(timeout=timeout, trust_env=False) as client:
-                res = client.post(
+                with client.stream(
+                    "POST",
                     "http://127.0.0.1:11434/api/generate",
                     json={
                         "model": chosen,
                         "prompt": prompt,
-                        "stream": False,
+                        "stream": True,
                         "format": "json",
                         "keep_alive": "60m",  # Giữ model trên VRAM không bị unload/reload
                         "think": False,
@@ -88,16 +105,31 @@ def generate_json(prompt: str, *, model: str | None = None, timeout: float = 180
                             "top_p": 0.9,
                         },
                     },
-                )
-                res.raise_for_status()
-                text = str((res.json() or {}).get("response") or "")
+                ) as res:
+                    res.raise_for_status()
+                    chunks: list[str] = []
+                    for line in res.iter_lines():
+                        check_cancel(active_job_id)
+                        if not line:
+                            continue
+                        try:
+                            event = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        chunks.append(str(event.get("response") or ""))
+                        if event.get("done"):
+                            break
+                    text = "".join(chunks)
         except Exception as e:
+            # Cancellation is control flow; never silently turn it into a
+            # fallback script after the user explicitly removed the project.
+            check_cancel(active_job_id)
             try:
                 from pipeline.core.app_log import append_log
                 append_log(f"[llm] Ollama ({chosen}) lỗi: {e}")
             except Exception:
                 pass
-
+    check_cancel(active_job_id)
     return parse_json(text)
 
 

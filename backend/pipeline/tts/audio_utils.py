@@ -7,6 +7,33 @@ from pathlib import Path
 from ..core.media import ffprobe_duration
 
 
+def trim_leading_silence(wav: Path) -> float:
+    """Remove encoder/filter padding before a TTS utterance.
+
+    ``atempo`` may add a small silence prefix even after a provider already
+    normalized its response.  This runs as the final per-clip audio step so a
+    timeline cue and its first spoken phoneme share the same start time.
+    """
+    if not wav.is_file():
+        return 0.0
+    trimmed = wav.with_name(wav.stem + "_trim.wav")
+    try:
+        subprocess.check_call(
+            [
+                "ffmpeg", "-y", "-i", str(wav), "-map", "0:a:0",
+                "-af", "silenceremove=start_periods=1:start_duration=0.02:start_threshold=-45dB",
+                "-acodec", "pcm_s16le", str(trimmed),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if trimmed.is_file() and trimmed.stat().st_size > 128:
+            trimmed.replace(wav)
+    finally:
+        trimmed.unlink(missing_ok=True)
+    return ffprobe_duration(wav)
+
+
 def fit_duration(
     wav: Path,
     target_sec: float | None,

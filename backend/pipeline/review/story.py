@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from pipeline.mt.text import _lang_name
+from pipeline.core.jobs import check_cancel
 from pipeline.review.llm import generate_json
 
 BLOCK = 75
@@ -44,6 +45,7 @@ def build_story(
     model: str | None = None,
     on_progress: Callable[[str, int, int, int], None] | None = None,
     title: str = "",
+    job_id: str | None = None,
 ) -> dict[str, Any]:
     if not visuals:
         return {
@@ -58,11 +60,12 @@ def build_story(
     fixed = story_pool_fixed(model)
     block_summaries = _parallel_summaries(
         [chunk for chunk in blocks if chunk],
-        lambda chunk: _summarize_block(chunk, language, model=model, title=title),
+        lambda chunk: _summarize_block(chunk, language, model=model, title=title, job_id=job_id),
         stage="blocks",
         on_progress=on_progress,
         workers=cap,
         fixed=fixed,
+        cancel_check=(lambda: check_cancel(job_id)) if job_id else None,
     )
     chapters = []
     for i, b in enumerate(block_summaries):
@@ -76,7 +79,8 @@ def build_story(
             "events": b.get("events") or [],
             "themes": [],
         })
-    context = _compile_movie_context(chapters, language, model=model, title=title)
+    check_cancel(job_id)
+    context = _compile_movie_context(chapters, language, model=model, title=title, job_id=job_id)
     graph = _story_graph(block_summaries, chapters, visuals, context)
     return {
         "blocks": block_summaries,
@@ -94,6 +98,7 @@ def _parallel_summaries(
     on_progress: Callable[[str, int, int, int], None] | None,
     workers: int,
     fixed: bool = False,
+    cancel_check: Callable[[], None] | None = None,
 ) -> list[dict[str, Any]]:
     """Run summaries with elastic pool when local; cloud keeps a fixed cap."""
     if not items:
@@ -114,6 +119,7 @@ def _parallel_summaries(
             if on_progress
             else None
         ),
+        cancel_check=cancel_check,
     )
 
 
@@ -129,17 +135,23 @@ def _safe_float(val: Any, default: float = 0.4) -> float:
 
 
 def _summarize_block(
-    scenes: list[dict[str, Any]], language: str, *, model: str | None = None, title: str = "",
+    scenes: list[dict[str, Any]], language: str, *, model: str | None = None, title: str = "", job_id: str | None = None,
 ) -> dict[str, Any]:
     ids = [s["scene_id"] for s in scenes]
-    blob = " | ".join(f"#{s['scene_id']} {s.get('description') or s.get('transcript') or ''}" for s in scenes)[:2000]
+    # Transcript is first-class evidence.  A scene description is only a
+    # fallback for silent footage and must not override spoken facts.
+    blob = " | ".join(f"#{s['scene_id']} {s.get('transcript') or s.get('description') or ''}" for s in scenes)[:2000]
     name = _lang_name(language)
     parsed = generate_json(
         f"Video title: {title or 'Unknown'}. "
         f"Summarize these consecutive movie scenes in {name}. "
         f"Write summary and names in {name} only; source dialogue may be another language. "
-        "JSON keys: summary, characters, events, importance (0-1). Keep scene_ids.\n" + blob,
+        "JSON keys: summary, characters, events, importance (0-1). Keep scene_ids.\n"
+        "GROUNDING: Treat the supplied scene text as the complete evidence. Do not add objects, food, weapons,"
+        " locations, actions, characters, or plot events that are not explicitly supported by it. If evidence is"
+        " sparse, use a neutral summary instead of guessing.\n" + blob,
         model=model,
+        job_id=job_id,
     )
     if not isinstance(parsed, dict):
         parsed = {
@@ -167,7 +179,8 @@ def _summarize_chapter(
     parsed = generate_json(
         f"Video title: {title or 'Unknown'}. "
         f"Summarize this sequence of scene blocks into a single chapter summary in {name}. "
-        "Combine events logically. JSON keys: title, summary, characters, importance (0-1).\n" + blob,
+        "Combine only the supplied events. Do not add objects, locations, characters, or actions absent from the"
+        " evidence; describe uncertain details neutrally. JSON keys: title, summary, characters, importance (0-1).\n" + blob,
         model=model,
     )
     if not isinstance(parsed, dict):
@@ -188,15 +201,17 @@ def _summarize_chapter(
 
 
 def _compile_movie_context(
-    chapters: list[dict[str, Any]], language: str, *, model: str | None = None, title: str = "",
+    chapters: list[dict[str, Any]], language: str, *, model: str | None = None, title: str = "", job_id: str | None = None,
 ) -> dict[str, Any]:
     blob = "\n".join(f"Ch{c['index']}: {c.get('summary')}" for c in chapters)[:4000]
     name = _lang_name(language)
     parsed = generate_json(
         f"Video title: {title or 'Unknown'}. "
         f"Analyze these chronological chapter summaries and compile a global movie context in {name}.\n"
+        "Use only the supplied summaries; never invent concrete props, locations, actions, or people. "
         "JSON format: {logline, themes:[], tone:[], spoiler_outline, characters:[{name, role, description}]}.\n" + blob,
         model=model,
+        job_id=job_id,
     )
     if not isinstance(parsed, dict):
         parsed = {

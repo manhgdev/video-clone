@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -19,6 +20,110 @@ from pipeline.review.scenes import detect_scenes
 
 
 class ReviewQueueTests(unittest.TestCase):
+    def test_visual_normalization_never_promotes_unverified_llm_props(self):
+        """A text-only model must not turn guessed food/props into Review facts."""
+        from pipeline.review.vision import _normalize
+
+        row = _normalize(
+            {"scene_id": 7, "start": 1, "end": 4, "duration": 3},
+            {
+                "characters": ["A person the model invented"],
+                "location": "restaurant",
+                "objects": ["food", "bowl"],
+                "description": "They prepare a meal.",
+            },
+            "Hai người tu tiên giao chiến dữ dội.",
+        )
+        self.assertEqual(row["description"], "Hai người tu tiên giao chiến dữ dội.")
+        self.assertEqual(row["characters"], [])
+        self.assertEqual(row["location"], "")
+        self.assertEqual(row["objects"], [])
+
+    def test_review_script_prompt_forbids_unsupported_scene_details(self):
+        from pipeline.review import script as sc
+
+        prompts: list[str] = []
+        original = sc.generate_json
+        sc.generate_json = lambda prompt, **_kwargs: (
+            prompts.append(prompt)
+            or {"script": [
+                "Hai người giao chiến khi mâu thuẫn bùng nổ và tình thế trở nên căng thẳng hơn.",
+                "Cuộc đối đầu tiếp tục đẩy cả hai vào một lựa chọn khó khăn.",
+            ]}
+        )
+        try:
+            sc.write_script(
+                {"movie_context": {}, "story_graph": {"events": []}},
+                duration_sec=30,
+                style="recap",
+                language="vi",
+                spoiler="none",
+                visuals=[{"scene_id": 1, "start": 0, "end": 10, "transcript": "Hai người giao chiến."}],
+                use_llm=True,
+            )
+        finally:
+            sc.generate_json = original
+        self.assertIn("Never invent food, props, weapons", prompts[0])
+
+    def test_capcut_review_transcript_never_calls_whisper(self):
+        from pipeline.review import transcript as tr
+
+        rows = [{"start": 0.0, "end": 1.0, "text": "CapCut transcript"}]
+        with patch("pipeline.capcut_stt.transcribe_and_translate", return_value=(rows, [])), patch(
+            "pipeline.review.transcript._whisper_chunks",
+            side_effect=AssertionError("Whisper must not run for CapCut"),
+        ):
+            result = tr.load_transcript(
+                Path("/tmp/review.mp4"), Path("/tmp"), source_lang="zh", target_lang="vi",
+                recognition_engine="capcut",
+            )
+        self.assertEqual(result, rows)
+
+    def test_local_llm_stream_observes_cancel(self):
+        """Deleting a Review must not wait for a complete Ollama response."""
+        from pipeline.core.jobs import Cancelled, arm_job, clear_job, request_cancel
+        from pipeline.review import llm
+
+        job_id = "review-llm-cancel"
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def raise_for_status(self):
+                return None
+
+            def iter_lines(self):
+                yield '{"response":"{\\\"script\\\":[", "done":false}'
+                request_cancel(job_id)
+                yield '{"response":"\\\"too late\\\"]}", "done":true}'
+
+        class Client:
+            def __init__(self, **_kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def stream(self, *_args, **_kwargs):
+                return Response()
+
+        original_client = llm.httpx.Client
+        llm.httpx.Client = Client  # type: ignore[assignment]
+        arm_job(job_id)
+        try:
+            with self.assertRaises(Cancelled):
+                llm.generate_json("test", model="local-test", job_id=job_id)
+        finally:
+            llm.httpx.Client = original_client  # type: ignore[assignment]
+            clear_job(job_id)
+
     def test_copy_output_rejects_missing_render(self):
         from pipeline.clone_run.headless import _copy_output
         with self.assertRaisesRegex(RuntimeError, "không tạo file đầu ra"):
@@ -132,6 +237,37 @@ class ReviewQueueTests(unittest.TestCase):
                 store._path = orig_path  # type: ignore[method-assign]
                 queue_engine.request_cancel = orig_cancel
                 queue_engine.arm_job = orig_arm
+
+    def test_queue_cancel_and_remove_signal_backend_stop_first(self):
+        from pipeline.queue import engine as queue_engine
+
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "jobs.json"
+            original_path = store._path
+            original_cancel = queue_engine.request_cancel
+            stopped: list[str] = []
+            store._path = lambda: path  # type: ignore[method-assign]
+            queue_engine.request_cancel = lambda job_id: stopped.append(job_id) or True
+            try:
+                store.insert({"id": "cancel", "status": "running", "type": "review", "parts": []})
+                store.insert({"id": "remove", "status": "running", "type": "review", "parts": []})
+                engine = object.__new__(queue_engine.QueueEngine)
+                engine._active = {}
+                engine._guard = __import__("threading").Lock()
+                engine.kick = lambda: None  # type: ignore[method-assign]
+                engine.snapshot = lambda: {"jobs": store.load_all()}  # type: ignore[method-assign]
+
+                engine.action("cancel", "cancel")
+                cancelled = store.get("cancel") or {}
+                self.assertEqual(cancelled["status"], "cancelled")
+                self.assertIn("Đã gửi lệnh huỷ", (cancelled.get("log") or [])[-1])
+
+                engine.action("remove", "remove")
+                self.assertIsNone(store.get("remove"))
+                self.assertEqual(stopped, ["cancel", "remove"])
+            finally:
+                store._path = original_path  # type: ignore[method-assign]
+                queue_engine.request_cancel = original_cancel
 
     def test_queue_interrupted_waits_for_resume(self):
         from pipeline.queue import engine as queue_engine
@@ -434,8 +570,8 @@ class ReviewQueueTests(unittest.TestCase):
             {"id": "p03_voice_001", "duration": 8.0, "text": "Local caption", "audio": "/tmp/p03_voice_001.wav"},
             {"id": "p03_voice_002", "duration": 4.0, "text": "Next caption", "audio": "/tmp/p03_voice_002.wav"},
         ], 6.0)
-        self.assertEqual(sum(row["duration"] for row in fitted), 6.0)
-        self.assertEqual(fitted[0]["ttsSpeed"], 2.0)
+        self.assertEqual(sum(row["duration"] for row in fitted), 10.0)
+        self.assertEqual(fitted[0]["ttsSpeed"], 1.2)
         floored = _floor_voiced_duration([
             {"id": "short", "duration": 70.0, "text": "Short narration"},
         ], 90.0)
@@ -447,18 +583,60 @@ class ReviewQueueTests(unittest.TestCase):
             style="normal",
             spoiler="full",
         )
-        with patch(
-            "pipeline.review.run.locate_review_caption_bands",
-            return_value=[(0.5, {"x": 0, "y": 864, "w": 1920, "h": 216})],
-        ):
-            segment = _part_export_segments(plan, Path("/tmp/raw.mp4"))[0]
-        self.assertEqual((segment["start"], segment["end"]), (0.0, 4.0))
+        fixed_band = {"x": 0, "y": 864, "w": 1920, "h": 216}
+        segment = _part_export_segments(plan, Path("/tmp/raw.mp4"), caption_bbox=fixed_band)[0]
+        self.assertEqual((segment["start"], segment["end"]), (0.0, 6.667))
         self.assertEqual(segment["audioFile"], "p03_voice_001.wav")
         self.assertEqual(segment["audioDuration"], 8.0)
-        self.assertEqual(segment["ttsSpeed"], 2.0)
+        self.assertEqual(segment["ttsSpeed"], 1.2)
         self.assertEqual(segment["source"], "")
         self.assertEqual(segment["translation"], "Local caption")
         self.assertEqual(segment["bbox"], {"x": 0, "y": 864, "w": 1920, "h": 216})
+
+    def test_review_caption_lane_uses_one_consensus_box(self):
+        from pipeline.review import adapter
+
+        with patch(
+            "pipeline.review.adapter.locate_review_caption_bands",
+            return_value=[
+                (0.1, {"x": 0, "y": 820, "w": 1920, "h": 88}),
+                (0.5, {"x": 0, "y": 824, "w": 1920, "h": 86}),
+                (0.9, {"x": 0, "y": 900, "w": 1920, "h": 40}),
+            ],
+        ), patch("pipeline.core.media.video_size", return_value=(1920, 1080)):
+            self.assertEqual(
+                adapter.locate_review_caption_band(Path("/tmp/review.mp4")),
+                {"x": 0, "y": 822, "w": 1920, "h": 87},
+            )
+
+    def test_review_caption_lane_ignores_one_temporal_label_group(self):
+        from pipeline.review import adapter
+
+        with patch(
+            "pipeline.review.adapter.locate_review_caption_bands",
+            return_value=[
+                (0.06, {"x": 0, "y": 874, "w": 1920, "h": 74}),
+                (0.28, {"x": 0, "y": 876, "w": 1920, "h": 72}),
+                (0.50, {"x": 0, "y": 782, "w": 1920, "h": 118}),
+                (0.72, {"x": 0, "y": 875, "w": 1920, "h": 73}),
+                (0.94, {"x": 0, "y": 873, "w": 1920, "h": 75}),
+            ],
+        ), patch("pipeline.core.media.video_size", return_value=(1920, 1080)):
+            self.assertEqual(
+                adapter.locate_review_caption_band(Path("/tmp/review.mp4")),
+                {"x": 0, "y": 874, "w": 1920, "h": 74},
+            )
+
+    def test_review_cover_lane_masks_the_full_part(self):
+        from pipeline.review.run import _review_cover_lane
+
+        with patch("pipeline.review.run.ffprobe_duration", return_value=42.5):
+            lane = _review_cover_lane(
+                Path("/tmp/review.mp4"), {"x": 0, "y": 824, "w": 1920, "h": 86},
+            )
+        self.assertEqual((lane["start"], lane["end"]), (0.0, 42.5))
+        self.assertTrue(lane["maskOnly"])
+        self.assertEqual(lane["bbox"], {"x": 0, "y": 824, "w": 1920, "h": 86})
 
     def test_review_caption_box_uses_detected_subtitle_lane(self):
         from pipeline.review.adapter import _review_caption_box_from_boxes
@@ -468,6 +646,17 @@ class ReviewQueueTests(unittest.TestCase):
         self.assertGreater(box["x"] + box["w"], 900)
         self.assertLess(box["y"], 650)
         self.assertGreater(box["y"] + box["h"], 682)
+
+    def test_review_cover_keeps_the_full_top_edge_of_hardsub(self):
+        from pipeline.export.burn_parts.layout_geo import _fit_hardsub_box
+
+        source = (300, 900, 1500, 970)
+        cover = _fit_hardsub_box(source, 900, 48, 1920, 1080)
+
+        # The cover may expand, but must never crop the detected ink from the
+        # top as the former `top_slack` calculation did.
+        self.assertLess(cover[1], source[1])
+        self.assertGreaterEqual(cover[3], source[3])
 
     def test_review_caption_cues_are_brief_and_cover_audio_timing(self):
         from pipeline.review.run import _review_caption_cues
@@ -726,6 +915,7 @@ class ReviewQueueTests(unittest.TestCase):
         self.assertEqual(cover["targetLang"], "vi")
         self.assertTrue(cover["coverHardsubs"])
         self.assertTrue(cover["burnSubs"])
+        self.assertEqual(cover["captionPlacement"], "over")
         above = caption_export_settings({"language": "vi", "captionMode": "above"})
         self.assertFalse(above["coverHardsubs"])
         self.assertTrue(above["burnSubs"])
@@ -739,7 +929,7 @@ class ReviewQueueTests(unittest.TestCase):
         self.assertFalse(disabled["coverHardsubs"])
         self.assertEqual(
             _fallback_review_bbox(1920, 1080),
-            {"x": 0, "y": 864, "w": 1920, "h": 216},
+            {"x": 0, "y": 983, "w": 1920, "h": 70},
         )
 
     def test_filter_complex_args_inline(self):
@@ -925,6 +1115,88 @@ class ReviewQueueTests(unittest.TestCase):
             sc.generate_json = original
         self.assertEqual(len(result["segments"]), 1)
         self.assertEqual(result["segments"][0]["text"], "Cô bé phát hiện bí mật khiến cả gia đình im lặng.")
+
+    def test_llm_script_progress_targets_the_review_job(self):
+        from pipeline.review import script as sc
+
+        original = sc.generate_json
+        sc.generate_json = lambda *_args, **_kwargs: {
+            "script": ["Nội dung lời kể đủ dài để kiểm tra nhật ký tiến trình."]
+        }
+        try:
+            with patch("pipeline.review.run._note") as note:
+                sc.write_script(
+                    {"movie_context": {}, "story_graph": {"events": []}},
+                    duration_sec=9,
+                    style="normal",
+                    language="vi",
+                    spoiler="none",
+                    visuals=[{"scene_id": 1, "start": 0, "end": 9, "transcript": "Một cảnh phim."}],
+                    job_id="review-job-123",
+                    use_llm=True,
+                )
+        finally:
+            sc.generate_json = original
+        self.assertTrue(any(
+            call.args[0] == "review-job-123" and "LLM đang viết kịch bản" in call.args[1]
+            for call in note.call_args_list
+        ))
+
+    def test_review_transcript_emits_small_progress_logs(self):
+        from pipeline.review import transcript as tr
+
+        with tempfile.TemporaryDirectory() as raw, patch(
+            "pipeline.review.transcript.extract_audio",
+        ), patch(
+            "pipeline.review.transcript.asr_whisper",
+            side_effect=lambda *_args, on_progress, **_kwargs: (
+                on_progress(3, 17.8) or [{"start": 0, "end": 1, "source": "Xin chào"}]
+            )), patch("pipeline.review.run._note") as note:
+            tr._whisper_chunks(
+                Path(raw) / "input.mp4", Path(raw), job_id="review-job-456",
+                duration=20, source_lang="auto",
+            )
+        messages = [str(call.args[1]) for call in note.call_args_list]
+        self.assertTrue(any("chuẩn bị audio" in message for message in messages))
+        self.assertTrue(any("đã nhận 3 câu · 89%" in message for message in messages))
+        self.assertTrue(any("hoàn tất · 1 câu" in message for message in messages))
+
+    def test_review_heartbeat_reports_ongoing_blocking_stage(self):
+        from pipeline.review.run import PROGRESS_HEARTBEAT_PREFIX, _progress_heartbeat
+
+        with patch("pipeline.review.run._note") as note:
+            with _progress_heartbeat("review-job-789", "compose", interval_sec=0.01, emit=True):
+                time.sleep(0.04)
+        messages = [str(call.args[1]) for call in note.call_args_list]
+        self.assertTrue(any(
+            message.startswith(f"{PROGRESS_HEARTBEAT_PREFIX}|compose|")
+            for message in messages
+        ))
+
+    def test_remove_job_artifacts_deletes_only_owned_outputs_and_cache(self):
+        from pipeline.queue import engine
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "source.mp4"
+            output = root / "exports" / "review.mp4"
+            cache = root / "data" / "review_cache" / "movie-key"
+            project = root / "public" / "project-1"
+            for path in (source, output, cache / "part.mp4", project / "cache" / "work.mp4"):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"data")
+            with patch.object(engine, "DATA", root / "data"), patch.object(engine, "PUBLIC_DATA", root / "public"):
+                removed = engine.remove_job_artifacts({
+                    "source": str(source),
+                    "output": str(output),
+                    "cacheRefs": {"root": str(cache)},
+                    "projectId": "project-1",
+                })
+            self.assertEqual(removed, 3)
+            self.assertTrue(source.is_file())
+            self.assertFalse(output.exists())
+            self.assertFalse(cache.exists())
+            self.assertFalse(project.exists())
 
     def test_review_segment_count_scales_without_fixed_bounds(self):
         from pipeline.review.script import _segment_count

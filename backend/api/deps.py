@@ -83,8 +83,11 @@ class Settings(BaseModel):
 
 
 class SegmentIn(BaseModel):
-    id: str
-    index: int
+    # CapCut cloud projects created before the timeline migration did not
+    # persist these two editor fields.  Accept them here; the export route
+    # assigns a stable id before handing clips to the renderer.
+    id: str = ""
+    index: int = 0
     start: float
     end: float
     source: str

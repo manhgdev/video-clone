@@ -4,6 +4,7 @@ export type Narration = 'default' | 'mild' | 'more'
 export type PausePace = 'fast' | 'balanced' | 'slow'
 export type ReviewMode = 'llm' | 'cloud' | 'translate'
 export type ReviewCloudProvider = 'gemini' | 'grok' | 'openai'
+export type ReviewRecognitionEngine = 'whisper' | 'capcut'
 
 export type CaptionMode = 'off' | 'cover' | 'below' | 'above'
 
@@ -12,6 +13,7 @@ export const DEFAULT_REVIEW_VOICE = 'cc:BV074_streaming:7102355709945188865'
 export type ReviewSettings = {
   language: string
   sourceLang: string
+  recognitionEngine: ReviewRecognitionEngine
   captionMode: CaptionMode
   buildMode: BuildMode
   chunkMinutes: 10 | 15 | 20
@@ -41,6 +43,7 @@ export const BUILD_MODES: BuildMode[] = ['fixed', 'stretch', 'accumulate', 'smar
 export const DEFAULT_REVIEW_SETTINGS: ReviewSettings = {
   language: 'vi',
   sourceLang: 'auto',
+  recognitionEngine: 'whisper',
   captionMode: 'cover',
   buildMode: 'accumulate',
   chunkMinutes: 15,

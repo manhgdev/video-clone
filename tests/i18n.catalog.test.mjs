@@ -97,3 +97,32 @@ test('English catalog covers Live Preview empty page', () => {
     assert.equal(catalog[vietnamese], english, vietnamese)
   }
 })
+
+test('SRT exporter CapCut translation UI is bilingual', () => {
+  const expected = {
+    'Nhận dạng & dịch': 'Recognition & translation',
+    'CapCut dịch (không dùng Whisper)': 'CapCut Translate (no Whisper)',
+    'CapCut nhận dạng và dịch trực tiếp trên cloud, rồi trả SRT có timecode. Không chạy Whisper hoặc API dịch khác.': 'CapCut recognizes and translates in the cloud, then returns a timed SRT. Whisper and other translation APIs are not used.',
+    'CapCut dịch & tải SRT': 'Translate with CapCut & download SRT',
+  }
+  for (const [vietnamese, english] of Object.entries(expected)) assert.equal(catalog[vietnamese], english, vietnamese)
+})
+
+test('Review CapCut recognition UI is bilingual', () => {
+  const expected = {
+    'Nhận dạng': 'Recognition',
+    'CapCut cloud': 'CapCut cloud',
+    'Gửi video lên CapCut để nhận dạng; không chạy Whisper.': 'Uploads the video to CapCut for recognition; Whisper is not used.',
+    'Cần mạng. Transcript được cache riêng theo CapCut để không lẫn với Whisper.': 'Requires internet. The transcript is cached separately from Whisper.',
+  }
+  for (const [vietnamese, english] of Object.entries(expected)) assert.equal(catalog[vietnamese], english, vietnamese)
+})
+
+test('Clone CapCut recognition and translation UI is bilingual', () => {
+  const expected = {
+    'Giọng nói (CapCut cloud)': 'Speech (CapCut cloud)',
+    'CapCut cloud': 'CapCut cloud',
+    'CapCut nhận dạng cloud — chạy Dịch toàn bộ': 'CapCut cloud recognition — run Full Translation',
+  }
+  for (const [vietnamese, english] of Object.entries(expected)) assert.equal(catalog[vietnamese], english, vietnamese)
+})

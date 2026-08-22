@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from pipeline.core.app_log import append_log
-from pipeline.core.jobs import Cancelled, arm_job, begin_job, check_cancel, request_cancel
+from pipeline.core.config import DATA, PUBLIC_DATA, safe_child
+from pipeline.core.jobs import Cancelled, arm_job, begin_job, check_cancel, request_cancel, set_job_context
 from pipeline.core.resources import gpu_job_cap
 from pipeline.gpu.manager import assign_device, diagnostics, vram_free_mb
 from pipeline.queue import store
@@ -69,6 +70,64 @@ def _source_key(job: dict[str, Any]) -> str:
     if not source or source.startswith(("http://", "https://")):
         return source
     return str(Path(source).expanduser().resolve())
+
+
+def _inside(path: Path, root: Path) -> bool:
+    """Return whether a resolved path is contained by a managed root."""
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _unlink_file(path: Path, *, source: Path | None = None) -> int:
+    """Delete one generated file, never the user's selected input file."""
+    resolved = path.resolve()
+    if source is not None and resolved == source.resolve():
+        return 0
+    if resolved.is_file():
+        resolved.unlink()
+        return 1
+    return 0
+
+
+def remove_job_artifacts(job: dict[str, Any]) -> int:
+    """Delete artifacts owned by one queue job, never its external source.
+
+    A queue row is not the source of truth for disk usage: Review also owns a
+    cache root and an editor project directory. Only paths beneath known app
+    roots are removed recursively; an output outside the app is one file.
+    """
+    source_text = str(job.get("source") or "").strip()
+    source = None if source_text.startswith(("http://", "https://")) else Path(source_text).expanduser()
+    removed = 0
+    candidates = [str(job.get("output") or "")]
+    candidates.extend(str(part.get("output") or "") for part in job.get("parts") or [])
+    for raw in candidates:
+        if raw:
+            removed += _unlink_file(Path(raw), source=source)
+
+    refs = job.get("cacheRefs") or {}
+    cache_root = Path(str(refs.get("root") or "")) if refs.get("root") else None
+    review_root = DATA / "review_cache"
+    if (
+        cache_root
+        and cache_root.resolve() != review_root.resolve()
+        and _inside(cache_root, review_root)
+        and cache_root.is_dir()
+    ):
+        shutil.rmtree(cache_root)
+        removed += 1
+
+    project_id = str(job.get("projectId") or "").strip()
+    if project_id:
+        for base in (PUBLIC_DATA, DATA):
+            project_root = safe_child(base, project_id)
+            if project_root and project_root.is_dir():
+                shutil.rmtree(project_root)
+                removed += 1
+    return removed
 
 
 class QueueEngine:
@@ -135,7 +194,7 @@ class QueueEngine:
 
     def action(self, job_id: str, op: str) -> dict[str, Any]:
         job = store.get(job_id)
-        if not job and op not in {"pause_all", "resume_all", "retry_failed", "clear_completed"}:
+        if not job and op not in {"pause_all", "resume_all", "retry_failed", "clear_completed", "clear_logs"}:
             raise KeyError(job_id)
         if op == "pause":
             patch = {"status": "paused", "error": None, "errorType": None}
@@ -149,10 +208,12 @@ class QueueEngine:
             store.mutate(job_id, patch, log="Tiếp tục")
             self.kick()
         elif op == "cancel":
+            # Stop first: a status update alone must never leave FFmpeg, OCR,
+            # TTS or a model worker consuming CPU/GPU while the UI says Cancelled.
+            request_cancel(job_id)
             patch = {"status": "cancelled", "errorType": "CANCELLED"}
             patch.update(_with_part_status(job or {}, {"pending", "running", "paused", "interrupted"}, "cancelled"))
-            store.mutate(job_id, patch)
-            request_cancel(job_id)
+            store.mutate(job_id, patch, log="Đã gửi lệnh huỷ tới worker")
         elif op == "retry":
             arm_job(job_id)
             patch = {"status": "queued", "error": None, "errorType": None, "progress": 0}
@@ -161,7 +222,16 @@ class QueueEngine:
             self.kick()
         elif op == "remove":
             request_cancel(job_id)
-            store.replace_all([j for j in store.load_all() if j.get("id") != job_id])
+            with self._guard:
+                active = job_id in self._active and self._active[job_id].is_alive()
+            if active:
+                # FFmpeg/model workers may still be writing: clean up in the
+                # worker's finally block once cancellation reaches a checkpoint.
+                store.mutate(job_id, {"status": "cancelled", "deleteWhenFinished": True}, log="Đang hủy và dọn file dự án")
+            else:
+                removed = remove_job_artifacts(job or {})
+                append_log(f"[queue:{job_id}] removed {removed} owned artifact(s)")
+                store.replace_all([j for j in store.load_all() if j.get("id") != job_id])
         elif op == "pause_all":
             self._pause_all = True
             for item in store.load_all():
@@ -186,7 +256,15 @@ class QueueEngine:
                     store.mutate(item["id"], {"status": "queued", "error": None, "errorType": None})
             self.kick()
         elif op == "clear_completed":
-            store.replace_all([j for j in store.load_all() if j.get("status") != "done"])
+            completed = [item for item in store.load_all() if item.get("status") == "done"]
+            removed = sum(remove_job_artifacts(item) for item in completed)
+            append_log(f"[queue] cleared {len(completed)} completed job(s), {removed} owned artifact(s)")
+            store.replace_all([item for item in store.load_all() if item.get("status") != "done"])
+        elif op == "clear_logs":
+            rows = store.load_all()
+            for item in rows:
+                item["log"] = []
+            store.replace_all(rows)
         return self.snapshot()
 
     def _loop(self) -> None:
@@ -259,6 +337,7 @@ class QueueEngine:
 
     def _run_job(self, job_id: str) -> None:
         begin_job(job_id)
+        set_job_context(job_id)
         job = store.get(job_id) or {}
         store.mutate(job_id, {"status": "running", "stage": "start", "progress": 0.01, "error": None},
                      log=f"Bắt đầu job {job.get('type') or '?'} · {Path(str(job.get('source') or '')).name or job.get('source')}")
@@ -301,8 +380,17 @@ class QueueEngine:
                 "errorType": kind,
             }, log=f"LỖI {kind}: {exc}\n{traceback.format_exc()[-2500:]}")
         finally:
+            set_job_context(None)
             with self._guard:
                 self._active.pop(job_id, None)
+            completed = store.get(job_id)
+            if completed and completed.get("deleteWhenFinished"):
+                try:
+                    removed = remove_job_artifacts(completed)
+                    append_log(f"[queue:{job_id}] removed {removed} owned artifact(s) after cancellation")
+                    store.replace_all([row for row in store.load_all() if row.get("id") != job_id])
+                except OSError as exc:
+                    store.mutate(job_id, {"deleteWhenFinished": False}, log=f"Không thể dọn file: {exc}")
             self.kick()
 
 

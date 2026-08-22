@@ -3,9 +3,7 @@ import type { ProjectSettings, Segment } from '@/features/project/project.types'
 import { localize, useLocale } from '@/app/i18n'
 import { cn } from '@/shared/lib/cn'
 import {
-  COVER_MASK_SHAPES,
   COVER_MASK_STYLES,
-  type CoverMaskShape,
   NumField,
   formatTimecode,
   parseTimecode,
@@ -62,10 +60,6 @@ export function EditorMaskPanel({
 }: Props) {
   const { locale } = useLocale()
   const dur = Math.max(0, timelineDuration)
-  const [topTab, setTopTab] = useState<'basic' | 'mask'>('mask')
-  const [activeShape, setActiveShape] = useState<CoverMaskShape>('rectangle')
-  const [maskFeather, setMaskFeather] = useState(20)
-  const [maskRadius, setMaskRadius] = useState(4)
   const [applyMode, setApplyMode] = useState<'full' | 'range'>('full')
   const [fromSec, setFromSec] = useState(0)
   const [toSec, setToSec] = useState(0)
@@ -96,301 +90,75 @@ export function EditorMaskPanel({
     })
   }
 
-  function handleSelectShape(shapeId: CoverMaskShape) {
-    setActiveShape(shapeId)
-    if (shapeId === 'horizontal' || shapeId === 'text') {
-      stretchCoverFullWidth()
-    }
+  const maskBox = (selected || bboxSeg) && selectedBox ? selectedBox : null
+  const hasMask = Boolean(maskBox)
+  const styleLabel = (id: string) => {
+    if (id === 'blur') return localize(locale, 'Làm mờ', 'Blur')
+    if (id === 'solid') return localize(locale, 'Màu nền', 'Solid')
+    if (id === 'mosaic') return localize(locale, 'Khối', 'Mosaic')
+    return id
   }
 
   return (
-    <div className="space-y-3">
-      {/* Top Tabs: Cơ bản / Mặt nạ (CapCut PC style) */}
-      <div className="grid grid-cols-2 p-0.5 rounded-lg bg-muted/60 border border-border/80 text-xs">
-        <button
-          type="button"
-          className={cn(
-            'py-1.5 font-medium rounded-md transition-all text-center',
-            topTab === 'basic'
-              ? 'bg-background text-foreground shadow-sm'
-              : 'text-muted-foreground hover:text-foreground',
-          )}
-          onClick={() => setTopTab('basic')}
-        >
-          {localize(locale, 'Cơ bản', 'Basic')}
-        </button>
-        <button
-          type="button"
-          className={cn(
-            'py-1.5 font-medium rounded-md transition-all text-center',
-            topTab === 'mask'
-              ? 'bg-background text-cyan-400 shadow-sm'
-              : 'text-muted-foreground hover:text-foreground',
-          )}
-          onClick={() => setTopTab('mask')}
-        >
-          {localize(locale, 'Mặt nạ', 'Mask')}
-        </button>
-      </div>
-
-      {topTab === 'basic' ? (
-        <div className="space-y-2 py-1 text-xs text-muted-foreground">
-          <p className="leading-relaxed">
-            {localize(
-              locale,
-              'Kéo thả vùng chọn trực tiếp trên video để định vị. Bấm sang tab "Mặt nạ" để tùy biến hiệu ứng làm mờ chuẩn CapCut.',
-              'Drag the bounding box directly on video preview to position. Switch to "Mask" tab to customize CapCut blur effects.',
-            )}
-          </p>
+    <div className="space-y-4">
+      <section className="space-y-3 rounded-lg border border-border bg-card p-3">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-semibold text-foreground">
+              {localize(locale, 'Vị trí vùng che', 'Mask position')}
+            </h3>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              {hasMask
+                ? localize(locale, 'Kéo khung trên video hoặc nhập chính xác các giá trị bên dưới.', 'Drag the frame on video or enter precise values below.')
+                : localize(locale, 'Chọn đoạn có chữ hoặc tua đến vị trí cần che để bắt đầu.', 'Select a segment with text or seek to the text you want to cover.')}
+            </p>
+          </div>
+          {hasMask && <span className="shrink-0 rounded-full bg-primary/10 px-2 py-1 text-[11px] font-medium text-primary">{localize(locale, 'Đã chọn', 'Selected')}</span>}
         </div>
-      ) : (
-        <>
-          {/* Header Mặt nạ checkbox + active badge chip */}
-          <div className="flex items-center justify-between pt-0.5">
-            <label className="flex items-center gap-2 cursor-pointer select-none">
-              <input
-                type="checkbox"
-                checked={true}
-                readOnly
-                className="w-3.5 h-3.5 rounded border-border text-cyan-500 accent-cyan-500"
-              />
-              <span className="text-xs font-semibold text-foreground flex items-center gap-1">
-                {localize(locale, 'Mặt nạ', 'Mask')}
-                <span className="text-[10px] text-cyan-400 font-normal">💎</span>
-              </span>
-            </label>
-            <div className="flex items-center gap-1.5">
-              <span className="text-[10px] px-2 py-0.5 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 font-medium">
-                {localize(locale, `Mặt nạ: ${COVER_MASK_SHAPES.find((s) => s.id === activeShape)?.labelVi || 'Hình chữ nhật'}`, `Mask: ${COVER_MASK_SHAPES.find((s) => s.id === activeShape)?.labelEn || 'Rectangle'}`)}
-              </span>
-            </div>
-          </div>
-
-          {/* CapCut Mask Shape Icons Grid */}
-          <div className="grid grid-cols-4 gap-1.5 pt-1">
-            {COVER_MASK_SHAPES.map(({ id, labelVi, labelEn }) => {
-              const isSelected = activeShape === id
-              return (
-                <button
-                  key={id}
-                  type="button"
-                  disabled={busy}
-                  className={cn(
-                    'relative flex flex-col items-center justify-center p-2 rounded-lg border transition-all group',
-                    isSelected
-                      ? 'border-cyan-400 bg-cyan-500/15 text-cyan-200 shadow-[0_0_8px_rgba(34,211,238,0.2)]'
-                      : 'border-border/70 bg-card hover:bg-accent text-muted-foreground hover:text-foreground',
-                  )}
-                  onClick={() => handleSelectShape(id)}
-                >
-                  <div className="w-8 h-8 flex items-center justify-center mb-1">
-                    {id === 'split' && (
-                      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6">
-                        <rect x="3" y="3" width="18" height="18" rx="2" strokeDasharray="3 3" />
-                        <line x1="3" y1="12" x2="21" y2="12" strokeWidth="2" />
-                      </svg>
-                    )}
-                    {id === 'horizontal' && (
-                      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6">
-                        <rect x="3" y="3" width="18" height="18" rx="2" strokeDasharray="2 2" />
-                        <line x1="3" y1="8" x2="21" y2="8" strokeWidth="1.8" />
-                        <line x1="3" y1="16" x2="21" y2="16" strokeWidth="1.8" />
-                      </svg>
-                    )}
-                    {id === 'circle' && (
-                      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6">
-                        <rect x="3" y="3" width="18" height="18" rx="2" strokeDasharray="2 2" />
-                        <circle cx="12" cy="12" r="6" strokeWidth="1.8" />
-                      </svg>
-                    )}
-                    {id === 'rectangle' && (
-                      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6">
-                        <rect x="3" y="3" width="18" height="18" rx="2" strokeDasharray="2 2" />
-                        <rect x="6" y="6" width="12" height="12" rx="1.5" strokeWidth="1.8" />
-                      </svg>
-                    )}
-                    {id === 'text' && (
-                      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6">
-                        <rect x="3" y="3" width="18" height="18" rx="2" strokeDasharray="2 2" />
-                        <path d="M7 8h10M12 8v10M9 18h6" strokeWidth="1.8" />
-                      </svg>
-                    )}
-                    {id === 'brush' && (
-                      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6">
-                        <path d="m14 4 6 6M4 20l6-2 10-10-4-4L6 14l-2 6z" strokeWidth="1.8" />
-                      </svg>
-                    )}
-                    {id === 'pen' && (
-                      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6">
-                        <path d="M12 19l7-7 3 3-7 7-3-3zM18 13l-1.5-7.5L2 2l3.5 14.5L13 18" strokeWidth="1.8" />
-                        <circle cx="11" cy="11" r="1.5" fill="currentColor" />
-                      </svg>
-                    )}
-                  </div>
-                  <span className="text-[10px] font-medium leading-tight">
-                    {localize(locale, labelVi, labelEn)}
-                  </span>
-                  {isSelected && (
-                    <span className="absolute bottom-1 right-1 w-1.5 h-1.5 rounded-full bg-cyan-400" />
-                  )}
-                </button>
-              )
-            })}
-          </div>
-
-          {/* Tùy chọn cài đặt mặt nạ (CapCut settings accordion) */}
-          <div className="border-t border-border/80 pt-2.5 space-y-2.5">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold text-foreground flex items-center gap-1.5">
-                <span>⚡</span>
-                {localize(locale, 'Tùy chọn cài đặt mặt nạ', 'Mask Options')}
-              </span>
-            </div>
-
-            {/* Kiểu hiệu ứng: Làm mờ / Màu nền / Khối */}
-            <div className="space-y-1">
-              <span className="text-[11px] text-muted-foreground font-medium">
-                {localize(locale, 'Kiểu hiệu ứng', 'Effect Style')}
-              </span>
-              <div className="grid grid-cols-3 gap-1">
-                {COVER_MASK_STYLES.map(({ id, label }) => (
-                  <button
-                    key={id}
-                    type="button"
-                    disabled={busy}
-                    className={cn(
-                      'rounded-md border px-2 py-1.5 text-[11px] transition-colors disabled:opacity-50',
-                      coverMaskStyle === id
-                        ? 'border-cyan-400 bg-cyan-500/20 text-cyan-200 font-medium'
-                        : 'border-border bg-accent hover:bg-muted text-muted-foreground',
-                    )}
-                    onClick={() => onSettings({ ...settings, coverMaskStyle: id })}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Độ mờ viền (Feather) & Bo góc (Radius) Sliders */}
-            <div className="space-y-2 bg-muted/40 p-2.5 rounded-lg border border-border/60">
-              <div className="space-y-1">
-                <div className="flex items-center justify-between text-[11px]">
-                  <span className="text-muted-foreground font-medium">
-                    {localize(locale, 'Độ mờ viền (Feather)', 'Feather / Softness')}
-                  </span>
-                  <span className="text-cyan-400 tabular-nums font-medium">{maskFeather} px</span>
-                </div>
-                <input
-                  type="range"
-                  min={0}
-                  max={50}
-                  step={1}
-                  className="w-full accent-cyan-400"
-                  value={maskFeather}
-                  disabled={busy}
-                  onChange={(e) => setMaskFeather(Number(e.target.value))}
-                />
-              </div>
-
-              <div className="space-y-1">
-                <div className="flex items-center justify-between text-[11px]">
-                  <span className="text-muted-foreground font-medium">
-                    {localize(locale, 'Bo góc (Radius)', 'Corner Radius')}
-                  </span>
-                  <span className="text-cyan-400 tabular-nums font-medium">{maskRadius} px</span>
-                </div>
-                <input
-                  type="range"
-                  min={0}
-                  max={40}
-                  step={1}
-                  className="w-full accent-cyan-400"
-                  value={maskRadius}
-                  disabled={busy}
-                  onChange={(e) => setMaskRadius(Number(e.target.value))}
-                />
-              </div>
-            </div>
-
-            {/* Màu phủ & Độ đậm */}
-            {coverMaskStyle !== 'mosaic' && (
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between text-[11px]">
-                  <span className="text-muted-foreground font-medium">
-                    {localize(locale, 'Màu phủ & Độ đậm', 'Tint Color & Opacity')}
-                  </span>
-                  <span className="text-muted-foreground tabular-nums">{coverMaskOpacity}%</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="color"
-                    className="h-8 w-10 shrink-0 cursor-pointer rounded-md border border-border bg-input p-0.5"
-                    value={coverMaskColor}
-                    disabled={busy}
-                    title={localize(locale, 'Màu phủ', 'Color')}
-                    onChange={(e) => onSettings({ ...settings, coverMaskColor: e.target.value })}
-                  />
-                  <input
-                    type="range"
-                    min={0}
-                    max={100}
-                    step={1}
-                    className="min-w-0 flex-1 accent-cyan-400"
-                    value={coverMaskOpacity}
-                    disabled={busy}
-                    title={`Độ đậm ${coverMaskOpacity}%`}
-                    onChange={(e) => onSettings({ ...settings, coverMaskOpacity: Number(e.target.value) })}
-                  />
-                </div>
-              </div>
-            )}
-
-            {/* Vị trí X, Y & Kích thước Rộng, Cao */}
-            {(selected || bboxSeg) && selectedBox ? (
-              <div className="space-y-2 pt-1">
+        {maskBox ? (
+          <div className="space-y-3">
                 <div className="grid grid-cols-4 gap-1.5">
                   <NumField
                     inline
                     label="X"
-                    value={selectedBox.x}
+                    value={maskBox.x}
                     disabled={busy || !selected}
                     onCommit={(v) =>
                       commitCoverBox({
-                        x: Math.round(Math.max(0, Math.min(sourceWidth - selectedBox.w, v))),
+                        x: Math.round(Math.max(0, Math.min(sourceWidth - maskBox.w, v))),
                       })
                     }
                   />
                   <NumField
                     inline
                     label="Y"
-                    value={selectedBox.y}
+                    value={maskBox.y}
                     disabled={busy || !selected}
                     onCommit={(v) =>
                       commitCoverBox({
-                        y: Math.round(Math.max(0, Math.min(sourceHeight - selectedBox.h, v))),
+                        y: Math.round(Math.max(0, Math.min(sourceHeight - maskBox.h, v))),
                       })
                     }
                   />
                   <NumField
                     inline
                     label={localize(locale, 'Rộng', 'W')}
-                    value={selectedBox.w}
+                    value={maskBox.w}
                     disabled={busy || !selected}
                     onCommit={(v) =>
                       commitCoverBox({
-                        w: Math.round(Math.max(12, Math.min(sourceWidth - selectedBox.x, v))),
+                        w: Math.round(Math.max(12, Math.min(sourceWidth - maskBox.x, v))),
                       })
                     }
                   />
                   <NumField
                     inline
                     label={localize(locale, 'Cao', 'H')}
-                    value={selectedBox.h}
+                    value={maskBox.h}
                     disabled={busy || !selected}
                     onCommit={(v) =>
                       commitCoverBox({
-                        h: Math.round(Math.max(12, Math.min(sourceHeight - selectedBox.y, v))),
+                        h: Math.round(Math.max(12, Math.min(sourceHeight - maskBox.y, v))),
                       })
                     }
                   />
@@ -399,42 +167,98 @@ export function EditorMaskPanel({
                 <div className="flex items-center gap-2 pt-0.5">
                   <button
                     type="button"
-                    className="flex-1 rounded-md border border-cyan-500/40 bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-200 px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50"
+                    className="flex-1 rounded-md border border-primary/40 bg-primary/10 px-3 py-2 text-xs font-medium text-primary transition-colors hover:bg-primary/15 disabled:opacity-50"
                     disabled={busy || !selected || sourceWidth <= 0}
-                    title={localize(locale, 'Kéo ngang phủ kín toàn bộ 100% video', 'Stretch full width 100%')}
+                    title={localize(locale, 'Mở rộng vùng che theo toàn bộ chiều ngang video', 'Stretch the mask across the entire video width')}
                     onClick={stretchCoverFullWidth}
                   >
-                    {localize(locale, 'Kéo Full Ngang', 'Full Width Banner')}
+                    {localize(locale, 'Phủ toàn chiều ngang', 'Fill full width')}
                   </button>
                 </div>
+          </div>
+        ) : null}
+      </section>
 
-                {/* Apply Range Section */}
-                <div className="border-t border-border pt-2 space-y-2">
-                  <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">
-                    {localize(locale, `Áp vị trí che · lane «${applyAllLaneLabel}»`, `Apply mask position · lane «${applyAllLaneLabel}»`)}
-                  </p>
+      <section className="space-y-3 rounded-lg border border-border bg-card p-3">
+        <div>
+          <h3 className="text-sm font-semibold text-foreground">{localize(locale, 'Kiểu che', 'Mask style')}</h3>
+          <p className="mt-1 text-xs text-muted-foreground">{localize(locale, 'Chọn cách xử lý cho vùng chữ gốc.', 'Choose how the original text area is treated.')}</p>
+        </div>
+        <div className="grid grid-cols-3 gap-2">
+          {COVER_MASK_STYLES.map(({ id }) => (
+            <button
+              key={id}
+              type="button"
+              disabled={busy}
+              className={cn(
+                'rounded-md border px-2 py-2 text-xs font-medium transition-colors disabled:opacity-50',
+                coverMaskStyle === id
+                  ? 'border-primary bg-primary/10 text-primary'
+                  : 'border-border bg-background text-muted-foreground hover:bg-muted hover:text-foreground',
+              )}
+              onClick={() => onSettings({ ...settings, coverMaskStyle: id })}
+            >
+              {styleLabel(id)}
+            </button>
+          ))}
+        </div>
+        {coverMaskStyle !== 'mosaic' && (
+          <div className="space-y-2">
+            <div className="flex items-center justify-between text-xs">
+              <label className="font-medium text-foreground">{localize(locale, 'Màu phủ và độ đậm', 'Tint and opacity')}</label>
+              <span className="tabular-nums text-muted-foreground">{coverMaskOpacity}%</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                type="color"
+                className="h-9 w-11 shrink-0 cursor-pointer rounded-md border border-border bg-input p-1"
+                value={coverMaskColor}
+                disabled={busy}
+                aria-label={localize(locale, 'Màu phủ', 'Tint color')}
+                onChange={(e) => onSettings({ ...settings, coverMaskColor: e.target.value })}
+              />
+              <input
+                type="range"
+                min={0}
+                max={100}
+                step={1}
+                className="min-w-0 flex-1 accent-primary"
+                value={coverMaskOpacity}
+                disabled={busy}
+                aria-label={localize(locale, 'Độ đậm vùng che', 'Mask opacity')}
+                onChange={(e) => onSettings({ ...settings, coverMaskOpacity: Number(e.target.value) })}
+              />
+            </div>
+          </div>
+        )}
+      </section>
+
+      {hasMask && (
+        <section className="space-y-3 rounded-lg border border-border bg-card p-3">
+          <div>
+            <h3 className="text-sm font-semibold text-foreground">{localize(locale, 'Áp dụng vị trí', 'Apply position')}</h3>
+            <p className="mt-1 text-xs text-muted-foreground">{localize(locale, `Đồng bộ vị trí vùng che cho lane ${applyAllLaneLabel}.`, `Sync this mask position to the ${applyAllLaneLabel} lane.`)}</p>
+          </div>
+
+                <div className="space-y-2">
                   <div className="grid grid-cols-2 gap-1">
                     <button
                       type="button"
                       disabled={busy}
                       className={cn(
                         'rounded-md border px-2 py-1.5 text-[11px] transition-colors disabled:opacity-50',
-                        applyMode === 'full'
-                          ? 'border-cyan-400 bg-cyan-500/20 text-cyan-200 font-medium'
-                          : 'border-border bg-accent hover:bg-muted text-muted-foreground',
+                        applyMode === 'full' ? 'border-primary bg-primary/10 text-primary font-medium' : 'border-border bg-background text-muted-foreground hover:bg-muted',
                       )}
                       onClick={() => setApplyMode('full')}
                     >
-                      {localize(locale, 'Full video', 'Full video')}
+                      {localize(locale, 'Toàn video', 'Full video')}
                     </button>
                     <button
                       type="button"
                       disabled={busy}
                       className={cn(
                         'rounded-md border px-2 py-1.5 text-[11px] transition-colors disabled:opacity-50',
-                        applyMode === 'range'
-                          ? 'border-cyan-400 bg-cyan-500/20 text-cyan-200 font-medium'
-                          : 'border-border bg-accent hover:bg-muted text-muted-foreground',
+                        applyMode === 'range' ? 'border-primary bg-primary/10 text-primary font-medium' : 'border-border bg-background text-muted-foreground hover:bg-muted',
                       )}
                       onClick={() => setApplyMode('range')}
                     >
@@ -465,31 +289,23 @@ export function EditorMaskPanel({
                   )}
                   <button
                     type="button"
-                    className="w-full rounded-md border border-cyan-400/60 bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-200 px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50"
+                    className="w-full rounded-md bg-primary px-3 py-2 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
                     disabled={busy || !(selected || bboxSeg) || segmentsLen === 0}
                     onClick={runApply}
                   >
                     {applyMode === 'full'
-                      ? localize(locale, `Áp vị trí (Y) · full · ${applyAllLaneLabel}`, `Apply Y · Full · ${applyAllLaneLabel}`)
-                      : localize(locale, `Áp Y · mọi bbox · ${formatTimecode(Math.min(fromSec, toSec))} → ${formatTimecode(Math.max(fromSec, toSec))}`, `Apply Y · ${formatTimecode(Math.min(fromSec, toSec))} → ${formatTimecode(Math.max(fromSec, toSec))}`)}
+                      ? localize(locale, `Áp dụng cho toàn bộ ${applyAllLaneLabel}`, `Apply to all ${applyAllLaneLabel}`)
+                      : localize(locale, `Áp dụng ${formatTimecode(Math.min(fromSec, toSec))} → ${formatTimecode(Math.max(fromSec, toSec))}`, `Apply ${formatTimecode(Math.min(fromSec, toSec))} → ${formatTimecode(Math.max(fromSec, toSec))}`)}
                   </button>
                 </div>
-              </div>
-            ) : (
-              <p className="text-[11px] text-muted-foreground pt-1">
-                {localize(
-                  locale,
-                  'Chưa có vùng che tại playhead — chọn đoạn caption hoặc tua tới chỗ có chữ.',
-                  'No mask region at playhead — select a caption segment or seek to subtitle.',
-                )}
-              </p>
-            )}
+        </section>
+      )}
 
-            {/* Reset bbox */}
-            <div className="border-t border-border pt-2 space-y-1.5">
-              <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">
-                {localize(locale, 'Đặt lại vùng che (Reset)', 'Reset Mask')}
-              </p>
+      <section className="space-y-2 rounded-lg border border-border bg-card p-3">
+        <div>
+          <h3 className="text-sm font-semibold text-foreground">{localize(locale, 'Đặt lại', 'Reset')}</h3>
+          <p className="mt-1 text-xs text-muted-foreground">{localize(locale, 'Xóa vùng che đã lưu để nhận dạng lại.', 'Clear saved mask regions so they can be detected again.')}</p>
+        </div>
               <div className="grid grid-cols-2 gap-1.5">
                 <button
                   type="button"
@@ -497,22 +313,18 @@ export function EditorMaskPanel({
                   disabled={busy || !(selected || bboxSeg)}
                   onClick={() => resetOcrRegion('one')}
                 >
-                  {localize(locale, 'Reset 1 clip', 'Reset current')}
+                  {localize(locale, 'Đặt lại đoạn này', 'Reset current')}
                 </button>
                 <button
                   type="button"
-                  className="rounded-md border border-cyan-400/50 bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-200 px-2 py-1.5 text-[11px] font-medium transition-colors disabled:opacity-50"
+                  className="rounded-md border border-border bg-background px-2 py-1.5 text-[11px] font-medium transition-colors hover:bg-muted disabled:opacity-50"
                   disabled={busy || segmentsLen === 0}
                   onClick={() => resetOcrRegion('all')}
                 >
-                  {localize(locale, 'Reset tất cả', 'Reset all')}
+                  {localize(locale, 'Đặt lại tất cả', 'Reset all')}
                 </button>
               </div>
-            </div>
-          </div>
-        </>
-      )}
+      </section>
     </div>
   )
 }
-

@@ -4843,11 +4843,10 @@ export default function LivePreviewEditor({
                       {bboxSeg && selectedBox && showBboxAtPlayhead && tool !== 'text' && (
                         <div
                           className={cn(
-                            'group/bbox absolute border-2 border-cyan-400 cursor-move z-10 overflow-visible rounded-sm transition-all',
-                            'shadow-[0_0_12px_rgba(34,211,238,0.25)]',
-                            !showCoverBlur && 'bg-cyan-900/15 border-dashed',
-                            draggingBox && 'opacity-90 ring-2 ring-cyan-300',
-                            (tool === 'cover' || effectivePropTab === 'mask') && 'border-cyan-400 ring-1 ring-cyan-400/60',
+                            'group/bbox absolute border-2 border-violet-400 cursor-move z-10 overflow-visible',
+                            !showCoverBlur && 'bg-violet-900/10 border-dashed',
+                            draggingBox && 'opacity-80 ring-2 ring-violet-300',
+                            (tool === 'cover' || effectivePropTab === 'mask') && 'border-yellow-400 ring-1 ring-yellow-400/50',
                           )}
                           style={{
                             ...sourceToDisplayStyle(selectedBox, crop),
@@ -4857,30 +4856,11 @@ export default function LivePreviewEditor({
                           }}
                           onPointerDown={(e) => beginBboxDrag(e, 'move', bboxSeg)}
                         >
-                          {/* CapCut Feather handle (Top Center) */}
-                          <div
-                            className="absolute -top-7 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded-full bg-black/85 border border-cyan-400/60 text-cyan-300 text-[10px] flex items-center gap-1 shadow-md opacity-85 group-hover/bbox:opacity-100 transition-opacity cursor-ns-resize pointer-events-auto select-none"
-                            title="Độ mờ viền (Feather)"
-                            onPointerDown={(e) => { e.stopPropagation(); beginBboxDrag(e, 'n', bboxSeg) }}
-                          >
-                            <span className="font-bold text-xs leading-none">≍</span>
-                            <span>Mờ viền</span>
-                          </div>
-
-                          {/* CapCut Rotate handle (Bottom Center) */}
-                          <div
-                            className="absolute -bottom-7 left-1/2 -translate-x-1/2 w-6 h-6 rounded-full bg-black/85 border border-cyan-400/60 text-cyan-300 text-xs flex items-center justify-center shadow-md opacity-85 group-hover/bbox:opacity-100 transition-opacity cursor-grab pointer-events-auto select-none"
-                            title="Xoay mặt nạ"
-                            onPointerDown={(e) => { e.stopPropagation() }}
-                          >
-                            <span>↻</span>
-                          </div>
-
                           {(['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'] as const).map((handle) => (
                             <span
                               key={handle}
                               className={cn(
-                                'absolute w-3.5 h-3.5 rounded-full bg-white border-2 border-cyan-500 shadow-md z-20 touch-none opacity-80 group-hover/bbox:opacity-100 transition-opacity',
+                                'absolute w-3.5 h-3.5 rounded-sm bg-white border-2 border-violet-500 shadow-sm z-20 touch-none opacity-0 hover:opacity-100 transition-opacity',
                                 handle === 'nw' && 'top-[-6px] left-[-6px] cursor-nwse-resize',
                                 handle === 'n'  && 'top-[-6px] left-[calc(50%-6px)] cursor-ns-resize',
                                 handle === 'ne' && 'top-[-6px] right-[-6px] cursor-nesw-resize',

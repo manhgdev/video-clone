@@ -68,6 +68,7 @@ export function CloneBatchSettingsPanel({ settings, voices, onChange }: Props) {
           <span>{t('Nhận dạng', 'Recognition')}</span>
           <select value={settings.engine} onChange={(e) => selectEngine(e.target.value as ProjectSettings['engine'])}>
             <option value="whisper">{t('Giọng nói (Whisper)', 'Speech (Whisper)')}</option>
+            <option value="capcut">{t('Giọng nói (CapCut cloud)', 'Speech (CapCut cloud)')}</option>
             <option value="paddleocr">{t('Chữ trên màn (OCR)', 'On-screen text (OCR)')}</option>
           </select>
           <small>{t('Chưa hỗ trợ SRT riêng.', 'Per-video SRT is unavailable.')}</small>
@@ -82,6 +83,7 @@ export function CloneBatchSettingsPanel({ settings, voices, onChange }: Props) {
             <option value="google">Google Translate</option>
             <option value="mymemory">MyMemory</option>
             <option value="tiktok">TikTok Translate</option>
+            <option value="capcut">{t('CapCut cloud', 'CapCut cloud')}</option>
             <option value="ollama">Ollama</option>
             <option value="openai">OpenAI</option>
             <option value="gemini">Gemini</option>

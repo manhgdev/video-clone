@@ -201,7 +201,19 @@ def _run(job_id: str) -> None:
         elif job["sourceKind"] == "caption":
             assert source is not None
             cues = _caption_cues(source)
-        if job["sourceKind"] == "media" or (job["sourceKind"] == "platform" and not cues):
+        options = job.get("options") or {}
+        capcut_translated: list[dict[str, Any]] | None = None
+        if job["sourceKind"] == "media" and str(options.get("recognitionEngine") or "whisper") == "capcut":
+            assert source is not None
+            from pipeline.capcut_stt import transcribe_and_translate
+            _update(job_id, progress=12, message="CapCut: đang gửi video")
+            cues, capcut_translated = transcribe_and_translate(
+                source, str(options.get("sourceLang") or "auto"), str(options.get("targetLang") or "vi"),
+                cancelled=lambda: bool((get_job(job_id) or {}).get("cancelled")),
+                progress=lambda message: _update(job_id, progress=45, message=message),
+            )
+            _update(job_id, progress=70, message="CapCut: đã dịch phụ đề")
+        elif job["sourceKind"] == "media" or (job["sourceKind"] == "platform" and not cues):
             assert source is not None
             _update(job_id, progress=12, message="Đang tách audio")
             wav = source.with_suffix(".wav")
@@ -209,26 +221,27 @@ def _run(job_id: str) -> None:
             if get_job(job_id).get("cancelled"):
                 return
             _update(job_id, progress=25, message="Whisper đang nhận dạng")
-            options = job.get("options") or {}
             segments = asr_whisper(wav, str(options.get("sourceLang") or "auto"), workers=int(options.get("workers") or 0))
             cues = [{"start": row["start"], "end": row["end"], "text": row["source"]} for row in segments]
         if not cues:
             raise RuntimeError("Không tìm thấy nội dung phụ đề")
         if get_job(job_id).get("cancelled"):
             return
-        options = job.get("options") or {}
         mode = str(options.get("outputMode") or "original")
         translated_cues: list[dict[str, Any]] | None = None
         if mode != "original":
-            _update(job_id, progress=65, message="Đang dịch phụ đề")
-            translated = translate_segments(
-                [str(cue.get("text") or "") for cue in cues], str(options.get("targetLang") or "vi"),
-                source_lang=str(options.get("sourceLang") or "auto"), translator=str(options.get("translator") or "google"),
-                workers=int(options.get("workers") or 2), ollama_mode=str(options.get("ollamaMode") or "cloud"),
-                ollama_model=str(options.get("ollamaModel") or "minimax-m3:cloud"), ollama_local_tier=str(options.get("ollamaLocalTier") or "balanced"),
-                durations=[max(0.1, float(cue["end"]) - float(cue["start"])) for cue in cues],
-            )
-            translated_cues = _translated_cues(cues, translated)
+            if capcut_translated is not None:
+                translated_cues = capcut_translated
+            else:
+                _update(job_id, progress=65, message="Đang dịch phụ đề")
+                translated = translate_segments(
+                    [str(cue.get("text") or "") for cue in cues], str(options.get("targetLang") or "vi"),
+                    source_lang=str(options.get("sourceLang") or "auto"), translator=str(options.get("translator") or "google"),
+                    workers=int(options.get("workers") or 2), ollama_mode=str(options.get("ollamaMode") or "cloud"),
+                    ollama_model=str(options.get("ollamaModel") or "minimax-m3:cloud"), ollama_local_tier=str(options.get("ollamaLocalTier") or "balanced"),
+                    durations=[max(0.1, float(cue["end"]) - float(cue["start"])) for cue in cues],
+                )
+                translated_cues = _translated_cues(cues, translated)
         _update(job_id, progress=75, message="Đang tạo các định dạng phụ đề")
         if mode == "translated":
             assert translated_cues is not None

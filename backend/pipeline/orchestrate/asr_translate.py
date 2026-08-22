@@ -6,6 +6,7 @@ import json
 import shutil
 import sys
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -51,6 +52,16 @@ from pipeline.translate import translate_segments
 from pipeline.tts import tts_cache_key, tts_segment
 
 from pipeline.orchestrate.tts_fit import assign_tts_fit_speeds
+
+
+def _is_project_cancelled(project_id: str) -> bool:
+    """Adapt the shared cancellation exception to CapCut's polling callback."""
+    try:
+        check_cancel(project_id)
+    except Cancelled:
+        return True
+    return False
+
 
 def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
     meta = load_meta(project_id)
@@ -173,6 +184,15 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
         # Đồng bộ cửa sổ làm việc ngay (status/editor không kẹt Ns cũ)
         meta["previewSec"] = preview_sec
 
+        configured_engine = str(settings.get("engine") or "whisper").lower().strip()
+        # CapCut's translation result belongs to its own timed ASR task.  It
+        # is only active when the user explicitly selected the CapCut speech
+        # engine; a translator choice alone must leave Clone Video's audio
+        # and Whisper timing untouched.
+        capcut_translator = (
+            str(settings.get("translator") or "").lower().strip() == "capcut"
+            and configured_engine == "capcut"
+        )
         # —— ASR (reuse segments if same engine+lang+video+preview) ——
         if cache.get("asrKey") == a_key and cached_segments:
             segments = cached_segments
@@ -185,6 +205,11 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
             )
         else:
             engine = settings.get("engine", "whisper")
+            # Never change Clone Video's ASR engine implicitly.  In
+            # particular, choosing a translation provider must not turn a
+            # Whisper project into a cloud ASR project, because that changes
+            # cue timing and downstream audio fitting.  CapCut is only used
+            # when its recognition engine is selected explicitly.
             if engine == "subtitle":
                 source_name = Path(str(settings.get("subtitleSource") or "")).name
                 source_file = ensure_layout(project_id) / "subtitles" / source_name
@@ -195,12 +220,45 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                 set_status(project_id, step="asr", progress=35, message="Đọc phụ đề SRT…", running=True)
                 segments = subtitle_segments(source_file, preview_sec=preview_sec)
                 use_ocr = False
+            elif engine == "capcut":
+                from pipeline.capcut_stt import transcribe_and_translate
+
+                set_status(project_id, step="asr", progress=15, message="CapCut: đang gửi video…", running=True)
+                target_lang = str(settings.get("targetLang") or "vi")
+                rows, capcut_translated = transcribe_and_translate(
+                    video, str(settings.get("sourceLang") or "auto"), str(settings.get("targetLang") or "vi"),
+                    require_translation=capcut_translator and target_lang not in {"none", "off", "source", ""},
+                    cancelled=lambda: _is_project_cancelled(project_id),
+                    progress=lambda message: set_status(project_id, step="asr", progress=35, message=message, running=True),
+                )
+                translated_by_time = {
+                    (round(float(row["start"]), 3), round(float(row["end"]), 3)): str(row["text"] or "")
+                    for row in capcut_translated
+                }
+                segments = [
+                    {
+                        "start": row["start"], "end": row["end"], "source": row["text"],
+                        **({
+                            "translation": (
+                                str(row["text"] or "")
+                                if target_lang in {"none", "off", "source", ""}
+                                else translated_by_time.get(
+                                    (round(float(row["start"]), 3), round(float(row["end"]), 3)), "",
+                                )
+                            ),
+                        } if capcut_translator else {}),
+                    }
+                    for row in rows
+                ]
+                if capcut_translator and any(not str(item.get("translation") or "").strip() for item in segments):
+                    raise RuntimeError("CapCut không trả bản dịch khớp với toàn bộ timecode.")
+                use_ocr = False
             else:
                 wav = cache_audio(project_id, audio_cache_tag(preview_sec, match_mode, speed=work_speed))
                 use_ocr = engine in ("paddleocr", "screen")
                 segments = []
             if not use_ocr:
-                if engine == "subtitle":
+                if engine in ("subtitle", "capcut"):
                     pass
                 elif wav.exists() and wav.stat().st_mtime >= video.stat().st_mtime:
                     set_status(
@@ -213,7 +271,7 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                     extract_audio(video, wav, project_id=project_id)
 
             frames_ok = any(cache_frames(project_id, tag).glob("*.jpg"))
-            if engine == "subtitle":
+            if engine in ("subtitle", "capcut"):
                 pass
             elif use_ocr:
                 ocr_req = int(settings.get("workers") or 0)
@@ -298,6 +356,14 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
             if not segments:
                 raise RuntimeError("Không nhận được đoạn thoại nào từ video.")
 
+            # All timeline cues need stable ids, including CapCut cloud rows
+            # which only provide text and timecodes.  Keep existing Whisper/
+            # SRT ids so cached audio and manual edits continue to match.
+            for index, segment in enumerate(segments):
+                segment["id"] = str(segment.get("id") or uuid.uuid4().hex)
+                segment["index"] = index
+                segment.setdefault("voice", "")
+
             append_job_event(project_id, "ASR_CHUNK_READY", {"range": [0, float(ffprobe_duration(video) or 0)], "segments": segments})
 
             # Whisper/SRT timestamps describe speech, not the small batches of
@@ -308,7 +374,7 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                 input_w, input_h = video_size(video)
             except Exception:
                 input_w, input_h = 0, 0
-            if input_h > input_w > 0 and engine in ("whisper", "subtitle"):
+            if input_h > input_w > 0 and engine in ("whisper", "subtitle", "capcut"):
                 from pipeline.subtitles import split_portrait_caption_segments
 
                 segments = split_portrait_caption_segments(segments)
@@ -380,7 +446,9 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
                 encoding="utf-8",
             )
             cache["asrKey"] = a_key
-            if cache.get("transKey") != t_key:
+            if capcut_translator:
+                cache["transKey"] = t_key
+            elif cache.get("transKey") != t_key:
                 cache.pop("transKey", None)
 
         # Preserve Whisper's sentence boundaries. The old CJK fragment merger
@@ -389,7 +457,17 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
 
         # —— Translate ——
         voice = settings.get("defaultVoice", "system")
-        if cache.get("transKey") == t_key and all((s.get("translation") or "").strip() for s in segments):
+        if capcut_translator and all((s.get("translation") or "").strip() for s in segments):
+            set_status(
+                project_id,
+                step="translate",
+                progress=90,
+                message=f"CapCut đã dịch {len(segments)} đoạn",
+                running=True,
+            )
+            for seg in segments:
+                seg["voice"] = inherit_voice(seg.get("voice"), voice)
+        elif cache.get("transKey") == t_key and all((s.get("translation") or "").strip() for s in segments):
             set_status(
                 project_id,
                 step="translate",
@@ -645,6 +723,8 @@ def run_pipeline(project_id: str, settings: dict[str, Any]) -> None:
             next_msg = f"{hint}Xong {len(segments)} đoạn — bấm Xuất bản để che chữ cũ + đè bản dịch"
         elif engine == "subtitle":
             next_msg = f"{hint}Dùng phụ đề SRT: {len(segments)} đoạn — tiếp theo: Lồng tiếng → Xuất bản"
+        elif engine == "capcut":
+            next_msg = f"{hint}CapCut đã nhận dạng {len(segments)} đoạn — tiếp theo: Dịch → Lồng tiếng → Xuất bản"
         else:
             next_msg = f"{hint}Xong {len(segments)} đoạn — tiếp theo: Lồng tiếng → Xuất bản"
         set_status(

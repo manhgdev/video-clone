@@ -321,12 +321,12 @@ export function EditorPropertiesPanel({
                             <div className="grid grid-cols-2 gap-2">
                               <PropLabel label={t('Nhận dạng', 'Recognition')}>
                                 <select className="h-8 w-full rounded-md border border-border bg-background px-2 text-xs" value={settings.engine} disabled={busy} onChange={(event) => onSettings({ ...settings, engine: event.target.value as ProjectSettings['engine'] })}>
-                                  <option value="whisper">Whisper</option><option value="paddleocr">OCR</option><option value="subtitle">SRT</option>
+                                  <option value="whisper">Whisper</option><option value="capcut">{t('CapCut cloud', 'CapCut cloud')}</option><option value="paddleocr">OCR</option><option value="subtitle">SRT</option>
                                 </select>
                               </PropLabel>
                               <PropLabel label={t('Công cụ dịch', 'Translator')}>
                                 <select className="h-8 w-full rounded-md border border-border bg-background px-2 text-xs" value={settings.translator} disabled={busy} onChange={(event) => onSettings({ ...settings, translator: event.target.value as ProjectSettings['translator'] })}>
-                                  {(['google', 'mymemory', 'tiktok', 'ollama', 'openai', 'gemini', 'deepseek', 'openrouter', 'grok', 'nvidia'] as const).map((item) => <option key={item} value={item}>{item}</option>)}
+                                  {(['google', 'mymemory', 'tiktok', 'capcut', 'ollama', 'openai', 'gemini', 'deepseek', 'openrouter', 'grok', 'nvidia'] as const).map((item) => <option key={item} value={item}>{item === 'capcut' ? t('CapCut cloud', 'CapCut cloud') : item}</option>)}
                                 </select>
                               </PropLabel>
                               <PropLabel label={t('Ngôn ngữ gốc', 'Source language')}>

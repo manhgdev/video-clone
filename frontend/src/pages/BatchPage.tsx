@@ -166,7 +166,7 @@ export default function BatchPage({ onBack, onOpenEditor, onOpenReviewProjects }
           narration: reviewSettings.narration,
           pausePace: reviewSettings.pausePace,
           captionMode: reviewSettings.captionMode,
-          ratio: '16:9', language: reviewSettings.language, sourceLang: reviewSettings.sourceLang, spoiler: 'none',
+          ratio: '16:9', language: reviewSettings.language, sourceLang: reviewSettings.sourceLang, recognitionEngine: reviewSettings.recognitionEngine, spoiler: 'none',
           subtitle: true, headless: true,
         }
         : {

@@ -127,6 +127,9 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   // ponytail: capture frame video qua canvas — <img> không render được video URL
   const [coverDataUrl, setCoverDataUrl] = useState<string | null>(null)
   const [isCoverPickerOpen, setIsCoverPickerOpen] = useState(false)
+  // The cover workspace must follow the source frame, not a fixed portrait
+  // card.  Start at 16:9 so it is also correct before metadata is available.
+  const [coverAspect, setCoverAspect] = useState(16 / 9)
 
   useEffect(() => {
     if (isOpen) {
@@ -143,6 +146,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   useEffect(() => {
     if (!isOpen || !videoCoverUrl) {
       setCoverDataUrl(null)
+      setCoverAspect(16 / 9)
       return
     }
     const vid = document.createElement('video')
@@ -162,7 +166,12 @@ export const ExportModal: React.FC<ExportModalProps> = ({
       }
     }
     vid.addEventListener('seeked', capture, { once: true })
-    vid.addEventListener('loadedmetadata', () => { vid.currentTime = Math.min(0.5, (vid.duration || 1) * 0.1) }, { once: true })
+    vid.addEventListener('loadedmetadata', () => {
+      if (vid.videoWidth > 0 && vid.videoHeight > 0) {
+        setCoverAspect(vid.videoWidth / vid.videoHeight)
+      }
+      vid.currentTime = Math.min(0.5, (vid.duration || 1) * 0.1)
+    }, { once: true })
     vid.addEventListener('error', () => setCoverDataUrl(null), { once: true })
     vid.load()
     return () => { vid.src = '' }
@@ -171,6 +180,9 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   if (!isOpen) return null
 
   const estMb = estimateFileSizeMB(durationSec, exportRes, bitrate, exportVideo, exportAudio)
+  // Keep horizontal video wide and let portrait video grow only up to the
+  // previous 360px workspace height.
+  const coverFrameWidth = Math.round(Math.min(240, Math.max(120, 360 * coverAspect)))
 
   const handleExport = () => {
     onConfirmExport({
@@ -229,8 +241,10 @@ export const ExportModal: React.FC<ExportModalProps> = ({
           {/* Left Column: Video Cover Box */}
           <div className="flex flex-col items-center shrink-0 w-[240px]">
             <div
-              className="relative w-full h-[360px] rounded-lg overflow-hidden border shadow-inner flex items-center justify-center group"
+              className="relative rounded-lg overflow-hidden border shadow-inner flex items-center justify-center group"
               style={{
+                width: `${coverFrameWidth}px`,
+                aspectRatio: String(coverAspect),
                 backgroundColor: 'var(--preview-workspace-bg, #000000)',
                 borderColor: 'var(--border, #27272a)',
               }}

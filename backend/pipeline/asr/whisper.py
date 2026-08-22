@@ -9,7 +9,7 @@ import tempfile
 import threading
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from ..core.jobs import Cancelled, check_cancel
 from ..core.project import set_status
@@ -386,12 +386,18 @@ def asr_whisper(
     *,
     workers: int = 2,
     project_id: str | None = None,
+    on_progress: Callable[[int, float], None] | None = None,
 ) -> list[dict[str, Any]]:
     """Whisper CUDA. Windows/frozen: subprocess — native crash không tắt API."""
     inproc = os.environ.get("VIDEO_CLONE_WHISPER_INPROCESS", "").strip() == "1"
     if not inproc and (getattr(sys, "frozen", False) or sys.platform == "win32"):
+        if on_progress:
+            on_progress(0, 0.0)
         return _asr_via_runtime_subprocess(wav, source_lang, workers=workers, project_id=project_id)
-    return asr_whisper_inprocess(wav, source_lang, workers=workers, project_id=project_id)
+    return asr_whisper_inprocess(
+        wav, source_lang, workers=workers, project_id=project_id,
+        on_progress=on_progress,
+    )
 
 
 def _runtime_whisper_python() -> str | None:
@@ -527,6 +533,7 @@ def asr_whisper_inprocess(
     *,
     workers: int = 2,
     project_id: str | None = None,
+    on_progress: Callable[[int, float], None] | None = None,
 ) -> list[dict[str, Any]]:
     """Whisper 1 lần cả file; siết start/end theo word timestamps."""
     import time
@@ -578,6 +585,9 @@ def asr_whisper_inprocess(
     if _sys.platform == "darwin":
         mlx_rows = _mlx_transcribe(wav, source_lang or "auto")
         if mlx_rows is not None:
+            if on_progress:
+                end = max((float(row.get("end") or 0) for row in mlx_rows), default=0.0)
+                on_progress(len(mlx_rows), end)
             try:
                 from pipeline.core.app_log import append_log
                 append_log(f"[whisper] mlx done: {len(mlx_rows)} segments (Metal GPU)")
@@ -623,6 +633,8 @@ def asr_whisper_inprocess(
                         message=progress_msg("Whisper", len(out), workers=thr, extra=f"~{t_end:.0f}s"),
                         running=True,
                     )
+                    if on_progress:
+                        on_progress(len(out), t_end)
     except Cancelled:
         close = getattr(segments, "close", None)
         if callable(close):
@@ -647,6 +659,7 @@ def asr_whisper_inprocess(
             message=progress_msg("Whisper xong", len(out), workers=thr),
             running=True,
         )
+    if on_progress:
+        on_progress(len(out), max((float(row.get("end") or 0) for row in out), default=0.0))
     return out
-
 

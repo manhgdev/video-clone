@@ -453,6 +453,8 @@ export default function Sidebar({
               ? 'Đọc chữ trên khung hình'
               : settings.engine === 'subtitle'
                 ? 'Dùng file phụ đề đã chọn'
+                : settings.engine === 'capcut'
+                  ? undefined
               : 'Faster-Whisper'
           }
         >
@@ -462,6 +464,7 @@ export default function Sidebar({
             onChange={(e) => selectEngine(e.target.value as ProjectSettings['engine'])}
           >
             <option value="whisper">Giọng nói (Whisper)</option>
+            <option value="capcut">{t('Giọng nói (CapCut cloud)', 'Speech (CapCut cloud)')}</option>
             <option value="paddleocr">Chữ trên màn (OCR)</option>
             <option value="subtitle">Phụ đề SRT</option>
           </select>
@@ -474,9 +477,11 @@ export default function Sidebar({
               ? 'Google free — nhanh.'
               : settings.translator === 'mymemory'
                 ? 'Free — không key (có quota IP)'
-                : settings.translator === 'tiktok'
-                  ? 'TikTok translate free'
-                  : settings.translator === 'ollama'
+                  : settings.translator === 'tiktok'
+                    ? 'TikTok translate free'
+                    : settings.translator === 'capcut'
+                      ? undefined
+                    : settings.translator === 'ollama'
                     ? settings.ollamaMode === 'cloud'
                       ? 'Cloud'
                       : 'Dùng model đã tải trên máy'
@@ -493,6 +498,7 @@ export default function Sidebar({
             <option value="google">Google Translate</option>
             <option value="mymemory">MyMemory</option>
             <option value="tiktok">TikTok Translate</option>
+            <option value="capcut">{t('CapCut cloud', 'CapCut cloud')}</option>
             <option value="ollama">Ollama</option>
             <option value="openai">OpenAI</option>
             <option value="gemini">Gemini</option>

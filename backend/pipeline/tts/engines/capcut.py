@@ -72,8 +72,16 @@ def synthesize(text: str, voice: str, out_wav: Path) -> None:
     out_wav.parent.mkdir(parents=True, exist_ok=True)
     mp3 = out_wav.with_suffix(".mp3")
     capcut_client.synthesize_mp3(text or ".", parsed[0], parsed[1], mp3)
+    # CapCut's generated MP3s consistently contain ~70–120 ms of digital
+    # silence before the first phoneme.  TTS clips are scheduled at the cue
+    # start, so keeping that padding makes voice audibly arrive after caption.
+    # Remove only initial silence; do not touch pauses inside spoken text.
     subprocess.check_call(
-        ["ffmpeg", "-y", "-i", str(mp3), "-acodec", "pcm_s16le", str(out_wav)],
+        [
+            "ffmpeg", "-y", "-i", str(mp3), "-map", "0:a:0",
+            "-af", "silenceremove=start_periods=1:start_duration=0.02:start_threshold=-45dB",
+            "-acodec", "pcm_s16le", str(out_wav),
+        ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )

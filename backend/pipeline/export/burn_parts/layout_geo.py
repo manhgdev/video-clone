@@ -91,7 +91,7 @@ def _fit_hardsub_box(
     *,
     font_path: str | None = None,
 ) -> tuple[int, int, int, int]:
-    """Ngang: max(che hết chữ cũ, fit chữ dịch). Dọc: sát trên, nới đáy."""
+    """Ngang: max(che hết chữ cũ, fit chữ dịch). Dọc: phủ tràn toàn bộ hardsub."""
     import math
 
     sx0, sy0, sx1, sy1 = seed
@@ -117,8 +117,11 @@ def _fit_hardsub_box(
     old_w = max(sw, _cover_box_width(src_w, frame_w) if src_w > 0 else 0)
     w = min(frame_w, max(old_w, auto_w))
     cx = (sx0 + sx1) / 2.0
-    top_slack = int(round(sh * 0.26))
-    y0 = max(0, sy0 + top_slack - pad_top)
+    # ``seed`` là hộp OCR nên có thể đã thiếu stroke phía trên. Không được
+    # dùng top_slack để co hộp xuống: chính nó làm lộ nửa trên phụ đề gốc ở
+    # một số part. Nới đều theo chiều cao glyph, với mức tối thiểu từ UI.
+    top_bleed = max(pad_top, int(round(sh * 0.18)))
+    y0 = max(0, sy0 - top_bleed)
     bot_extra = max(pad_bot, int(round(sh * 0.4)), int(round(font_size * 0.7)))
     y1 = min(frame_h, sy1 + bot_extra)
     x0 = max(0, int(round(cx - w / 2)))

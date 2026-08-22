@@ -254,6 +254,9 @@ def api_export(project_id: str, payload: ExportPayload):
         out: list[dict] = []
         for i, item in enumerate(ordered):
             d = item.model_dump(exclude_none=False)
+            # Migrate pre-timeline/CapCut cues that did not include an editor
+            # id.  Renderer, TTS and later edits all require a persistent id.
+            d["id"] = str(d.get("id") or uuid.uuid4().hex)
             if d.get("bbox") is None:
                 d.pop("bbox", None)
             if d.get("captionLayout") is None:

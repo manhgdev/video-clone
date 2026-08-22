@@ -1,4 +1,9 @@
-"""VisionProvider: Ollama VL if present, else transcript-grounded heuristic. No downloads."""
+"""Transcript-grounded scene facts for Review.
+
+Keyframes are retained for matching/inspection, but the local JSON LLM client is
+text-only.  It must never be asked to describe pixels it has not received:
+doing that turned made-up visual details into review narration.
+"""
 from __future__ import annotations
 
 import subprocess
@@ -7,7 +12,6 @@ from typing import Any
 
 from pipeline.core.jobs import check_cancel
 from pipeline.core.media import _ff_bin
-from pipeline.review.llm import generate_json, pick_llm, list_ollama_models
 
 
 def analyze_scenes(
@@ -21,8 +25,10 @@ def analyze_scenes(
 ) -> list[dict[str, Any]]:
     frames_dir = cache_dir / "keyframes"
     frames_dir.mkdir(parents=True, exist_ok=True)
-    vl_model = pick_llm(list_ollama_models(), prefer_vision=True) if use_vision else None
-    use_vl = bool(use_vision and vl_model and any(k in vl_model.lower() for k in ("vl", "vision", "llava")))
+    # The current `generate_json` transport carries text only, not an image
+    # message.  Keep this parameter for API compatibility, but do not let a
+    # model infer a scene from a transcript and call it vision.
+    del use_vision
     out: list[dict[str, Any]] = []
     total_scenes = len(scenes)
     for i, scene in enumerate(scenes):
@@ -36,17 +42,7 @@ def analyze_scenes(
                 pass
         text = _scene_text(scene, transcript)
         frame = _keyframe(source, scene, frames_dir)
-        if use_vl and frame is not None and i % 8 == 0:
-            parsed = generate_json(
-                "Describe this movie scene JSON with keys characters,location,objects,action,"
-                f"emotion,description,visual_score,plot_score,emotion_score,spoiler_score. "
-                f"Transcript: {text[:800]}",
-                model=vl_model,
-                timeout=90,
-            )
-            row = _normalize(scene, parsed, text)
-        else:
-            row = _heuristic(scene, text)
+        row = _heuristic(scene, text)
         row["keyframe"] = str(frame) if frame else ""
         out.append(row)
         if i > 0 and i % 400 == 0:
@@ -122,12 +118,15 @@ def _normalize(scene: dict[str, Any], parsed: Any, text: str) -> dict[str, Any]:
         "start": scene["start"],
         "end": scene["end"],
         "duration": scene["duration"],
-        "characters": list(data.get("characters") or []),
-        "location": str(data.get("location") or ""),
-        "objects": list(data.get("objects") or []),
+        # Descriptive nouns, characters and locations require actual image
+        # input.  Until the vision transport supports it, only transcript
+        # facts may become script evidence.
+        "characters": [],
+        "location": "",
+        "objects": [],
         "action": str(data.get("action") or ""),
         "emotion": str(data.get("emotion") or ""),
-        "description": str(data.get("description") or text[:240]),
+        "description": text[:240] or f"Scene {scene['scene_id']}",
         "visual_score": num("visual_score", 0.4),
         "plot_score": num("plot_score", 0.4),
         "emotion_score": num("emotion_score", 0.3),

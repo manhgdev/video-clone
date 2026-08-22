@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from pipeline.core.config import DATA, safe_child
 from pipeline.queue.engine import enqueue, get_engine, job_action, list_jobs
 from pipeline.queue.store import get as get_job, mutate
 
@@ -48,6 +49,39 @@ def resolve_job_file(job: dict[str, Any], part: int | None = None) -> Path:
     raise HTTPException(404, "Chưa có file video")
 
 
+def _delete_review_part_cache(job: dict[str, Any], index: int) -> None:
+    """Remove large intermediate files for one deleted Review part."""
+    refs = job.get("cacheRefs") or {}
+    root_raw = str(refs.get("root") or "")
+    run_id = str(refs.get("run") or job.get("runId") or "")
+    if not root_raw or not run_id:
+        return
+    try:
+        root = Path(root_raw).resolve()
+        review_cache = (DATA / "review_cache").resolve()
+        root.relative_to(review_cache)
+    except (OSError, ValueError):
+        return
+    if root == review_cache:
+        return
+    runs = root / "runs"
+    run = safe_child(runs, run_id)
+    if not run or not run.is_dir():
+        return
+    for stem, suffix in (
+        ("raw_part", ".mp4"),
+        ("burned_part", ".mp4"),
+        ("part", ".mp4"),
+        ("script", ".json"),
+        ("plan", ".json"),
+        ("voice", ".json"),
+        ("final", ".json"),
+    ):
+        candidate = run / f"{stem}_{index:02d}{suffix}"
+        if candidate.is_file():
+            candidate.unlink()
+
+
 @router.get("/api/queue")
 def api_queue():
     get_engine()
@@ -66,7 +100,7 @@ def api_queue_enqueue(body: EnqueueIn):
 
 @router.post("/api/queue/action")
 def api_queue_global(body: QueueActionIn):
-    if body.op not in {"pause_all", "resume_all", "retry_failed", "clear_completed"}:
+    if body.op not in {"pause_all", "resume_all", "retry_failed", "clear_completed", "clear_logs"}:
         raise HTTPException(422, "Lệnh không hợp lệ")
     return job_action("*", body.op)
 
@@ -100,6 +134,10 @@ def api_queue_delete_part(job_id: str, index: int):
                 path.unlink()
             except OSError as exc:
                 raise HTTPException(500, str(exc)) from exc
+        try:
+            _delete_review_part_cache(job, int(index))
+        except OSError as exc:
+            raise HTTPException(500, str(exc)) from exc
         item["status"] = "cancelled"
         item["output"] = ""
     if not found:

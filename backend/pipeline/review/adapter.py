@@ -1,6 +1,7 @@
 """EditPlan → existing project timeline/segments so the shared Editor can open it."""
 from __future__ import annotations
 
+from statistics import median
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +30,10 @@ def caption_export_settings(settings: dict[str, Any]) -> dict[str, Any]:
         # so exported video and Live Preview show the same translated caption.
         "burnSubs": True,
         "coverHardsubs": mode == "cover",
-        "captionPlacement": "above" if mode == "above" else "below",
+        # Cover replaces the original subtitle in its own lane. "below" here
+        # placed the translated caption outside the blur band and could push it
+        # toward the middle after a clip was resized.
+        "captionPlacement": "over" if mode == "cover" else ("above" if mode == "above" else "below"),
     }
 
 
@@ -89,17 +93,48 @@ def _fallback_review_bbox(width: int, height: int) -> dict[str, int]:
 def _review_caption_box_from_boxes(
     boxes: list[tuple[int, int, int, int]], width: int, height: int
 ) -> dict[str, int]:
-    """Return a slim, compact horizontal blur band hugging the subtitle lane closely."""
+    """Return one subtitle row, never the union of unrelated OCR labels."""
     fallback = _fallback_review_bbox(width, height)
-    # Lọc chỉ lấy các box nằm ở dải phụ đề đáy (y >= 70% chiều cao khung hình)
+    # OCR can see a lower-third subtitle together with a corner logo/badge.
+    # Group words into rows first; taking one giant y-union was what made the
+    # cover jump to a label when both happened to be in the lower quarter.
     bottom_boxes = [box for box in boxes if box[1] >= height * 0.70]
     if not bottom_boxes:
         return fallback
-    y0 = min(box[1] for box in bottom_boxes)
-    y1 = max(box[3] for box in bottom_boxes)
-    # Khoảng đệm gọn gàng ôm sát chữ (4-6px), không bị dư thừa chiều cao trên dưới
-    pad_top = max(4, round(height * 0.006))
-    pad_bottom = max(4, round(height * 0.005))
+    rows: list[list[tuple[int, int, int, int]]] = []
+    y_tolerance = max(8, round(height * 0.022))
+    for box in sorted(bottom_boxes, key=lambda item: (item[1] + item[3]) / 2):
+        center = (box[1] + box[3]) / 2
+        for row in rows:
+            row_center = median((item[1] + item[3]) / 2 for item in row)
+            if abs(center - row_center) <= y_tolerance:
+                row.append(box)
+                break
+        else:
+            rows.append([box])
+
+    def row_score(row: list[tuple[int, int, int, int]]) -> tuple[float, float]:
+        x0 = min(item[0] for item in row)
+        x1 = max(item[2] for item in row)
+        center_x = (x0 + x1) / 2
+        span = x1 - x0
+        # A small edge-only label is normally a watermark, not a subtitle.
+        edge_label = span < width * 0.12 and (center_x < width * 0.24 or center_x > width * 0.76)
+        if edge_label:
+            return (-1.0, 0.0)
+        center_y = median((item[1] + item[3]) / 2 for item in row)
+        return (min(1.0, span / max(1, width)) + min(0.25, len(row) * 0.05) + center_y / max(1, height) * 0.10, center_y)
+
+    chosen = max(rows, key=row_score)
+    if row_score(chosen)[0] < 0:
+        return fallback
+    y0 = min(box[1] for box in chosen)
+    y1 = max(box[3] for box in chosen)
+    # OCR thường chỉ trả phần ruột ký tự và bỏ stroke/viền ngoài. Cover phải
+    # tràn lên trên đủ xa để không còn lộ viền subtitle gốc, nhất là CJK có
+    # outline dày; vẫn giữ dải dưới cùng để không bắt nhầm watermark ở giữa.
+    pad_top = max(8, round(height * 0.018))
+    pad_bottom = max(7, round(height * 0.012))
     top = max(round(height * 0.75), y0 - pad_top)
     bottom = min(height, y1 + pad_bottom)
     band_h = bottom - top
@@ -112,7 +147,11 @@ def _review_caption_box_from_boxes(
 
 
 def locate_review_caption_bands(video: Path) -> list[tuple[float, dict[str, int]]]:
-    """Sample subtitle boxes strictly in the bottom subtitle lane (y >= 75%)."""
+    """Collect actual subtitle candidates from the start, middle and end.
+
+    Missing OCR is deliberately omitted instead of represented by ``fallback``:
+    a real subtitle row can legitimately sit at exactly the fallback position.
+    """
     from pipeline.core.media import ffprobe_duration, video_size
 
     width, height = video_size(video)
@@ -126,7 +165,9 @@ def locate_review_caption_bands(video: Path) -> list[tuple[float, dict[str, int]
         cap = cv2.VideoCapture(str(video))
         bands: list[tuple[float, dict[str, int]]] = []
         try:
-            for fraction in (0.10, 0.25, 0.40, 0.55, 0.70, 0.85):
+            # Three samples per temporal third make a transient title card or
+            # animated brand label lose to the persistent subtitle lane.
+            for fraction in (0.06, 0.16, 0.28, 0.42, 0.50, 0.58, 0.72, 0.84, 0.94):
                 cap.set(cv2.CAP_PROP_POS_MSEC, duration * fraction * 1000.0)
                 ok, frame = cap.read()
                 if not ok:
@@ -146,13 +187,65 @@ def locate_review_caption_bands(video: Path) -> list[tuple[float, dict[str, int]
                         boxes.append((bx0, by0, bx1, by1))
                 if boxes:
                     bands.append((fraction, _review_caption_box_from_boxes(boxes, width, height)))
-                else:
-                    bands.append((fraction, fallback))
         finally:
             cap.release()
-        return bands or [(0.5, fallback)]
+        return bands
     except Exception:
-        return [(0.5, fallback)]
+        return []
+
+
+def locate_review_caption_band(video: Path) -> dict[str, int]:
+    """Resolve one stable Review subtitle lane from all sampled frames.
+
+    Review narration is intentionally fixed on screen.  Choosing an OCR box
+    per cue makes both the blur mask and translated caption jump whenever OCR
+    sees a different subtitle line or a false positive.
+    """
+    from pipeline.core.media import video_size
+
+    width, height = video_size(video)
+    fallback = _fallback_review_bbox(width, height)
+    candidates = locate_review_caption_bands(video)
+    if not candidates:
+        return fallback
+
+    # Cluster rows by geometry. A winning group must recur in at least two of
+    # the start/middle/end thirds; this rejects an animated label, scene title
+    # or logo that only occurs during one part of the movie.
+    groups: list[list[tuple[float, dict[str, int]]]] = []
+    y_tolerance = max(10, round(height * 0.028))
+    h_tolerance = max(10, round(height * 0.030))
+    for sample in sorted(candidates, key=lambda item: item[1]["y"]):
+        fraction, box = sample
+        for group in groups:
+            gy = median(int(item[1]["y"]) for item in group)
+            gh = median(int(item[1]["h"]) for item in group)
+            if abs(int(box["y"]) - gy) <= y_tolerance and abs(int(box["h"]) - gh) <= h_tolerance:
+                group.append(sample)
+                break
+        else:
+            groups.append([sample])
+
+    stable_groups = [
+        group for group in groups
+        if len(group) >= 2 and len({min(2, int(fraction * 3)) for fraction, _box in group}) >= 2
+    ]
+    if not stable_groups:
+        return fallback
+
+    def group_score(group: list[tuple[float, dict[str, int]]]) -> tuple[int, int, float]:
+        thirds = len({min(2, int(fraction * 3)) for fraction, _box in group})
+        # For equally persistent rows, subtitles are normally lower than UI.
+        y = median(int(box["y"]) for _fraction, box in group)
+        return (thirds, len(group), y)
+
+    winner = max(stable_groups, key=group_score)
+    return {
+        "x": 0,
+        "y": int(round(median(int(box["y"]) for _fraction, box in winner))),
+        "w": max(64, int(width or fallback["w"])),
+        "h": max(24, int(round(median(int(box["h"]) for _fraction, box in winner)))),
+    }
 
 
 def apply_edit_plan(
