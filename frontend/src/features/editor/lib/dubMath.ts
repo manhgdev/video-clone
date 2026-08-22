@@ -4,7 +4,7 @@ import { segmentHasDub } from './segmentQuery'
 
 /** TTS manual speed từng câu (không gồm bake global). */
 export function dubManualSpeed(seg: Segment): number {
-  return Math.max(0.75, Math.min(1.5, seg.ttsSpeed ?? 1))
+  return Math.max(0.25, Math.min(4, seg.ttsSpeed ?? 1))
 }
 
 /**
@@ -16,13 +16,13 @@ export function dubManualSpeed(seg: Segment): number {
 export function dubPlaybackSpeed(seg: Segment, bakedSpeed = 1): number {
   const bake =
     typeof bakedSpeed === 'number' && bakedSpeed > 0.2
-      ? Math.max(0.5, Math.min(2, bakedSpeed))
+      ? Math.max(0.25, Math.min(4, bakedSpeed))
       : 1
   const fit =
-    typeof seg.ttsBake === 'number' && seg.ttsBake > 0.2 && seg.ttsBake <= 2.5
+    typeof seg.ttsBake === 'number' && seg.ttsBake > 0.2 && seg.ttsBake <= 4
       ? seg.ttsBake
       : 1
-  return Math.max(0.5, Math.min(2, dubManualSpeed(seg) * (bake / fit)))
+  return Math.max(0.25, Math.min(4, dubManualSpeed(seg) * (bake / fit)))
 }
 
 /**
@@ -184,7 +184,7 @@ export function dubAudioAbsEnd(
   const ad = seg.audioDuration ?? 0
   const rate = Math.max(0.2, videoRate)
   if (ad > 0.05) {
-    return seg.start + (ad / Math.max(0.5, ttsSpeed)) * rate + 0.04
+    return seg.start + (ad / Math.max(0.25, ttsSpeed)) * rate + 0.04
   }
   return Math.max(seg.end, seg.start + 0.05)
 }
@@ -262,7 +262,7 @@ export function buildCascadePlan(
 
     let durationInVideoTime = 0
     if (ad > 0.05) {
-      durationInVideoTime = (ad / Math.max(0.5, ttsSpeed)) * rate + 0.04
+      durationInVideoTime = (ad / Math.max(0.25, ttsSpeed)) * rate + 0.04
     } else {
       durationInVideoTime = Math.max(0, seg.end - seg.start) + 0.05
     }

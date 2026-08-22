@@ -178,6 +178,14 @@ def _tts_clip_plan(
         wav = root / "tts" / name
         if not wav.exists():
             wav = root / "tts" / f"{seg['id']}.wav"
+        if not wav.exists() and seg.get("audioPath"):
+            p = Path(str(seg["audioPath"]))
+            if p.exists():
+                wav = p
+        if not wav.exists() and seg.get("audio"):
+            p = Path(str(seg["audio"]))
+            if p.exists():
+                wav = p
         if not wav.exists():
             continue
         start = float(seg.get("start") or 0)

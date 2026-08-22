@@ -215,6 +215,35 @@ class ReviewQueueTests(unittest.TestCase):
             finally:
                 review_cache.DATA = orig
 
+    def test_review_job_uses_a_fresh_project_workspace(self):
+        """Different Review settings for one source must not share cancellation state."""
+        from pipeline.clone_run import open_source
+
+        with tempfile.TemporaryDirectory() as raw:
+            src = Path(raw) / "film.mp4"
+            src.write_bytes(b"video")
+            original_find = open_source.find_project_by_fp
+            original_layout = open_source.ensure_layout
+            original_duration = open_source.ffprobe_duration
+            original_save = open_source.save_meta
+            original_status = open_source.set_status
+            try:
+                open_source.find_project_by_fp = lambda _fp: "existing-project"
+                open_source.ensure_layout = lambda project_id: Path(raw) / project_id
+                open_source.ffprobe_duration = lambda _path: 10.0
+                open_source.save_meta = lambda *_args, **_kwargs: None
+                open_source.set_status = lambda *_args, **_kwargs: None
+                project_id = open_source.open_local_video(
+                    str(src), kind="review", reuse_existing=False,
+                )
+                self.assertNotEqual(project_id, "existing-project")
+            finally:
+                open_source.find_project_by_fp = original_find
+                open_source.ensure_layout = original_layout
+                open_source.ffprobe_duration = original_duration
+                open_source.save_meta = original_save
+                open_source.set_status = original_status
+
     def test_scene_fallback_long_duration(self):
         scenes = detect_scenes(Path("/no/such.mp4"), 3600)
         self.assertGreater(len(scenes), 10)
@@ -239,6 +268,26 @@ class ReviewQueueTests(unittest.TestCase):
         self.assertEqual(resolve_build_mode({"buildMode": "fixed", "cutMode": "accumulate"}), "fixed")
         self.assertEqual(resolve_build_mode({"cutMode": "smart"}), "smart")
         self.assertEqual(resolve_build_mode({}), "accumulate")
+
+    def test_review_mode_uses_its_own_model_provider(self):
+        """Ollama mode must not inherit the saved Cloud provider from a draft."""
+        from pipeline.review.run import _select_review_model
+
+        self.assertEqual(
+            _select_review_model("llm", "gemini", "qwen3:8b", ["qwen3:8b"]),
+            "qwen3:8b",
+        )
+        self.assertIsNone(_select_review_model("translate", "gemini", "auto", []))
+
+    def test_review_provider_invalidates_story_cache(self):
+        self.assertEqual(invalidate_from({"reviewProvider"}), "story_graph")
+        self.assertEqual(
+            _settings_diff(
+                {"reviewProvider": "gemini"},
+                {"reviewProvider": "openai"},
+            ),
+            {"reviewProvider"},
+        )
 
     def test_windows_only_accumulate_splits(self):
         from pipeline.review.run import _windows
@@ -855,12 +904,42 @@ class ReviewQueueTests(unittest.TestCase):
         self.assertIn("middle or later section", prompts[0])
         self.assertIn("evt_000 900.0-906.0 scenes=[9]: Cô bé trở về gặp gia đình.", prompts[0])
 
+    def test_short_review_part_uses_one_clean_voice_line(self):
+        from pipeline.review import script as sc
+
+        original = sc.generate_json
+        sc.generate_json = lambda *_args, **_kwargs: {
+            "script": ["Câu 2: Cô bé phát hiện bí mật khiến cả gia đình im lặng."]
+        }
+        try:
+            result = sc.write_script(
+                {"movie_context": {}, "story_graph": {"events": []}},
+                duration_sec=9,
+                style="normal",
+                language="vi",
+                spoiler="none",
+                visuals=[{"scene_id": 1, "start": 0, "end": 9, "transcript": "Một bí mật được hé lộ."}],
+                use_llm=True,
+            )
+        finally:
+            sc.generate_json = original
+        self.assertEqual(len(result["segments"]), 1)
+        self.assertEqual(result["segments"][0]["text"], "Cô bé phát hiện bí mật khiến cả gia đình im lặng.")
+
+    def test_review_segment_count_scales_without_fixed_bounds(self):
+        from pipeline.review.script import _segment_count
+
+        self.assertEqual(_segment_count(9), 1)
+        self.assertEqual(_segment_count(72), 4)
+        self.assertEqual(_segment_count(3 * 60 * 60), 600)
+
     def test_finalize_drops_scene_labels(self):
         from pipeline.review.script import _dedupe_text, _finalize_line, _pad_lines, _strip_scene_marks, scrub_script
         self.assertEqual(_finalize_line("Scene 578", "vi"), "")
         self.assertEqual(_finalize_line("Cảnh 84 Cảnh 1120 Cảnh 1300", "vi"), "")
         self.assertEqual(_finalize_line("ene 83 Cảnh 84", "vi"), "")
         self.assertEqual(_finalize_line("Sang phần 36.", "vi"), "")
+        self.assertEqual(_finalize_line("Câu 3: Một bí mật vừa được hé lộ.", "vi"), "Một bí mật vừa được hé lộ")
         cleaned = _finalize_line("Sang phần 36. Câu chuyện tiếp tục với một thử thách mới.", "vi")
         self.assertEqual(cleaned, "Câu chuyện tiếp tục với một thử thách mới")
         self.assertNotIn("phần", " ".join(_pad_lines([], 12, "vi")).lower())

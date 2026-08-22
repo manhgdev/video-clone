@@ -111,6 +111,17 @@ def compose_video(
         if clip_workers is not None and int(clip_workers) > 0:
             hard = min(hard, int(clip_workers))
         hard = max(1, min(hard, len(clips)))
+        total_clips = len(clips)
+
+        def prog(cur: int, total: int, w_now: int) -> None:
+            if job_id and (cur % max(1, total // 8) == 0 or cur == total):
+                try:
+                    from pipeline.review.run import _note
+                    pct = int(cur / max(1, total) * 100)
+                    _note(job_id, f"FFmpeg ghép video: {cur}/{total} clip ({pct}%) · {w_now} luồng")
+                except Exception:
+                    pass
+
         rows = run_with_adaptive_workers(
             list(enumerate(clips)),
             encode_one,
@@ -119,6 +130,7 @@ def compose_video(
             requested=0,
             cap=hard,
             thread_name_prefix="rv-ff",
+            on_progress=prog,
             cancel_check=(lambda: check_cancel(job_id)) if job_id else None,
         )
         parts = [p for _, p in sorted(rows, key=lambda r: r[0])]

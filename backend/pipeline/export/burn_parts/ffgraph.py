@@ -753,33 +753,6 @@ def try_render_ffmpeg(
             w, h, post_crop, post_height, video_scale_x, video_scale_y
         )
         render_video = video
-        mask_ops = [op for op in ops if op["kind"] == "mask"]
-        # Core Image's Metal-backed path is deliberately mask-only. Caption
-        # overlays stay in the combined FFmpeg graph to avoid encoding the
-        # whole Review twice (Metal blur pass, then text-overlay pass).
-        if (
-            sys.platform == "darwin"
-            and mask_ops
-            and not any(op["kind"] == "overlay" for op in ops)
-            and all(str(op["style"]).lower() == "blur" for op in mask_ops)
-        ):
-            from .apple_ci import try_render_blur_masks
-
-            prepared = tmpdir / "coreimage_blur.mp4"
-            if project_id:
-                set_status(
-                    project_id, step="export", progress=18,
-                    message="Làm mờ mask bằng Apple GPU…", running=True,
-                )
-            if try_render_blur_masks(video, prepared, mask_ops, w, h, project_id):
-                render_video = prepared
-                ops = [op for op in ops if op["kind"] != "mask"]
-                _log(f"[ffgraph] Core Image Metal blur: {len(mask_ops)} mask")
-            else:
-                _log("[ffgraph] Core Image Metal unavailable → FFmpeg blur")
-
-        # Core Image may leave only text overlays (or no FFmpeg operations).
-        # Mux original audio explicitly: the helper is video-only by contract.
         if not ops:
             cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
                    "-i", str(render_video), "-i", str(video), "-map", "0:v", "-map", "1:a?"]

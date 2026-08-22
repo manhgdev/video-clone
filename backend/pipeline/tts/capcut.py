@@ -326,8 +326,22 @@ def _post_json(path: str, body: dict[str, Any], device: dict[str, Any], *, babi:
     headers = base_headers(device, body_text, appid=appid)
     if "sign" not in {k.lower() for k in headers}:
         headers["sign"] = make_sign_header(url, device["appvr"], headers["device-time"], device["tdid"])
-    with _http(timeout=60.0) as client:
-        r = client.post(url, headers=headers, content=body_text.encode("utf-8"))
+    last_err: Exception | None = None
+    r = None
+    for attempt in range(4):
+        try:
+            with _http(timeout=60.0) as client:
+                r = client.post(url, headers=headers, content=body_text.encode("utf-8"))
+            break
+        except Exception as e:
+            last_err = e
+            if attempt < 3:
+                import time
+                time.sleep(0.5 * (attempt + 1))
+                continue
+            raise RuntimeError(f"CapCut network error after 4 attempts: {e}") from e
+    if r is None:
+        raise RuntimeError(f"CapCut request failed: {last_err}")
     try:
         data = r.json()
     except Exception as e:
@@ -446,7 +460,7 @@ def synthesize_mp3(text: str, voice: str, resource_id: str, out_mp3: Path, *, ra
                 r.raise_for_status()
                 out_mp3.write_bytes(r.content)
             return out_mp3
-        except RuntimeError as e:
+        except Exception as e:
             last_err = e
             # CapCut can reject a laugh intermittently; retry once with a minimal
             # valid utterance instead of failing the whole dubbing job.
@@ -456,6 +470,9 @@ def synthesize_mp3(text: str, voice: str, resource_id: str, out_mp3: Path, *, ra
                 and re.fullmatch(r"(?i)ha(?:[\s-]+ha)*[.!?…]*", " ".join((text or "").split()))
             ):
                 text = "Ha."
+                continue
+            if attempt < 2 and not _is_shark(e):
+                time.sleep(1.0 * (attempt + 1))
                 continue
             if not _is_shark(e) or attempt >= 2:
                 raise

@@ -24,9 +24,16 @@ def analyze_scenes(
     vl_model = pick_llm(list_ollama_models(), prefer_vision=True) if use_vision else None
     use_vl = bool(use_vision and vl_model and any(k in vl_model.lower() for k in ("vl", "vision", "llava")))
     out: list[dict[str, Any]] = []
+    total_scenes = len(scenes)
     for i, scene in enumerate(scenes):
-        if job_id and i % 20 == 0:
+        if job_id and (i % 20 == 0 or i == total_scenes - 1):
             check_cancel(job_id)
+            try:
+                from pipeline.review.run import _note
+                pct = int((i + 1) / max(1, total_scenes) * 100)
+                _note(job_id, f"Phân tích hình ảnh: {i + 1}/{total_scenes} cảnh ({pct}%)")
+            except Exception:
+                pass
         text = _scene_text(scene, transcript)
         frame = _keyframe(source, scene, frames_dir)
         if use_vl and frame is not None and i % 8 == 0:

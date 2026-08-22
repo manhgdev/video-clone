@@ -9,15 +9,21 @@ from pipeline.core.media import ffprobe_duration
 from pipeline.core.project import ensure_layout, find_project_by_fp, save_meta, set_status
 
 
-def open_local_video(path: str, *, kind: str = "clone") -> str:
+def open_local_video(
+    path: str,
+    *,
+    kind: str = "clone",
+    reuse_existing: bool = True,
+) -> str:
     src = Path(path).expanduser().resolve()
     if not src.is_file():
         raise FileNotFoundError(f"SOURCE_ERROR: không thấy file {src}")
     try:
         fp = f"{src.stat().st_size:x}-{int(src.stat().st_mtime)}-{src.name}"
-        existing = find_project_by_fp(fp)
-        if existing:
-            return existing
+        if reuse_existing:
+            existing = find_project_by_fp(fp)
+            if existing:
+                return existing
     except OSError:
         fp = uuid.uuid4().hex
     # ponytail: 10h+ files must not be SHA-scanned or copied; size+mtime token is the cache key.

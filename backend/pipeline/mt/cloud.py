@@ -241,8 +241,10 @@ def _gemini_generate(
     timeout: float = 120.0,
 ) -> str:
     # base: .../v1beta  →  .../v1beta/models/{model}:generateContent
-    root = base_url.rstrip("/")
-    if not root.endswith("v1beta") and "/models" not in root:
+    root = (base_url or "").rstrip("/")
+    if not root:
+        root = "https://generativelanguage.googleapis.com/v1beta"
+    elif not root.endswith("v1beta") and "/models" not in root:
         root = root + "/v1beta"
     url = f"{root}/models/{model}:generateContent"
     keys = _usable_keys(api_key=api_key, api_keys=api_keys)

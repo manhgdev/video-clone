@@ -40,11 +40,10 @@ def generate_json(prompt: str, *, model: str | None = None, timeout: float = 180
     chosen = model or pick_llm()
     if not chosen:
         return None
-    cloud_provider: str | None = None
-    try:
-        if chosen.startswith("cloud:"):
-            _, provider, configured_model = chosen.split(":", 2)
-            cloud_provider = provider
+    text = ""
+    if chosen.startswith("cloud:"):
+        _, provider, configured_model = chosen.split(":", 2)
+        try:
             cloud = load_app_config()["cloud"].get(provider) or {}
             keys = provider_api_keys(provider)
             if not keys:
@@ -62,7 +61,16 @@ def generate_json(prompt: str, *, model: str | None = None, timeout: float = 180
                     max_output_tokens=2048,
                     system_msg="Return valid JSON only. Do not use markdown fences.",
                 )
-        else:
+        except Exception as exc:
+            try:
+                from pipeline.core.app_log import append_log
+                append_log(f"[llm] Cloud {provider} lỗi ({exc}), tự động chuyển sang local Ollama…")
+            except Exception:
+                pass
+            chosen = pick_llm()
+
+    if not text and chosen and not chosen.startswith("cloud:"):
+        try:
             with httpx.Client(timeout=timeout, trust_env=False) as client:
                 res = client.post(
                     "http://127.0.0.1:11434/api/generate",
@@ -71,28 +79,25 @@ def generate_json(prompt: str, *, model: str | None = None, timeout: float = 180
                         "prompt": prompt,
                         "stream": False,
                         "format": "json",
+                        "keep_alive": "60m",  # Giữ model trên VRAM không bị unload/reload
                         "think": False,
                         "options": {
-                            "num_predict": 8192,
-                            "num_ctx": 6144,  # smaller KV cache = faster tokens/sec
-                            "temperature": 0.7,
+                            "num_predict": 1024,
+                            "num_ctx": 2048,  # siêu gọn nhẹ = tốc độ sinh tức thì
+                            "temperature": 0.5,
+                            "top_p": 0.9,
                         },
                     },
                 )
                 res.raise_for_status()
                 text = str((res.json() or {}).get("response") or "")
-    except RuntimeError:
-        raise
-    except httpx.HTTPStatusError as exc:
-        if cloud_provider:
-            raise RuntimeError(
-                f"REVIEW_CLOUD_REQUEST_FAILED:{cloud_provider}:{exc.response.status_code}"
-            ) from None
-        return None
-    except Exception:
-        if cloud_provider:
-            raise RuntimeError(f"REVIEW_CLOUD_REQUEST_FAILED:{cloud_provider}") from None
-        return None
+        except Exception as e:
+            try:
+                from pipeline.core.app_log import append_log
+                append_log(f"[llm] Ollama ({chosen}) lỗi: {e}")
+            except Exception:
+                pass
+
     return parse_json(text)
 
 

@@ -65,7 +65,8 @@ function jobLog(job: QueueJob) {
 }
 
 function statusLabel(status: string, t: (vi: string, en: string) => string) {
-  if (status === 'running' || status === 'queued') return t('Đang chạy', 'Running')
+  if (status === 'running') return t('Đang chạy', 'Running')
+  if (status === 'queued') return t('Đang chờ', 'Queued')
   if (status === 'paused') return t('Đã dừng', 'Paused')
   if (status === 'interrupted') return t('Gián đoạn', 'Interrupted')
   if (status === 'done') return t('Hoàn thành', 'Done')
@@ -75,6 +76,7 @@ function statusLabel(status: string, t: (vi: string, en: string) => string) {
 
 function partStatusLabel(status: string | undefined, t: (vi: string, en: string) => string) {
   if (status === 'running') return t('Đang chạy', 'Running')
+  if (status === 'queued') return t('Đang chờ', 'Queued')
   if (status === 'paused') return t('Đã dừng', 'Paused')
   if (status === 'pending') return t('Đang chờ', 'Pending')
   if (status === 'failed') return t('Lỗi', 'Failed')
@@ -224,7 +226,8 @@ export default function FilmPage({ onBack, onOpenEditor }: Props) {
 
   const counts = useMemo(() => ({
     all: jobs.length,
-    running: jobs.filter((j) => j.status === 'running' || j.status === 'queued').length,
+    active: jobs.filter((j) => j.status === 'running' || j.status === 'queued').length,
+    queued: jobs.filter((j) => j.status === 'queued').length,
     done: jobs.filter((j) => j.status === 'done').length,
     failed: jobs.filter((j) => j.status === 'failed' || j.status === 'cancelled' || j.status === 'interrupted' || j.status === 'paused').length,
   }), [jobs])
@@ -236,7 +239,7 @@ export default function FilmPage({ onBack, onOpenEditor }: Props) {
     return true
   })
 
-  const active = jobs.find((j) => j.status === 'running' || j.status === 'queued')
+  const active = jobs.find((j) => j.status === 'running')
   const logLines = active
     ? jobLog(active)
     : [t('[Hệ thống] Khởi động Review. Sẵn sàng...', '[System] Review ready. Waiting to start...')]
@@ -410,12 +413,12 @@ export default function FilmPage({ onBack, onOpenEditor }: Props) {
         </div>
         <div className="rv-filters">
           <button type="button" className={`rv-chip${filter === 'all' ? ' on' : ''}`} onClick={() => setFilter('all')}><i className="all" />{t('Tất cả', 'All')} {counts.all}</button>
-          <button type="button" className={`rv-chip${filter === 'running' ? ' on' : ''}`} onClick={() => setFilter('running')}><i className="run" />{t('Đang chạy', 'Running')} {counts.running}</button>
+          <button type="button" className={`rv-chip${filter === 'running' ? ' on' : ''}`} onClick={() => setFilter('running')}><i className="run" />{t('Đang hoạt động', 'Active')} {counts.active}</button>
           <button type="button" className={`rv-chip${filter === 'done' ? ' on' : ''}`} onClick={() => setFilter('done')}><i className="ok" />{t('Hoàn thành', 'Done')} {counts.done}</button>
           <button type="button" className={`rv-chip${filter === 'failed' ? ' on' : ''}`} onClick={() => setFilter('failed')}><i className="bad" />{t('Dừng / Lỗi', 'Paused / Error')} {counts.failed}</button>
         </div>
-        {counts.running ? (
-          <div className="rv-banner">● {t('Hàng đợi', 'Queue')}: {Math.max(0, counts.running - 1)} {t('dự án đang chờ', 'projects waiting')}
+        {counts.active ? (
+          <div className="rv-banner">● {t('Hàng đợi', 'Queue')}: {counts.queued} {t('dự án đang chờ', 'projects waiting')}
             {active ? <> · {t('Đang chạy', 'Running')}: {jobTitle(active)} - {fmtDate(active, locale)}</> : null}
           </div>
         ) : null}
@@ -535,8 +538,9 @@ export default function FilmPage({ onBack, onOpenEditor }: Props) {
     <div className="rv-page">
       <div className="rv-top">
         <div className="rv-row">
-          <button type="button" className="rv-back" onClick={() => setView('list')}>← {t('Quay lại', 'Back')}</button>
-          <h1>{editingJobId ? t('Cài đặt dự án', 'Project settings') : t('Tạo dự án mới', 'Create new project')}</h1>
+          <BackTitle onBack={() => setView('list')}>
+            {editingJobId ? t('Cài đặt dự án', 'Project settings') : t('Tạo dự án mới', 'Create new project')}
+          </BackTitle>
         </div>
         <div className="rv-top-actions">
           {!editingJobId && <button type="button" className="rv-draft" onClick={saveDraft}>🖫 {t('Lưu nháp', 'Save draft')}</button>}

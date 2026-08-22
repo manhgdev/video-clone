@@ -80,7 +80,7 @@ export function ReviewLeftPanel({ settings, onChange }: { settings: ReviewSettin
 
         <div className="rv-sec">
           <span className="rv-sec-l"><i className="rv-dot orange" />{t('Chế độ bám nhả theo hình', 'Beat-follow mode')}</span>
-          <span className="rv-slow">● {t('Xử lý chậm hơn', 'Slower processing')}</span>
+          <span className="rv-slow">● {t('Ưu tiên khớp cảnh', 'Prioritizes scene matching')}</span>
         </div>
         <div className="rv-choices">
           <button type="button" className={`rv-choice${mode === 'fixed' ? ' on' : ''}`} onClick={() => onChange({ buildMode: 'fixed' })}>
@@ -95,12 +95,12 @@ export function ReviewLeftPanel({ settings, onChange }: { settings: ReviewSettin
 
         <div className="rv-sec rv-sec-div">
           <span className="rv-sec-l"><i className="rv-dot orange" />{t('Chế độ cắt thông minh', 'Smart cut mode')}</span>
-          <span className="rv-fast">● {t('Xử lý nhanh hơn', 'Faster processing')}</span>
+          <span className="rv-fast">● {t('Dựng theo từng phần', 'Builds in parts')}</span>
         </div>
         <div className="rv-choices">
           <button type="button" className={`rv-choice${mode === 'accumulate' ? ' on' : ''}`} onClick={() => onChange({ buildMode: 'accumulate' })}>
             <b>{t('Phân đoạn tích lũy', 'Cumulative segments')}</b>
-            <span>{t('AI chọn phân cảnh dài nối tiếp theo ngữ cảnh, xử lý nhanh hơn.', 'AI picks long consecutive scenes by context, faster to process.')}</span>
+            <span>{t('Phân tích phim một lần, rồi dựng các phần nối tiếp theo ngữ cảnh.', 'Analyzes the film once, then builds consecutive contextual parts.')}</span>
           </button>
           <button type="button" className={`rv-choice${mode === 'smart' ? ' on' : ''}`} title={smartCutHint} onClick={() => onChange({ buildMode: 'smart' })}>
             <b>{t('Cắt thông minh (Nâng cao)', 'Smart cut (Advanced)')} <em className="rv-pill soft">{t('Thử nghiệm', 'Experimental')}</em></b>
@@ -136,23 +136,6 @@ export function ReviewLeftPanel({ settings, onChange }: { settings: ReviewSettin
             ))}
           </div>
         </>
-      ) : mode === 'stretch' ? (
-        <>
-          <h4 className="rv-nest-h small">{t('Nhịp nghỉ giữa câu', 'Pause between sentences')}</h4>
-          <p className="rv-hint">{t('Khoảng lặng giữa các câu đọc – ảnh hưởng tốc độ tổng thể video.', 'Silence between spoken sentences — affects overall video pacing.')}</p>
-          <div className="rv-choices three">
-            <button type="button" className={`rv-choice center${settings.pausePace === 'fast' ? ' on' : ''}`} onClick={() => onChange({ pausePace: 'fast' })}>
-              <span className="rv-ico">⚡</span><b>{t('Nhanh', 'Fast')}</b><small>{t('Video ngắn - Reels', 'Short video - Reels')}</small>
-            </button>
-            <button type="button" className={`rv-choice center${settings.pausePace === 'balanced' ? ' on' : ''}`} onClick={() => onChange({ pausePace: 'balanced' })}>
-              <span className="rv-ico">⚖️</span><b>{t('Cân bằng', 'Balanced')}</b><small>{t('Tối ưu cho review', 'Optimized for review')}</small>
-            </button>
-            <button type="button" className={`rv-choice center${settings.pausePace === 'slow' ? ' on' : ''}`} onClick={() => onChange({ pausePace: 'slow' })}>
-              <span className="rv-ico">🐢</span><b>{t('Chậm rãi', 'Slow')}</b><small>{t('Kể chuyện sâu', 'Deep storytelling')}</small>
-            </button>
-          </div>
-          <p className="rv-hint">{t('Độ dài mỗi cảnh tự co giãn theo giọng đọc thật - không cần chỉnh nhịp cắt thủ công.', 'Each scene length auto-stretches to the real narration - no manual cut timing needed.')}</p>
-        </>
       ) : mode === 'accumulate' ? (
         <label className="rv-field">
           <div className="rv-inline">
@@ -163,9 +146,9 @@ export function ReviewLeftPanel({ settings, onChange }: { settings: ReviewSettin
               ))}
             </div>
           </div>
-          <p className="rv-hint">{t('Nguồn được tách phần để xử lý nhanh; mỗi phần chỉ tạo phần lời kể tương ứng rồi ghép lại đúng độ dài review đã chọn.', 'The source is split for faster processing; each part creates only its share of narration, then all parts are joined to the selected review length.')}</p>
+          <p className="rv-hint">{t('Phim được phân tích một lần; mỗi phần chỉ tạo lời kể và dựng đoạn tương ứng, rồi ghép lại đúng độ dài review đã chọn.', 'The film is analyzed once; each part only creates its narration and edit, then all parts are joined to the selected review length.')}</p>
         </label>
-      ) : (
+      ) : mode === 'fixed' ? (
         <label className="rv-field">
           <div className="rv-inline">
             <span className="rv-lab">{t('Độ dài video review (phút)', 'Review length (minutes)')}</span>
@@ -177,7 +160,25 @@ export function ReviewLeftPanel({ settings, onChange }: { settings: ReviewSettin
           </div>
           <p className="rv-hint">{t('Một video duy nhất — không chia thành nhiều phần.', 'One video — not split into parts.')}</p>
         </label>
-      )}
+      ) : null}
+
+      {/* Nhịp nghỉ giữa câu — applies to all build modes */}
+      <h4 className="rv-nest-h small">{t('Nhịp nghỉ giữa câu', 'Pause between sentences')}</h4>
+      <p className="rv-hint">{t('Khoảng lặng giữa các câu đọc – ảnh hưởng tốc độ tổng thể video.', 'Silence between spoken sentences — affects overall video pacing.')}</p>
+      <div className="rv-choices three">
+        <button type="button" className={`rv-choice center${settings.pausePace === 'fast' ? ' on' : ''}`} onClick={() => onChange({ pausePace: 'fast' })}>
+          <span className="rv-ico">⚡</span><b>{t('Nhanh', 'Fast')}</b><small>{t('Video ngắn - Reels', 'Short video - Reels')}</small>
+        </button>
+        <button type="button" className={`rv-choice center${settings.pausePace === 'balanced' ? ' on' : ''}`} onClick={() => onChange({ pausePace: 'balanced' })}>
+          <span className="rv-ico">⚖️</span><b>{t('Cân bằng', 'Balanced')}</b><small>{t('Tối ưu cho review', 'Optimized for review')}</small>
+        </button>
+        <button type="button" className={`rv-choice center${settings.pausePace === 'slow' ? ' on' : ''}`} onClick={() => onChange({ pausePace: 'slow' })}>
+          <span className="rv-ico">🐢</span><b>{t('Chậm rãi', 'Slow')}</b><small>{t('Kể chuyện sâu', 'Deep storytelling')}</small>
+        </button>
+      </div>
+      {mode === 'stretch' ? (
+        <p className="rv-hint">{t('Ở chế độ Co giãn, độ dài cảnh tự điều chỉnh theo TTS – không cần chỉnh nhịp cắt thủ công.', 'In Stretch mode, scene length auto-adjusts to TTS — no manual cut timing needed.')}</p>
+      ) : null}
     </>
   )
 }
@@ -258,11 +259,24 @@ export function ReviewRightPanel({
     setPackOpen(false)
   }
 
+  const genreOptions = [
+    // Built-in genres (merged with their pack names if overridden)
+    ...GENRES.map((g) => {
+      const overridePack = packs.find((p) => p.id === g.id)
+      return { id: g.id, label: overridePack?.name || (locale === 'en' ? g.en : g.vi) }
+    }),
+    // Custom packs not in GENRES
+    ...packs.filter((p) => !GENRES.some((g) => g.id === p.id)).map((p) => ({ id: p.id, label: p.name || p.id })),
+  ]
+
   return (
     <>
       <div className="rv-tts-head">
         <span className="rv-lab">{t('Giọng đọc (TTS)', 'Narration (TTS)')}</span>
-        <span className="rv-lab rv-lab-r">{t('Thể loại phim', 'Movie genre')} <button type="button" className="rv-link" onClick={openPacks}>{t('Cấu hình…', 'Configure…')}</button></span>
+        <span className="rv-lab rv-lab-r">
+          {t('Thể loại phim', 'Movie genre')}{' '}
+          <button type="button" className="rv-link" onClick={openPacks}>{t('Cấu hình…', 'Configure…')}</button>
+        </span>
       </div>
       <div className="rv-two">
         <div className="rv-voice">
@@ -273,7 +287,7 @@ export function ReviewRightPanel({
         </div>
         <div className="rv-voice">
           <select value={settings.genre} onChange={(e) => onChange({ genre: e.target.value })}>
-            {GENRES.map((g) => <option key={g.id} value={g.id}>{locale === 'en' ? g.en : g.vi}</option>)}
+            {genreOptions.map((g) => <option key={g.id} value={g.id}>{g.label}</option>)}
           </select>
         </div>
       </div>

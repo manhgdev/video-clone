@@ -83,7 +83,7 @@ html.dark .rv-page {
 .rv-count { margin-left: 8px; color: var(--rv-muted); font-size: .92rem; font-weight: 600; }
 .rv-top-actions, .rv-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 
-.rv-back, .rv-ghost {
+.rv-ghost {
   height: 36px;
   border: 0;
   border-radius: 10px;
@@ -93,7 +93,7 @@ html.dark .rv-page {
   font-weight: 650;
   font-size: .85rem;
 }
-.rv-back:hover, .rv-ghost:hover { background: var(--rv-input); }
+.rv-ghost:hover { background: var(--rv-input); }
 .rv-draft {
   height: 36px;
   border: 1px solid var(--rv-input-line);
@@ -146,6 +146,7 @@ html.dark .rv-page {
 }
 .rv-reset { height: 28px; border: 0; background: transparent; color: var(--rv-muted); font-size: .78rem; }
 .rv-link { height: auto; border: 0; background: none; color: var(--rv); font-size: .78rem; font-weight: 650; padding: 0; text-align: right; }
+.rv-genre-cur { color: var(--rv); font-size: .72rem; font-weight: 600; }
 
 .rv-video-row {
   display: grid;

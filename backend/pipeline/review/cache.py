@@ -30,6 +30,7 @@ INVALIDATE_FROM = {
     "reviewPlanVersion": "script",
     "reviewModel": "story_graph",
     "reviewMode": "story_graph",
+    "reviewProvider": "story_graph",
     "reviewMatchVersion": "matching",
     "style": "script",
     "language": "script",

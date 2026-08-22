@@ -61,15 +61,17 @@ def _parse_hex_color(hex_str: str, default: tuple[int, int, int] = (76, 29, 149)
 
 
 def _feather_vertical_blend(
-    frame_bgr: Any, roi: Any, covered: Any, y0: int, y1: int, x0: int, x1: int, feather: int = 2
+    frame_bgr: Any, roi: Any, covered: Any, y0: int, y1: int, x0: int, x1: int, feather: int = 16
 ) -> None:
-    """Hòa mép trên/dưới vùng che — giữ mép trái/phải thay 100%."""
+    """Hòa mép trên/dưới vùng che mềm mại chuẩn CapCut — giữ mép trái/phải 100%."""
     import numpy as np
 
     bh, bw = roi.shape[:2]
+    feather_actual = max(2, min(int(feather), bh // 3))
     alpha = np.ones((bh, bw), np.float32)
-    for i in range(feather):
-        a = (i + 1) / (feather + 1)
+    for i in range(feather_actual):
+        t = (i + 1) / (feather_actual + 1)
+        a = t * t * (3.0 - 2.0 * t)
         alpha[i, :] = np.minimum(alpha[i, :], a)
         alpha[-(i + 1), :] = np.minimum(alpha[-(i + 1), :], a)
     a3 = alpha[..., None]

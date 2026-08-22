@@ -75,36 +75,44 @@ def locate_review_captions(
 
 
 def _fallback_review_bbox(width: int, height: int) -> dict[str, int]:
-    """Fixed bottom band for Review; no per-caption OCR is required."""
+    """Slim, compact horizontal bottom band for Review (lower ~6.5%)."""
     width, height = max(64, int(width or 1920)), max(64, int(height or 1080))
+    band_h = max(36, round(height * 0.065))
     return {
         "x": 0,
-        "y": round(height * 0.80),
+        "y": max(0, height - band_h - round(height * 0.025)),
         "w": width,
-        "h": max(24, height - round(height * 0.80)),
+        "h": band_h,
     }
 
 
 def _review_caption_box_from_boxes(
     boxes: list[tuple[int, int, int, int]], width: int, height: int
 ) -> dict[str, int]:
-    """Return a padded OCR box that covers only the visible source subtitle."""
+    """Return a slim, compact horizontal blur band hugging the subtitle lane closely."""
     fallback = _fallback_review_bbox(width, height)
-    if not boxes:
+    # Lọc chỉ lấy các box nằm ở dải phụ đề đáy (y >= 70% chiều cao khung hình)
+    bottom_boxes = [box for box in boxes if box[1] >= height * 0.70]
+    if not bottom_boxes:
         return fallback
-    x0 = min(box[0] for box in boxes)
-    y0 = min(box[1] for box in boxes)
-    x1 = max(box[2] for box in boxes)
-    y1 = max(box[3] for box in boxes)
-    pad_x = max(round(width * 0.015), round(max(1, x1 - x0) * 0.04))
-    pad_y = max(round(height * 0.012), round(max(1, y1 - y0) * 0.60))
-    left, top = max(0, x0 - pad_x), max(0, y0 - pad_y)
-    right, bottom = min(width, x1 + pad_x), min(height, y1 + pad_y)
-    return {"x": left, "y": top, "w": max(24, right - left), "h": max(24, bottom - top)}
+    y0 = min(box[1] for box in bottom_boxes)
+    y1 = max(box[3] for box in bottom_boxes)
+    # Khoảng đệm gọn gàng ôm sát chữ (4-6px), không bị dư thừa chiều cao trên dưới
+    pad_top = max(4, round(height * 0.006))
+    pad_bottom = max(4, round(height * 0.005))
+    top = max(round(height * 0.75), y0 - pad_top)
+    bottom = min(height, y1 + pad_bottom)
+    band_h = bottom - top
+    return {
+        "x": 0,
+        "y": max(0, min(height - band_h, top)),
+        "w": width,
+        "h": band_h,
+    }
 
 
 def locate_review_caption_bands(video: Path) -> list[tuple[float, dict[str, int]]]:
-    """Sample start/middle/end subtitle boxes and reuse them without per-cue OCR."""
+    """Sample subtitle boxes strictly in the bottom subtitle lane (y >= 75%)."""
     from pipeline.core.media import ffprobe_duration, video_size
 
     width, height = video_size(video)
@@ -112,21 +120,34 @@ def locate_review_caption_bands(video: Path) -> list[tuple[float, dict[str, int]
     try:
         import cv2
         from pipeline.ocr.extract import _rapidocr_labels
-        from pipeline.ocr.locate import ocr_mid_hardsub_boxes
 
         duration = max(0.1, float(ffprobe_duration(video) or 0))
         ocr = _rapidocr_labels()
         cap = cv2.VideoCapture(str(video))
         bands: list[tuple[float, dict[str, int]]] = []
         try:
-            for fraction in (0.12, 0.31, 0.50, 0.69, 0.88):
+            for fraction in (0.10, 0.25, 0.40, 0.55, 0.70, 0.85):
                 cap.set(cv2.CAP_PROP_POS_MSEC, duration * fraction * 1000.0)
                 ok, frame = cap.read()
                 if not ok:
                     continue
-                found, _text = ocr_mid_hardsub_boxes(frame, ocr)
-                if found:
-                    bands.append((fraction, _review_caption_box_from_boxes(found, width, height)))
+                h, w = frame.shape[:2]
+                y_crop = int(h * 0.75)
+                bottom_roi = frame[y_crop:h, 0:w]
+                results, _ = ocr(bottom_roi)
+                boxes: list[tuple[int, int, int, int]] = []
+                if results:
+                    for item in results:
+                        pts = item[0]
+                        bx0 = int(min(p[0] for p in pts))
+                        by0 = int(min(p[1] for p in pts)) + y_crop
+                        bx1 = int(max(p[0] for p in pts))
+                        by1 = int(max(p[1] for p in pts)) + y_crop
+                        boxes.append((bx0, by0, bx1, by1))
+                if boxes:
+                    bands.append((fraction, _review_caption_box_from_boxes(boxes, width, height)))
+                else:
+                    bands.append((fraction, fallback))
         finally:
             cap.release()
         return bands or [(0.5, fallback)]
@@ -168,7 +189,9 @@ def apply_edit_plan(
         if audio:
             item["audioFile"] = Path(audio).name
             item["audioUrl"] = f"/api/projects/{project_id}/tts/{Path(audio).name}"
-            item["audioDuration"] = max(0.0, end - start)
+            item["audioDuration"] = float(seg.get("audio_duration") or max(0.0, end - start))
+            item["ttsSpeed"] = float(seg.get("tts_speed") or 1.0)
+            item["ttsBake"] = float(seg.get("tts_bake") or 1.0)
         segments.append(item)
     meta["videoPath"] = str(compiled)
     meta["duration"] = float(plan.get("duration") or 0)

@@ -17,6 +17,12 @@ def detect_scenes(
     job_id: str | None = None,
     threshold: float = 0.35,
 ) -> list[dict[str, Any]]:
+    if job_id:
+        try:
+            from pipeline.review.run import _note
+            _note(job_id, f"Cắt cảnh: đang quét chuyển cảnh khung hình ({path.name})…")
+        except Exception:
+            pass
     cuts = _ffmpeg_scenes(path, threshold=threshold, job_id=job_id)
     if len(cuts) < 2:
         step = 8.0 if duration < 3600 else 12.0

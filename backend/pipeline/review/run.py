@@ -1,6 +1,7 @@
 """Review orchestrator using parallel, fully finalized Review parts."""
 from __future__ import annotations
 
+import hashlib
 import re
 import shutil
 import threading
@@ -35,7 +36,7 @@ from pipeline.review.vision import analyze_scenes
 from pipeline.tts import tts_segment
 
 
-REVIEW_PLAN_VERSION = 14
+REVIEW_PLAN_VERSION = 17
 REVIEW_STORY_VERSION = 6
 REVIEW_FINALIZE_VERSION = 8
 REVIEW_MATCH_VERSION = 4
@@ -101,24 +102,22 @@ def run_review_job(job: dict[str, Any]) -> dict[str, Any]:
     windows = _windows(duration, mode, settings)
     nwin = max(1, len(windows))
     window_duration = sum(max(0.0, end - start) for start, end in windows)
-    part_pipeline = mode == "accumulate" and nwin > 1
-    available_models = list_ollama_models() if review_mode == "llm" else []
+    available_models = list_ollama_models()
     requested_model = str(settings.get("reviewModel") or "auto").strip()
-    if review_mode == "llm" and requested_model not in {"", "auto"}:
-        if requested_model not in available_models:
-            raise RuntimeError("REVIEW_LLM_MODEL_UNAVAILABLE")
-        review_model = requested_model
-    elif review_mode == "llm":
-        review_model = pick_llm(available_models) if review_mode == "llm" else None
-    elif review_mode == "cloud":
+    if review_mode == "llm" and requested_model not in {"", "auto"} and requested_model not in available_models:
+        raise RuntimeError("REVIEW_LLM_MODEL_UNAVAILABLE")
+    if review_mode == "cloud":
         from pipeline.core.app_config import load_app_config
 
         cloud = load_app_config()["cloud"].get(review_provider) or {}
         if not str(cloud.get("apiKey") or "").strip():
             raise RuntimeError(f"REVIEW_CLOUD_KEY_REQUIRED:{review_provider}")
-        review_model = f"cloud:{review_provider}:{str(cloud.get('reviewModel') or '')}"
-    else:
-        review_model = None
+    review_model = _select_review_model(
+        review_mode,
+        review_provider,
+        requested_model,
+        available_models,
+    )
     if review_mode == "llm" and not review_model:
         raise RuntimeError("REVIEW_LLM_REQUIRED")
     settings["reviewModel"] = review_model or "translate"
@@ -132,13 +131,13 @@ def run_review_job(job: dict[str, Any]) -> dict[str, Any]:
     )
 
     with _timed("scene_detect") as _t_scenes:
-        scenes = [] if part_pipeline else _cached_or(
+        scenes = _cached_or(
             root / "scenes.json", lambda: detect_scenes(src, duration, job_id=job_id),
             job_id, "scenes", 0.12, "Cắt cảnh",
         )
     _note(job_id, f"Cảnh: {len(scenes) if isinstance(scenes, list) else 0} đoạn · {_t_scenes.elapsed:.0f}s")
     with _timed("transcript") as _t_tr:
-        transcript = [] if part_pipeline else _cached_or(
+        transcript = _cached_or(
             root / f"transcript_{source_lang}.json",
             lambda: load_transcript(
                 src, root, job_id=job_id, duration=duration,
@@ -153,7 +152,7 @@ def run_review_job(job: dict[str, Any]) -> dict[str, Any]:
     sample = _clip((transcript[0].get("text") if transcript else "") or "")
     _note(job_id, f"Transcript: {len(transcript)} câu · {_t_tr.elapsed:.0f}s" + (f" · ví dụ: {sample}" if sample else ""))
     with _timed("visual_analysis") as _t_vis:
-        visuals = [] if part_pipeline else _cached_or(
+        visuals = _cached_or(
             root / "visual_analysis" / f"scenes_{review_mode}_{source_lang}.json",
             lambda: analyze_scenes(
                 src, scenes, transcript, root, job_id=job_id,
@@ -188,7 +187,7 @@ def run_review_job(job: dict[str, Any]) -> dict[str, Any]:
         story_builder = lambda: _faithful_story(visuals)
     story_model_key = re.sub(r"[^A-Za-z0-9._-]+", "_", review_model or "translate")
     with _timed("story_graph") as _t_story:
-        story = {} if part_pipeline else _cached_or(
+        story = _cached_or(
             root / f"story_graph_v{REVIEW_STORY_VERSION}_{review_mode}_{story_model_key}_{lang}_{source_lang}.json",
             story_builder,
             job_id,
@@ -207,10 +206,6 @@ def run_review_job(job: dict[str, Any]) -> dict[str, Any]:
     reuse_tts = _reuse(start, "tts")
     reuse_match = _reuse(start, "matching")
     reuse_tl = _reuse(start, "timeline")
-    if part_pipeline:
-        # A window now owns its own local-time source and analysis cache.
-        # Legacy full-source scripts/audio cannot safely be reused here.
-        reuse_script = reuse_tts = reuse_match = reuse_tl = False
     prev_scripts = _load_scripts(prev_rd, nwin) if (reuse_script or reuse_tts or reuse_match) else None
     scripts_scrubbed = False
     if prev_scripts:
@@ -235,6 +230,7 @@ def run_review_job(job: dict[str, Any]) -> dict[str, Any]:
     if not reuse_tts:
         reuse_match = reuse_tl = False
     finalize_key = _finalize_key(settings)
+    script_settings_key = _script_settings_key(settings)
     if reuse_match and not _parts_complete(prev_rd, nwin, finalize_key):
         reuse_match = False
     if not reuse_match:
@@ -256,7 +252,10 @@ def run_review_job(job: dict[str, Any]) -> dict[str, Any]:
     _refresh_part_timeline(parts_meta, factor=factor)
     _note(job_id, f"Dựng: {nwin} phần · {_fmt_range(0, duration)}", parts=parts_meta, stage="script", progress=0.56)
 
-    project_id = open_local_video(str(src), kind="review")
+    # Each queued Review is a separate edit/export run. Reusing the project of
+    # an earlier job aliases cancellation and lets a later run stop its FFmpeg.
+    # Analysis cache remains shared by source fingerprint in ``review_cache``.
+    project_id = open_local_video(str(src), kind="review", reuse_existing=False)
     share_cancel(job_id, project_id)
     tts_dir = ensure_layout(project_id) / "tts"
     orig_pct = float(settings.get("originalAudioPct") or 0)
@@ -304,8 +303,9 @@ def run_review_job(job: dict[str, Any]) -> dict[str, Any]:
                 not scripts_scrubbed
                 and _part_cache_matches(
                     cached_script, script_dur,
-                    source_start=w0 if part_pipeline else None,
-                    source_end=w1 if part_pipeline else None,
+                    source_start=w0,
+                    source_end=w1,
+                    settings_key=script_settings_key,
                 )
                 and _media_artifact_ok(raw_part)
                 and _media_artifact_ok(part)
@@ -353,54 +353,16 @@ def run_review_job(job: dict[str, Any]) -> dict[str, Any]:
             part_source = src
             part_meta = meta
             part_transcript = transcript
-            if part_pipeline:
-                part_root = root / "windows" / f"{pi:02d}_{int(w0 * 1000):010d}_{int(w1 * 1000):010d}"
-                part_source = _materialize_window(src, part_root, w0, w1, job_id)
-                part_duration = max(0.01, float(ffprobe_duration(part_source) or (w1 - w0)))
-                part_meta = inspect_media(part_source)
-                part_scenes = _cached_or(
-                    part_root / "scenes.json",
-                    lambda: detect_scenes(part_source, part_duration, job_id=job_id),
-                    job_id, "scenes", 0.12, f"Cắt cảnh phần {pi + 1}",
-                )
-                part_transcript = _cached_or(
-                    part_root / f"transcript_{source_lang}.json",
-                    lambda: load_transcript(
-                        part_source, part_root, job_id=job_id, duration=part_duration,
-                        sidecar="", source_lang=source_lang,
-                    ),
-                    job_id, "transcript", 0.28, f"Transcript phần {pi + 1}",
-                )
-                vis = _cached_or(
-                    part_root / "visual_analysis" / f"scenes_{review_mode}_{source_lang}.json",
-                    lambda: analyze_scenes(
-                        part_source, part_scenes, part_transcript, part_root, job_id=job_id,
-                        use_vision=review_mode == "llm",
-                    ),
-                    job_id, "vision", 0.42, f"Phân tích hình phần {pi + 1}",
-                )
-                part_story_model_key = re.sub(r"[^A-Za-z0-9._-]+", "_", review_model or "translate")
-
-                def part_story_progress(stage: str, done: int, total: int, workers: int) -> None:
-                    label = "khối cảnh" if stage == "blocks" else "chương"
-                    _note(
-                        job_id,
-                        f"Cốt truyện phần {pi + 1}: {label} {done}/{total} · {workers} luồng",
-                        stage="story_graph",
-                        progress=0.42 + 0.09 * (done / max(1, total)),
-                    )
-
-                story_part = _cached_or(
-                    part_root / f"story_graph_v{REVIEW_STORY_VERSION}_{review_mode}_{part_story_model_key}_{lang}_{source_lang}.json",
-                    (lambda: build_story(
-                        vis, language=lang, model=review_model, on_progress=part_story_progress, title=src.name,
-                    ))
-                    if review_mode != "translate" else (lambda: _faithful_story(vis)),
-                    job_id, "story_graph", 0.52, f"Cốt truyện phần {pi + 1}",
-                )
-            else:
-                vis = visuals
-                story_part = story
+            # Analyze the source once. Each cumulative part receives only its
+            # timeline slice, while clip timestamps remain in the full source.
+            # This avoids repeating Whisper, vision and LLM work per window.
+            vis = _slice_visuals(visuals, w0, w1) if nwin > 1 else visuals
+            story_part = _slice_story(story, vis) if nwin > 1 else story
+            part_transcript = [
+                row for row in transcript
+                if float(row.get("end") or 0) >= w0
+                and float(row.get("start") or 0) <= w1
+            ]
             script_dur = _script_duration(mode, w0, w1, window_duration, settings, factor)
             with parts_lock:
                 _note(
@@ -432,21 +394,17 @@ def run_review_job(job: dict[str, Any]) -> dict[str, Any]:
                     notes=str(settings.get("notes") or ""),
                     genre=str(settings.get("genre") or ""),
                     visuals=vis,
-                    source_transcript=part_transcript if part_pipeline else [
-                        row for row in transcript
-                        if float(row.get("end") or 0) >= w0
-                        and float(row.get("start") or 0) <= w1
-                    ],
+                    source_transcript=part_transcript,
                     project_id=project_id,
                     use_llm=review_mode != "translate",
                     llm_model=review_model,
                 )
             script["reviewPlanVersion"] = REVIEW_PLAN_VERSION
+            script["settingsKey"] = script_settings_key
             script["targetDurationSec"] = round(script_dur, 3)
-            if part_pipeline:
-                script["sourceStart"] = round(w0, 3)
-                script["sourceEnd"] = round(w1, 3)
-                script["windowSourceVersion"] = WINDOW_SOURCE_VERSION
+            script["sourceStart"] = round(w0, 3)
+            script["sourceEnd"] = round(w1, 3)
+            script["windowSourceVersion"] = WINDOW_SOURCE_VERSION
             save_json(rd / f"script_{pi:02d}.json", script)
             segs = script.get("segments") or []
             _note(job_id, f"Kịch bản phần {pi + 1}: {len(segs)} đoạn · {script_dur:.0f}s · {_t_sc.elapsed:.0f}s" + (" · cache" if reuse_script else ""))
@@ -504,6 +462,12 @@ def run_review_job(job: dict[str, Any]) -> dict[str, Any]:
             caption_flags = caption_export_settings(settings)
             mux_source = raw_part
             if caption_flags["burnSubs"] or caption_flags["coverHardsubs"]:
+                _note(
+                    job_id,
+                    f"Hiệu ứng làm mờ dải chữ & chèn phụ đề phần {pi + 1} ({len(caption_segments)} câu)…",
+                    stage=f"Mờ & Phụ đề {pi + 1}/{nwin}",
+                    progress=0.85 + 0.05 * (pi / nwin),
+                )
                 burned = rd / f"burned_part_{pi:02d}.mp4"
                 cover_and_burn(
                     raw_part,
@@ -517,16 +481,23 @@ def run_review_job(job: dict[str, Any]) -> dict[str, Any]:
                     workers=int(compose_workers or 0),
                     caption_placement=str(caption_flags["captionPlacement"]),
                     cover_mask_style=str(settings.get("coverMaskStyle") or "blur"),
-                    cover_mask_color=str(settings.get("coverMaskColor") or "#4c1d95"),
-                    cover_mask_opacity=int(settings.get("coverMaskOpacity", 40)),
+                    cover_mask_color=str(settings.get("coverMaskColor") or "#000000"),
+                    cover_mask_opacity=int(settings.get("coverMaskOpacity", 60)),
                     caption_text_color=str(settings.get("captionTextColor") or "#ffffff"),
                     caption_bg_style=str(settings.get("captionBgStyle") or "none"),
                     caption_bg_color=str(settings.get("captionBgColor") or "#000000"),
                     caption_bg_opacity=int(settings.get("captionBgOpacity", 55)),
                     caption_stroke=bool(settings.get("captionStroke", True)),
                 )
+                _note(job_id, f"Hiệu ứng & phụ đề phần {pi + 1}: hoàn thành")
                 mux_source = burned
             check_cancel(job_id)
+            _note(
+                job_id,
+                f"Lồng ghép âm thanh & nhạc nền phần {pi + 1} ({len(audio_segments)} đoạn thoại)…",
+                stage=f"Lồng tiếng {pi + 1}/{nwin}",
+                progress=0.90 + 0.04 * (pi / nwin),
+            )
             mux_dub(
                 project_id,
                 mux_source,
@@ -538,6 +509,7 @@ def run_review_job(job: dict[str, Any]) -> dict[str, Any]:
                 destination=part,
                 namespace=f"review_{run_id}_part_{pi:02d}",
             )
+            _note(job_id, f"Lồng tiếng phần {pi + 1}: hoàn thành")
             save_json(rd / f"plan_{pi:02d}.json", plan)
             save_json(rd / f"voice_{pi:02d}.json", voiced)
             save_json(rd / f"final_{pi:02d}.json", {
@@ -638,6 +610,35 @@ def run_review_job(job: dict[str, Any]) -> dict[str, Any]:
     return {"output": dest, "projectId": project_id, "cacheRefs": cache_refs}
 
 
+def _select_review_model(
+    review_mode: str,
+    review_provider: str,
+    requested_model: str,
+    available_models: list[str],
+) -> str | None:
+    """Resolve exactly the provider selected by the Review writing mode.
+
+    ``reviewProvider`` stays in a draft so users can switch modes without
+    losing their Cloud selection. It must not turn an Ollama run into a Cloud
+    run when the writing mode is ``llm``.
+    """
+    if review_mode == "cloud":
+        from pipeline.core.app_config import load_app_config
+
+        cloud = load_app_config()["cloud"].get(review_provider) or {}
+        model_name = (
+            requested_model
+            if requested_model not in {"", "auto"} and not requested_model.startswith("cloud:")
+            else str(cloud.get("reviewModel") or "")
+        )
+        return f"cloud:{review_provider}:{model_name}"
+    if review_mode in {"llm", "ai"}:
+        if requested_model not in {"", "auto"} and requested_model in available_models:
+            return requested_model
+        return pick_llm(available_models)
+    return None
+
+
 def _part_export_segments(plan: dict[str, Any], video: Path) -> list[dict[str, Any]]:
     """Convert one match plan to timing using sampled source-subtitle boxes."""
     bands = locate_review_caption_bands(video)
@@ -656,6 +657,8 @@ def _part_export_segments(plan: dict[str, Any], video: Path) -> list[dict[str, A
             "end": end,
             "source": "",
             "translation": text,
+            "audio": str(audio),
+            "audioPath": str(audio),
             "audioFile": audio.name,
             "audioDuration": float(seg.get("audio_duration") or max(0.0, end - start)),
             "ttsSpeed": float(seg.get("tts_speed") or 1.0),
@@ -667,64 +670,41 @@ def _part_export_segments(plan: dict[str, Any], video: Path) -> list[dict[str, A
 
 
 def _review_caption_cues(
-    audio_segments: list[dict[str, Any]], *, max_chars: int = 38
+    audio_segments: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Split Review captions into brief one-line cues without splitting TTS audio."""
+    """Each review narration segment displays its exact spoken text for its full duration."""
     cues: list[dict[str, Any]] = []
     for segment in audio_segments:
-        text = " ".join(str(segment.get("translation") or "").split())
-        words = text.split()
-        if not words:
+        text = str(segment.get("translation") or "").strip()
+        if not text:
             continue
-        chunks: list[str] = []
-        current = ""
-        for word in words:
-            candidate = f"{current} {word}".strip()
-            if current and len(candidate) > max_chars:
-                chunks.append(current)
-                current = word
-            else:
-                current = candidate
-        if current:
-            chunks.append(current)
-        start = float(segment.get("start") or 0)
-        end = max(start, float(segment.get("end") or start))
-        total = max(1, sum(len(chunk) for chunk in chunks))
-        cursor = start
-        for index, chunk in enumerate(chunks):
-            if index == len(chunks) - 1:
-                cue_end = end
-            else:
-                cue_end = start + (end - start) * sum(
-                    len(part) for part in chunks[: index + 1]
-                ) / total
-            cues.append({
-                **segment,
-                "id": f"{segment.get('id') or 'caption'}_caption_{index + 1:02d}",
-                "start": round(cursor, 3),
-                "end": round(cue_end, 3),
-                "translation": chunk,
-            })
-            cursor = cue_end
+        cues.append({
+            **segment,
+            "translation": text,
+            "dubSubtitle": text,
+        })
     return cues
 
 
 def _cap_voiced_duration(
     voiced: list[dict[str, Any]], target_duration: float
 ) -> list[dict[str, Any]]:
-    """Fit overlong narration to its part target without dropping spoken text."""
+    """Fit narration pacing while keeping speech natural (never rushing beyond 1.20x)."""
     total = sum(max(0.0, float(row.get("duration") or 0)) for row in voiced)
     target = max(1.0, float(target_duration or 0))
     if total <= target + 0.05 or total <= 0:
         return voiced
     scale = target / total
+    # Cap max speed to 1.20x (energetic human pace, never rushed/chipmunk)
+    speed = min(1.20, max(1.0, 1.0 / scale))
+    effective_scale = 1.0 / speed
     fitted: list[dict[str, Any]] = []
     for row in voiced:
         item = dict(row)
         original = max(0.05, float(item.get("duration") or 0.05))
         item["audio_duration"] = original
-        item["duration"] = round(original * scale, 3)
-        item["ttsSpeed"] = round(min(4.0, max(1.0, 1.0 / scale)), 4)
+        item["duration"] = round(original * effective_scale, 3)
+        item["ttsSpeed"] = round(speed, 4)
         fitted.append(item)
     return fitted
 
@@ -842,15 +822,31 @@ def _accumulate_worker_limits(part_count: int) -> tuple[int, int, int]:
     return 1, 24, compose_cap
 
 
+def _script_settings_key(settings: dict[str, Any]) -> str:
+    """Stable fingerprint of settings that affect script / TTS / matching output.
+    Any change here forces a rebuild from script stage onward."""
+    keys = (
+        "style", "scriptStyle", "narration", "reviewMode", "reviewModel", "reviewProvider",
+        "buildMode", "genre", "pausePace", "voice", "language", "spoiler",
+        "notes", "durationSec", "chunkMinutes", "keepSec", "skipSec",
+        "reviewPlanVersion",
+    )
+    return "|".join(f"{k}={_norm_setting(settings.get(k))}" for k in keys)
+
+
 def _part_cache_matches(
     script: object,
     target_duration: float,
     *,
     source_start: float | None = None,
     source_end: float | None = None,
+    settings_key: str | None = None,
 ) -> bool:
     """Reject old plans while preserving finalized interrupted work."""
     if not isinstance(script, dict) or script.get("reviewPlanVersion") != REVIEW_PLAN_VERSION:
+        return False
+    # Settings fingerprint check: if key is provided and differs, must rebuild.
+    if settings_key and script.get("settingsKey") and script.get("settingsKey") != settings_key:
         return False
     try:
         cached_target = float(script.get("targetDurationSec") or 0)
@@ -1260,7 +1256,12 @@ def _tts_parallel(
     from pipeline.tts.engines import vieneu as _vieneu
 
     pending = [
-        {"i": i, "seg": seg, "text": str(seg.get("text") or " "), "wav": tts_dir / f"p{pi:02d}_{seg['id']}.wav"}
+        {
+            "i": i,
+            "seg": seg,
+            "text": str(seg.get("text") or " "),
+            "wav": tts_dir / f"p{pi:02d}_{seg['id']}_{hashlib.md5(str(seg.get('text') or ' ').strip().encode('utf-8')).hexdigest()[:8]}.wav",
+        }
         for i, seg in enumerate(segs)
     ]
     if not pending:
@@ -1284,8 +1285,13 @@ def _tts_parallel(
         return job, float(dur or 0) or 2.5
 
     def prog(cur: int, total: int, w_now: int) -> None:
-        if cur == total or cur % max(1, max(1, total // 5)) == 0:
-            _note(job_id, progress_msg("TTS", cur, total, workers=w_now), stage=f"TTS {cur}/{total}")
+        pct = int(cur / max(1, total) * 100)
+        _note(
+            job_id,
+            f"TTS phần {pi + 1}: {cur}/{total} đoạn ({pct}%) · {w_now} luồng",
+            stage=f"TTS {cur}/{total}",
+            progress=0.70 + 0.14 * (cur / max(1, total)),
+        )
 
     rows = run_with_adaptive_workers(
         pending,

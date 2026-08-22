@@ -50,47 +50,90 @@ export function parseHexColor(hex: string): [number, number, number] {
   return [Number.isNaN(n(0)) ? 76 : n(0), Number.isNaN(n(2)) ? 29 : n(2), Number.isNaN(n(4)) ? 149 : n(4)]
 }
 
-/** Preview mask «Làm mờ» — kính CapCut (blur + tint mỏng); xuất pad-blur khớp. */
+export type CoverMaskShape = 'split' | 'horizontal' | 'circle' | 'rectangle' | 'text' | 'brush' | 'pen'
+
+export const COVER_MASK_SHAPES: { id: CoverMaskShape; labelVi: string; labelEn: string }[] = [
+  { id: 'split', labelVi: 'Tách', labelEn: 'Split' },
+  { id: 'horizontal', labelVi: 'Cuộn phim', labelEn: 'Filmstrip' },
+  { id: 'circle', labelVi: 'Hình tròn', labelEn: 'Circle' },
+  { id: 'rectangle', labelVi: 'Hình chữ nhật', labelEn: 'Rectangle' },
+  { id: 'text', labelVi: 'Văn bản', labelEn: 'Text' },
+  { id: 'brush', labelVi: 'Cọ', labelEn: 'Brush' },
+  { id: 'pen', labelVi: 'Bút', labelEn: 'Pen' },
+]
+
+/** Preview mask «Làm mờ» — kính CapCut (blur + gradient feather + tint mỏng); xuất pad-blur khớp. */
 export function coverMaskPreviewStyle(
   style: ProjectSettings['coverMaskStyle'] | 'inpaint',
   color: string,
   opacity: number,
+  options?: {
+    feather?: number
+    shape?: CoverMaskShape
+    borderRadius?: number
+  },
 ): React.CSSProperties {
   const [r, g, b] = parseHexColor(color)
   const pct = Math.max(0, Math.min(100, opacity))
   const a = Math.max(0.05, Math.min(1, pct / 100))
+  const feather = options?.feather ?? 20
+  const shape = options?.shape ?? 'rectangle'
+  const br = options?.borderRadius ? `${options.borderRadius}px` : undefined
+
+  let maskGradient = ''
+  if (shape === 'circle') {
+    maskGradient = `radial-gradient(ellipse at center, #000 60%, transparent 100%)`
+  } else if (shape === 'horizontal' || shape === 'text') {
+    maskGradient = `linear-gradient(to bottom, transparent 0%, #000 ${feather}px, #000 100%)`
+  } else if (feather > 0) {
+    maskGradient = `linear-gradient(to bottom, transparent 0%, #000 ${feather}px, #000 calc(100% - ${feather}px), transparent 100%)`
+  }
+
+  const maskProps: React.CSSProperties = maskGradient
+    ? {
+        maskImage: maskGradient,
+        WebkitMaskImage: maskGradient,
+      }
+    : {}
+
   if (style === 'solid') {
-    return { backgroundColor: `rgba(${r},${g},${b},${a})` }
+    return {
+      backgroundColor: `rgba(${r},${g},${b},${a})`,
+      borderRadius: br,
+      ...maskProps,
+    }
   }
   if (style === 'mosaic') {
     return {
       backgroundColor: 'rgba(42,42,48,0.72)',
       backdropFilter: 'blur(22px) saturate(0.4) contrast(0.92) brightness(0.92)',
       WebkitBackdropFilter: 'blur(22px) saturate(0.4) contrast(0.92) brightness(0.92)',
-      // isolation giúp backdrop-filter không bị layer text che
+      borderRadius: br,
       isolation: 'isolate' as const,
+      ...maskProps,
     }
   }
   if (style === 'inpaint') {
-    // Export uses native inpaint. In the browser, use a restrained feathered
-    // backdrop blur so the preview never exposes a rectangular patch seam.
     return {
       backgroundColor: 'transparent',
-      backdropFilter: 'blur(13px) saturate(0.82) brightness(0.96)',
-      WebkitBackdropFilter: 'blur(13px) saturate(0.82) brightness(0.96)',
-      maskImage: 'linear-gradient(to bottom, transparent 0%, #000 18%, #000 82%, transparent 100%)',
-      WebkitMaskImage: 'linear-gradient(to bottom, transparent 0%, #000 18%, #000 82%, transparent 100%)',
+      backdropFilter: 'blur(16px) saturate(0.82) brightness(0.96)',
+      WebkitBackdropFilter: 'blur(16px) saturate(0.82) brightness(0.96)',
+      borderRadius: br,
       isolation: 'isolate' as const,
+      ...maskProps,
     }
   }
+
   // Làm mờ CapCut: blur phía sau + tint mỏng (bản đẹp — không đậm thêm)
-  const tintA = Math.min(0.22, Math.max(0.06, a * 0.28))
-  const blurPx = Math.round(22 + a * 20) // ~22–42px
+  const tintA = Math.min(0.32, Math.max(0.12, a * 0.32))
+  const blurPx = Math.round(24 + a * 20) // ~24–44px
   return {
     backgroundColor: `rgba(${r},${g},${b},${tintA})`,
-    backdropFilter: `blur(${blurPx}px) saturate(0.88)`,
-    WebkitBackdropFilter: `blur(${blurPx}px) saturate(0.88)`,
+    backdropFilter: `blur(${blurPx}px) saturate(0.85)`,
+    WebkitBackdropFilter: `blur(${blurPx}px) saturate(0.85)`,
+    borderRadius: br,
     isolation: 'isolate' as const,
+    ...maskProps,
   }
 }
 

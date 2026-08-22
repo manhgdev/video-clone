@@ -8,9 +8,9 @@ from typing import Any
 from pipeline.mt.text import _lang_name
 from pipeline.review.llm import generate_json
 
-BLOCK = 20
-CHAPTER = 8
-CLOUD_STORY_WORKERS = 3
+BLOCK = 75
+CHAPTER = 4
+CLOUD_STORY_WORKERS = 4
 
 
 def story_workers(model: str | None) -> int:
@@ -45,8 +45,16 @@ def build_story(
     on_progress: Callable[[str, int, int, int], None] | None = None,
     title: str = "",
 ) -> dict[str, Any]:
-    blocks = [visuals[i : i + BLOCK] for i in range(0, len(visuals), BLOCK)] or [[]]
-    cap = story_workers(model)
+    if not visuals:
+        return {
+            "blocks": [],
+            "chapters": [],
+            "movie_context": {},
+            "story_graph": {},
+        }
+    chunk_size = max(60, len(visuals) // 3 + 1)
+    blocks = [visuals[i : i + chunk_size] for i in range(0, len(visuals), chunk_size)] or [visuals]
+    cap = min(len(blocks), story_workers(model))
     fixed = story_pool_fixed(model)
     block_summaries = _parallel_summaries(
         [chunk for chunk in blocks if chunk],
@@ -56,18 +64,18 @@ def build_story(
         workers=cap,
         fixed=fixed,
     )
-    chapter_chunks = [
-        block_summaries[i : i + CHAPTER]
-        for i in range(0, len(block_summaries), CHAPTER)
-    ]
-    chapters = _parallel_summaries(
-        list(enumerate(chapter_chunks)),
-        lambda row: _summarize_chapter(row[1], language, index=row[0], model=model, title=title),
-        stage="chapters",
-        on_progress=on_progress,
-        workers=cap,
-        fixed=fixed,
-    )
+    chapters = []
+    for i, b in enumerate(block_summaries):
+        chapters.append({
+            "index": i,
+            "scene_ids": b.get("scene_ids") or [],
+            "start": b.get("start") or 0,
+            "end": b.get("end") or 0,
+            "summary": b.get("summary") or "",
+            "characters": b.get("characters") or [],
+            "events": b.get("events") or [],
+            "themes": [],
+        })
     context = _compile_movie_context(chapters, language, model=model, title=title)
     graph = _story_graph(block_summaries, chapters, visuals, context)
     return {
@@ -109,11 +117,22 @@ def _parallel_summaries(
     )
 
 
+def _safe_float(val: Any, default: float = 0.4) -> float:
+    try:
+        if isinstance(val, (int, float)):
+            return float(val)
+        s = str(val or "").strip()
+        m = re.search(r"(\d+(?:\.\d+)?)", s)
+        return float(m.group(1)) if m else default
+    except Exception:
+        return default
+
+
 def _summarize_block(
     scenes: list[dict[str, Any]], language: str, *, model: str | None = None, title: str = "",
 ) -> dict[str, Any]:
     ids = [s["scene_id"] for s in scenes]
-    blob = " | ".join(f"#{s['scene_id']} {s.get('description') or s.get('transcript') or ''}" for s in scenes)[:3500]
+    blob = " | ".join(f"#{s['scene_id']} {s.get('description') or s.get('transcript') or ''}" for s in scenes)[:2000]
     name = _lang_name(language)
     parsed = generate_json(
         f"Video title: {title or 'Unknown'}. "
@@ -133,17 +152,17 @@ def _summarize_block(
         "scene_ids": ids,
         "start": scenes[0]["start"],
         "end": scenes[-1]["end"],
-        "summary": str(parsed.get("summary") or "")[:800],
+        "summary": str(parsed.get("summary") or "")[:500],
         "characters": list(parsed.get("characters") or []),
         "events": list(parsed.get("events") or []),
-        "importance": float(parsed.get("importance") or 0.4),
+        "importance": _safe_float(parsed.get("importance"), 0.4),
     }
 
 
 def _summarize_chapter(
     blocks: list[dict[str, Any]], language: str, *, index: int, model: str | None = None, title: str = "",
 ) -> dict[str, Any]:
-    blob = " ".join(b.get("summary") or "" for b in blocks)[:3000]
+    blob = " ".join(b.get("summary") or "" for b in blocks)[:1500]
     name = _lang_name(language)
     parsed = generate_json(
         f"Video title: {title or 'Unknown'}. "
@@ -208,7 +227,7 @@ def _story_graph(
             "scene_ids": block.get("scene_ids") or [],
             "start": block.get("start") or 0,
             "end": block.get("end") or 0,
-            "importance": float(block.get("importance") or 0),
+            "importance": _safe_float(block.get("importance"), 0.0),
             "spoiler_level": 0,
         })
     chars: list[str] = []

@@ -21,6 +21,17 @@ _FF_LANG = {
 }
 
 
+def _detect_filename_lang(source: Path) -> str:
+    name = source.name
+    if re.search(r"[\u4e00-\u9fff]", name):
+        return "zh"
+    if re.search(r"[\u3040-\u30ff]", name):
+        return "ja"
+    if re.search(r"[\uac00-\ud7af]", name):
+        return "ko"
+    return "auto"
+
+
 def load_transcript(
     source: Path,
     cache_dir: Path,
@@ -31,6 +42,10 @@ def load_transcript(
     source_lang: str = "auto",
 ) -> list[dict[str, Any]]:
     lang = (source_lang or "auto").strip() or "auto"
+    if lang == "auto":
+        detected = _detect_filename_lang(source)
+        if detected != "auto":
+            lang = detected
     for cand in _subtitle_candidates(source, sidecar):
         try:
             rows = subtitle_segments(cand)

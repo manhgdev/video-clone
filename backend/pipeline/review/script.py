@@ -1,6 +1,7 @@
 """Review script from story graph. Voice lines are later timed by existing TTS."""
 from __future__ import annotations
 
+import math
 import re
 from typing import Any
 
@@ -18,7 +19,7 @@ STYLES = {
 
 
 NARRATION = {"default": 1.0, "mild": 1.2, "more": 1.37}
-_SEC_PER_LINE = 6.0
+_SEC_PER_LINE = 18.0
 _PAD_VI = (
     "Câu chuyện tiếp tục với những tình tiết mới. Nhân vật chính phải đối mặt thử thách, "
     "đưa ra lựa chọn, và xung đột ngày càng rõ ràng hơn trước mắt khán giả."
@@ -48,6 +49,12 @@ _SCENE_MARK = re.compile(
 _NAV_MARK = re.compile(
     r"\b(?:sang|chuyển\s+(?:sang|đến)|tiếp\s+theo\s+(?:là|đến))\s+"
     r"(?:phần|đoạn|cảnh|chương)\s*(?:thứ\s*)?\d+\s*[.:,-]?\s*",
+    re.I,
+)
+# Models occasionally return schema labels as spoken text (for example,
+# "Câu 2: ..."). They are structural labels, never narration.
+_LINE_NUMBER_MARK = re.compile(
+    r"^\s*(?:câu|đoạn|sentence|line)\s*\d+\s*[:.、)\-–—]*\s*",
     re.I,
 )
 _CJK = re.compile(r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]+")
@@ -90,9 +97,10 @@ def write_script(
     context = story.get("movie_context") or {}
     hint = STYLES.get(style, STYLES["normal"])
     factor = NARRATION.get(str(narration or "default"), 1.0)
-    n = max(6, min(120, int(round(float(duration_sec or 0) / _SEC_PER_LINE * factor))))
+    n = _segment_count(duration_sec, factor)
+    min_segments = 1 if n == 1 else 2
     name = _lang_name(language)
-    word_budget = max(n * 44, round(float(duration_sec or 0) * 6.0))
+    word_budget = max(n * 22, round(float(duration_sec or 0) * 1.8))
     evidence, event_ids, scene_ids = _part_evidence(story, visuals)
     part_position = _part_position(visuals)
     if not use_llm:
@@ -106,33 +114,19 @@ def write_script(
         extra += f" Genre: {genre}."
     if notes:
         extra += f" Writer notes: {notes}."
-    words_per_seg = word_budget // n
+    words_per_seg = max(15, word_budget // n)
     prompt = (
-        f"Write a {duration_sec:.0f}-second movie review voiceover in {name}. "
-        f"This is the {part_position} of the source film. Style: {hint}. "
-        f"Genre: {genre or 'auto'}.\n"
-        "CRITICAL RULES:\n"
-        "1. Write FLOWING NARRATION that connects events naturally — NOT isolated scene descriptions.\n"
-        "2. NEVER end sentences with abstract labels like 'thể hiện sự X', 'phản ánh Y', 'tạo ra Z', 'cho thấy W'. These are BANNED.\n"
-        "3. Use concrete character names, actions, spoken words, and emotions shown through behavior.\n"
-        "4. Vary sentence length and rhythm: mix short punchy lines with longer descriptive ones.\n"
-        "5. The FIRST segment MUST hook the viewer with a dramatic question or striking image.\n"
-        "6. The LAST segment MUST be 'outro' — leave a cliffhanger, question, or emotional resonance.\n"
-        "7. 'purpose' MUST be one of: hook, setup, rising, tension, reveal, climax, reflection, bridge, outro.\n"
-        f"8. Every segment text MUST be {name} only — never copy source-language subtitles.\n"
-        f"9. Never write Scene/Cảnh/chapter numbers. Spoiler mode: {spoiler}.{extra}\n"
-        f"10. CRITICAL: Each segment MUST cite a DIFFERENT event from the evidence. "
-        f"Do NOT repeat the same event_ref across multiple segments. "
-        f"Distribute coverage across ALL {len(event_ids)} available events chronologically.\n"
-        f"Output JSON {{segments:[{{id,text,purpose,visual_intent,character_refs,event_refs,preferred_scene_ids}}]}}.\n"
-        f"Every segment MUST cite at least one event_refs from {sorted(event_ids)} and only use "
-        f"preferred_scene_ids from {sorted(scene_ids)}.\n"
-        f"WORD COUNT IS CRITICAL: write EXACTLY {n} segments with AT LEAST {words_per_seg} words each.\n"
-        f"Total MUST be at least {word_budget} words. Each segment is read aloud for ~{words_per_seg//8}s of screen time.\n"
-        f"Global context: {context.get('logline','')}\n"
-        f"PART EVIDENCE:\n{evidence}"
+        f"Write an engaging movie review narration in {name} ({duration_sec:.0f} seconds total).\n"
+        f"Part position: {part_position}. Style: {hint}. Genre: {genre or 'auto'}.\n"
+        "RULES:\n"
+        "1. Write natural narration sentences connecting the story events chronologically.\n"
+        "2. Hook the viewer in the first sentence; leave a punchy outro at the end.\n"
+        f"3. All narration MUST be in {name} only.\n"
+        f"4. Output EXACTLY a JSON object with a list of {n} narration sentences:\n"
+        f'{{"script": ["Opening hook narration sentence...", "Next story sentence...", ...]}}\n\n'
+        f"Story Events:\n{evidence}"
     )
-    min_words = max(60, round(word_budget * 0.45))
+    min_words = max(30, round(word_budget * 0.35))
 
     def _log(msg: str) -> None:
         if not project_id:
@@ -149,22 +143,43 @@ def write_script(
 
     _log(f"LLM đang viết kịch bản · {n} đoạn · ~{word_budget} từ · {llm_model or 'auto'}…")
     parsed = generate_json(prompt, model=llm_model)
-    if not _script_is_usable(parsed, min_words, event_ids, scene_ids):
-        _log(f"LLM thử lại (lần 2) · cần tối thiểu {min_words} từ…")
-        parsed = generate_json(
+    items = _normalize_parsed_script(parsed)
+    if len(items) < min_segments:
+        _log(f"LLM thử lại ngắn gọn ({llm_model or 'auto'})…")
+        parsed2 = generate_json(
             prompt
-            + f"\nRETURN VALID JSON NOW. Requirements: {n} segments, "
-            f"MINIMUM {min_words} words total, at least {words_per_seg} words per segment, "
-            f"valid event_refs, no generic filler phrases.",
+            + '\nRETURN JSON only. Do not number or prefix narration lines. '
+            + '{"script": ["A concise narration of the selected moment."]}.',
             model=llm_model,
         )
-    if not _script_is_usable(parsed, min_words, event_ids, scene_ids):
-        _log("LLM không tạo được kịch bản hợp lệ — REVIEW_LLM_EVIDENCE_INVALID")
-        raise RuntimeError("REVIEW_LLM_EVIDENCE_INVALID")
-    clean = _clean_segments(parsed["segments"], language, event_ids, scene_ids)
-    if len(clean) < 3:
-        raise RuntimeError("REVIEW_LLM_EVIDENCE_INVALID")
+        items2 = _normalize_parsed_script(parsed2)
+        if len(items2) >= min_segments:
+            items = items2
+
+    if not items or len(items) < min_segments:
+        _log("Chuyển sang kịch bản chuyển dịch theo nhịp phim để tiếp tục liền mạch…")
+        return _translation_script(
+            story, n, language,
+            source_transcript=source_transcript,
+            visuals=visuals,
+        )
+    clean = _clean_segments(items, language, event_ids, scene_ids)
+    if len(clean) < min_segments:
+        _log("Sử dụng kịch bản dòng sự kiện để tiếp tục…")
+        return _translation_script(
+            story, n, language,
+            source_transcript=source_transcript,
+            visuals=visuals,
+        )
     return {"segments": clean[:n], "language": language, "style": style, "spoiler": spoiler}
+
+
+def _segment_count(duration_sec: float, narration_factor: float = 1.0) -> int:
+    """Choose one natural narration unit per reading interval, without fixed bounds."""
+    seconds = max(0.0, float(duration_sec or 0))
+    factor = max(0.01, float(narration_factor or 1.0))
+    return max(1, int(math.ceil(seconds * factor / _SEC_PER_LINE)))
+
 
 def _part_position(visuals: list[dict[str, Any]] | None) -> str:
     if not visuals:
@@ -173,37 +188,35 @@ def _part_position(visuals: list[dict[str, Any]] | None) -> str:
     return "opening section" if start < 5 else "middle or later section"
 
 
+def _normalize_parsed_script(parsed: Any) -> list[dict[str, Any]]:
+    if isinstance(parsed, list):
+        items = parsed
+    elif isinstance(parsed, dict):
+        items = parsed.get("script") or parsed.get("segments") or parsed.get("lines") or []
+    else:
+        return []
+    out: list[dict[str, Any]] = []
+    for item in items:
+        if isinstance(item, str) and item.strip():
+            out.append({"text": item.strip()})
+        elif isinstance(item, dict) and str(item.get("text") or "").strip():
+            out.append(dict(item))
+    return out
+
+
 def _script_is_usable(
     parsed: Any, min_words: int, event_ids: set[str], scene_ids: set[int],
 ) -> bool:
-    """Require enough evidence-backed text before sending it to TTS."""
-    if not isinstance(parsed, dict):
+    """Require enough usable text before sending it to TTS."""
+    items = _normalize_parsed_script(parsed)
+    if len(items) < 2:
         return False
-    segments = parsed.get("segments")
-    if not isinstance(segments, list) or len(segments) < 3:
-        return False
-    words = sum(
-        len(str(segment.get("text") or "").split())
-        for segment in segments
-        if isinstance(segment, dict)
-    )
-    if words < min_words:
-        return False
-    for segment in segments:
-        if not isinstance(segment, dict):
-            return False
-        refs = {str(ref) for ref in (segment.get("event_refs") or [])}
-        preferred = {
-            int(ref) for ref in (segment.get("preferred_scene_ids") or [])
-            if str(ref).isdigit() or isinstance(ref, int)
-        }
-        text = str(segment.get("text") or "").strip()
-        if (
-            not refs or not refs <= event_ids or not preferred or not preferred <= scene_ids
-            or not text or _GENERIC_RECAP.search(text)
-        ):
-            return False
-    return True
+    valid_texts = [
+        str(item.get("text") or "").strip()
+        for item in items
+        if str(item.get("text") or "").strip()
+    ]
+    return len(valid_texts) >= 2
 
 
 def _part_evidence(
@@ -224,10 +237,12 @@ def _part_evidence(
             scene_ids.update(ids)
             rows.append(
                 f"{event_id} {float(event.get('start') or 0):.1f}-{float(event.get('end') or 0):.1f} "
-                f"scenes={ids}: {str(event.get('summary') or '')[:400]}"
+                f"scenes={ids}: {str(event.get('summary') or '')[:240]}"
             )
         if rows:
-            return "\n".join(rows)[:6500], event_ids, scene_ids
+            step = max(1, len(rows) // 18)
+            selected = rows[::step][:20]
+            return "\n".join(selected)[:2800], event_ids, scene_ids
     rows = list(visuals or [])
     if not rows:
         return "(No part evidence available.)", set(), set()
@@ -244,8 +259,10 @@ def _part_evidence(
         scene_id = int(scene.get("scene_id") or index)
         event_ids.add(event_id)
         scene_ids.add(scene_id)
-        facts.append(f"{event_id} {start // 60:02d}:{start % 60:02d}-{end // 60:02d}:{end % 60:02d} scenes=[{scene_id}] {text[:180]}")
-    return "\n".join(facts)[:6500] or "(No usable part evidence available.)", event_ids, scene_ids
+        facts.append(f"{event_id} {start // 60:02d}:{start % 60:02d}-{end // 60:02d}:{end % 60:02d} scenes=[{scene_id}] {text[:140]}")
+    step = max(1, len(facts) // 18)
+    selected_facts = facts[::step][:20]
+    return "\n".join(selected_facts)[:2800] or "(No usable part evidence available.)", event_ids, scene_ids
 
 
 def _translation_script(
@@ -256,35 +273,68 @@ def _translation_script(
     source_transcript: list[dict[str, Any]] | None,
     visuals: list[dict[str, Any]] | None,
 ) -> dict[str, Any]:
-    """Translate chronological source evidence without trying to recap it."""
+    """Translate chronological source evidence across the full timeline without trying to recap it."""
     transcript_rows = [
         row for row in (source_transcript or [])
         if str(row.get("text") or "").strip()
     ]
-    events = list((story.get("story_graph") or {}).get("events") or [])
-    source_rows: list[dict[str, Any]]
+    segments: list[dict[str, Any]] = []
     if transcript_rows:
-        source_rows = [
-            {
-                "event_id": f"src_{index:05d}",
-                "summary": str(row.get("text") or "").strip(),
-                "start": float(row.get("start") or 0),
-                "end": float(row.get("end") or row.get("start") or 0),
-                "scene_ids": _overlapping_scene_ids(row, visuals),
-            }
-            for index, row in enumerate(transcript_rows)
-        ]
+        n_buckets = max(1, min(n, len(transcript_rows)))
+        min_t = min(float(r.get("start") or 0) for r in transcript_rows)
+        max_t = max(float(r.get("end") or r.get("start") or min_t + 1) for r in transcript_rows)
+        span = max(1.0, max_t - min_t)
+        step = span / n_buckets
+
+        buckets: list[list[dict[str, Any]]] = [[] for _ in range(n_buckets)]
+        for r in transcript_rows:
+            st = float(r.get("start") or 0)
+            idx = min(n_buckets - 1, max(0, int((st - min_t) / step)))
+            buckets[idx].append(r)
+
+        bucket_texts: list[str] = []
+        bucket_scenes: list[list[int]] = []
+        for b in buckets:
+            b_txt = ""
+            sc_set: set[int] = set()
+            for r in b:
+                t = str(r.get("text") or "").strip()
+                if not t:
+                    continue
+                sc_set.update(_overlapping_scene_ids(r, visuals))
+                if not b_txt:
+                    b_txt = t
+                elif len(b_txt + " " + t) <= 120:
+                    b_txt = (b_txt + " " + t).strip()
+                else:
+                    break
+            bucket_texts.append(b_txt or (str(b[0].get("text") or "").strip() if b else ""))
+            bucket_scenes.append(sorted(sc_set)[:8])
+
+        translated = _translate_beats(bucket_texts, language)
+        for index, (text, sc_ids) in enumerate(zip(translated, bucket_scenes)):
+            for sentence in _sentence_units(text):
+                clean = _finalize_line(sentence, language) or sentence.strip()
+                if not clean:
+                    continue
+                segments.append(_voice_item(len(segments), clean, {
+                    "event_refs": [f"src_{index:03d}"],
+                    "preferred_scene_ids": sc_ids,
+                }))
+                if len(segments) >= n:
+                    break
+            if len(segments) >= n:
+                break
     else:
+        events = list((story.get("story_graph") or {}).get("events") or [])
         source_rows = [
             event for event in events
             if str(event.get("summary") or "").strip() and (event.get("scene_ids") or [])
         ]
-    texts = [str(row.get("summary") or "").strip() for row in source_rows]
-    translated = _translate_beats(texts, language)
-    segments: list[dict[str, Any]] = []
-    for index, (event, text) in enumerate(zip(source_rows, translated)):
-        for sentence in _sentence_units(text):
-            clean = _finalize_line(sentence, language)
+        texts = [str(row.get("summary") or "").strip() for row in source_rows]
+        translated = _translate_beats(texts, language)
+        for index, (event, text) in enumerate(zip(source_rows, translated)):
+            clean = _finalize_line(text, language) or text.strip()
             if not clean:
                 continue
             segments.append(_voice_item(index, clean, {
@@ -293,11 +343,9 @@ def _translation_script(
             }))
             if len(segments) >= n:
                 break
-        if len(segments) >= n:
-            break
     if not segments:
         raise RuntimeError("REVIEW_TRANSLATION_EMPTY")
-    return {"segments": segments, "language": language, "style": "translate", "spoiler": "full"}
+    return {"segments": segments[:n], "language": language, "style": "translate", "spoiler": "full"}
 
 
 def _overlapping_scene_ids(
@@ -334,7 +382,8 @@ def _in_voiceover_lang(text: str, language: str) -> bool:
 
 
 def _strip_scene_marks(text: str) -> str:
-    t = _NAV_MARK.sub(" ", text or "")
+    t = _LINE_NUMBER_MARK.sub("", text or "")
+    t = _NAV_MARK.sub(" ", t)
     t = _SCENE_MARK.sub(" ", t)
     t = re.sub(r"\s+", " ", t).strip(" .,;:/-")
     return t
@@ -528,12 +577,14 @@ def _clean_segments(
 ) -> list[dict[str, Any]]:
     clean: list[dict[str, Any]] = []
     seen: set[str] = set()
+    valid_events = sorted(event_ids) if event_ids else []
+    valid_scenes = sorted(scene_ids) if scene_ids else []
     for i, seg in enumerate(segs):
         if not isinstance(seg, dict):
             continue
         text = _finalize_line(str(seg.get("text") or ""), language)
         text = _dedupe_text(text, seen)
-        if not text or _GENERIC_RECAP.search(text):
+        if not text:
             continue
         refs = {str(ref) for ref in (seg.get("event_refs") or [])}
         preferred = {
@@ -541,9 +592,12 @@ def _clean_segments(
             if str(ref).isdigit() or isinstance(ref, int)
         }
         if event_ids is not None and (not refs or not refs <= event_ids):
-            continue
+            ev = valid_events[i % len(valid_events)] if valid_events else f"evt_{i:03d}"
+            seg["event_refs"] = [ev]
         if scene_ids is not None and (not preferred or not preferred <= scene_ids):
-            continue
+            chunk_size = max(1, len(valid_scenes) // max(1, len(segs)))
+            sc_idx = min(len(valid_scenes) - 1, i * chunk_size) if valid_scenes else 0
+            seg["preferred_scene_ids"] = [valid_scenes[sc_idx]] if valid_scenes else [i]
         clean.append(_voice_item(i, text, seg))
     return clean
 

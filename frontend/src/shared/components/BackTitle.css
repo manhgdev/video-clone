@@ -1,7 +1,13 @@
-.back-title {
+.back-title.back-title {
   display: flex;
   align-items: center;
   gap: 8px;
+  margin: 0;
+  color: var(--ink, #0f172a);
+  font-size: 1.28rem;
+  font-weight: 800;
+  line-height: 1.25;
+  letter-spacing: -0.03em;
 }
 .back-title .back-title-btn {
   display: inline-flex;
